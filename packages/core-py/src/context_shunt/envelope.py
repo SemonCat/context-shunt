@@ -17,8 +17,15 @@ from .limits import SCHEMA_VERSION, legal_pair
 
 OMISSION_REASONS = frozenset(
     {
-        "BUDGET_EXCEEDED", "TIMEOUT", "CANCELLED", "CHUNK_FAILED", "MODEL_ERROR",
-        "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "UPSTREAM_TRUNCATED", "UNKNOWN_REMAINDER",
+        "BUDGET_EXCEEDED",
+        "TIMEOUT",
+        "CANCELLED",
+        "CHUNK_FAILED",
+        "MODEL_ERROR",
+        "INVALID_MODEL_OUTPUT",
+        "CITATION_INVALID",
+        "UPSTREAM_TRUNCATED",
+        "UNKNOWN_REMAINDER",
     }
 )
 
@@ -91,7 +98,9 @@ def build(
     return env
 
 
-def error_envelope(request_id: str, exc: ShuntError, *, guidance: str | None = None) -> dict[str, Any]:
+def error_envelope(
+    request_id: str, exc: ShuntError, *, guidance: str | None = None
+) -> dict[str, Any]:
     """Map a bounded failure to an envelope. The exception message never rides along."""
     status = "blocked" if exc.code in _BLOCKED_CODES else "error"
     return build(

@@ -8,6 +8,7 @@
  */
 import { ShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits, chunkByteBudget } from "./limits.js";
+import { READER_SYSTEM_PROMPT } from "./provider.js";
 import { Snapshot, canonicalJson, recordAt, recordCount, resolvePointer } from "./snapshot.js";
 import { capBytes, utf8Length } from "./textindex.js";
 
@@ -25,6 +26,17 @@ export interface Plan {
   readonly totalEstTokens: number;
   readonly truncated: boolean;
   readonly omitted: Array<{ source_id: string; selector: Record<string, unknown>; reason: string }>;
+}
+
+/**
+ * Tokens each call spends on the fixed instruction and the excerpt wrapper.
+ *
+ * The request budget covers *all* prompt input, not just chunk text, so the planner has to
+ * reserve this per chunk or an eight-chunk plan silently overruns the cap.
+ */
+export function perCallOverheadTokens(limits: Limits = DEFAULT_LIMITS): number {
+  const fixed = utf8Length(READER_SYSTEM_PROMPT) + 256; // wrapper, locator, question
+  return Math.max(1, Math.ceil(fixed / limits.bytesPerTokenEstimate));
 }
 
 /** Conservative estimate. Metrics derived from it are labelled `estimated`. */
@@ -128,9 +140,11 @@ export function planChunks(
 ): Plan {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const budgetChunks = Math.min(opts.maxChunks, limits.maxChunksPerRequest);
+  const overhead = perCallOverheadTokens(limits);
   const produced: Chunk[] = [];
   const omitted: Plan["omitted"] = [];
   let truncated = false;
+  let spentTokens = 0;
 
   for (const { sourceId, snapshot, selector } of selections) {
     const kind = selector["kind"];
@@ -163,16 +177,18 @@ export function planChunks(
       if (chunk.estTokens > limits.maxChunkTokens) {
         throw new ShuntError("LIMIT_EXCEEDED", "CHUNK_OVER_TOKEN_CAP");
       }
-      if (produced.length >= budgetChunks) {
+      const projected = spentTokens + chunk.estTokens + overhead;
+      if (produced.length >= budgetChunks || projected > limits.maxRequestInputTokens) {
         truncated = true;
         omitted.push({ source_id: sourceId, selector: chunk.locator, reason: "BUDGET_EXCEEDED" });
         continue;
       }
+      spentTokens = projected;
       produced.push(chunk);
     }
   }
 
-  const totalEstTokens = produced.reduce((sum, c) => sum + c.estTokens, 0);
+  const totalEstTokens = produced.reduce((sum, c) => sum + c.estTokens, 0) + overhead * produced.length;
   if (totalEstTokens > limits.maxRequestInputTokens) {
     throw new ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP");
   }

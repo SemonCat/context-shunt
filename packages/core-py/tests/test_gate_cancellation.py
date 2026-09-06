@@ -11,7 +11,6 @@ from context_shunt.provider import ModelResponse, ModelUsage, TransientProviderE
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-
 from tests.support import answer_json
 
 pytestmark = pytest.mark.gate_cancellation

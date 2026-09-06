@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    # Every gate here runs from the repository alone: no host, no provider, no network.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python core
+        run: |
+          python3 -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -e 'packages/core-py[dev]'
+
+      - name: Install Node workspaces
+        run: npm ci || npm install
+
+      - name: Vendored contracts match contracts/v1
+        run: ./scripts/sync-contracts --check
+
+      - name: Lint (ruff)
+        run: ./.venv/bin/ruff check packages/core-py adapters/hermes scripts/sync-contracts scripts/verify
+
+      - name: Format check (ruff)
+        run: ./.venv/bin/ruff format --check packages/core-py
+
+      - name: Typecheck (TypeScript core)
+        run: ./node_modules/.bin/tsc -p packages/core-ts/tsconfig.json --noEmit
+
+      - name: Typecheck (OpenClaw adapter)
+        run: ./node_modules/.bin/tsc -p adapters/openclaw/tsconfig.json --noEmit
+
+      - name: Build (TypeScript core)
+        run: npm run build --workspace @context-shunt/core
+
+      - name: Unit gates
+        run: ./scripts/verify unit all
+
+      - name: Fail-closed integration gates
+        run: |
+          ./scripts/verify integration hermes --mode unsupported
+          ./scripts/verify integration openclaw --mode unsupported
+
+      - name: Deterministic benchmark half
+        run: ./scripts/verify benchmark core
+
+      - name: Packaging gate
+        run: ./scripts/verify packaging all
+
+      - name: Opt-in gates report NOT_RUN, not pass
+        # Exit code 2 is the contract for "prerequisite absent". A 0 here would mean a
+        # gate that needs a live host or a live model quietly passed without one.
+        run: |
+          set +e
+          ./scripts/verify eval luna
+          test $? -eq 2 || { echo "eval luna must report NOT_RUN (exit 2) without live Luna"; exit 1; }
+          ./scripts/verify integration hermes --mode local
+          test $? -eq 2 || { echo "hermes --mode local must report NOT_RUN (exit 2) without a host"; exit 1; }
+          ./scripts/verify integration openclaw --mode local
+          test $? -eq 2 || { echo "openclaw --mode local must report NOT_RUN (exit 2) without a host"; exit 1; }
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-reports
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14

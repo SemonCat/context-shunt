@@ -64,6 +64,6 @@ class InMemoryMetrics:
 
     def rendered(self) -> str:
         """Everything this sink would emit, for leak assertions."""
-        parts = [f"{n}{dict(l)}={v}" for (n, l), v in self.counters.items()]
-        parts += [f"{n}{dict(l)}={v}" for n, v, l in self.observations]
+        parts = [f"{name}{dict(labels)}={value}" for (name, labels), value in self.counters.items()]
+        parts += [f"{name}{dict(labels)}={value}" for name, value, labels in self.observations]
         return "\n".join(parts)

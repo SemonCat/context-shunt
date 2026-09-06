@@ -34,6 +34,18 @@ class Plan:
     omitted: tuple[dict[str, Any], ...]
 
 
+def per_call_overhead_tokens(limits: Limits = DEFAULT_LIMITS) -> int:
+    """Tokens each call spends on the fixed instruction and the excerpt wrapper.
+
+    The request budget covers *all* prompt input, not just chunk text, so the planner has
+    to reserve this per chunk or an eight-chunk plan silently overruns the cap.
+    """
+    from .provider import READER_SYSTEM_PROMPT
+
+    fixed = len(READER_SYSTEM_PROMPT.encode("utf-8")) + 256  # wrapper, locator, question
+    return max(1, -(-fixed // limits.bytes_per_token_estimate))
+
+
 def chunk_byte_budget(limits: Limits = DEFAULT_LIMITS) -> int:
     """The smaller of the byte cap and the token cap expressed in bytes.
 
@@ -138,9 +150,11 @@ def plan(
 ) -> Plan:
     """Build a bounded plan. Ranges that do not fit become explicit omissions."""
     budget_chunks = min(max_chunks, limits.max_chunks_per_request)
+    overhead = per_call_overhead_tokens(limits)
     produced: list[Chunk] = []
     omitted: list[dict[str, Any]] = []
     truncated = False
+    spent_tokens = 0
 
     for source_id, snapshot, selector in selections:
         kind = selector.get("kind")
@@ -160,8 +174,12 @@ def plan(
             candidates = _line_chunks(snapshot, source_id, start, end, limits)
         elif kind == "records":
             candidates = _record_chunks(
-                snapshot, source_id, selector["pointer"], int(selector["start"]),
-                int(selector["end"]), limits,
+                snapshot,
+                source_id,
+                selector["pointer"],
+                int(selector["start"]),
+                int(selector["end"]),
+                limits,
             )
         else:
             raise ShuntError("INVALID_REQUEST", "UNSUPPORTED_SELECTOR")
@@ -169,15 +187,17 @@ def plan(
         for chunk in candidates:
             if chunk.est_tokens > limits.max_chunk_tokens:
                 raise ShuntError("LIMIT_EXCEEDED", "CHUNK_OVER_TOKEN_CAP")
-            if len(produced) >= budget_chunks:
+            projected = spent_tokens + chunk.est_tokens + overhead
+            if len(produced) >= budget_chunks or projected > limits.max_request_input_tokens:
                 truncated = True
                 omitted.append(
                     {"source_id": source_id, "selector": chunk.locator, "reason": "BUDGET_EXCEEDED"}
                 )
                 continue
+            spent_tokens = projected
             produced.append(chunk)
 
-    total = sum(c.est_tokens for c in produced)
+    total = sum(c.est_tokens for c in produced) + overhead * len(produced)
     if total > limits.max_request_input_tokens:
         raise ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP")
     return Plan(

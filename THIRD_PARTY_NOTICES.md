@@ -1,24 +1,72 @@
 # Third-party notices
 
-## Spotify Shunt
+## Spotify Shunt (design baseline)
 
-- 來源識別：`spotify/portal-ai-plugins`，`main` 分支，`plugins/shunt`。
-- 授權：Apache License 2.0；本 repo 的 [LICENSE](LICENSE) 包含完整授權文本。
-- 關係：本規格採用其 pre-read gate 與 question-driven bulk-reader 設計基線。
-- 查證來源：使用者提供之 Astra 查證結果；當時 upstream 51 tests 全過。本輪沒有重新查詢 upstream，也沒有匯入第三方程式碼。
-- 精確 revision：本輪未提供 commit SHA；不得把可變的 `main` 當作可重現版本，也不得將該測試結果宣稱為本 repo 的結果。
+| Field | Value |
+| --- | --- |
+| Source | `spotify/portal-ai-plugins`, path `plugins/shunt` |
+| Exact revision inspected | `3c24ca30ff63e1f5bbad1c43fe5324daff579123` (default branch `main`, committed 2026-08-17) |
+| Upstream licence | Apache License 2.0 (repository `LICENSE`; the upstream tree contains no `NOTICE` file at that revision) |
+| Relationship | Design baseline only. **No code was copied or adapted.** |
 
-實作若複用 upstream 程式碼，匯入者必須在首次匯入時填入實際 commit SHA、來源檔案與本地對應路徑，保留原始 copyright／attribution／license headers，在修改檔案標示修改，並複製該匯入版本適用的 NOTICE 內容。這是匯入工作的一部分，不要求 plan writer 再做 upstream 研究。
+The upstream plugin at that revision is a Claude Code plugin built from Bash: two
+`PreToolUse` hooks (`hooks/check-file-size`, `hooks/check-bash-read`), delegation scripts
+(`scripts/bulk-read`, `scripts/code-write`) over a shared `scripts/lib/aika.sh`, and two
+skills. This repository shares three uncopyrightable ideas with it and nothing else:
 
-## Host 與服務邊界
+1. a pre-read gate that refuses a full read above a line threshold (350),
+2. letting an explicitly targeted read through rather than gating it, and
+3. asking a cheap model a question with the corpus attached, out of the main context.
 
-Hermes、OpenClaw、Suma 與 `gpt-5.6-luna` 在本規格中作為整合介面或服務名稱使用。本輪未附帶其 SDK、程式碼或模型權重，亦未宣稱它們的授權。實作新增依賴時須記錄 package、固定版本、授權、來源及需要散布的 notices。
+Everything here is independently written to a different design, and the differences are
+substantive rather than cosmetic: shared versioned JSON contracts, a quote-aware shell
+classifier with a tri-state outcome instead of string matching, immutable SHA-256
+snapshots with line and JSON-record indexes, session-scoped capability handles,
+deterministic citation verification, bounded envelopes behind an output guard, and a pure
+spill/pointer mode with no summarization. Upstream's threshold check uses `wc -l`, which
+undercounts a file with no trailing newline; this repository defines and tests its own
+physical-line counter instead.
 
-## 匯入紀錄格式
+Upstream reported 51 passing tests of its own at the revision above. **That is upstream's
+result, about upstream's code.** It is not a result of this repository and is never
+reported as one. This repository's own results come from `scripts/verify` and are recorded
+per run under `reports/`.
 
-目前無程式碼匯入紀錄。首次匯入時新增以下欄位，禁止以推測補齊權利人或 NOTICE：
+## Import record
 
-| 元件／版本或 commit | 原始路徑 → 本地路徑 | 授權及原始 notices | 本地修改與日期 |
+No third-party code has been imported. The table stays empty until that changes.
+
+| Component / version or commit | Original path → local path | Licence and original notices | Local modifications and date |
 | --- | --- | --- | --- |
+| _(none)_ | | | |
 
-本文件不取代第三方原始授權或其必須保存的 NOTICE。
+If code is ever imported, the importer must, at first import: fill in the actual commit
+SHA, the upstream file paths and the local paths; keep every original copyright,
+attribution and licence header intact; mark modified files as modified with a date; and
+copy the `NOTICE` content applicable to the imported revision. Rights holders and notices
+must never be filled in by guesswork.
+
+## Runtime dependencies
+
+Pinned or bounded, with their licences:
+
+| Package | Version | Licence | Used by |
+| --- | --- | --- | --- |
+| `jsonschema` | `>=4.25,<4.26` | MIT | Python core — contract validation |
+| `ajv` | `8.17.1` | MIT | TypeScript core — contract validation |
+| `ajv-formats` | `3.0.1` | MIT | TypeScript core — `date-time` format |
+
+Development-only, not distributed: `pytest`, `ruff`, `typescript`, `vitest`,
+`@types/node`. None of these ship inside either plugin package.
+
+Neither package bundles or redistributes host code. `openclaw` and `hermes-agent` are
+integration targets resolved at the user's install; their licences are their own.
+
+## Host and service names
+
+Hermes, OpenClaw, Suma and `gpt-5.6-luna` appear here as integration interfaces and
+service names. This repository ships none of their SDKs, code or model weights, and makes
+no claim about their licences.
+
+This file does not replace any third party's own licence, nor any `NOTICE` that a third
+party requires to be preserved.

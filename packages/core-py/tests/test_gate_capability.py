@@ -26,7 +26,6 @@ from context_shunt.capability import (
 from context_shunt.errors import ShuntError
 from context_shunt.limits import READER_MODEL
 from context_shunt.session import ShuntSession
-
 from tests.support import make_capability, make_config
 
 pytestmark = pytest.mark.gate_capability
@@ -77,9 +76,16 @@ class FakeCtx:
     def __init__(self, config: dict, *, llm=None, hooks=None, with_tools=True):
         self.plugin_config = config
         self.llm = llm
-        self.supported_hooks = hooks if hooks is not None else [
-            "pre_tool_call", "post_tool_call", "transform_tool_result", "on_session_end",
-        ]
+        self.supported_hooks = (
+            hooks
+            if hooks is not None
+            else [
+                "pre_tool_call",
+                "post_tool_call",
+                "transform_tool_result",
+                "on_session_end",
+            ]
+        )
         self.registered_hooks: list[str] = []
         self.registered_tools: list[str] = []
         self.messages: list[str] = []
@@ -103,9 +109,16 @@ class FakeCtx:
 
 def test_supported_and_unsupported_modes():
     report = CapabilityReport(
-        adapter="a", adapter_version="1", host_name="h", host_version="1",
-        contract_version="1.0", reader_model=READER_MODEL,
-        modes=[supported("local_gate"), unsupported("suma_post_tool", DisabledReason.HOST_FAIL_OPEN)],
+        adapter="a",
+        adapter_version="1",
+        host_name="h",
+        host_version="1",
+        contract_version="1.0",
+        reader_model=READER_MODEL,
+        modes=[
+            supported("local_gate"),
+            unsupported("suma_post_tool", DisabledReason.HOST_FAIL_OPEN),
+        ],
     )
     assert report.enabled("local_gate") is True
     assert report.enabled("suma_post_tool") is False
@@ -215,14 +228,20 @@ def test_pre_tool_call_blocks_a_large_read_with_a_contract_envelope(tmp_path):
 def test_pre_tool_call_allows_the_threshold_and_bounded_reads(tmp_path):
     module = _load_adapter()
     module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
-    assert module.pre_tool_call(
-        tool_name="read_file", args={"file_path": str(_planted(tmp_path, 350))}, task_id="t1"
-    ) is None
-    assert module.pre_tool_call(
-        tool_name="read_file",
-        args={"file_path": str(_planted(tmp_path, 351)), "offset": 1, "limit": 50},
-        task_id="t1",
-    ) is None
+    assert (
+        module.pre_tool_call(
+            tool_name="read_file", args={"file_path": str(_planted(tmp_path, 350))}, task_id="t1"
+        )
+        is None
+    )
+    assert (
+        module.pre_tool_call(
+            tool_name="read_file",
+            args={"file_path": str(_planted(tmp_path, 351)), "offset": 1, "limit": 50},
+            task_id="t1",
+        )
+        is None
+    )
 
 
 def test_pre_tool_call_blocks_unprovable_shell_and_passes_others(tmp_path):
@@ -234,8 +253,13 @@ def test_pre_tool_call_blocks_unprovable_shell_and_passes_others(tmp_path):
         task_id="t1",
     )
     assert json.loads(blocked["message"])["code"] == "UNCLASSIFIABLE_READ"
-    assert module.pre_tool_call(tool_name="terminal", args={"command": "npm test"}, task_id="t1") is None
-    assert module.pre_tool_call(tool_name="delegate_task", args={"prompt": "x"}, task_id="t1") is None
+    assert (
+        module.pre_tool_call(tool_name="terminal", args={"command": "npm test"}, task_id="t1")
+        is None
+    )
+    assert (
+        module.pre_tool_call(tool_name="delegate_task", args={"prompt": "x"}, task_id="t1") is None
+    )
 
 
 def test_reader_tool_answers_with_luna_and_verified_citations(tmp_path):

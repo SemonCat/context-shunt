@@ -19,13 +19,20 @@ from .paths import contains_secret_marker
 
 _ALLOWED_KEYS = frozenset(
     {
-        "schema_version", "request_id", "status", "code", "answer", "citations",
-        "coverage", "sources", "retryable", "guidance", "pointer",
+        "schema_version",
+        "request_id",
+        "status",
+        "code",
+        "answer",
+        "citations",
+        "coverage",
+        "sources",
+        "retryable",
+        "guidance",
+        "pointer",
     }
 )
-_ALLOWED_SOURCE_KEYS = frozenset(
-    {"source_id", "snapshot_id", "media_type", "bytes", "expires_at"}
-)
+_ALLOWED_SOURCE_KEYS = frozenset({"source_id", "snapshot_id", "media_type", "bytes", "expires_at"})
 
 
 class OutputGuardError(Exception):
@@ -34,7 +41,9 @@ class OutputGuardError(Exception):
 
 def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]:
     """The smallest legal envelope. Used when nothing else can be trusted."""
-    safe_id = request_id if isinstance(request_id, str) and request_id[:64].strip() else "req_unknown"
+    safe_id = (
+        request_id if isinstance(request_id, str) and request_id[:64].strip() else "req_unknown"
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": safe_id[:64],

@@ -19,12 +19,25 @@ from .limits import DEFAULT_LIMITS, Limits
 from .paths import PathPolicy
 
 _NARROWABLE = {
-    "full_read_max_lines", "targeted_read_max_lines", "targeted_search_max_matches",
-    "max_tool_result_bytes", "max_envelope_bytes", "max_source_bytes", "max_chunk_bytes",
-    "max_answer_bytes", "max_quote_bytes", "session_spill_quota_bytes",
-    "max_sources_per_request", "max_chunks_per_request", "max_citations",
-    "max_concurrent_model_calls", "max_chunk_tokens", "max_request_input_tokens",
-    "max_output_tokens_per_call", "request_deadline_ms", "model_call_deadline_ms",
+    "full_read_max_lines",
+    "targeted_read_max_lines",
+    "targeted_search_max_matches",
+    "max_tool_result_bytes",
+    "max_envelope_bytes",
+    "max_source_bytes",
+    "max_chunk_bytes",
+    "max_answer_bytes",
+    "max_quote_bytes",
+    "session_spill_quota_bytes",
+    "max_sources_per_request",
+    "max_chunks_per_request",
+    "max_citations",
+    "max_concurrent_model_calls",
+    "max_chunk_tokens",
+    "max_request_input_tokens",
+    "max_output_tokens_per_call",
+    "request_deadline_ms",
+    "model_call_deadline_ms",
     "spill_ttl_seconds",
 }
 
@@ -77,7 +90,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
 
     limits = DEFAULT_LIMITS
     overrides = {k: int(v) for k, v in (raw.get("limits") or {}).items() if k in _NARROWABLE}
-    unknown = set((raw.get("limits") or {})) - _NARROWABLE
+    unknown = set(raw.get("limits") or {}) - _NARROWABLE
     if unknown:
         raise ShuntError("INVALID_REQUEST", "UNKNOWN_LIMIT_OVERRIDE", retryable=False)
     if overrides:
@@ -92,6 +105,8 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
         denylist=tuple(raw.get("denylist") or ()),
         gate_enabled=bool(raw.get("gate_enabled", True)),
         reader=ReaderConfig(enabled=bool(reader_raw.get("enabled", True)), model=model),
-        suma_post_tool=SumaConfig(enabled=bool((raw.get("suma_post_tool") or {}).get("enabled", False))),
+        suma_post_tool=SumaConfig(
+            enabled=bool((raw.get("suma_post_tool") or {}).get("enabled", False))
+        ),
         limits=limits,
     )

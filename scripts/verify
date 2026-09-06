@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""Acceptance entry point: ``scripts/verify <suite> <gate> [options]``.
+
+Exit codes are the contract:
+
+* ``0``  every selected gate passed, and each one collected at least one case.
+* ``1``  an assertion failed, a corpus was empty, or a gate is not implemented.
+* ``2``  a gate needs a prerequisite that is absent (a live host, a live model). It is
+         reported as ``NOT_RUN`` - never as a pass, and never silently skipped.
+
+Deterministic gates never report ``NOT_RUN``: they run from the repository alone. Opt-in
+gates (real host integration, live Luna evals, provider benchmarks) say what is missing.
+
+Every run appends a non-sensitive report to ``reports/`` (gitignored): suite, gate,
+counts, exit code, duration and tool versions. No source content, question, answer or
+path from a fixture is written there.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REPORTS = ROOT / "reports"
+PY = ROOT / ".venv" / "bin" / "python"
+NODE_BIN = ROOT / "node_modules" / ".bin"
+
+EXIT_OK, EXIT_FAIL, EXIT_NOT_RUN = 0, 1, 2
+
+CORE_TS = ROOT / "packages" / "core-ts"
+OPENCLAW_ADAPTER = ROOT / "adapters" / "openclaw"
+
+# gate -> (pytest marker, [vitest project/file pairs])
+UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
+    "contract": ("gate_contract", [(CORE_TS, "test/contract.test.ts")]),
+    "pre-read": ("gate_pre_read", [(CORE_TS, "test/gate.test.ts")]),
+    "reader": ("gate_reader", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "citations": ("gate_citations", [(CORE_TS, "test/citations.test.ts")]),
+    "no-raw-leak": ("gate_no_raw_leak", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "bounded-output": ("gate_bounded_output", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "cancellation": ("gate_cancellation", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "permissions": ("gate_permissions", [(CORE_TS, "test/permissions.test.ts")]),
+    "no-writes": ("gate_no_writes", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "capability": ("gate_capability", [(OPENCLAW_ADAPTER, "test/adapter.test.ts")]),
+}
+
+INTEGRATION_HOSTS = ("hermes", "openclaw")
+INTEGRATION_MODES = ("local", "post-tool", "unsupported")
+
+
+@dataclass
+class GateResult:
+    suite: str
+    gate: str
+    status: str  # pass | fail | not_run
+    cases: int = 0
+    detail: str = ""
+    duration_s: float = 0.0
+    lines: list[str] = field(default_factory=list)
+
+    @property
+    def exit_code(self) -> int:
+        return {"pass": EXIT_OK, "fail": EXIT_FAIL, "not_run": EXIT_NOT_RUN}[self.status]
+
+
+# -- process helpers -------------------------------------------------------
+
+
+def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def _python() -> str | None:
+    if PY.exists():
+        return str(PY)
+    return shutil.which("python3")
+
+
+def _pytest(marker: str) -> tuple[str, int, str]:
+    interpreter = _python()
+    if interpreter is None:
+        return "not_run", 0, "python3 not found"
+    proc = _run([interpreter, "-m", "pytest", "-m", marker, "-q", "--no-header"], ROOT)
+    cases = _pytest_count(proc.stdout)
+    if proc.returncode == 5 or cases == 0:
+        # pytest exit 5 is "no tests collected". An empty gate is a failure, not a pass.
+        return "fail", 0, "no cases collected"
+    if proc.returncode != 0:
+        return "fail", cases, _tail(proc.stdout or proc.stderr)
+    return "pass", cases, ""
+
+
+_COUNTED_OUTCOMES = ("passed", "failed", "error", "errors", "xfailed", "xpassed")
+
+
+def _pytest_count(output: str) -> int:
+    """Count executed cases only. `deselected` and `skipped` are not executed cases."""
+    for line in reversed(output.strip().splitlines()):
+        if not any(f" {word}" in line for word in _COUNTED_OUTCOMES):
+            continue
+        tokens = line.replace(",", " ").replace("=", " ").split()
+        total = 0
+        for index, token in enumerate(tokens[:-1]):
+            if token.isdigit() and tokens[index + 1].rstrip(".") in _COUNTED_OUTCOMES:
+                total += int(token)
+        if total:
+            return total
+    return 0
+
+
+def _vitest(project: Path, target: str) -> tuple[str, int, str]:
+    binary = NODE_BIN / "vitest"
+    if not binary.exists():
+        return "not_run", 0, "node_modules missing (run: npm install)"
+    proc = _run([str(binary), "run", target, "--reporter=json"], project)
+    cases, failed = _vitest_counts(proc.stdout)
+    if cases == 0:
+        return "fail", 0, "no cases collected"
+    if proc.returncode != 0 or failed:
+        return "fail", cases, f"{failed} failing"
+    return "pass", cases, ""
+
+
+def _vitest_counts(output: str) -> tuple[int, int]:
+    start = output.find("{")
+    if start < 0:
+        return 0, 0
+    try:
+        parsed = json.loads(output[start:])
+    except ValueError:
+        return 0, 0
+    return int(parsed.get("numTotalTests", 0)), int(parsed.get("numFailedTests", 0))
+
+
+def _tail(text: str, lines: int = 12) -> str:
+    return "\n".join(text.strip().splitlines()[-lines:])
+
+
+# -- suites ----------------------------------------------------------------
+
+
+def run_unit(gate: str) -> list[GateResult]:
+    if gate == "all":
+        results: list[GateResult] = [run_contract_sync()]
+        for name in UNIT_GATES:
+            results.extend(run_unit(name))
+        return results
+    if gate not in UNIT_GATES:
+        return [GateResult("unit", gate, "fail", detail=f"unknown gate; known: {', '.join(UNIT_GATES)}")]
+
+    marker, ts_targets = UNIT_GATES[gate]
+    started = time.monotonic()
+    status, cases, detail = _pytest(marker)
+    lines = [f"python  {marker}: {status} ({cases} cases) {detail}".rstrip()]
+    for project, target in ts_targets:
+        ts_status, ts_cases, ts_detail = _vitest(project, target)
+        lines.append(
+            f"node    {project.name}/{target}: {ts_status} ({ts_cases} cases) {ts_detail}".rstrip()
+        )
+        cases += ts_cases
+        if ts_status == "fail":
+            status, detail = "fail", ts_detail
+        elif ts_status == "not_run" and status == "pass":
+            status, detail = "not_run", ts_detail
+    return [
+        GateResult("unit", gate, status, cases, detail, time.monotonic() - started, lines)
+    ]
+
+
+def run_contract_sync() -> GateResult:
+    """The vendored contract copies must match `contracts/v1` byte for byte."""
+    started = time.monotonic()
+    proc = _run([sys.executable, str(ROOT / "scripts" / "sync-contracts"), "--check"], ROOT)
+    status = "pass" if proc.returncode == 0 else "fail"
+    return GateResult(
+        "unit", "contract-sync", status, 1, _tail(proc.stderr), time.monotonic() - started,
+        [f"contracts vendored copies: {status}"],
+    )
+
+
+def _hermes_prereq() -> tuple[bool, str]:
+    root = os.environ.get("CONTEXT_SHUNT_HERMES_ROOT", "")
+    interpreter = os.environ.get("CONTEXT_SHUNT_HERMES_PYTHON", "")
+    if not root or not Path(root).is_dir():
+        return False, "set CONTEXT_SHUNT_HERMES_ROOT to a hermes-agent checkout"
+    if not interpreter or not Path(interpreter).exists():
+        return False, "set CONTEXT_SHUNT_HERMES_PYTHON to an interpreter with hermes-agent installed"
+    return True, ""
+
+
+def _openclaw_prereq() -> tuple[bool, str]:
+    root = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROOT", "")
+    if not root or not Path(root).is_dir():
+        return False, "set CONTEXT_SHUNT_OPENCLAW_ROOT to an OpenClaw checkout"
+    if not (Path(root) / "package.json").exists():
+        return False, "CONTEXT_SHUNT_OPENCLAW_ROOT does not look like an OpenClaw checkout"
+    return True, ""
+
+
+def run_integration(host: str, mode: str) -> list[GateResult]:
+    if host == "all":
+        results: list[GateResult] = []
+        for name in INTEGRATION_HOSTS:
+            # "all" with an explicit --mode runs that mode on both hosts; the default
+            # walks every mode so `integration all` covers the whole matrix once.
+            modes = INTEGRATION_MODES if mode == "local" else (mode,)
+            for each in modes:
+                results.extend(run_integration(name, each))
+        return results
+    if host not in INTEGRATION_HOSTS:
+        return [GateResult("integration", host, "fail", detail=f"unknown host; known: {', '.join(INTEGRATION_HOSTS)}")]
+    if mode not in INTEGRATION_MODES:
+        return [GateResult("integration", f"{host}/{mode}", "fail", detail=f"unknown mode; known: {', '.join(INTEGRATION_MODES)}")]
+
+    gate = f"{host} --mode {mode}"
+    started = time.monotonic()
+
+    if mode == "unsupported":
+        # Fail-closed behaviour is ours, not the host's, so this gate is deterministic:
+        # it proves the adapter refuses the mode and keeps the local gate working.
+        marker = "gate_capability"
+        status, cases, detail = _pytest(marker)
+        project = OPENCLAW_ADAPTER if host == "openclaw" else None
+        lines = [f"python  {marker}: {status} ({cases} cases)"]
+        if project is not None:
+            ts_status, ts_cases, ts_detail = _vitest(project, "test/adapter.test.ts")
+            lines.append(f"node    adapter fail-closed: {ts_status} ({ts_cases} cases) {ts_detail}".rstrip())
+            cases += ts_cases
+            if ts_status != "pass":
+                status, detail = ts_status, ts_detail
+        return [GateResult("integration", gate, status, cases, detail, time.monotonic() - started, lines)]
+
+    ok, why = (_hermes_prereq() if host == "hermes" else _openclaw_prereq())
+    if not ok:
+        return [
+            GateResult(
+                "integration", gate, "not_run", 0,
+                f"prerequisite missing: {why}", time.monotonic() - started,
+                [f"NOT_RUN {gate}: {why}"],
+            )
+        ]
+
+    if mode == "post-tool":
+        # Both supported hosts are proven unable to give the required capture/replacement
+        # order (docs/capability-matrix.md). The honest result is NOT_RUN for the live
+        # gate plus a passing fail-closed gate, never a pass for an unsupported mode.
+        return [
+            GateResult(
+                "integration", gate, "not_run", 0,
+                "mode disabled on this host: capture happens after truncation "
+                "(see docs/capability-matrix.md); run --mode unsupported instead",
+                time.monotonic() - started,
+                [f"NOT_RUN {gate}: mode is unsupported on this host and stays disabled"],
+            )
+        ]
+
+    if host == "openclaw":
+        ts_status, ts_cases, ts_detail = _vitest(OPENCLAW_ADAPTER, "test/host-integration.test.ts")
+        return [
+            GateResult("integration", gate, ts_status, ts_cases, ts_detail,
+                       time.monotonic() - started,
+                       [f"node    openclaw host checkout: {ts_status} ({ts_cases} cases) {ts_detail}".rstrip()])
+        ]
+
+    marker = f"integration_{host}"
+    status, cases, detail = _pytest(marker)
+    return [
+        GateResult("integration", gate, status, cases, detail, time.monotonic() - started,
+                   [f"python  {marker}: {status} ({cases} cases) {detail}".rstrip()])
+    ]
+
+
+def run_eval(gate: str) -> list[GateResult]:
+    if gate != "luna":
+        return [GateResult("eval", gate, "fail", detail="unknown gate; known: luna")]
+    started = time.monotonic()
+    if not os.environ.get("CONTEXT_SHUNT_LUNA_EVAL"):
+        return [
+            GateResult(
+                "eval", "luna", "not_run", 0,
+                "prerequisite missing: set CONTEXT_SHUNT_LUNA_EVAL=1 and provide a host "
+                "bridge that serves gpt-5.6-luna; a mock is never a pass",
+                time.monotonic() - started,
+                ["NOT_RUN eval luna: live gpt-5.6-luna access is required"],
+            )
+        ]
+    status, cases, detail = _pytest("eval_luna")
+    return [GateResult("eval", "luna", status, cases, detail, time.monotonic() - started)]
+
+
+def run_benchmark(gate: str) -> list[GateResult]:
+    started = time.monotonic()
+    if gate == "core":
+        status, cases, detail = _pytest("benchmark")
+        return [GateResult("benchmark", "core", status, cases, detail, time.monotonic() - started)]
+    if gate != "all":
+        return [GateResult("benchmark", gate, "fail", detail="unknown gate; known: core, all")]
+    results = run_benchmark("core")
+    results.append(
+        GateResult(
+            "benchmark", "provider", "not_run", 0,
+            "prerequisite missing: reader latency and token cost need live gpt-5.6-luna "
+            "(set CONTEXT_SHUNT_LUNA_EVAL=1 with a host bridge)",
+            0.0, ["NOT_RUN benchmark provider: live gpt-5.6-luna access is required"],
+        )
+    )
+    return results
+
+
+def run_packaging(gate: str) -> list[GateResult]:
+    if gate != "all":
+        return [GateResult("packaging", gate, "fail", detail="unknown gate; known: all")]
+    started = time.monotonic()
+    lines: list[str] = []
+    failures: list[str] = []
+    checks = 0
+
+    # 1. The TypeScript core builds, and the build output is what the package ships.
+    tsc = NODE_BIN / "tsc"
+    if not tsc.exists():
+        return [GateResult("packaging", "all", "not_run", 0, "node_modules missing (run: npm install)")]
+    for project in (CORE_TS / "tsconfig.build.json", OPENCLAW_ADAPTER / "tsconfig.json"):
+        checks += 1
+        proc = _run([str(tsc), "-p", str(project), "--noEmit"], ROOT)
+        ok = proc.returncode == 0
+        lines.append(f"typecheck {project.parent.name}: {'pass' if ok else 'fail'}")
+        if not ok:
+            failures.append(f"typecheck failed: {project}")
+    checks += 1
+    proc = _run([str(tsc), "-p", str(CORE_TS / "tsconfig.build.json")], ROOT)
+    built = (CORE_TS / "dist" / "index.js").exists()
+    lines.append(f"build @context-shunt/core: {'pass' if proc.returncode == 0 and built else 'fail'}")
+    if proc.returncode != 0 or not built:
+        failures.append("core-ts build did not produce dist/index.js")
+
+    # 2. Both packages declare the files they ship, and ship the contracts with them.
+    for manifest, required in (
+        (CORE_TS / "package.json", ["dist", "contracts"]),
+        (OPENCLAW_ADAPTER / "package.json", ["index.ts", "src", "openclaw.plugin.json"]),
+    ):
+        checks += 1
+        data = json.loads(manifest.read_text())
+        missing = [entry for entry in required if entry not in (data.get("files") or [])]
+        lines.append(f"{manifest.parent.name} files[]: {'pass' if not missing else 'fail'}")
+        if missing:
+            failures.append(f"{manifest} files[] is missing {missing}")
+
+    # 3. The Python package ships the vendored contracts.
+    checks += 1
+    vendored = ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts" / "v1"
+    ok = (vendored / "limits.json").exists() and (vendored / "request.schema.json").exists()
+    lines.append(f"core-py vendored contracts: {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append("core-py vendored contracts are missing")
+
+    # 4. Defaults are safe: Suma off, writer unavailable, caps at the contract values.
+    checks += 1
+    example = ROOT / "examples" / "config" / "openclaw.json"
+    hermes_example = ROOT / "examples" / "config" / "hermes.config.yaml"
+    ok = example.exists() and hermes_example.exists()
+    if ok:
+        cfg = json.loads(example.read_text())
+        entry = cfg["plugins"]["entries"]["context-shunt"]["config"]
+        ok = entry["suma_post_tool"]["enabled"] is False and "writer" not in entry
+        ok = ok and "propose_patch" not in example.read_text()
+    lines.append(f"example config defaults (suma off, no writer): {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append("example configuration does not carry safe defaults")
+
+    # 5. Nothing shippable contains a spill, a report, a secret or a local path.
+    checks += 1
+    leaked = _release_artifact_scan()
+    lines.append(f"release artifact scan: {'pass' if not leaked else 'fail'}")
+    if leaked:
+        failures.append(f"disallowed content in shippable files: {leaked}")
+
+    # 6. Uninstall removes private artifacts.
+    checks += 1
+    ok, detail = _uninstall_smoke()
+    lines.append(f"uninstall clears private artifacts: {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append(detail)
+
+    status = "pass" if not failures else "fail"
+    return [
+        GateResult("packaging", "all", status, checks, "; ".join(failures),
+                   time.monotonic() - started, lines)
+    ]
+
+
+def _release_artifact_scan() -> list[str]:
+    """Shippable files must not carry snapshots, reports, secrets or local paths."""
+    bad: list[str] = []
+    shippable = [
+        *(ROOT / "contracts").rglob("*.json"),
+        *(ROOT / "adapters").rglob("*.py"),
+        *(ROOT / "adapters").rglob("*.ts"),
+        *(ROOT / "adapters").rglob("*.json"),
+        *(ROOT / "adapters").rglob("*.yaml"),
+        *(ROOT / "packages" / "core-py" / "src").rglob("*.py"),
+        *(ROOT / "packages" / "core-ts" / "src").rglob("*.ts"),
+        *(ROOT / "examples").rglob("*"),
+    ]
+    home = str(Path.home())
+    for path in shippable:
+        if not path.is_file():
+            continue
+        text = path.read_text(errors="replace")
+        if home in text:
+            bad.append(f"{path.relative_to(ROOT)}: absolute home path")
+        for marker in ("BEGIN RSA PRIVATE KEY", "BEGIN OPENSSH PRIVATE KEY"):
+            # The policy denylist itself names these markers; only a real key body counts.
+            if marker in text and "SECRET_MARKERS" not in text and "_SECRET_CONTENT_MARKERS" not in text:
+                bad.append(f"{path.relative_to(ROOT)}: key material")
+        if ".spill" in text and "spill" not in path.name and path.suffix == ".json":
+            bad.append(f"{path.relative_to(ROOT)}: spill artifact reference")
+    for pattern in ("*.spill", "*.shunt-spill"):
+        for path in ROOT.rglob(pattern):
+            if ".git" in path.parts:
+                continue
+            bad.append(f"{path.relative_to(ROOT)}: spill artifact present in the tree")
+    return bad
+
+
+def _uninstall_smoke() -> tuple[bool, str]:
+    """A session's handles and spill files must be gone after teardown."""
+    interpreter = _python()
+    if interpreter is None:
+        return False, "python3 not found"
+    script = """
+import sys, tempfile, pathlib
+sys.path.insert(0, "packages/core-py/src")
+from context_shunt.config import load as load_config
+from context_shunt.capability import CapabilityReport, supported
+from context_shunt.limits import READER_MODEL
+from context_shunt.session import ShuntSession
+
+tmp = pathlib.Path(tempfile.mkdtemp())
+(tmp / "ws").mkdir()
+(tmp / "ws" / "a.txt").write_text("alpha\\n")
+config = load_config(
+    {"workspace_roots": [str(tmp / "ws")], "spill_dir": str(tmp / "cache"),
+     "suma_post_tool": {"enabled": True}},
+    default_spill_dir=tmp / "cache",
+)
+capability = CapabilityReport(
+    adapter="smoke", adapter_version="1", host_name="smoke", host_version="1",
+    contract_version="1.0", reader_model=READER_MODEL,
+    modes=[supported("local_gate"), supported("reader"), supported("suma_post_tool")],
+)
+session = ShuntSession("smoke", config, capability)
+session.register_path(str(tmp / "ws" / "a.txt"))
+outcome = session.post_tool_result("req_smoke", "x" * 60000)
+assert outcome.action == "spill", outcome.action
+spills = list((tmp / "cache").rglob("*.spill"))
+assert spills, "spill was not written"
+session.close()
+assert not list((tmp / "cache").rglob("*.spill")), "spill survived teardown"
+assert session.registry.count("smoke") == 0, "handles survived teardown"
+print("OK")
+"""
+    proc = _run([interpreter, "-c", script], ROOT)
+    if proc.returncode != 0 or "OK" not in proc.stdout:
+        return False, f"uninstall smoke failed: {_tail(proc.stderr or proc.stdout, 4)}"
+    return True, ""
+
+
+def run_release(gate: str) -> list[GateResult]:
+    if gate != "all":
+        return [GateResult("release", gate, "fail", detail="unknown gate; known: all")]
+    results: list[GateResult] = []
+    results.extend(run_unit("all"))
+    for host in INTEGRATION_HOSTS:
+        for mode in INTEGRATION_MODES:
+            results.extend(run_integration(host, mode))
+    results.extend(run_eval("luna"))
+    results.extend(run_benchmark("all"))
+    results.extend(run_packaging("all"))
+    results.append(_license_check())
+    return results
+
+
+def _license_check() -> GateResult:
+    started = time.monotonic()
+    failures: list[str] = []
+    license_text = (ROOT / "LICENSE").read_text(errors="replace")
+    if "Apache License" not in license_text:
+        failures.append("LICENSE is not Apache-2.0")
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(errors="replace")
+    if "3c24ca30ff63e1f5bbad1c43fe5324daff579123" not in notices:
+        failures.append("THIRD_PARTY_NOTICES.md does not pin the upstream commit")
+    if "51 tests" in notices and "upstream" not in notices.lower():
+        failures.append("upstream test results must stay attributed to upstream")
+    # Dependencies must be pinned or bounded.
+    core_ts = json.loads((CORE_TS / "package.json").read_text())
+    for name, spec in {**core_ts.get("dependencies", {}), **core_ts.get("devDependencies", {})}.items():
+        if spec.startswith("^") or spec.startswith("*") or spec == "latest":
+            failures.append(f"@context-shunt/core dependency {name} is not pinned")
+    pyproject = (ROOT / "packages" / "core-py" / "pyproject.toml").read_text()
+    if "jsonschema>=4.25,<4.26" not in pyproject:
+        failures.append("core-py dependency jsonschema is not bounded")
+    status = "pass" if not failures else "fail"
+    return GateResult("release", "license-and-deps", status, 4, "; ".join(failures),
+                      time.monotonic() - started)
+
+
+# -- reporting -------------------------------------------------------------
+
+
+def _versions() -> dict[str, str]:
+    def probe(cmd: list[str]) -> str:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout.strip()[:40]
+        except OSError:
+            return "unavailable"
+
+    return {
+        "python": platform.python_version(),
+        "node": probe(["node", "--version"]),
+        "platform": platform.platform(),
+        "contract": "1.0",
+    }
+
+
+def _write_report(argv: list[str], results: list[GateResult], code: int, elapsed: float) -> Path:
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    path = REPORTS / f"verify-{stamp}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "argv": argv,
+                "exit_code": code,
+                "duration_s": round(elapsed, 3),
+                "versions": _versions(),
+                "gates": [
+                    {
+                        "suite": r.suite,
+                        "gate": r.gate,
+                        "status": r.status,
+                        "cases": r.cases,
+                        "detail": r.detail[:400],
+                        "duration_s": round(r.duration_s, 3),
+                    }
+                    for r in results
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return path
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="scripts/verify", add_help=True)
+    parser.add_argument("suite", choices=["unit", "integration", "eval", "benchmark", "packaging", "release"])
+    parser.add_argument("gate", help="gate name, host name, or 'all'")
+    parser.add_argument("--mode", default="local", choices=list(INTEGRATION_MODES))
+    args = parser.parse_args(argv)
+
+    started = time.monotonic()
+    if args.suite == "unit":
+        results = run_unit(args.gate)
+    elif args.suite == "integration":
+        results = run_integration(args.gate, args.mode)
+    elif args.suite == "eval":
+        results = run_eval(args.gate)
+    elif args.suite == "benchmark":
+        results = run_benchmark(args.gate)
+    elif args.suite == "packaging":
+        results = run_packaging(args.gate)
+    else:
+        results = run_release(args.gate)
+
+    elapsed = time.monotonic() - started
+    total_cases = sum(r.cases for r in results)
+    failed = [r for r in results if r.status == "fail"]
+    not_run = [r for r in results if r.status == "not_run"]
+
+    print(f"context-shunt verify: {args.suite} {args.gate}")
+    for result in results:
+        icon = {"pass": "PASS", "fail": "FAIL", "not_run": "NOT_RUN"}[result.status]
+        print(f"  [{icon}] {result.suite} {result.gate}  cases={result.cases}  {result.duration_s:.2f}s")
+        for line in result.lines:
+            print(f"          {line}")
+        if result.detail and result.status != "pass":
+            print(f"          -> {result.detail}")
+
+    code = EXIT_OK
+    if failed:
+        code = EXIT_FAIL
+    elif not_run:
+        code = EXIT_NOT_RUN
+
+    versions = _versions()
+    print(
+        f"\ntotals: gates={len(results)} cases={total_cases} "
+        f"failed={len(failed)} not_run={len(not_run)} duration={elapsed:.2f}s"
+    )
+    print(f"versions: python={versions['python']} node={versions['node']} contract={versions['contract']}")
+    report = _write_report(argv, results, code, elapsed)
+    print(f"report: {report.relative_to(ROOT)}")
+    if code == EXIT_NOT_RUN:
+        print("\nNOT_RUN means a prerequisite is absent. It is not a pass.")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

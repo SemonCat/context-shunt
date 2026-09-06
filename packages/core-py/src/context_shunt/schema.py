@@ -8,7 +8,7 @@ fields where the contract is stated in bytes.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
+from functools import cache
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -17,7 +17,7 @@ from .errors import ShuntError
 from .limits import CONTRACTS_DIR, DEFAULT_LIMITS, SCHEMA_VERSION
 
 
-@lru_cache(maxsize=None)
+@cache
 def _validator(name: str) -> Draft202012Validator:
     with (CONTRACTS_DIR / name).open("rb") as fh:
         return Draft202012Validator(json.load(fh))

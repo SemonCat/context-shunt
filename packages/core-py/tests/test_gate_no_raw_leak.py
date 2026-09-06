@@ -12,7 +12,6 @@ import logging
 
 import pytest
 
-from context_shunt import envelope as E
 from context_shunt.errors import ShuntError
 from context_shunt.guard import enforce_or_fixed
 from context_shunt.metrics import InMemoryMetrics
@@ -21,7 +20,6 @@ from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.spill import SpillStore, SumaSpillEngine
-
 from tests.support import FakeLuna, answer_json
 
 pytestmark = pytest.mark.gate_no_raw_leak
@@ -88,6 +86,7 @@ def test_reader_failures_never_return_raw(failure, caplog):
             )
         )
     else:
+
         def bridge(**_kw):
             raise RuntimeError(f"upstream rejected prompt containing {MID} and {TAIL}")
 
@@ -154,7 +153,13 @@ def test_output_guard_failure_emits_a_fixed_envelope_not_the_input():
         "code": "ANSWERED",
         "answer": HEAD,
         "citations": [],
-        "coverage": {"complete": True, "processed_chunks": 1, "planned_chunks": 1, "omitted": [], "upstream_truncated": False},
+        "coverage": {
+            "complete": True,
+            "processed_chunks": 1,
+            "planned_chunks": 1,
+            "omitted": [],
+            "upstream_truncated": False,
+        },
         "sources": [],
         "retryable": False,
         "raw": _payload(),
@@ -183,10 +188,15 @@ def test_gate_block_envelope_carries_no_source_content(tmp_path):
 
 
 def test_metric_labels_reject_content():
+    from context_shunt.metrics import MetricsError
+
     metrics = InMemoryMetrics()
-    with pytest.raises(Exception):
+    # A path is not an allowed label key at all.
+    with pytest.raises(MetricsError):
         metrics.count("gate_decision", {"path": HEAD})
-    with pytest.raises(Exception):
+    # An allowed key still rejects a value that is not a bounded enum token.
+    with pytest.raises(MetricsError):
         metrics.count("gate_decision", {"reason": HEAD + " " + MID})
-    with pytest.raises(Exception):
+    # Full request ids are forbidden as dimensions even though they are not content.
+    with pytest.raises(MetricsError):
         metrics.count("gate_decision", {"request_id": "req_leak"})

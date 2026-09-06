@@ -19,10 +19,27 @@ from .errors import ShuntError
 # data destination and why chunks stay minimal.
 _SECRET_NAMES = frozenset(
     {
-        ".env", ".env.local", ".env.production", ".env.development", ".netrc", "_netrc",
-        "credentials", "auth.json", ".htpasswd", "id_rsa", "id_dsa", "id_ecdsa",
-        "id_ed25519", ".pgpass", "shadow", "master.key", "secrets.yaml", "secrets.yml",
-        ".npmrc", ".pypirc", ".dockercfg",
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        ".netrc",
+        "_netrc",
+        "credentials",
+        "auth.json",
+        ".htpasswd",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        ".pgpass",
+        "shadow",
+        "master.key",
+        "secrets.yaml",
+        "secrets.yml",
+        ".npmrc",
+        ".pypirc",
+        ".dockercfg",
     }
 )
 _SECRET_SUFFIXES = ("_rsa", "_dsa", "_ed25519")

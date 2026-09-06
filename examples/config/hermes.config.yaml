@@ -1,0 +1,53 @@
+# Example Hermes configuration for context-shunt.
+# Merge these keys into ~/.hermes/config.yaml; do not replace the file.
+
+plugins:
+  enabled:
+    - context-shunt
+  entries:
+    context-shunt:
+      # The reader needs the model override, and only this model. Hermes gates plugin
+      # model overrides per plugin, so without this the reader reports MODEL_ERROR
+      # instead of quietly answering with whatever model is configured.
+      llm:
+        allow_model_override: true
+        allowed_models:
+          - gpt-5.6-luna
+        allow_provider_override: false
+        allow_agent_id_override: false
+        allow_profile_override: false
+
+      config:
+        # Only these roots may become sources. Everything else is UNSAFE_SOURCE.
+        workspace_roots:
+          - /path/to/your/project
+
+        # Private cache for snapshots and spill. Keep it outside every workspace root
+        # and outside git. Directory 0700, files 0600, cleared on session end.
+        spill_dir: ~/.cache/context-shunt
+
+        # Extra administrator denials, relative globs inside a root. The built-in secret
+        # policy (.env, private keys, credential stores) applies regardless.
+        denylist:
+          - "secrets/*"
+          - "**/*.local.yaml"
+
+        # Block oversized and unprovable reads before they run.
+        gate_enabled: true
+
+        reader:
+          enabled: true
+          model: gpt-5.6-luna # the only accepted value; anything else is refused at load
+
+        # Optional oversized-result spill. Unsupported on this host (see
+        # docs/capability-matrix.md), so it stays off and setting it true changes nothing.
+        suma_post_tool:
+          enabled: false
+
+        # Caps may only be narrowed. A wider value is refused at load.
+        # limits:
+        #   full_read_max_lines: 200
+        #   max_answer_bytes: 4096
+
+# There is no writer key. v1 refuses `writer.enabled: true` at load time rather than
+# accepting it and doing nothing.

@@ -103,8 +103,7 @@ class Reader:
         search_only = [s for s in selections if s[2].get("kind") == "search"]
         if search_only:
             selections = [
-                (sid, snap, _search_selector_to_lines(snap, sel))
-                for sid, snap, sel in selections
+                (sid, snap, _search_selector_to_lines(snap, sel)) for sid, snap, sel in selections
             ]
 
         deadline.check("PLAN")
@@ -113,7 +112,9 @@ class Reader:
         selections = [
             (sid, snap, sel)
             for sid, snap, sel in selections
-            if not (sel.get("kind") == "lines" and int(sel.get("end", 0)) < int(sel.get("start", 1)))
+            if not (
+                sel.get("kind") == "lines" and int(sel.get("end", 0)) < int(sel.get("start", 1))
+            )
         ]
         budgets = request["budgets"]
         the_plan = plan(selections, max_chunks=budgets["max_chunks"], limits=self._limits)
@@ -144,9 +145,7 @@ class Reader:
             usage_in += outcome.usage.input_tokens
             usage_out += outcome.usage.output_tokens
             if outcome.failed_reason:
-                coverage.omit(
-                    outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason
-                )
+                coverage.omit(outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason)
                 continue
             coverage.processed_chunks += 1
             if outcome.answer:
@@ -232,9 +231,12 @@ class Reader:
                 if exc.retryable and attempt + 1 < attempts and not deadline.expired():
                     continue
                 outcome.failed_reason = (
-                    "MODEL_ERROR" if exc.code == "MODEL_ERROR"
-                    else "INVALID_MODEL_OUTPUT" if exc.code == "INVALID_MODEL_OUTPUT"
-                    else "TIMEOUT" if exc.code == "TIMEOUT"
+                    "MODEL_ERROR"
+                    if exc.code == "MODEL_ERROR"
+                    else "INVALID_MODEL_OUTPUT"
+                    if exc.code == "INVALID_MODEL_OUTPUT"
+                    else "TIMEOUT"
+                    if exc.code == "TIMEOUT"
                     else "CHUNK_FAILED"
                 )
                 return outcome
@@ -284,7 +286,7 @@ def _parse_model_json(text: str) -> dict[str, Any]:
     if stripped.startswith("```"):
         stripped = stripped.split("\n", 1)[-1]
         if stripped.endswith("```"):
-            stripped = stripped[: -3]
+            stripped = stripped[:-3]
     try:
         value = json.loads(stripped)
     except ValueError:

@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from context_shunt import envelope as E
 from context_shunt.errors import ShuntError
-from context_shunt.guard import enforce, enforce_or_fixed, OutputGuardError
+from context_shunt.guard import OutputGuardError, enforce, enforce_or_fixed
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.spill import SpillStore, SumaSpillEngine
-
 from tests.support import FakeLuna, answer_json
 
 pytestmark = pytest.mark.gate_bounded_output
@@ -141,7 +138,9 @@ def test_answer_quote_and_citation_caps_are_enforced():
         code="ANSWERED",
         answer="a [c1]",
         citations=[_citation()],
-        coverage=E.Coverage(complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False),
+        coverage=E.Coverage(
+            complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False
+        ),
     )
     enforce(base)
     with pytest.raises(OutputGuardError):
@@ -159,7 +158,9 @@ def test_unverified_citation_never_leaves_the_guard():
         code="ANSWERED",
         answer="a [c1]",
         citations=[{**_citation(), "verified": False}],
-        coverage=E.Coverage(complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False),
+        coverage=E.Coverage(
+            complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False
+        ),
     )
     assert enforce_or_fixed(env)["code"] == "LIMIT_EXCEEDED"
 
@@ -167,8 +168,10 @@ def test_unverified_citation_never_leaves_the_guard():
 def test_reader_answer_is_capped_to_the_requested_budget():
     registry = SourceRegistry()
     entry = registry.register("sess", snapshot_bytes(b"alpha value here\n"))
-    long_answer = ("Alpha is present [c1]. " * 2000)
-    reply = answer_json(long_answer, [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}])
+    long_answer = "Alpha is present [c1]. " * 2000
+    reply = answer_json(
+        long_answer, [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}]
+    )
     env = Reader(registry, FakeLuna(default_reply=reply)).answer(
         "sess",
         {

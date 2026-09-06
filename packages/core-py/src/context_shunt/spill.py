@@ -18,6 +18,7 @@ the mode stays disabled.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -116,20 +117,17 @@ class SpillStore:
             for child in directory.iterdir():
                 _unlink_quiet(child)
                 removed += 1
-            try:
+            with contextlib.suppress(OSError):
+                # A concurrent write may repopulate it; the TTL sweep gets it next.
                 directory.rmdir()
-            except OSError:
-                pass
         with self._lock:
             self._used_by_session.pop(session_id, None)
         return removed
 
 
 def _unlink_quiet(path: Path) -> None:
-    try:
+    with contextlib.suppress(OSError):
         path.unlink()
-    except OSError:
-        pass
 
 
 class SumaSpillEngine:
@@ -176,7 +174,12 @@ class SumaSpillEngine:
         size = len(serialized)
         if size > self._limits.max_source_bytes:
             exc = ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
-            return SpillOutcome(action="error", envelope=E.error_envelope(request_id, exc), code=exc.code, bytes_measured=size)
+            return SpillOutcome(
+                action="error",
+                envelope=E.error_envelope(request_id, exc),
+                code=exc.code,
+                bytes_measured=size,
+            )
         if size <= self._limits.max_tool_result_bytes:
             return SpillOutcome(action="passthrough", bytes_measured=size)
 
@@ -188,7 +191,9 @@ class SumaSpillEngine:
             code = exc.code if exc.code in ("SPILL_FAILED", "UNSAFE_SOURCE") else "SPILL_FAILED"
             safe = ShuntError(code, exc.detail, retryable=False)
             return SpillOutcome(
-                action="error", envelope=E.error_envelope(request_id, safe), code=code,
+                action="error",
+                envelope=E.error_envelope(request_id, safe),
+                code=code,
                 bytes_measured=size,
             )
 
@@ -242,11 +247,19 @@ class SumaSpillEngine:
 
 
 def _content_blocks(result: Any) -> list[dict] | None:
-    if isinstance(result, list) and result and all(isinstance(b, dict) and "type" in b for b in result):
+    if (
+        isinstance(result, list)
+        and result
+        and all(isinstance(b, dict) and "type" in b for b in result)
+    ):
         return result
     if isinstance(result, dict):
         blocks = result.get("content")
-        if isinstance(blocks, list) and blocks and all(isinstance(b, dict) and "type" in b for b in blocks):
+        if (
+            isinstance(blocks, list)
+            and blocks
+            and all(isinstance(b, dict) and "type" in b for b in blocks)
+        ):
             return blocks
     return None
 

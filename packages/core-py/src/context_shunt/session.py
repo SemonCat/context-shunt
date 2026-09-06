@@ -80,8 +80,11 @@ class ShuntSession:
         decision = self._gate.evaluate(tool, args)
         self._metrics.count(
             "gate_decision",
-            {"decision": decision.decision.value, "form": decision.form.value,
-             "reason": decision.reason or "NONE"},
+            {
+                "decision": decision.decision.value,
+                "form": decision.form.value,
+                "reason": decision.reason or "NONE",
+            },
         )
         return decision
 

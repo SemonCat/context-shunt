@@ -92,8 +92,12 @@ class CapabilityReport:
         }
 
 
-def unsupported(mode: str, *reasons: DisabledReason, evidence: tuple[str, ...] = ()) -> ModeCapability:
-    return ModeCapability(mode=mode, support=Support.UNSUPPORTED, reasons=reasons, evidence=evidence)
+def unsupported(
+    mode: str, *reasons: DisabledReason, evidence: tuple[str, ...] = ()
+) -> ModeCapability:
+    return ModeCapability(
+        mode=mode, support=Support.UNSUPPORTED, reasons=reasons, evidence=evidence
+    )
 
 
 def supported(mode: str, evidence: tuple[str, ...] = ()) -> ModeCapability:

@@ -13,7 +13,6 @@ from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-
 from tests.support import FakeLuna, answer_json
 
 pytestmark = pytest.mark.gate_citations

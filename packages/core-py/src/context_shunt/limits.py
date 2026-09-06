@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -17,18 +17,18 @@ CONTRACTS_DIR = Path(__file__).resolve().parent / "contracts" / "v1"
 SCHEMA_VERSION = "1.0"
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load(name: str) -> dict[str, Any]:
     with (CONTRACTS_DIR / name).open("rb") as fh:
         return json.load(fh)
 
 
-@lru_cache(maxsize=None)
+@cache
 def raw_limits() -> dict[str, Any]:
     return _load("limits.json")
 
 
-@lru_cache(maxsize=None)
+@cache
 def status_code_pairs() -> dict[str, Any]:
     return _load("status-code-pairs.json")
 

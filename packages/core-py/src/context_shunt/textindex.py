@@ -33,9 +33,7 @@ class BoundedCount:
     exact: bool
 
 
-def count_lines_bounded(
-    stream: Iterator[bytes], *, max_lines: int, max_bytes: int
-) -> BoundedCount:
+def count_lines_bounded(stream: Iterator[bytes], *, max_lines: int, max_bytes: int) -> BoundedCount:
     """Count lines while streaming, stopping at ``max_lines`` or ``max_bytes``.
 
     An inexact result is treated as "unknown scale" by the gate, which blocks.

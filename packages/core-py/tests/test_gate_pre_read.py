@@ -7,9 +7,8 @@ import pytest
 from context_shunt.clock import FakeClock
 from context_shunt.gate import Decision, PreReadGate, ProbeResult
 from context_shunt.probe import FileProber
-from context_shunt.textindex import count_lines
 from context_shunt.session import ShuntSession
-
+from context_shunt.textindex import count_lines
 from tests.support import make_capability, make_config
 
 pytestmark = pytest.mark.gate_pre_read

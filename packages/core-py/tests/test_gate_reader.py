@@ -13,17 +13,11 @@ from context_shunt.provider import HostBridgeProvider, UnavailableProvider
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-
 from tests.support import FakeLuna, answer_json
 
 pytestmark = pytest.mark.gate_reader
 
-SOURCE = (
-    "import os\n"
-    "max_retries = 3\n"
-    'backoff = "exponential"\n'
-    "timeout_seconds = 30\n"
-)
+SOURCE = 'import os\nmax_retries = 3\nbackoff = "exponential"\ntimeout_seconds = 30\n'
 QUESTION = "Where is the retry ceiling defined and what is it?"
 
 
@@ -169,7 +163,8 @@ def test_partial_when_a_chunk_is_omitted_by_budget():
     entry = registry.register("sess", snapshot_bytes(body.encode()))
     luna = FakeLuna(default_reply=answer_json("", []))
     env = Reader(registry, luna).answer(
-        "sess", _request(entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000})
+        "sess",
+        _request(entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}),
     )
     assert env["status"] == "partial"
     assert env["coverage"]["complete"] is False

@@ -109,7 +109,9 @@ class PreReadGate:
         offset = args.get("offset")
         for name, value in (("limit", limit), ("offset", offset)):
             if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
-                return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, f"BAD_{name.upper()}")
+                return _blocked(
+                    "UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, f"BAD_{name.upper()}"
+                )
         if limit is not None and limit < 1:
             return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "BAD_LIMIT")
         if offset is not None and offset < 0:
@@ -147,7 +149,9 @@ class PreReadGate:
         if c.form is ShellForm.NOT_READ_LIKE:
             return _ALLOW_NOT_READ
         if c.form is ShellForm.UNCLASSIFIABLE:
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, c.reason or "UNPROVABLE")
+            return _blocked(
+                "UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, c.reason or "UNPROVABLE"
+            )
 
         probes: list[ProbeResult] = []
         for path in c.files:

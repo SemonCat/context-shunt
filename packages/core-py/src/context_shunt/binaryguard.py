@@ -12,9 +12,19 @@ from .errors import ShuntError
 _TEXT_CONTROL_ALLOWLIST = frozenset({0x09, 0x0A, 0x0D, 0x0C, 0x1B})
 _CONTROL_DENSITY_LIMIT = 0.30
 _BINARY_MAGICS = (
-    b"\x7fELF", b"\x89PNG\r\n\x1a\n", b"GIF8", b"\xff\xd8\xff", b"%PDF-",
-    b"PK\x03\x04", b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"OggS", b"RIFF",
-    b"\xca\xfe\xba\xbe", b"MZ",
+    b"\x7fELF",
+    b"\x89PNG\r\n\x1a\n",
+    b"GIF8",
+    b"\xff\xd8\xff",
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"\x1f\x8b",
+    b"BZh",
+    b"\xfd7zXZ\x00",
+    b"OggS",
+    b"RIFF",
+    b"\xca\xfe\xba\xbe",
+    b"MZ",
 )
 
 TEXT_MEDIA_TYPE = "text/plain"
@@ -28,9 +38,7 @@ def looks_binary(sample: bytes) -> bool:
         return True
     if b"\x00" in sample:
         return True
-    control = sum(
-        1 for b in sample if b < 0x20 and b not in _TEXT_CONTROL_ALLOWLIST
-    )
+    control = sum(1 for b in sample if b < 0x20 and b not in _TEXT_CONTROL_ALLOWLIST)
     return control / len(sample) > _CONTROL_DENSITY_LIMIT
 
 

@@ -1,36 +1,140 @@
 # context-shunt
 
-將大型工具資料留在主代理 context 之外，以問題導向的 reader 回傳可驗證答案與引用。此 repo 目前只有規格，尚未實作或通過測試。
+Keep large sources out of your agent's context. When a read would dump 20,000 lines into
+the conversation, context-shunt stops it *before the tool runs* and offers a different
+deal: ask a question about the file instead, and get back a short answer whose every
+citation has been checked against the bytes it claims to quote.
 
-## v1 範圍
+v1 is read-only. It never modifies a source.
 
-- **Read-only**：Hermes 與 OpenClaw 各有一個 adapter，共用 JSON contract 與安全核心。
-- **Large local read gate**：超過 350 行的 full Read 與未受限的 `cat` 類讀取，在工具執行前阻擋並提供 reader 指引；受限 offset/limit/search 可放行，但仍須符合輸出與安全上限。
-- **Question-driven reader**：每次呼叫必須帶 question，固定使用 `gpt-5.6-luna`，只回傳受限答案、已驗證的行／record 引用與 coverage。
-- **Optional Suma mode**：oversized MCP 結果使用純 spill/pointer；替換舊 heuristic compactor，包含 dict/list，預設停用。
-- **Code-writer**：僅保留 future optional contract 的設計邊界；v1 不註冊工具、不授予寫入權限，預設禁用。
+```text
+        read a 20k-line file                    ask a question about it
+                 │                                        │
+                 ▼                                        ▼
+        pre-read gate (before execution)          question-driven reader
+                 │                                        │
+       blocked ──┴── allowed if bounded            gpt-5.6-luna, per chunk
+                 │                                        │
+                 ▼                                        ▼
+        bounded envelope + guidance          citation verifier → output guard
+                 └───────────────┬────────────────────────┘
+                                 ▼
+                       ≤16 KiB back to the agent
+```
 
-Read-only 指不修改使用者來源或執行寫入型業務工具；受控 spill、暫存與不含內容的 metrics 可由核心寫入。
+## What it does
 
-## 文件
+- **Blocks oversized full reads before they happen.** A full read of a text file over
+  **350 physical lines**, or over 16 KiB, is refused at the pre-tool hook — so the payload
+  never exists, rather than being trimmed after the fact. Targeted reads
+  (`offset`+`limit`), bounded searches and small files pass straight through.
+- **Refuses read-like shell commands it cannot prove safe.** `cat big.txt`,
+  `awk '{print}' f`, `cat $FILE`, `cat *.md`, `cat f | grep x` — anything reading a file
+  that can't be shown bounded gets `UNCLASSIFIABLE_READ`. `head -n 100 /abs/path`,
+  `sed -n '10,60p' /abs/path`, `grep -m 20 pat /abs/path` and `wc -l /abs/path` pass.
+  `npm test` and `git status` are none of its business.
+- **Answers questions instead.** Every reader call carries your question verbatim to
+  `gpt-5.6-luna` — one call per chunk, at most two at a time, at most one retry.
+- **Verifies every citation mechanically.** The verifier re-reads the immutable snapshot
+  and checks the handle, the full SHA-256, the range and the exact quote. A claim whose
+  citation fails is deleted from the answer; an answer with nothing left becomes
+  `CITATION_INVALID`. A model saying `verified: true` proves nothing.
+- **Never leaks the payload it intercepted.** Not into the envelope, the transcript, a
+  log, a metric label, a trace, an exception, or a retry. Provider error bodies are
+  dropped at the boundary. `unit no-raw-leak` plants sentinels and injects failures at
+  every stage to prove it.
 
-1. [架構與資料契約](docs/architecture.md)
-2. [給 Opus 的逐步實作工作單](docs/implementation-plan.md)
-3. [Unit / integration / eval / benchmark 驗收](docs/acceptance.md)
-4. [第三方來源與授權說明](THIRD_PARTY_NOTICES.md)
+## Install
 
-## 已採用的查證基線
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -e 'packages/core-py[dev]'
+npm install
+./scripts/verify unit all
+```
 
-以下是使用者提供、另一位 Astra 已完成的查證，本輪未重新研究 upstream：官方 `spotify/portal-ai-plugins` 的 `main` 分支 `plugins/shunt` 為 Apache-2.0，當時 51 tests 全過；它使用 pre-read gate、放行 targeted reads，並以每次帶 question 的 bulk-reader 呼叫廉價模型。
+Then follow [`docs/install.md`](docs/install.md) for your host. Example configuration for
+both is in [`examples/config/`](examples/config/).
 
-Hermes 提供 `pre_tool_call`、`transform_tool_result`、`ctx.llm`，但 transform 例外會 fail-open。OpenClaw 提供 `before_tool_call`、tool-result persistence/middleware、runtime llm；**middleware 前是否已有 truncation 尚待實作階段驗證**。這些是整合前提，不代表本專案已經完成 host 相容性或安全驗證。
+## Hosts and modes
 
-## 實作原則
+| Mode | Hermes | OpenClaw | Default |
+| --- | --- | --- | --- |
+| Local pre-read gate | supported | supported | on |
+| Question-driven reader (`gpt-5.6-luna` only) | supported | supported | on |
+| Suma oversized-result spill/pointer | **unsupported** | **unsupported** | off |
+| Writer / `propose_patch` | not in v1 | not in v1 | refused at load |
 
-來源內容不可信。Gate、spill 與 citation verification 由確定性程式負責，reader 不能決定權限或改寫檔案。失敗不得將被攔截的大型原始資料送回主代理；無法證明 host 能保障這點的模式不得啟用。
+The optional Suma mode needs the host to hand over the complete result *before*
+truncation and accept a replacement *before* persistence. Neither host does: Hermes'
+`transform_tool_result` receives post-truncation content inside a fail-open `try/except`,
+and OpenClaw caps the result before it invokes the plugin's persist hook. So the mode is
+reported `unsupported`, stays off, and fails closed if configuration asks for it.
 
-實作語言依 host SDK 接入需求決定；JSON Schema 是跨 adapter 的相容性邊界。所有下列數值是 v1 設計預設，需由 acceptance gates 驗證，不是已量測結果。安裝與執行命令須在實作後補上，不提供未存在的 CLI。
+The spill engine itself is implemented and passing — oversized strings, objects, arrays
+and content blocks all spill to a private pointer with zero model calls and no
+summarization. The engine is not the blocker; host enablement is.
+[`docs/capability-matrix.md`](docs/capability-matrix.md) has the file-and-line evidence.
 
-## 授權
+## Verifying
 
-本專案採 [Apache License 2.0](LICENSE)。第三方程式碼與修改紀錄須依 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 保存。本輪不建立遠端、不 push。
+`./scripts/verify <suite> <gate>` exits `0` on pass, `1` on failure, `2` on `NOT_RUN`. A
+`NOT_RUN` gate is one whose prerequisite is absent; it is never counted as a pass.
+
+| Command | Needs |
+| --- | --- |
+| `./scripts/verify unit all` | nothing |
+| `./scripts/verify packaging all` | nothing |
+| `./scripts/verify benchmark core` | nothing |
+| `./scripts/verify integration <host> --mode unsupported` | nothing |
+| `./scripts/verify integration <host> --mode local` | a real host checkout |
+| `./scripts/verify eval luna` | live `gpt-5.6-luna` |
+| `./scripts/verify release all` | all of the above |
+
+Deterministic gates never skip. Opt-in gates say what is missing.
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| [`contracts/v1/`](contracts/v1/) | JSON Schemas, shared caps, status/code table, and the fixture corpora both cores must satisfy |
+| [`packages/core-py/`](packages/core-py/) | Python core (used by Hermes) |
+| [`packages/core-ts/`](packages/core-ts/) | TypeScript core (used by OpenClaw) |
+| [`adapters/hermes/`](adapters/hermes/) | Hermes plugin: `plugin.yaml` + `__init__.py` |
+| [`adapters/openclaw/`](adapters/openclaw/) | OpenClaw plugin: `openclaw.plugin.json` + `index.ts` |
+| [`evals/`](evals/) | the fixed 40-item reader eval corpus and its scoring rules |
+| [`scripts/verify`](scripts/verify) | the acceptance entry point |
+
+Two cores, one contract. Neither core is derived from the other: both read
+`contracts/v1/conformance/*.json`, so the gate decisions, line counting, citation rules
+and spill behaviour are pinned by the same cases on both sides.
+
+## Design notes
+
+Source content is untrusted data, never instructions. The gate, the snapshot, the spill
+and the citation verifier are deterministic code; the model decides nothing about
+permissions and cannot reach a file. The reader gets no shell, no network, no write tools
+and no host conversation — only a fixed instruction, your question, and one authorized
+excerpt.
+
+Anything that cannot be proven is refused rather than assumed: an unfinished size probe
+blocks, an unrecognised read-like command blocks, an unprovable host guarantee disables
+the mode that needed it. Every cap lives in
+[`contracts/v1/limits.json`](contracts/v1/limits.json) and a deployment may only narrow
+them — a config file cannot widen the boundary the gates measure.
+
+## Docs
+
+1. [Architecture and data contract](docs/architecture.md) — the normative v1 spec
+2. [Capability matrix](docs/capability-matrix.md) — what each host supports, with evidence
+3. [Install and uninstall](docs/install.md)
+4. [Acceptance gates](docs/acceptance.md)
+5. [Implementation plan](docs/implementation-plan.md)
+6. [Third-party notices](THIRD_PARTY_NOTICES.md)
+
+## Licence
+
+[Apache License 2.0](LICENSE). The design baseline is Spotify's Apache-2.0
+`spotify/portal-ai-plugins` `plugins/shunt` at commit
+`3c24ca30ff63e1f5bbad1c43fe5324daff579123`; no code was copied or adapted, and upstream's
+own test results stay attributed to upstream. See
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

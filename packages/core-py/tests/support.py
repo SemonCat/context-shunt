@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from context_shunt.capability import CapabilityReport, supported, unsupported
-from context_shunt.config import Config, load as load_config
+from context_shunt.config import Config
+from context_shunt.config import load as load_config
+from context_shunt.errors import ShuntError
 from context_shunt.limits import DEFAULT_LIMITS, READER_MODEL
 from context_shunt.provider import ModelResponse, ModelUsage, TransientProviderError
-from context_shunt.errors import ShuntError
 
 
 @dataclass
@@ -33,9 +34,7 @@ class FakeLuna:
     default_reply: str | None = None
 
     def complete(self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int):
-        self.calls.append(
-            RecordedCall(system, user, self.model, max_output_tokens, timeout_ms)
-        )
+        self.calls.append(RecordedCall(system, user, self.model, max_output_tokens, timeout_ms))
         reply = self.replies.pop(0) if self.replies else self.default_reply
         if reply is None:
             reply = json.dumps({"answer": "", "citations": []})
@@ -44,7 +43,9 @@ class FakeLuna:
         if callable(reply):
             reply = reply(user)
         return ModelResponse(
-            text=reply, model=self.model, usage=ModelUsage(input_tokens=10, output_tokens=5, estimated=False)
+            text=reply,
+            model=self.model,
+            usage=ModelUsage(input_tokens=10, output_tokens=5, estimated=False),
         )
 
     @property

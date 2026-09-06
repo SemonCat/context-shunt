@@ -17,7 +17,6 @@ from context_shunt.registry import SourceRegistry
 from context_shunt.schema import request_validator, validate_request
 from context_shunt.session import ShuntSession
 from context_shunt.snapshot import snapshot_bytes
-
 from tests.support import FakeLuna, answer_json, make_capability, make_config
 
 pytestmark = pytest.mark.gate_no_writes

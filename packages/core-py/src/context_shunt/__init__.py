@@ -7,7 +7,8 @@ It never writes to a source.
 """
 
 from .capability import CapabilityReport, DisabledReason, ModeCapability, Support
-from .config import Config, load as load_config
+from .config import Config
+from .config import load as load_config
 from .errors import ShuntError
 from .gate import Decision, GateDecision, PreReadGate, ProbeResult, guidance_for
 from .limits import DEFAULT_LIMITS, READER_MODEL, SCHEMA_VERSION, Limits
