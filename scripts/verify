@@ -341,7 +341,23 @@ def run_packaging(gate: str) -> list[GateResult]:
     if proc.returncode != 0 or not built:
         failures.append("core-ts build did not produce dist/index.js")
 
-    # 2. Both packages declare the files they ship, and ship the contracts with them.
+    # 2. The built package resolves its vendored contracts from dist/, which is the
+    #    shape an installed plugin actually runs in.
+    checks += 1
+    probe = (
+        "import('./packages/core-ts/dist/index.js').then(m=>{"
+        "if(m.DEFAULT_LIMITS.fullReadMaxLines!==350)throw new Error('limits');"
+        "if(m.READER_MODEL!=='gpt-5.6-luna')throw new Error('model');"
+        "m.requestValidator();console.log('OK')})"
+        ".catch(e=>{console.error(e.message);process.exit(1)})"
+    )
+    proc = _run(["node", "-e", probe], ROOT)
+    ok = proc.returncode == 0 and "OK" in proc.stdout
+    lines.append(f"dist resolves vendored contracts: {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append("built dist cannot load its vendored contracts")
+
+    # 3. Both packages declare the files they ship, and ship the contracts with them.
     for manifest, required in (
         (CORE_TS / "package.json", ["dist", "contracts"]),
         (OPENCLAW_ADAPTER / "package.json", ["index.ts", "src", "openclaw.plugin.json"]),
@@ -353,7 +369,7 @@ def run_packaging(gate: str) -> list[GateResult]:
         if missing:
             failures.append(f"{manifest} files[] is missing {missing}")
 
-    # 3. The Python package ships the vendored contracts.
+    # 4. The Python package ships the vendored contracts.
     checks += 1
     vendored = ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts" / "v1"
     ok = (vendored / "limits.json").exists() and (vendored / "request.schema.json").exists()
@@ -361,7 +377,7 @@ def run_packaging(gate: str) -> list[GateResult]:
     if not ok:
         failures.append("core-py vendored contracts are missing")
 
-    # 4. Defaults are safe: Suma off, writer unavailable, caps at the contract values.
+    # 5. Defaults are safe: Suma off, writer unavailable, caps at the contract values.
     checks += 1
     example = ROOT / "examples" / "config" / "openclaw.json"
     hermes_example = ROOT / "examples" / "config" / "hermes.config.yaml"
@@ -375,14 +391,14 @@ def run_packaging(gate: str) -> list[GateResult]:
     if not ok:
         failures.append("example configuration does not carry safe defaults")
 
-    # 5. Nothing shippable contains a spill, a report, a secret or a local path.
+    # 6. Nothing shippable contains a spill, a report, a secret or a local path.
     checks += 1
     leaked = _release_artifact_scan()
     lines.append(f"release artifact scan: {'pass' if not leaked else 'fail'}")
     if leaked:
         failures.append(f"disallowed content in shippable files: {leaked}")
 
-    # 6. Uninstall removes private artifacts.
+    # 7. Uninstall removes private artifacts.
     checks += 1
     ok, detail = _uninstall_smoke()
     lines.append(f"uninstall clears private artifacts: {'pass' if ok else 'fail'}")
