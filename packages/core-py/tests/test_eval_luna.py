@@ -27,6 +27,7 @@ from context_shunt.provider import HostBridgeProvider
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
+from context_shunt.store import ScopeIdentity, SnapshotStore
 
 pytestmark = pytest.mark.eval_luna
 
@@ -55,6 +56,65 @@ def _load_bridge():
         )
     module_name, _, attr = spec.partition(":")
     return getattr(importlib.import_module(module_name), attr)
+
+
+def _eval_registry(root: Path) -> SourceRegistry:
+    """A store-backed registry for one eval run, in its own private root."""
+    identity = ScopeIdentity(
+        host="eval", profile="luna", principal="local", session="eval", generation=1
+    )
+    store = SnapshotStore(root, DEFAULT_LIMITS)
+    store.open_scope(identity)
+    return SourceRegistry(store, identity, DEFAULT_LIMITS)
+
+
+def test_the_eval_body_matches_the_current_apis(tmp_path):
+    """Exercise the gate's own wiring without a provider.
+
+    The scored test is skipped whenever the bridge is absent, which is almost always - and
+    a skipped body is never type-checked or executed, so it silently rotted through a
+    contract revision that changed both ``SourceRegistry`` and ``Reader.answer``. Whoever
+    first has credentials should get a score, not a TypeError, so every call the scored
+    test makes is constructed here too.
+    """
+    corpus = _corpus()
+    item = corpus["items"][0]
+    registry = _eval_registry(tmp_path)
+    entry = registry.register("eval", snapshot_bytes(item["content"].encode("utf-8")))
+    verifier = CitationVerifier(registry)
+    assert verifier.verify("eval", {"quote": ""}).verified is False
+
+    # The provider is never reached: a blank question is refused before any call, so this
+    # asserts the shapes without needing a model.
+    bridge_calls = 0
+
+    def refuse(**_kwargs):
+        nonlocal bridge_calls
+        bridge_calls += 1
+        raise AssertionError("the eval wiring check must not call a provider")
+
+    provider = HostBridgeProvider(refuse, DEFAULT_LIMITS, READER_MODEL)
+    result = Reader(registry, provider).answer(
+        "eval",
+        {
+            "schema_version": "1.0",
+            "request_id": "req_wiring",
+            "operation": "read",
+            "question": "   ",
+            "sources": [
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "selector": {"kind": "all"},
+                }
+            ],
+            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+        },
+    )
+    # `answer` returns a ReaderResult, not an envelope: the scored test unwraps `.envelope`.
+    assert result.envelope["status"] == "error"
+    assert set(("answer", "citations", "coverage")) <= set(result.envelope)
+    assert bridge_calls == 0
 
 
 def test_corpus_is_fixed_and_complete():
@@ -87,7 +147,7 @@ def test_corpus_is_fixed_and_complete():
     not os.environ.get(ENABLE_ENV),
     reason=f"set {ENABLE_ENV}=1 with a live {READER_MODEL} bridge; scripts/verify reports NOT_RUN",
 )
-def test_luna_eval_meets_the_fixed_thresholds():
+def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     corpus = _corpus()
     provider = HostBridgeProvider(_load_bridge(), DEFAULT_LIMITS, READER_MODEL)
     thresholds = corpus["thresholds"]
@@ -97,8 +157,8 @@ def test_luna_eval_meets_the_fixed_thresholds():
 
     for item in corpus["items"]:
         media = JSON_MEDIA_TYPE if item["media_type"] == "application/json" else TEXT_MEDIA_TYPE
-        for _ in range(corpus["runs_per_item"]):
-            registry = SourceRegistry()
+        for run in range(corpus["runs_per_item"]):
+            registry = _eval_registry(tmp_path / f"{item['id']}-{run}")
             entry = registry.register(
                 "eval", snapshot_bytes(item["content"].encode("utf-8"), media_type_hint=media)
             )
@@ -106,22 +166,30 @@ def test_luna_eval_meets_the_fixed_thresholds():
             if item["media_type"] == "application/json" and item["expected_locator"]:
                 pointer = item["expected_locator"]["pointer"]
                 selector = {"kind": "records", "pointer": pointer, "start": 1, "end": 64}
-            envelope = Reader(registry, provider).answer(
-                "eval",
-                {
-                    "schema_version": "1.0",
-                    "request_id": f"req_{item['id']}",
-                    "operation": "read",
-                    "question": item["question"],
-                    "sources": [
-                        {
-                            "source_id": entry.source_id,
-                            "snapshot_id": entry.snapshot.snapshot_id,
-                            "selector": selector,
-                        }
-                    ],
-                    "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
-                },
+            envelope = (
+                Reader(registry, provider)
+                .answer(
+                    "eval",
+                    {
+                        "schema_version": "1.0",
+                        "request_id": f"req_{item['id']}",
+                        "operation": "read",
+                        "question": item["question"],
+                        "sources": [
+                            {
+                                "source_id": entry.source_id,
+                                "snapshot_id": entry.snapshot.snapshot_id,
+                                "selector": selector,
+                            }
+                        ],
+                        "budgets": {
+                            "max_chunks": 8,
+                            "max_answer_bytes": 8192,
+                            "deadline_ms": 60000,
+                        },
+                    },
+                )
+                .envelope
             )
             scored += 1
             answer = envelope["answer"]

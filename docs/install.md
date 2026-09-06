@@ -35,7 +35,9 @@ python3 -m venv .venv
 # TypeScript core and the OpenClaw adapter
 npm install
 
-# Every deterministic gate. No host and no provider needed.
+# Every deterministic gate. No host and no provider needed - but both of the
+# steps above are: the store gate writes a store with one core and reads it back
+# with the other, which is what proves they agree on the normative DDL.
 ./scripts/verify unit all
 ./scripts/verify packaging all
 ```

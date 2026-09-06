@@ -80,6 +80,36 @@ model context, and the accounting records that as negative savings rather than h
 If that trade is wrong for your deployment, set `inspect.enabled: false`. The reader and the
 gate keep working.
 
+## A page is bounded twice, so quote-dense sources page smaller
+
+The 16 KiB per-result cap counts source bytes, because that is what the disclosure ceiling
+is a statement about. The output guard counts *serialized* bytes, and JSON escaping puts
+those two apart: a `"` costs one byte in the file and two on the wire, a C0 control
+character one and six. A page therefore stops at whichever bound it reaches first, so a
+quote-dense file — any code, any JSON — yields pages well under 16 KiB. Paging continues
+normally; only the page size changes.
+
+One case is a hard stop rather than a smaller page. A `lines` selector cannot split a line,
+so a *single* line whose escaped width exceeds the envelope headroom cannot be returned at
+all: that is `LIMIT_EXCEEDED` with detail `UNIT_OVER_WIRE_BUDGET`, and nothing is charged
+against the disclosure ceiling for it. The same bytes are reachable with a `bytes` selector,
+which may split anywhere. This is deliberately not reported as `DISCLOSURE_EXHAUSTED` —
+that would point at waiting for allowance, which never helps here.
+
+## An answer may lose evidence to fit the envelope
+
+The per-field caps are not jointly satisfiable: the maximum answer plus the maximum number
+of maximum-length quotes exceeds the 16 KiB envelope cap before escaping is counted. When an
+assembled answer does not fit, evidence is dropped largest-first, the assertions that lose
+their citation are stripped with it, and each drop is recorded as a `BUDGET_EXCEEDED`
+omission with `status: partial`. An answer that fits is published untouched.
+
+So a `partial` answer may be a *narrower* true answer rather than a complete one — the
+omissions say which evidence went. If every citation had to be dropped, the result is an
+explicit refusal rather than `NO_MATCH`, which would wrongly claim the sources held nothing.
+A model reply that is itself larger than the tool-result cap is refused earlier and shows up
+as an `INVALID_MODEL_OUTPUT` omission.
+
 ## Deletion is not secure erasure
 
 Removing a payload unlinks the file. The bytes may remain recoverable from the underlying

@@ -151,7 +151,7 @@ inspect and stats do not depend on the reader and stay fully usable either way.
 
 | Command | Needs |
 | --- | --- |
-| `./scripts/verify unit all` | nothing |
+| `./scripts/verify unit all` | both cores installed |
 | `./scripts/verify packaging all` | nothing |
 | `./scripts/verify benchmark core` | nothing |
 | `./scripts/verify integration <host> --mode unsupported` | nothing |
@@ -160,6 +160,11 @@ inspect and stats do not depend on the reader and stay fully usable either way.
 | `./scripts/verify release all` | all of the above |
 
 Deterministic gates never skip. Opt-in gates say what is missing.
+
+`unit all` needs no host and no provider, but it does need both cores: the store gate
+writes a store with one core and reads it back with the other, which is the only real
+proof that the two agree on the normative DDL. Install both, per
+[`install.md`](docs/install.md), before running it.
 
 ## Layout
 
