@@ -15,12 +15,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ShuntError } from "../src/errors.js";
-import { Inspector, decodeCursor, encodeCursor } from "../src/inspect.js";
+import { Inspector, decodeCursor, encodeCursor, escapedJsonCost } from "../src/inspect.js";
 import { DEFAULT_LIMITS as L, EMITTED_SCHEMA_VERSION } from "../src/limits.js";
 import { UnavailableProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
 import { LineIndex } from "../src/textindex.js";
 import { FakeLuna, makeCapability, makeConfig } from "./support.js";
+
+/** Direct extractor calls do not go through a session, so they state the headroom. */
+const WIRE = L.maxExtendedEnvelopeBytes;
 
 // The store loads node:sqlite through createRequire for bundler independence; the test
 // reads the same database the same way.
@@ -346,7 +349,7 @@ describe("extractor behaviour", () => {
         data,
         new LineIndex(data),
         { kind: "bytes", start: 0, end: data.length },
-        { maxResultBytes: 7, maxScanLines: 1, state: { offset } },
+        { maxResultBytes: 7, maxScanLines: 1, maxWireBytes: WIRE, state: { offset } },
       );
       if (result.segments.length === 0) break;
       parts.push(result.segments[0]!.text);
@@ -363,7 +366,7 @@ describe("extractor behaviour", () => {
       data,
       new LineIndex(data),
       { kind: "search", needle: "(a+)+b", max_matches: 5 },
-      { maxResultBytes: 4096, maxScanLines: 100 },
+      { maxResultBytes: 4096, maxScanLines: 100, maxWireBytes: WIRE },
     );
     expect(result.matchesFound).toBe(2);
   });
@@ -376,5 +379,96 @@ describe("extractor behaviour", () => {
     expect(env.code).toBe("EXTRACTED");
     expect(env.extraction!.segments).toEqual([]);
     expect(env.extraction!.result_bytes).toBe(0);
+  });
+});
+
+// -- the wire budget: escaped bytes, not raw bytes ---------------------------
+
+describe("the wire budget", () => {
+  it("matches the real serializer on ordinary text", () => {
+    // The hand-rolled table exists for parity, so it still has to be arithmetically right.
+    for (const sample of [
+      "plain ascii",
+      'a "quoted" phrase',
+      "back\\slash",
+      "tab\there\nnewline",
+      " ",
+      "héllo wörld",
+      "✓ ✗ ∑",
+      "\u{1d11e} emoji \u{1f3af}",
+      "",
+    ]) {
+      const expected = Buffer.byteLength(JSON.stringify(sample), "utf8") - 2;
+      expect(escapedJsonCost(sample)).toBe(expected);
+    }
+  });
+
+  it("keeps a quote-dense page inside the envelope cap and keeps paging", () => {
+    // 16384 quote characters are 16 KiB of content but 32 KiB on the wire, so budgeting
+    // only on raw bytes produced an envelope the guard then refused - turning ordinary
+    // source into an unexplained LIMIT_EXCEEDED. Any code or JSON file has this density.
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, '"'.repeat(40000));
+    const req = request(entry, { kind: "bytes", start: 0, end: 40000 }, { maxScanLines: 1 });
+    let recovered = 0;
+    for (let page = 0; page < 8; page += 1) {
+      const env = s.inspect({ ...req });
+      expect(env.code).toBe("EXTRACTED");
+      expect(Buffer.byteLength(JSON.stringify(env), "utf8")).toBeLessThanOrEqual(
+        L.maxExtendedEnvelopeBytes,
+      );
+      recovered += env.extraction!.result_bytes;
+      if (env.extraction!.complete || !env.extraction!.next_cursor) break;
+      req["cursor"] = env.extraction!.next_cursor;
+    }
+    // Paging must still make progress, just in smaller pages.
+    expect(recovered).toBeGreaterThan(16384);
+  });
+
+  it("charges only what a quote-dense page delivered", () => {
+    // The charge used to be committed before the guard, so a refused page still cost budget.
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, '"'.repeat(40000));
+    const env = s.inspect(
+      request(entry, { kind: "bytes", start: 0, end: 40000 }, { maxScanLines: 1 }),
+    );
+    const delivered = env.extraction!.result_bytes;
+    expect(delivered).toBeGreaterThan(0);
+    const allowance = s.store.disclosureAllowance(s.identity, entry.sourceId);
+    expect(L.disclosureMaxPerSourceBytes - allowance.perSourceRemaining).toBe(delivered);
+  });
+
+  it("leaves a quote-free page exactly as it was", () => {
+    // Escaping only binds when it expands, so plain text must page exactly as before.
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, "q".repeat(40000));
+    const env = s.inspect(
+      request(entry, { kind: "bytes", start: 0, end: 40000 }, { maxScanLines: 1 }),
+    );
+    expect(env.extraction!.result_bytes).toBe(16384);
+  });
+
+  it("names the envelope, not the allowance, when one line is too wide", () => {
+    // A `lines` selector cannot split a line, so this refusal is terminal and must be
+    // named. Reporting DISCLOSURE_EXHAUSTED would point the caller at waiting for
+    // allowance, which never helps; the honest remedy is a `bytes` selector.
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, '"'.repeat(30000) + "\n");
+    const env = s.inspect(request(entry, { kind: "lines", start: 1, end: 1 }));
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    // Nothing was charged for a page that returned nothing.
+    const allowance = s.store.disclosureAllowance(s.identity, entry.sourceId);
+    expect(allowance.perSourceRemaining).toBe(L.disclosureMaxPerSourceBytes);
+    // ... and the same bytes are reachable through a selector that can split.
+    const same = s.inspect(
+      request(entry, { kind: "bytes", start: 0, end: 30000 }, { maxScanLines: 1 }),
+    );
+    expect(same.code).toBe("EXTRACTED");
+    expect(same.extraction!.result_bytes).toBeGreaterThan(0);
   });
 });

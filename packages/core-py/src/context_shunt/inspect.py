@@ -12,6 +12,15 @@ calls" a structural fact rather than a promise.
 **It is bounded per result.** One page is capped at ``inspect.max_result_bytes`` (16 KiB),
 measured on the UTF-8 bytes of the emitted segments.
 
+That content cap is not the same measurement the output guard makes. The guard weighs the
+*serialized* envelope, and JSON escaping makes those two numbers diverge: a ``"`` costs one
+byte in the snapshot and two on the wire, and a C0 control character costs one and six. So
+a page is bounded twice - once on content, so the disclosure ceiling stays a statement
+about source bytes, and once on wire cost, so a full page of quote-dense source cannot
+produce an envelope the guard would then refuse. Whichever binds first ends the page; the
+caller pages on. See :func:`escaped_json_cost` for why that second measurement is computed
+here rather than delegated to the platform serializer.
+
 **It is bounded cumulatively.** Paging is the obvious way to defeat a per-result cap, so
 every page is charged against a per-source and a per-session disclosure ceiling before a
 byte is returned. Once the ceiling is reached, further pages return no content and say
@@ -44,6 +53,36 @@ CURSOR_PREFIX = "csr_"
 _CURSOR_VERSION = 1
 _MAC_BYTES = 16
 
+#: Characters JSON gives a two-byte short escape. Everything else below 0x20 costs six
+#: (``\u00XX``); everything at or above it costs its UTF-8 length.
+_SHORT_ESCAPES = frozenset({0x22, 0x5C, 0x08, 0x0C, 0x0A, 0x0D, 0x09})
+
+
+def escaped_json_cost(text: str) -> int:
+    """Serialized bytes ``text`` occupies inside a JSON string, excluding the quote marks.
+
+    Hand-rolled on purpose. ``json.dumps(ensure_ascii=False)`` and ``JSON.stringify`` agree
+    on ordinary text but not on every input, and a page boundary that differs between the
+    two cores would be a parity failure against the shared fixtures. This table is a closed
+    set defined over code points, so both cores return the same number by construction.
+    """
+    total = 0
+    for char in text:
+        point = ord(char)
+        if point in _SHORT_ESCAPES:
+            total += 2
+        elif point < 0x20:
+            total += 6
+        elif point < 0x80:
+            total += 1
+        elif point < 0x800:
+            total += 2
+        elif point < 0x10000:
+            total += 3
+        else:
+            total += 4
+    return total
+
 
 @dataclass(frozen=True)
 class Segment:
@@ -57,6 +96,21 @@ class Segment:
 
     def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "start": self.start, "end": self.end, "text": self.text}
+
+    @staticmethod
+    def wire_overhead(kind: str, start: int, end: int) -> int:
+        """Serialized cost of the segment object around its text, plus its list comma.
+
+        Measured rather than hardcoded so that adding a field to :meth:`to_dict` cannot
+        silently under-budget the page. The structure is pure ASCII, so the platform
+        serializers agree on it; only the caller-derived ``text`` needs
+        :func:`escaped_json_cost`.
+        """
+        skeleton = {"kind": kind, "start": start, "end": end, "text": ""}
+        return len(json.dumps(skeleton, ensure_ascii=False, separators=(",", ":"))) + 1
+
+    def wire_bytes(self) -> int:
+        return self.wire_overhead(self.kind, self.start, self.end) + escaped_json_cost(self.text)
 
 
 @dataclass
@@ -74,6 +128,10 @@ class Extraction:
     #: position, so it is the only place that can tell this apart from an honest empty
     #: page (a scan-budget stop emits nothing but does advance).
     stalled: bool = False
+    #: Which budget ended the page. Only meaningful alongside ``stalled``, where it is the
+    #: difference between "this unit is larger than any page" and "this unit is larger than
+    #: what is left of the disclosure allowance" - two refusals with different remedies.
+    stall_reason: str = "content"
 
 
 def canonical_selector(selector: dict[str, Any]) -> str:
@@ -152,6 +210,7 @@ class Inspector:
         *,
         max_result_bytes: int,
         max_scan_lines: int,
+        max_wire_bytes: int,
         state: dict[str, Any] | None = None,
     ) -> Extraction:
         budget = min(
@@ -161,14 +220,16 @@ class Inspector:
         )
         if budget <= 0:
             raise ShuntError("INVALID_REQUEST", "ZERO_RESULT_BUDGET", retryable=False)
+        if max_wire_bytes <= 0:
+            raise ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM", retryable=False)
         scan_budget = min(max_scan_lines, self._limits.inspect_max_scan_lines)
         kind = selector.get("kind")
         if kind == "lines":
-            return self._lines(index, selector, budget, scan_budget, state or {})
+            return self._lines(index, selector, budget, max_wire_bytes, scan_budget, state or {})
         if kind == "bytes":
-            return self._bytes(data, selector, budget, state or {})
+            return self._bytes(data, selector, budget, max_wire_bytes, state or {})
         if kind == "search":
-            return self._search(index, selector, budget, scan_budget, state or {})
+            return self._search(index, selector, budget, max_wire_bytes, scan_budget, state or {})
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
     # -- lines -------------------------------------------------------------
@@ -178,6 +239,7 @@ class Inspector:
         index: LineIndex,
         selector: dict[str, Any],
         budget: int,
+        wire_budget: int,
         scan_budget: int,
         state: dict[str, Any],
     ) -> Extraction:
@@ -194,6 +256,11 @@ class Inspector:
 
         emitted: list[str] = []
         used = 0
+        # The whole page is one segment, so its structural cost is paid once. It is
+        # measured against the widest end ordinal the page could reach, never a narrower
+        # one that would let the last line overshoot.
+        wire_used = Segment.wire_overhead("lines", start, end)
+        stopped_on_wire = False
         ordinal = start
         page_lines = min(self._limits.inspect_max_lines_per_page, scan_budget)
         while ordinal <= end and out.lines_scanned < page_lines:
@@ -205,8 +272,13 @@ class Inspector:
             size = len(chunk.encode("utf-8"))
             if used + size > budget:
                 break
+            wire_size = escaped_json_cost(chunk)
+            if wire_used + wire_size > wire_budget:
+                stopped_on_wire = True
+                break
             emitted.append(line)
             used += size
+            wire_used += wire_size
             out.lines_scanned += 1
             ordinal += 1
 
@@ -220,12 +292,19 @@ class Inspector:
             out.complete = False
             out.next_cursor_state = {"line": ordinal}
             out.stalled = ordinal == start and not emitted
+            if out.stalled and stopped_on_wire:
+                out.stall_reason = "wire"
         return out
 
     # -- bytes -------------------------------------------------------------
 
     def _bytes(
-        self, data: bytes, selector: dict[str, Any], budget: int, state: dict[str, Any]
+        self,
+        data: bytes,
+        selector: dict[str, Any],
+        budget: int,
+        wire_budget: int,
+        state: dict[str, Any],
     ) -> Extraction:
         requested_start = int(selector["start"])
         requested_end = int(selector["end"])
@@ -244,15 +323,41 @@ class Inspector:
         begin = _forward_to_boundary(data, start)
         finish = _back_to_boundary(data, begin, begin + take)
         if finish <= begin:
-            out.complete = end > begin
-            if not out.complete:
+            if end <= begin:
+                # Nothing remains to emit, so the empty page is a complete answer.
                 return out
             # Nothing fits without splitting a character; advancing is the only honest move.
+            out.complete = False
             advanced = min(end, begin + 1)
             out.next_cursor_state = {"offset": advanced}
             out.stalled = advanced <= start
             return out
         text = data[begin:finish].decode("utf-8", errors="strict")
+        # A byte range may be cut at any character boundary, so the wire budget shortens the
+        # page rather than refusing it: walk the decoded window and stop at the last
+        # character whose escaped cost still fits.
+        overhead = Segment.wire_overhead("bytes", begin, finish)
+        wire_used = overhead
+        kept_bytes = 0
+        kept_chars = 0
+        for char in text:
+            cost = escaped_json_cost(char)
+            if wire_used + cost > wire_budget:
+                break
+            wire_used += cost
+            kept_bytes += len(char.encode("utf-8"))
+            kept_chars += 1
+        if kept_chars < len(text):
+            finish = begin + kept_bytes
+            text = text[:kept_chars]
+        if finish <= begin:
+            # Not even one character fits the envelope headroom. Advancing would emit a
+            # cursor the caller could not make progress with, so this is refused instead.
+            out.complete = False
+            out.next_cursor_state = {"offset": begin}
+            out.stalled = True
+            out.stall_reason = "wire"
+            return out
         out.segments.append(Segment(kind="bytes", start=begin, end=finish, text=text))
         out.result_bytes = finish - begin
         if finish < end:
@@ -267,6 +372,7 @@ class Inspector:
         index: LineIndex,
         selector: dict[str, Any],
         budget: int,
+        wire_budget: int,
         scan_budget: int,
         state: dict[str, Any],
     ) -> Extraction:
@@ -280,6 +386,7 @@ class Inspector:
         ordinal = max(1, int(state.get("line", 1)))
         already = max(0, int(state.get("matches", 0)))
         used = 0
+        wire_used = 0
         remaining_matches = max_matches - already
         if remaining_matches <= 0:
             return out
@@ -301,16 +408,29 @@ class Inspector:
                     ordinal += 1
                     continue
                 size = len(text.encode("utf-8"))
-                if used + size > budget or len(out.segments) >= self._limits.inspect_max_segments:
+                wire_size = Segment.wire_overhead("lines", low, high) + escaped_json_cost(text)
+                over_wire = wire_used + wire_size > wire_budget
+                if (
+                    used + size > budget
+                    or over_wire
+                    or len(out.segments) >= self._limits.inspect_max_segments
+                ):
                     out.complete = False
                     out.next_cursor_state = {
                         "line": ordinal,
                         "matches": already + (out.matches_found or 0),
                     }
                     out.result_bytes = used
+                    # A first match too large for the page leaves the cursor where it was.
+                    # Reporting which budget bound it keeps "this match cannot ever fit"
+                    # distinct from "the allowance ran out".
+                    out.stalled = not out.segments and ordinal == max(1, int(state.get("line", 1)))
+                    if out.stalled and over_wire:
+                        out.stall_reason = "wire"
                     return out
                 out.segments.append(Segment(kind="lines", start=low, end=high, text=text))
                 used += size
+                wire_used += wire_size
                 out.matches_found = (out.matches_found or 0) + 1
                 if (out.matches_found or 0) >= remaining_matches:
                     ordinal += 1

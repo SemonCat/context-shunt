@@ -50,9 +50,9 @@ import {
 } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
 import { GateDecision, PreReadGate, guidanceFor } from "./gate.js";
-import { enforceOrFixed, fixedError } from "./guard.js";
+import { enforce, enforceOrFixed, fixedError } from "./guard.js";
 import { EMITTED_SCHEMA_VERSION } from "./limits.js";
-import { Inspector, decodeCursor, encodeCursor } from "./inspect.js";
+import { CURSOR_PREFIX, Inspector, decodeCursor, encodeCursor } from "./inspect.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
 import { authorize, pathPolicy, readAuthorizedBounded } from "./paths.js";
 import { fileProber } from "./probe.js";
@@ -70,6 +70,12 @@ import { INSPECT_OPERATIONS, STATS_OPERATIONS, type InspectRequest, type StatsRe
 import { JSON_MEDIA_TYPE, Snapshot, TEXT_MEDIA_TYPE, snapshotBytes } from "./snapshot.js";
 import { SpillEngine, SpillOutcome } from "./spill.js";
 import { ScopeIdentity, SnapshotStore } from "./store.js";
+
+/**
+ * Envelope schema cap on `extraction.next_cursor`. The scaffolding measurement assumes a
+ * cursor of exactly this length so a real one can never overshoot the budget it set.
+ */
+const MAX_CURSOR_CHARS = 512;
 
 export class ShuntSession {
   private readonly gate: PreReadGate;
@@ -331,12 +337,18 @@ export class ShuntSession {
       {
         maxResultBytes: budget,
         maxScanLines: validated.budgets.max_scan_lines,
+        maxWireBytes: this.extractionWireBudget(requestId, operationId, entry, selector, handles),
         state,
       },
     );
     if (extraction.stalled) {
       // The page emitted nothing *and* the cursor did not move, so continuing would loop
       // forever. A scan-budget stop is not this case: it emits nothing but does advance.
+      if (extraction.stallReason === "wire") {
+        // This unit cannot fit any envelope, whatever the allowance says. Calling it a
+        // disclosure problem would send the caller to a remedy that never works.
+        throw new ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", false);
+      }
       if (clippedByAllowance) {
         return this.disclosureExhausted(
           requestId, operationId, entry, selector, handles, allowance,
@@ -344,38 +356,11 @@ export class ShuntSession {
       }
       throw new ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_PAGE_BUDGET", false);
     }
-    // Check-and-increment before a byte is returned: a concurrent inspect that consumed
-    // the allowance in the meantime causes this page to disclose nothing.
-    const charge = this.store.chargeDisclosure(
-      this.identity, sourceId, extraction.mode, extraction.resultBytes,
-    );
-    if (!charge.granted) {
-      return this.disclosureExhausted(requestId, operationId, entry, selector, handles, allowance);
-    }
 
     const nextCursor =
       extraction.nextCursorState !== undefined
         ? encodeCursor(key, sourceId, snapshotId, selector, extraction.nextCursorState)
         : null;
-    const block: ExtractionShape = {
-      mode: extraction.mode,
-      source_id: sourceId,
-      snapshot_id: snapshotId,
-      deterministic: true,
-      segments: extraction.segments.map((segment) => ({ ...segment })),
-      result_bytes: extraction.resultBytes,
-      complete: extraction.complete,
-      next_cursor: nextCursor,
-      lines_scanned: extraction.linesScanned,
-      scan_budget_exhausted: extraction.scanBudgetExhausted,
-      disclosed_bytes_source: charge.disclosedBytesSource,
-      disclosed_bytes_session: charge.disclosedBytesSession,
-      disclosure_limit_reached: charge.limitReached,
-      ...(extraction.matchesFound !== undefined
-        ? { matches_found: extraction.matchesFound }
-        : {}),
-    };
-
     const coverage = new Coverage();
     coverage.upstreamTruncated = false;
     coverage.complete = extraction.complete;
@@ -386,8 +371,26 @@ export class ShuntSession {
         extraction.scanBudgetExhausted ? "SCAN_BUDGET_EXHAUSTED" : "UNKNOWN_REMAINDER",
       );
     }
-    const published = enforceOrFixed(
-      buildEnvelope({
+    const compose = (sourceUsed: number, sessionUsed: number, limitReached: boolean): Envelope => {
+      const block: ExtractionShape = {
+        mode: extraction.mode,
+        source_id: sourceId,
+        snapshot_id: snapshotId,
+        deterministic: true,
+        segments: extraction.segments.map((segment) => ({ ...segment })),
+        result_bytes: extraction.resultBytes,
+        complete: extraction.complete,
+        next_cursor: nextCursor,
+        lines_scanned: extraction.linesScanned,
+        scan_budget_exhausted: extraction.scanBudgetExhausted,
+        disclosed_bytes_source: sourceUsed,
+        disclosed_bytes_session: sessionUsed,
+        disclosure_limit_reached: limitReached,
+        ...(extraction.matchesFound !== undefined
+          ? { matches_found: extraction.matchesFound }
+          : {}),
+      };
+      return buildEnvelope({
         requestId,
         status: extraction.complete ? "ok" : "partial",
         code: "EXTRACTED",
@@ -398,7 +401,36 @@ export class ShuntSession {
         provenance: deterministicProvenance("deterministic_extraction"),
         accountingId: operationId,
         extraction: block,
-      }),
+      });
+    };
+
+    // Guard the page *before* charging for it, so a refusal cannot consume allowance the
+    // caller never receives. The probe carries the widest values the three disclosure
+    // counters can legally take, and `false` for the flag because it is the longer of the
+    // two literals; every other field is the one that will actually be published. The
+    // published envelope is therefore never larger than the probe and never differs from it
+    // anywhere the guard looks, so a probe that passes cannot become a failure below.
+    const limits = this.config.limits;
+    try {
+      enforce(
+        compose(limits.disclosureMaxPerSourceBytes, limits.disclosureMaxPerSessionBytes, false),
+        limits,
+      );
+    } catch {
+      throw new ShuntError("LIMIT_EXCEEDED", "EXTRACTION_REFUSED", false);
+    }
+
+    // Check-and-increment before a byte is returned: a concurrent inspect that consumed
+    // the allowance in the meantime causes this page to disclose nothing.
+    const charge = this.store.chargeDisclosure(
+      this.identity, sourceId, extraction.mode, extraction.resultBytes,
+    );
+    if (!charge.granted) {
+      return this.disclosureExhausted(requestId, operationId, entry, selector, handles, allowance);
+    }
+
+    const published = enforceOrFixed(
+      compose(charge.disclosedBytesSource, charge.disclosedBytesSession, charge.limitReached),
       this.config.limits,
     );
     this.record({
@@ -413,6 +445,58 @@ export class ShuntSession {
       boundary: "extraction",
     });
     return published;
+  }
+
+  /**
+   * Serialized room left for segment text once the envelope around it is paid for.
+   *
+   * Measured rather than reserved as a constant. The scaffolding is not fixed: an omission
+   * echoes the caller's selector, and a `search` selector carries a caller-supplied needle,
+   * so a constant sized against a short needle would under-budget a long one. Everything
+   * here is set to its most expensive legal shape - incomplete coverage with an omission, a
+   * match count present, a maximum-length cursor, both counters at their caps - so the real
+   * envelope is never larger than what this measured.
+   */
+  private extractionWireBudget(
+    requestId: string,
+    operationId: string,
+    entry: RegisteredSource,
+    selector: Record<string, unknown>,
+    handles: SourceHandle[],
+  ): number {
+    const limits = this.config.limits;
+    const coverage = new Coverage();
+    coverage.upstreamTruncated = false;
+    coverage.complete = false;
+    coverage.omit(entry.sourceId, omissionSelector(selector), "SCAN_BUDGET_EXHAUSTED");
+    const skeleton = buildEnvelope({
+      requestId,
+      status: "partial",
+      code: "EXTRACTED",
+      coverage,
+      sources: handles,
+      retryable: false,
+      resultKind: "deterministic_extraction",
+      provenance: deterministicProvenance("deterministic_extraction"),
+      accountingId: operationId,
+      extraction: {
+        mode: (selector["kind"] as ExtractionShape["mode"]) ?? "lines",
+        source_id: entry.sourceId,
+        snapshot_id: entry.snapshot.snapshotId,
+        deterministic: true,
+        segments: [],
+        result_bytes: limits.maxExtractionBytes,
+        complete: false,
+        next_cursor: CURSOR_PREFIX + "c".repeat(MAX_CURSOR_CHARS - CURSOR_PREFIX.length),
+        lines_scanned: limits.inspectMaxScanLines,
+        scan_budget_exhausted: true,
+        matches_found: limits.inspectMaxSearchMatches,
+        disclosed_bytes_source: limits.disclosureMaxPerSourceBytes,
+        disclosed_bytes_session: limits.disclosureMaxPerSessionBytes,
+        disclosure_limit_reached: false,
+      },
+    });
+    return limits.maxExtendedEnvelopeBytes - serializedBytes(skeleton);
   }
 
   private disclosureExhausted(

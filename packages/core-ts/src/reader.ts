@@ -36,6 +36,7 @@ import { CitationVerifier, referencedIds, stripUnsupportedAssertions } from "./c
 import { Clock, Deadline, monotonicClock } from "./clock.js";
 import {
   Citation, Coverage, Envelope, SourceHandle, buildEnvelope, errorEnvelope, isoExpiry,
+  serializedBytes,
 } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits } from "./limits.js";
@@ -407,24 +408,94 @@ export class Reader {
       };
     }
 
-    coverage.complete = complete;
-    return {
-      envelope: buildEnvelope({
+    const answered = (text: string, cited: Citation[], ok: boolean): Envelope => {
+      coverage.complete = ok;
+      return buildEnvelope({
         requestId,
-        status: complete ? "ok" : "partial",
+        status: ok ? "ok" : "partial",
         code: "ANSWERED",
-        answer,
-        citations,
+        answer: text,
+        citations: cited,
         coverage,
         sources: handles,
         resultKind: "model_derived",
         provenance,
         ...(accountingId !== undefined ? { accountingId } : {}),
-      }),
+      });
+    };
+
+    const fitted = this.fitToEnvelope(answer, citations, coverage, answered);
+    if (fitted.answer.length === 0) {
+      // Every piece of evidence had to go, so there is no supported answer left to publish.
+      // Saying NO_MATCH here would claim the sources held nothing, which is a different and
+      // untrue statement; the honest report is that it would not fit.
+      const failure = new ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_ENVELOPE", false);
+      this.metrics.count("reader_error", { code: failure.code });
+      const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+      const opts: Parameters<typeof errorEnvelope>[2] = {
+        provenance: failed,
+        sources: handles,
+        handlesValid: true,
+      };
+      if (accountingId !== undefined) opts.accountingId = accountingId;
+      return { envelope: errorEnvelope(requestId, failure, opts), provenance: failed, cost, sourceIds };
+    }
+
+    return {
+      envelope: answered(fitted.answer, fitted.citations, complete && fitted.dropped === 0),
       provenance,
       cost,
       sourceIds,
     };
+  }
+
+  /**
+   * Shrink an over-large answer until the output guard will accept it.
+   *
+   * Every field can be individually within its cap while the assembled envelope is not: a
+   * full answer plus the maximum number of maximum-length quotes already exceeds the 16 KiB
+   * envelope cap before JSON escaping is counted, and quotes are copied from source text, so
+   * quote-dense sources escape wide. Without this the guard converts a good, fully verified
+   * answer into a bare `LIMIT_EXCEEDED` - after the model call has been paid for, and with
+   * no indication of what went wrong.
+   *
+   * Evidence is dropped largest-first rather than last-first: the model's citation order is
+   * arbitrary, so trimming by position would make the surviving set depend on it, while
+   * trimming by cost is deterministic and converges fastest. Each drop re-strips the
+   * assertions it orphaned, which shrinks the answer too, so the loop re-measures between
+   * drops and stops as soon as it fits.
+   */
+  private fitToEnvelope(
+    answer: string,
+    citations: Citation[],
+    coverage: Coverage,
+    build: (text: string, cited: Citation[], ok: boolean) => Envelope,
+  ): { answer: string; citations: Citation[]; dropped: number } {
+    let text = answer;
+    let kept = citations;
+    let dropped = 0;
+    // One drop per pass, so this cannot run longer than there are citations.
+    for (let pass = 0; pass <= citations.length; pass += 1) {
+      if (serializedBytes(build(text, kept, false)) <= this.limits.maxEnvelopeBytes) {
+        return { answer: text, citations: kept, dropped };
+      }
+      if (kept.length === 0) return { answer: "", citations: [], dropped };
+      let victim = kept[0] as Citation;
+      for (const candidate of kept) {
+        if (serializedBytes(candidate) > serializedBytes(victim)) victim = candidate;
+      }
+      coverage.omit(
+        String(victim.source_id ?? ""),
+        (victim.locator as Record<string, unknown>) ?? { kind: "all" },
+        "BUDGET_EXCEEDED",
+      );
+      dropped += 1;
+      const survivors = kept.filter((entry) => entry.id !== victim.id);
+      text = stripUnsupportedAssertions(text, new Set(survivors.map((entry) => entry.id)));
+      const used = new Set(referencedIds(text));
+      kept = survivors.filter((entry) => used.has(entry.id));
+    }
+    return { answer: "", citations: [], dropped };
   }
 
   private async runChunks(

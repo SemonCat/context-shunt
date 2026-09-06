@@ -36,6 +36,45 @@ export const CURSOR_PREFIX = "csr_";
 const CURSOR_VERSION = 1;
 const MAC_BYTES = 16;
 
+/**
+ * Characters JSON gives a two-byte short escape. Everything else below 0x20 costs six
+ * (`\u00XX`); everything at or above it costs its UTF-8 length.
+ */
+const SHORT_ESCAPES = new Set([0x22, 0x5c, 0x08, 0x0c, 0x0a, 0x0d, 0x09]);
+
+/**
+ * Serialized bytes `text` occupies inside a JSON string, excluding the quote marks.
+ *
+ * Hand-rolled on purpose. `JSON.stringify` and Python's `json.dumps(ensure_ascii=False)`
+ * agree on ordinary text but not on every input, and a page boundary that differs between
+ * the two cores would be a parity failure against the shared fixtures. This table is a
+ * closed set defined over code points, so both cores return the same number by
+ * construction.
+ */
+export function escapedJsonCost(text: string): number {
+  let total = 0;
+  for (const char of text) {
+    const point = char.codePointAt(0) as number;
+    if (SHORT_ESCAPES.has(point)) total += 2;
+    else if (point < 0x20) total += 6;
+    else if (point < 0x80) total += 1;
+    else if (point < 0x800) total += 2;
+    else if (point < 0x10000) total += 3;
+    else total += 4;
+  }
+  return total;
+}
+
+/**
+ * Serialized cost of the segment object around its text, plus its list comma. Measured
+ * rather than hardcoded so that adding a field to a segment cannot silently under-budget
+ * the page. The structure is pure ASCII, so the platform serializers agree on it; only the
+ * caller-derived `text` needs {@link escapedJsonCost}.
+ */
+export function segmentWireOverhead(kind: string, start: number, end: number): number {
+  return Buffer.byteLength(JSON.stringify({ kind, start, end, text: "" }), "utf8") + 1;
+}
+
 export interface Segment {
   kind: "lines" | "bytes";
   start: number;
@@ -65,6 +104,12 @@ export interface Extraction {
    * stop emits nothing but does advance).
    */
   stalled: boolean;
+  /**
+   * Which budget ended the page. Only meaningful alongside `stalled`, where it is the
+   * difference between "this unit is larger than any page" and "this unit is larger than
+   * what is left of the disclosure allowance" - two refusals with different remedies.
+   */
+  stallReason: "content" | "wire";
 }
 
 function emptyExtraction(mode: Extraction["mode"]): Extraction {
@@ -78,6 +123,7 @@ function emptyExtraction(mode: Extraction["mode"]): Extraction {
     scanBudgetExhausted: false,
     matchesFound: undefined,
     stalled: false,
+    stallReason: "content",
   };
 }
 
@@ -178,7 +224,12 @@ export class Inspector {
     data: Uint8Array,
     index: LineIndex,
     selector: Record<string, unknown>,
-    opts: { maxResultBytes: number; maxScanLines: number; state?: CursorState },
+    opts: {
+      maxResultBytes: number;
+      maxScanLines: number;
+      maxWireBytes: number;
+      state?: CursorState;
+    },
   ): Extraction {
     const budget = Math.min(
       opts.maxResultBytes,
@@ -186,15 +237,19 @@ export class Inspector {
       this.limits.maxExtractionBytes,
     );
     if (budget <= 0) throw new ShuntError("INVALID_REQUEST", "ZERO_RESULT_BUDGET", false);
+    if (opts.maxWireBytes <= 0) {
+      throw new ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM", false);
+    }
+    const wire = opts.maxWireBytes;
     const scanBudget = Math.min(opts.maxScanLines, this.limits.inspectMaxScanLines);
     const state = opts.state ?? {};
     switch (selector["kind"]) {
       case "lines":
-        return this.lines(index, selector, budget, scanBudget, state);
+        return this.lines(index, selector, budget, wire, scanBudget, state);
       case "bytes":
-        return this.bytes(data, selector, budget, state);
+        return this.bytes(data, selector, budget, wire, state);
       case "search":
-        return this.search(index, selector, budget, scanBudget, state);
+        return this.search(index, selector, budget, wire, scanBudget, state);
       default:
         throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
     }
@@ -206,6 +261,7 @@ export class Inspector {
     index: LineIndex,
     selector: Record<string, unknown>,
     budget: number,
+    wireBudget: number,
     scanBudget: number,
     state: CursorState,
   ): Extraction {
@@ -222,6 +278,11 @@ export class Inspector {
 
     const emitted: string[] = [];
     let used = 0;
+    // The whole page is one segment, so its structural cost is paid once. It is measured
+    // against the widest end ordinal the page could reach, never a narrower one that would
+    // let the last line overshoot.
+    let wireUsed = segmentWireOverhead("lines", start, end);
+    let stoppedOnWire = false;
     let ordinal = start;
     const pageLines = Math.min(this.limits.inspectMaxLinesPerPage, scanBudget);
     while (ordinal <= end && out.linesScanned < pageLines) {
@@ -234,8 +295,14 @@ export class Inspector {
       const chunk = emitted.length === 0 ? line : `\n${line}`;
       const size = utf8Length(chunk);
       if (used + size > budget) break;
+      const wireSize = escapedJsonCost(chunk);
+      if (wireUsed + wireSize > wireBudget) {
+        stoppedOnWire = true;
+        break;
+      }
       emitted.push(line);
       used += size;
+      wireUsed += wireSize;
       out.linesScanned += 1;
       ordinal += 1;
     }
@@ -249,6 +316,7 @@ export class Inspector {
       out.complete = false;
       out.nextCursorState = { line: ordinal };
       out.stalled = ordinal === start && emitted.length === 0;
+      if (out.stalled && stoppedOnWire) out.stallReason = "wire";
     }
     return out;
   }
@@ -259,6 +327,7 @@ export class Inspector {
     data: Uint8Array,
     selector: Record<string, unknown>,
     budget: number,
+    wireBudget: number,
     state: CursorState,
   ): Extraction {
     const requestedStart = Number(selector["start"]);
@@ -276,7 +345,7 @@ export class Inspector {
     // UTF-8 boundary so the emitted text is exactly a substring of the snapshot and never
     // a mojibake fragment; the cursor resumes from the boundary actually used.
     const begin = forwardToBoundary(data, start);
-    const finish = backToBoundary(data, begin, begin + take);
+    let finish = backToBoundary(data, begin, begin + take);
     if (finish <= begin) {
       out.complete = end <= begin;
       if (out.complete) return out;
@@ -286,7 +355,33 @@ export class Inspector {
       out.stalled = advanced <= start;
       return out;
     }
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(begin, finish));
+    let text = new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(begin, finish));
+    // A byte range may be cut at any character boundary, so the wire budget shortens the
+    // page rather than refusing it: walk the decoded window and stop at the last character
+    // whose escaped cost still fits.
+    let wireUsed = segmentWireOverhead("bytes", begin, finish);
+    let keptBytes = 0;
+    let kept = "";
+    for (const char of text) {
+      const cost = escapedJsonCost(char);
+      if (wireUsed + cost > wireBudget) break;
+      wireUsed += cost;
+      keptBytes += utf8Length(char);
+      kept += char;
+    }
+    if (kept.length < text.length) {
+      finish = begin + keptBytes;
+      text = kept;
+    }
+    if (finish <= begin) {
+      // Not even one character fits the envelope headroom. Advancing would emit a cursor
+      // the caller could not make progress with, so this is refused instead.
+      out.complete = false;
+      out.nextCursorState = { offset: begin };
+      out.stalled = true;
+      out.stallReason = "wire";
+      return out;
+    }
     out.segments.push({ kind: "bytes", start: begin, end: finish, text });
     out.resultBytes = finish - begin;
     if (finish < end) {
@@ -302,6 +397,7 @@ export class Inspector {
     index: LineIndex,
     selector: Record<string, unknown>,
     budget: number,
+    wireBudget: number,
     scanBudget: number,
     state: CursorState,
   ): Extraction {
@@ -320,6 +416,8 @@ export class Inspector {
     let ordinal = Math.max(1, state.line ?? 1);
     const already = Math.max(0, state.matches ?? 0);
     let used = 0;
+    let wireUsed = 0;
+    const startLine = ordinal;
     const remainingMatches = maxMatches - already;
     if (remainingMatches <= 0) return out;
 
@@ -344,14 +442,26 @@ export class Inspector {
           continue;
         }
         const size = utf8Length(text);
-        if (used + size > budget || out.segments.length >= this.limits.inspectMaxSegments) {
+        const wireSize = segmentWireOverhead("lines", low, high) + escapedJsonCost(text);
+        const overWire = wireUsed + wireSize > wireBudget;
+        if (
+          used + size > budget ||
+          overWire ||
+          out.segments.length >= this.limits.inspectMaxSegments
+        ) {
           out.complete = false;
           out.nextCursorState = { line: ordinal, matches: already + (out.matchesFound ?? 0) };
           out.resultBytes = used;
+          // A first match too large for the page leaves the cursor where it was. Reporting
+          // which budget bound it keeps "this match cannot ever fit" distinct from "the
+          // allowance ran out".
+          out.stalled = out.segments.length === 0 && ordinal === startLine;
+          if (out.stalled && overWire) out.stallReason = "wire";
           return out;
         }
         out.segments.push({ kind: "lines", start: low, end: high, text });
         used += size;
+        wireUsed += wireSize;
         out.matchesFound = (out.matchesFound ?? 0) + 1;
         if ((out.matchesFound ?? 0) >= remainingMatches) {
           ordinal += 1;

@@ -414,24 +414,94 @@ class Reader:
                 source_ids=tuple(source_ids),
             )
 
-        coverage.complete = complete
-        return ReaderResult(
-            envelope=E.build(
+        def answered(answer_text: str, citations: list[dict[str, Any]], ok: bool) -> dict[str, Any]:
+            coverage.complete = ok
+            return E.build(
                 request_id=request_id,
-                status="ok" if complete else "partial",
+                status="ok" if ok else "partial",
                 code="ANSWERED",
-                answer=answer,
-                citations=verified,
+                answer=answer_text,
+                citations=citations,
                 coverage=coverage,
                 sources=handles,
                 result_kind=ResultKind.MODEL_DERIVED,
                 provenance=provenance,
                 accounting_id=accounting_id,
-            ),
+            )
+
+        answer, verified, dropped = self._fit_to_envelope(answer, verified, coverage, answered)
+        if not answer:
+            # Every piece of evidence had to go, so there is no supported answer left to
+            # publish. Saying NO_MATCH here would claim the sources held nothing, which is a
+            # different and untrue statement; the honest report is that it would not fit.
+            exc = ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_ENVELOPE", retryable=False)
+            self._metrics.count("reader_error", {"code": exc.code})
+            failed = _as_failure_provenance(provenance)
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                ),
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
+
+        return ReaderResult(
+            envelope=answered(answer, verified, complete and not dropped),
             provenance=provenance,
             cost=cost,
             source_ids=tuple(source_ids),
         )
+
+    def _fit_to_envelope(
+        self,
+        answer: str,
+        verified: list[dict[str, Any]],
+        coverage: E.Coverage,
+        build: Any,
+    ) -> tuple[str, list[dict[str, Any]], int]:
+        """Shrink an over-large answer until the output guard will accept it.
+
+        Every field can be individually within its cap while the assembled envelope is not:
+        a full answer plus the maximum number of maximum-length quotes already exceeds the
+        16 KiB envelope cap before JSON escaping is counted, and quotes are copied from
+        source text, so quote-dense sources escape wide. Without this the guard converts a
+        good, fully verified answer into a bare ``LIMIT_EXCEEDED`` - after the model call
+        has been paid for, and with no indication of what went wrong.
+
+        Evidence is dropped largest-first rather than last-first: the model's citation order
+        is arbitrary, so trimming by position would make the surviving set depend on it,
+        while trimming by cost is deterministic and converges fastest. Each drop re-strips
+        the assertions it orphaned, which shrinks the answer too, so the loop re-measures
+        between drops and stops as soon as it fits.
+        """
+        dropped = 0
+        # One drop per pass, so this cannot run longer than there are citations.
+        for _ in range(len(verified) + 1):
+            if (
+                E.serialized_bytes(build(answer, verified, False))
+                <= self._limits.max_envelope_bytes
+            ):
+                return answer, verified, dropped
+            if not verified:
+                return "", [], dropped
+            victim = max(verified, key=lambda c: E.serialized_bytes(c))
+            coverage.omit(
+                str(victim.get("source_id", "")),
+                victim.get("locator") or {"kind": "all"},
+                "BUDGET_EXCEEDED",
+            )
+            dropped += 1
+            kept = [c for c in verified if c["id"] != victim["id"]]
+            answer = strip_unsupported_assertions(answer, {c["id"] for c in kept})
+            used = set(referenced_ids(answer))
+            verified = [c for c in kept if c["id"] in used]
+        return "", [], dropped
 
     # -- provenance for paths that never produced model output --------------
 

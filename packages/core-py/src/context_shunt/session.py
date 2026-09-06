@@ -47,8 +47,8 @@ from .clock import Clock, MonotonicClock
 from .config import Config
 from .errors import ShuntError
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
-from .guard import enforce_or_fixed, fixed_error
-from .inspect import Inspector, decode_cursor, encode_cursor
+from .guard import OutputGuardError, enforce, enforce_or_fixed, fixed_error
+from .inspect import CURSOR_PREFIX, Inspector, decode_cursor, encode_cursor
 from .limits import EMITTED_SCHEMA_VERSION
 from .metrics import MetricsSink, NullMetrics
 from .paths import authorize
@@ -76,6 +76,9 @@ from .store import ScopeIdentity, SnapshotStore
 
 _INSPECT_OPERATIONS = frozenset({"inspect"})
 _STATS_OPERATIONS = frozenset({"stats"})
+#: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
+#: a cursor of exactly this length so a real one can never overshoot the budget it set.
+_MAX_CURSOR_CHARS = 512
 
 
 class ShuntSession:
@@ -317,17 +320,90 @@ class ShuntSession:
             selector,
             max_result_bytes=budget,
             max_scan_lines=int(budgets["max_scan_lines"]),
+            max_wire_bytes=self._extraction_wire_budget(
+                request_id, operation_id, entry, selector, handles
+            ),
             state=state,
         )
         if extraction.stalled:
             # The page emitted nothing *and* the cursor did not move, so continuing would
             # loop forever. A scan-budget stop is not this case: it emits nothing but does
             # advance the scan position, and is reported as an honest empty page.
+            if extraction.stall_reason == "wire":
+                # This unit cannot fit any envelope, whatever the allowance says. Calling it
+                # a disclosure problem would send the caller to a remedy that never works.
+                raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", retryable=False)
             if clipped_by_allowance:
                 return self._disclosure_exhausted(
                     request_id, operation_id, entry, selector, handles, allowance
                 )
             raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_PAGE_BUDGET", retryable=False)
+
+        next_cursor = (
+            encode_cursor(key, source_id, snapshot_id, selector, extraction.next_cursor_state)
+            if extraction.next_cursor_state is not None
+            else None
+        )
+        coverage = E.Coverage(upstream_truncated=False, complete=extraction.complete)
+        if not extraction.complete:
+            coverage.omit(
+                source_id,
+                _omission_selector(selector),
+                "SCAN_BUDGET_EXHAUSTED"
+                if extraction.scan_budget_exhausted
+                else "UNKNOWN_REMAINDER",
+            )
+
+        def compose(source_used: int, session_used: int, limit_reached: bool) -> dict[str, Any]:
+            block: dict[str, Any] = {
+                "mode": extraction.mode,
+                "source_id": source_id,
+                "snapshot_id": snapshot_id,
+                "deterministic": True,
+                "segments": [segment.to_dict() for segment in extraction.segments],
+                "result_bytes": extraction.result_bytes,
+                "complete": extraction.complete,
+                "next_cursor": next_cursor,
+                "lines_scanned": extraction.lines_scanned,
+                "scan_budget_exhausted": extraction.scan_budget_exhausted,
+                "disclosed_bytes_source": source_used,
+                "disclosed_bytes_session": session_used,
+                "disclosure_limit_reached": limit_reached,
+            }
+            if extraction.matches_found is not None:
+                block["matches_found"] = extraction.matches_found
+            return E.build(
+                request_id=request_id,
+                status="ok" if extraction.complete else "partial",
+                code="EXTRACTED",
+                coverage=coverage,
+                sources=handles,
+                retryable=False,
+                result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
+                provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+                accounting_id=operation_id,
+                extraction=block,
+            )
+
+        # Guard the page *before* charging for it, so a refusal cannot consume allowance the
+        # caller never receives. The probe carries the widest values the three disclosure
+        # counters can legally take, and `false` for the flag because it is the longer of the
+        # two literals; every other field is the one that will actually be published. The
+        # published envelope is therefore never larger than the probe and never differs from
+        # it anywhere the guard looks, so a probe that passes cannot become a failure below.
+        limits = self.config.limits
+        try:
+            enforce(
+                compose(
+                    limits.disclosure_max_per_source_bytes,
+                    limits.disclosure_max_per_session_bytes,
+                    False,
+                ),
+                limits,
+            )
+        except OutputGuardError as exc:
+            raise ShuntError("LIMIT_EXCEEDED", "EXTRACTION_REFUSED", retryable=False) from exc
+
         # Check-and-increment before a byte is returned: a concurrent inspect that
         # consumed the allowance in the meantime causes this page to disclose nothing.
         charge = self._store.charge_disclosure(
@@ -338,49 +414,8 @@ class ShuntSession:
                 request_id, operation_id, entry, selector, handles, allowance
             )
 
-        next_cursor = (
-            encode_cursor(key, source_id, snapshot_id, selector, extraction.next_cursor_state)
-            if extraction.next_cursor_state is not None
-            else None
-        )
-        block: dict[str, Any] = {
-            "mode": extraction.mode,
-            "source_id": source_id,
-            "snapshot_id": snapshot_id,
-            "deterministic": True,
-            "segments": [segment.to_dict() for segment in extraction.segments],
-            "result_bytes": extraction.result_bytes,
-            "complete": extraction.complete,
-            "next_cursor": next_cursor,
-            "lines_scanned": extraction.lines_scanned,
-            "scan_budget_exhausted": extraction.scan_budget_exhausted,
-            "disclosed_bytes_source": charge.disclosed_bytes_source,
-            "disclosed_bytes_session": charge.disclosed_bytes_session,
-            "disclosure_limit_reached": charge.limit_reached,
-        }
-        if extraction.matches_found is not None:
-            block["matches_found"] = extraction.matches_found
-
-        coverage = E.Coverage(upstream_truncated=False, complete=extraction.complete)
-        if not extraction.complete:
-            coverage.omit(
-                source_id,
-                _omission_selector(selector),
-                "SCAN_BUDGET_EXHAUSTED"
-                if extraction.scan_budget_exhausted
-                else "UNKNOWN_REMAINDER",
-            )
-        env = E.build(
-            request_id=request_id,
-            status="ok" if extraction.complete else "partial",
-            code="EXTRACTED",
-            coverage=coverage,
-            sources=handles,
-            retryable=False,
-            result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
-            provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
-            accounting_id=operation_id,
-            extraction=block,
+        env = compose(
+            charge.disclosed_bytes_source, charge.disclosed_bytes_session, charge.limit_reached
         )
         published = enforce_or_fixed(env, self.config.limits)
         self._record(
@@ -395,6 +430,56 @@ class ShuntSession:
             boundary=DeliveryBoundary.EXTRACTION,
         )
         return published
+
+    def _extraction_wire_budget(
+        self,
+        request_id: str,
+        operation_id: str,
+        entry: RegisteredSource,
+        selector: dict[str, Any],
+        handles: list[dict[str, Any]],
+    ) -> int:
+        """Serialized room left for segment text once the envelope around it is paid for.
+
+        Measured rather than reserved as a constant. The scaffolding is not fixed: an
+        omission echoes the caller's selector, and a ``search`` selector carries a
+        caller-supplied needle, so a constant sized against a short needle would
+        under-budget a long one. Everything here is set to its most expensive legal shape -
+        incomplete coverage with an omission, a match count present, a maximum-length
+        cursor, both counters at their caps - so the real envelope is never larger than
+        what this measured.
+        """
+        limits = self.config.limits
+        coverage = E.Coverage(upstream_truncated=False, complete=False)
+        coverage.omit(entry.source_id, _omission_selector(selector), "SCAN_BUDGET_EXHAUSTED")
+        skeleton = E.build(
+            request_id=request_id,
+            status="partial",
+            code="EXTRACTED",
+            coverage=coverage,
+            sources=handles,
+            retryable=False,
+            result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
+            provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+            accounting_id=operation_id,
+            extraction={
+                "mode": selector.get("kind", "lines"),
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "deterministic": True,
+                "segments": [],
+                "result_bytes": limits.max_extraction_bytes,
+                "complete": False,
+                "next_cursor": CURSOR_PREFIX + "c" * (_MAX_CURSOR_CHARS - len(CURSOR_PREFIX)),
+                "lines_scanned": limits.inspect_max_scan_lines,
+                "scan_budget_exhausted": True,
+                "matches_found": limits.inspect_max_search_matches,
+                "disclosed_bytes_source": limits.disclosure_max_per_source_bytes,
+                "disclosed_bytes_session": limits.disclosure_max_per_session_bytes,
+                "disclosure_limit_reached": False,
+            },
+        )
+        return limits.max_extended_envelope_bytes - E.serialized_bytes(skeleton)
 
     def _disclosure_exhausted(
         self,

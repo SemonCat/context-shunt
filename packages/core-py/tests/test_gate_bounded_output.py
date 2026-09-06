@@ -8,6 +8,7 @@ from context_shunt import envelope as E
 from context_shunt.errors import ShuntError
 from context_shunt.guard import OutputGuardError, enforce, enforce_or_fixed
 from context_shunt.limits import DEFAULT_LIMITS
+from context_shunt.provenance import ResultKind
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
@@ -244,3 +245,130 @@ def _citation():
         "quote": "alpha",
         "verified": True,
     }
+
+
+# -- the envelope must fit even when every field individually does ----------
+
+
+def _quote_dense_source(entries: int = 40, pairs: int = 40) -> str:
+    """Ordinary quote-dense source: keys and string values, as any code or JSON file has."""
+    rows = []
+    for i in range(entries):
+        body = ",".join(f'"k{i:02d}{j:02d}":"v{i:02d}{j:02d}"' for j in range(pairs))
+        rows.append(f"export const e{i:02d}={{{body}}};")
+    return "\n".join(rows)
+
+
+def _cited_reply(lines: list[str], filler_repeats: int, count: int = 16) -> str:
+    filler = "short keys mapped onto short string values in declaration order " * filler_repeats
+    citations = [
+        {"id": f"c{i}", "line_start": i + 1, "line_end": i + 1, "quote": lines[i][:512]}
+        for i in range(count)
+    ]
+    answer = " ".join(f"Entry {i:02d} uses {filler}[c{i}]." for i in range(count))
+    return answer_json(answer, citations)
+
+
+def _answer_over(tmp_path, filler_repeats: int):
+    registry = make_registry(tmp_path, session_id="sess")
+    body = _quote_dense_source()
+    entry = registry.register("sess", snapshot_bytes(body.encode()))
+    reply = _cited_reply(body.split("\n"), filler_repeats)
+    return (
+        Reader(registry, FakeLuna(default_reply=reply))
+        .answer(
+            "sess",
+            {
+                "schema_version": "1.0",
+                "request_id": "req_fit",
+                "operation": "read",
+                "question": "What does this file declare?",
+                "sources": [
+                    {
+                        "source_id": entry.source_id,
+                        "snapshot_id": entry.snapshot.snapshot_id,
+                        "selector": {"kind": "all"},
+                    }
+                ],
+                "budgets": {
+                    "max_chunks": 8,
+                    "max_answer_bytes": DEFAULT_LIMITS.max_answer_bytes,
+                    "deadline_ms": 60000,
+                },
+            },
+        )
+        .envelope
+    )
+
+
+def test_the_field_caps_alone_do_not_keep_an_envelope_under_the_cap():
+    """This is why the reader has to measure: the per-field caps are not jointly satisfiable.
+
+    A 1 KiB answer with the maximum number of maximum-length quotes is legal field by field
+    and 17374 bytes serialized, over the 16 KiB envelope cap. Before the fit step the guard
+    turned that into a bare LIMIT_EXCEEDED after the model call was already paid for.
+    """
+    quote = '"k":"v",' * 64
+    assert len(quote.encode()) == DEFAULT_LIMITS.max_quote_bytes
+    coverage = E.Coverage(upstream_truncated=False, complete=True)
+    citations = [
+        {
+            "id": f"c{i}",
+            "source_id": f"src_{i:016x}",
+            "snapshot_id": "sha256:" + "0" * 64,
+            "locator": {"kind": "lines", "start": 1, "end": 1},
+            "quote": quote,
+            "verified": True,
+        }
+        for i in range(DEFAULT_LIMITS.max_citations)
+    ]
+    env = E.build(
+        request_id="req_x",
+        status="ok",
+        code="ANSWERED",
+        coverage=coverage,
+        sources=[],
+        retryable=False,
+        answer="a" * 1024,
+        citations=citations,
+        result_kind=ResultKind.MODEL_DERIVED,
+        provenance=derived_provenance(),
+        accounting_id="acc_" + "0" * 16,
+    )
+    assert E.serialized_bytes(env) > DEFAULT_LIMITS.max_envelope_bytes
+    with pytest.raises(OutputGuardError):
+        enforce(env)
+
+
+def test_an_answer_that_fits_is_published_untouched(tmp_path):
+    """The fit step must not shrink anything that was already inside the cap."""
+    env = _answer_over(tmp_path, filler_repeats=1)
+    assert env["code"] == "ANSWERED" and env["status"] == "ok"
+    assert len(env["citations"]) == 16
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+    # Close to the cap on purpose: if scaffolding grows, this becomes a trimming case and
+    # that should be visible rather than silent.
+    assert E.serialized_bytes(env) <= DEFAULT_LIMITS.max_envelope_bytes
+
+
+def test_an_oversized_answer_drops_evidence_and_says_so_instead_of_refusing(tmp_path):
+    env = _answer_over(tmp_path, filler_repeats=2)
+    assert env["code"] == "ANSWERED", "a good verified answer must not become LIMIT_EXCEEDED"
+    assert env["status"] == "partial", "dropping evidence is not a complete result"
+    assert env["answer"]
+    assert 0 < len(env["citations"]) < 16
+    dropped = [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+    assert dropped, "what was removed has to be recorded, not silently absent"
+    assert E.serialized_bytes(env) <= DEFAULT_LIMITS.max_envelope_bytes
+    # Every surviving citation is still referenced by the answer, and vice versa.
+    from context_shunt.citations import referenced_ids
+
+    assert set(referenced_ids(env["answer"])) == {c["id"] for c in env["citations"]}
+
+
+def test_trimming_is_deterministic_and_independent_of_citation_order(tmp_path):
+    """Dropping by cost, not position: the model's ordering must not change the outcome."""
+    first = _answer_over(tmp_path / "a", filler_repeats=3)
+    second = _answer_over(tmp_path / "b", filler_repeats=3)
+    assert {c["id"] for c in first["citations"]} == {c["id"] for c in second["citations"]}
+    assert first["answer"] == second["answer"]

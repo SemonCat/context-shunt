@@ -18,6 +18,7 @@ import { Deadline, FakeClock } from "../src/clock.js";
 import {
   HostBridgeProvider, UnavailableProvider, responseAttribution,
 } from "../src/provider.js";
+import { referencedIds } from "../src/citations.js";
 import { Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
@@ -685,5 +686,134 @@ describe("no raw leak and no writes", () => {
     expect(env.code).toBe("ANSWERED");
     expect(statSync(path).mode & 0o777).toBe(0o444);
     chmodSync(path, 0o644);
+  });
+});
+
+// -- the envelope must fit even when every field individually does -----------
+
+/** Ordinary quote-dense source: keys and string values, as any code or JSON file has. */
+function quoteDenseSource(entries = 40, pairs = 40): string {
+  const rows: string[] = [];
+  for (let i = 0; i < entries; i += 1) {
+    const cells: string[] = [];
+    for (let j = 0; j < pairs; j += 1) {
+      const key = String(i).padStart(2, "0") + String(j).padStart(2, "0");
+      cells.push(`"k${key}":"v${key}"`);
+    }
+    rows.push(`export const e${String(i).padStart(2, "0")}={${cells.join(",")}};`);
+  }
+  return rows.join("\n");
+}
+
+async function answerOver(dir: string, fillerRepeats: number, count = 16) {
+  const registry = makeRegistry(dir, { sessionId: "sess" });
+  const body = quoteDenseSource();
+  const entry = registry.register("sess", snapshotBytes(enc(body)));
+  const lines = body.split("\n");
+  const filler = "short keys mapped onto short string values in declaration order ".repeat(
+    fillerRepeats,
+  );
+  const citations = Array.from({ length: count }, (_, i) => ({
+    id: `c${i}`,
+    line_start: i + 1,
+    line_end: i + 1,
+    quote: lines[i]!.slice(0, 512),
+  }));
+  const answer = Array.from(
+    { length: count },
+    (_, i) => `Entry ${String(i).padStart(2, "0")} uses ${filler}[c${i}].`,
+  ).join(" ");
+  const result = await new Reader(
+    registry,
+    new FakeLuna([answerJson(answer, citations)]),
+  ).answer("sess", {
+    schema_version: "1.0",
+    request_id: "req_fit",
+    operation: "read",
+    question: "What does this file declare?",
+    sources: [
+      {
+        source_id: entry.sourceId,
+        snapshot_id: entry.snapshot.snapshotId,
+        selector: { kind: "all" },
+      },
+    ],
+    budgets: { max_chunks: 8, max_answer_bytes: L.maxAnswerBytes, deadline_ms: 60000 },
+  });
+  return result.envelope;
+}
+
+describe("fitting the envelope", () => {
+  it("shows the field caps alone do not keep an envelope under the cap", () => {
+    // This is why the reader has to measure: the per-field caps are not jointly
+    // satisfiable. A 1 KiB answer with the maximum number of maximum-length quotes is
+    // legal field by field and over the 16 KiB envelope cap. Before the fit step the guard
+    // turned that into a bare LIMIT_EXCEEDED after the model call was already paid for.
+    const quote = '"k":"v",'.repeat(64);
+    expect(enc(quote).length).toBe(L.maxQuoteBytes);
+    const coverage = new Coverage();
+    coverage.upstreamTruncated = false;
+    coverage.complete = true;
+    const citations = Array.from({ length: L.maxCitations }, (_, i) => ({
+      id: `c${i}`,
+      source_id: `src_${String(i).padStart(16, "0")}`,
+      snapshot_id: "sha256:" + "0".repeat(64),
+      locator: { kind: "lines", start: 1, end: 1 },
+      quote,
+      verified: true as const,
+    }));
+    const env = buildEnvelope({
+      requestId: "req_x",
+      status: "ok",
+      code: "ANSWERED",
+      coverage,
+      sources: [],
+      retryable: false,
+      answer: "a".repeat(1024),
+      citations,
+      resultKind: "model_derived",
+      provenance: derivedProvenance(),
+      accountingId: "acc_" + "0".repeat(16),
+    });
+    expect(serializedBytes(env)).toBeGreaterThan(L.maxEnvelopeBytes);
+    expect(() => enforce(env)).toThrow(OutputGuardError);
+  });
+
+  it("publishes an answer that fits untouched", async () => {
+    // The fit step must not shrink anything that was already inside the cap.
+    const env = await answerOver(tmp(), 1);
+    expect(env.code).toBe("ANSWERED");
+    expect(env.status).toBe("ok");
+    expect(env.citations).toHaveLength(16);
+    expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
+    // Close to the cap on purpose: if scaffolding grows, this becomes a trimming case and
+    // that should be visible rather than silent.
+    expect(serializedBytes(env)).toBeLessThanOrEqual(L.maxEnvelopeBytes);
+  });
+
+  it("drops evidence and says so instead of refusing an oversized answer", async () => {
+    const env = await answerOver(tmp(), 2);
+    // A good verified answer must not become LIMIT_EXCEEDED.
+    expect(env.code).toBe("ANSWERED");
+    // Dropping evidence is not a complete result.
+    expect(env.status).toBe("partial");
+    expect(env.answer.length).toBeGreaterThan(0);
+    expect(env.citations.length).toBeGreaterThan(0);
+    expect(env.citations.length).toBeLessThan(16);
+    // What was removed has to be recorded, not silently absent.
+    expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+    expect(serializedBytes(env)).toBeLessThanOrEqual(L.maxEnvelopeBytes);
+    // Every surviving citation is still referenced by the answer, and vice versa.
+    expect(new Set(referencedIds(env.answer))).toEqual(
+      new Set(env.citations.map((c) => c.id)),
+    );
+  });
+
+  it("trims deterministically, independent of citation order", async () => {
+    // Dropping by cost, not position: the model's ordering must not change the outcome.
+    const first = await answerOver(tmp(), 3);
+    const second = await answerOver(tmp(), 3);
+    expect(first.citations.map((c) => c.id)).toEqual(second.citations.map((c) => c.id));
+    expect(first.answer).toBe(second.answer);
   });
 });

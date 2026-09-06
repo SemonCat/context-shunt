@@ -13,7 +13,12 @@ import json
 import pytest
 
 from context_shunt.errors import ShuntError
-from context_shunt.inspect import Inspector, decode_cursor, encode_cursor
+from context_shunt.inspect import (
+    Inspector,
+    decode_cursor,
+    encode_cursor,
+    escaped_json_cost,
+)
 from context_shunt.limits import DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION
 from context_shunt.provider import UnavailableProvider
 from context_shunt.session import ShuntSession
@@ -336,6 +341,7 @@ def test_a_byte_range_never_splits_a_character(tmp_path):
             {"kind": "bytes", "start": 0, "end": len(data)},
             max_result_bytes=7,
             max_scan_lines=1,
+            max_wire_bytes=DEFAULT_LIMITS.max_extended_envelope_bytes,
             state={"offset": offset},
         )
         if not result.segments:
@@ -362,6 +368,7 @@ def test_search_accepts_only_a_literal_needle(tmp_path):
         {"kind": "search", "needle": "(a+)+b", "max_matches": 5},
         max_result_bytes=4096,
         max_scan_lines=100,
+        max_wire_bytes=DEFAULT_LIMITS.max_extended_envelope_bytes,
     )
     assert result.matches_found == 2
 
@@ -373,3 +380,95 @@ def test_a_range_past_the_end_of_the_snapshot_is_an_empty_exact_answer(tmp_path)
     assert env["code"] == "EXTRACTED"
     assert env["extraction"]["segments"] == []
     assert env["extraction"]["result_bytes"] == 0
+
+
+# -- the wire budget: escaped bytes, not raw bytes --------------------------
+
+
+def test_escaped_json_cost_matches_the_real_serializer_on_ordinary_text():
+    """The hand-rolled table exists for parity, so it still has to be arithmetically right."""
+    for sample in (
+        "plain ascii",
+        'a "quoted" phrase',
+        "back\\slash",
+        "tab\there\nnewline",
+        "\x00\x01\x1f",  # long-form control escapes
+        "héllo wörld",
+        "✓ ✗ ∑",
+        "𝄞 emoji 🎯",
+        "",
+    ):
+        expected = len(json.dumps(sample, ensure_ascii=False).encode("utf-8")) - 2
+        assert escaped_json_cost(sample) == expected, sample
+
+
+def test_a_quote_dense_page_stays_inside_the_envelope_cap_and_keeps_paging(tmp_path):
+    """The content cap and the wire cap are different measurements.
+
+    16384 quote characters are 16 KiB of content but 32 KiB on the wire, so budgeting only
+    on raw bytes produced an envelope the guard then refused - turning ordinary source into
+    an unexplained LIMIT_EXCEEDED. Any code or JSON file has this density.
+    """
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, '"' * 40000)
+    request = _request(entry, {"kind": "bytes", "start": 0, "end": 40000}, max_scan_lines=1)
+    recovered = 0
+    for _ in range(8):
+        env = session.inspect(dict(request))
+        assert env["code"] == "EXTRACTED"
+        extraction = env["extraction"]
+        # The measurement that actually matters: what the guard weighs.
+        assert len(json.dumps(env, ensure_ascii=False, separators=(",", ":")).encode()) <= (
+            L.max_extended_envelope_bytes
+        )
+        recovered += extraction["result_bytes"]
+        if extraction["complete"] or not extraction["next_cursor"]:
+            break
+        request["cursor"] = extraction["next_cursor"]
+    assert recovered > 16384, "paging must still make progress, just in smaller pages"
+
+
+def test_a_quote_dense_page_charges_only_what_it_delivered(tmp_path):
+    """The charge used to be committed before the guard, so a refused page still cost budget."""
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, '"' * 40000)
+    env = session.inspect(
+        _request(entry, {"kind": "bytes", "start": 0, "end": 40000}, max_scan_lines=1)
+    )
+    delivered = env["extraction"]["result_bytes"]
+    assert delivered > 0
+    allowance = session.store.disclosure_allowance(session.identity, entry.source_id)
+    spent = L.disclosure_max_per_source_bytes - allowance.per_source_remaining
+    assert spent == delivered
+
+
+def test_a_quote_free_page_is_unchanged_by_the_wire_budget(tmp_path):
+    """Escaping only binds when it expands, so plain text must page exactly as before."""
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, "q" * 40000)
+    env = session.inspect(
+        _request(entry, {"kind": "bytes", "start": 0, "end": 40000}, max_scan_lines=1)
+    )
+    assert env["extraction"]["result_bytes"] == 16384
+
+
+def test_a_single_line_too_wide_for_the_envelope_says_so_rather_than_blaming_disclosure(tmp_path):
+    """A `lines` selector cannot split a line, so this refusal is terminal and must be named.
+
+    Reporting DISCLOSURE_EXHAUSTED here would point the caller at waiting for allowance,
+    which never helps; the honest remedy is a `bytes` selector.
+    """
+    session = _session(tmp_path)
+    # One line whose escaped width alone exceeds any envelope's headroom.
+    entry = _captured(tmp_path, session, '"' * 30000 + "\n")
+    env = session.inspect(_request(entry, {"kind": "lines", "start": 1, "end": 1}))
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+    assert '"""' not in json.dumps(env)
+    # Nothing was charged for a page that returned nothing.
+    allowance = session.store.disclosure_allowance(session.identity, entry.source_id)
+    assert allowance.per_source_remaining == L.disclosure_max_per_source_bytes
+    # ... and the same bytes are reachable through a selector that can split.
+    same = session.inspect(
+        _request(entry, {"kind": "bytes", "start": 0, "end": 30000}, max_scan_lines=1)
+    )
+    assert same["code"] == "EXTRACTED" and same["extraction"]["result_bytes"] > 0
