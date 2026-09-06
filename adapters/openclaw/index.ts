@@ -45,7 +45,7 @@ export const PLUGIN_ID = "context-shunt";
 /** The subset of the host plugin API this adapter uses. */
 export interface OpenClawPluginApi {
   on(hook: string, handler: (event: any, ctx?: any) => unknown, opts?: Record<string, unknown>): void;
-  registerTool?(definition: Record<string, unknown>, handler: (input: any, ctx?: any) => unknown): void;
+  registerTool?(tool: Record<string, unknown>, opts?: Record<string, unknown>): void;
   pluginConfig?: Record<string, unknown>;
   logger?: { info(msg: string, ...rest: unknown[]): void; warn?(msg: string, ...rest: unknown[]): void };
   hostVersion?: string;
@@ -69,24 +69,28 @@ const DEFAULT_HOOKS = [
   "session_end",
 ] as const;
 
-export const READER_TOOL_DEFINITION = {
-  name: "context_shunt_read",
-  description:
-    "Answer a question about one or more large files without pulling them into this " +
-    "conversation. Returns a bounded, citation-verified answer. Read-only.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      question: { type: "string", description: "The question to answer. Required." },
-      paths: {
-        type: "array",
-        items: { type: "string" },
-        description: "Absolute paths inside a configured workspace root.",
-      },
+/**
+ * Tool name and JSON-Schema parameters. `openclaw.plugin.json` declares the same name in
+ * `contracts.tools`; OpenClaw rejects a runtime registration that is not declared there.
+ */
+export const READER_TOOL_NAME = "context_shunt_read";
+
+export const READER_TOOL_DESCRIPTION =
+  "Answer a question about one or more large files without pulling them into this " +
+  "conversation. Returns a bounded, citation-verified answer. Read-only.";
+
+export const READER_TOOL_PARAMETERS = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    question: { type: "string", description: "The question to answer. Required." },
+    paths: {
+      type: "array",
+      items: { type: "string" },
+      description: "Absolute paths inside a configured workspace root.",
     },
-    required: ["question", "paths"],
   },
+  required: ["question", "paths"],
 } as const;
 
 export class ContextShuntPlugin {
@@ -119,9 +123,7 @@ export class ContextShuntPlugin {
     }
     this.api.on("session_end", (event) => this.onSessionEnd(event));
     if (modeEnabled(this.capability, "reader") && typeof this.api.registerTool === "function") {
-      this.api.registerTool(READER_TOOL_DEFINITION as unknown as Record<string, unknown>, (input, ctx) =>
-        this.onReaderTool(input, ctx),
-      );
+      this.api.registerTool(this.readerTool());
     }
     this.api.logger?.info(
       `context-shunt capability report: ${JSON.stringify(reportToJson(this.capability))}`,
@@ -147,6 +149,22 @@ export class ContextShuntPlugin {
     if (decision.decision !== "blocked") return undefined;
     const envelope = session.blockEnvelope(requestIdFrom(event?.toolCallId), decision);
     return { decision: "deny", reason: serialize(envelope) };
+  }
+
+  /**
+   * The registered tool object. `execute(toolCallId, params)` is the host's shape, and the
+   * bounded envelope is returned as a single text content block.
+   */
+  readerTool(): Record<string, unknown> {
+    return {
+      name: READER_TOOL_NAME,
+      description: READER_TOOL_DESCRIPTION,
+      parameters: READER_TOOL_PARAMETERS,
+      execute: async (toolCallId: string, params: unknown) => {
+        const text = await this.onReaderTool(params, { toolCallId });
+        return { content: [{ type: "text", text }] };
+      },
+    };
   }
 
   /** Answer a question about registered sources. Read-only. */

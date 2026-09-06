@@ -2,21 +2,50 @@
   "id": "context-shunt",
   "name": "Context Shunt",
   "description": "Blocks oversized full reads before they run and answers questions about large sources with a fixed cheap reader model, returning a bounded citation-verified envelope. Read-only: registers no writer tool.",
-  "activation": { "onStartup": true },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "context_shunt_read"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "workspace_roots": { "type": "array", "items": { "type": "string" } },
-      "spill_dir": { "type": "string" },
-      "denylist": { "type": "array", "items": { "type": "string" } },
-      "gate_enabled": { "type": "boolean", "default": true },
+      "workspace_roots": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "spill_dir": {
+        "type": "string"
+      },
+      "denylist": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "gate_enabled": {
+        "type": "boolean",
+        "default": true
+      },
       "reader": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "enabled": { "type": "boolean", "default": true },
-          "model": { "type": "string", "const": "gpt-5.6-luna", "default": "gpt-5.6-luna" }
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "model": {
+            "type": "string",
+            "const": "gpt-5.6-luna",
+            "default": "gpt-5.6-luna"
+          }
         }
       },
       "suma_post_tool": {
@@ -33,7 +62,10 @@
       "limits": {
         "type": "object",
         "description": "Deployment caps. Values may only be narrower than the contract defaults.",
-        "additionalProperties": { "type": "integer", "minimum": 0 }
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   }

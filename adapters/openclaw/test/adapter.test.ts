@@ -7,14 +7,19 @@
  * the live host: that is what the opt-in `integration openclaw` gate is for, and it
  * reports not-run when the host is absent.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { READER_MODEL, ShuntSession, modeEnabled } from "@context-shunt/core";
 
-import { ContextShuntPlugin, READER_TOOL_DEFINITION, default as plugin } from "../index.js";
+import {
+  ContextShuntPlugin,
+  READER_TOOL_NAME,
+  READER_TOOL_PARAMETERS,
+  default as plugin,
+} from "../index.js";
 import { buildCapabilityReport, SUMA_EVIDENCE } from "../src/capability.js";
 import { normalizeToolCall, requestIdFrom } from "../src/normalize.js";
 
@@ -36,8 +41,14 @@ function fakeApi(overrides: Record<string, unknown> = {}) {
       registered.hooks.push(hook);
       handlers.set(hook, handler);
     },
-    registerTool(def: Record<string, unknown>) {
-      registered.tools.push(String(def["name"]));
+    registerTool(tool: Record<string, unknown>, opts?: Record<string, unknown>) {
+      // Mirrors OpenClaw's registerTool(tool, opts?): one AnyAgentTool-shaped object.
+      if (typeof tool["execute"] !== "function") {
+        throw new Error("registerTool needs a tool object with execute()");
+      }
+      if (opts !== undefined) throw new Error("no tool options are expected");
+      registered.tools.push(String(tool["name"]));
+      handlers.set(`tool:${String(tool["name"])}`, tool["execute"] as never);
     },
     logger: { info: (msg: string) => logs.push(msg), warn: (msg: string) => logs.push(msg) },
     llm: {
@@ -309,10 +320,30 @@ describe("reader tool", () => {
   });
 
   it("declares only a question and paths - no write surface", () => {
-    expect(Object.keys(READER_TOOL_DEFINITION.parameters.properties).sort()).toEqual([
-      "paths",
-      "question",
-    ]);
+    expect(Object.keys(READER_TOOL_PARAMETERS.properties).sort()).toEqual(["paths", "question"]);
+  });
+
+  it("registers a tool object whose execute returns a text content block", async () => {
+    const dir = workspace();
+    const path = join(dir, "ws", "conf.txt");
+    writeFileSync(path, "max_retries = 3\n");
+    const { api, registered, handlers } = configured(dir);
+    new ContextShuntPlugin(api).register();
+    expect(registered.tools).toEqual([READER_TOOL_NAME]);
+    const execute = handlers.get(`tool:${READER_TOOL_NAME}`)!;
+    const result: any = await (execute as any)("tc_tool", {
+      question: "What is the retry ceiling?",
+      paths: [path],
+    });
+    expect(result.content[0].type).toBe("text");
+    expect(JSON.parse(result.content[0].text).code).toBe("ANSWERED");
+  });
+
+  it("declares the registered tool name in the plugin manifest contracts", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
+    );
+    expect(manifest.contracts.tools).toEqual([READER_TOOL_NAME]);
   });
 });
 

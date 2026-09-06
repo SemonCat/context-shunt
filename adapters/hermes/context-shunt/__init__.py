@@ -47,6 +47,8 @@ from context_shunt.session import ShuntSession  # noqa: E402
 
 ADAPTER = "hermes"
 PLUGIN_ID = "context-shunt"
+# Hermes groups tools into toolsets; ours holds exactly one read-only tool.
+TOOLSET = "context_shunt"
 
 # Hermes tool ids this adapter claims to cover. A read tool outside this list is not
 # protected, and the capability report says so rather than implying blanket coverage.
@@ -324,7 +326,15 @@ def register(ctx: Any) -> None:
 
     register_tool = getattr(ctx, "register_tool", None)
     if callable(register_tool) and _capability.enabled("reader"):
-        register_tool(READER_TOOL_SCHEMA, context_shunt_read)
+        # Hermes' PluginContext.register_tool takes (name, toolset, schema, handler, ...).
+        # No override= is passed: this tool adds a surface, it never replaces a built-in.
+        register_tool(
+            READER_TOOL_SCHEMA["name"],
+            TOOLSET,
+            READER_TOOL_SCHEMA,
+            context_shunt_read,
+            description=READER_TOOL_SCHEMA["description"],
+        )
 
     log = getattr(ctx, "logger", None)
     if log is not None:

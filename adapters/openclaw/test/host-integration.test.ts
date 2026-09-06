@@ -85,6 +85,14 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(modeEnabled(report, "reader")).toBe(true);
   });
 
+  it("registers a tool name the host manifest contract declares", () => {
+    // OpenClaw rejects a runtime registration that is not declared in contracts.tools.
+    const manifest = JSON.parse(hostFile("package.json")) && JSON.parse(
+      readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
+    );
+    expect(manifest.contracts.tools).toContain("context_shunt_read");
+  });
+
   it("loads against the host version and registers only the read-only surface", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     const hooks: string[] = [];
@@ -94,7 +102,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
       hostVersion: String(pkg.version),
       availableHooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
       on: (hook: string) => hooks.push(hook),
-      registerTool: (def: Record<string, unknown>) => tools.push(String(def["name"])),
+      registerTool: (tool: Record<string, unknown>) => tools.push(String(tool["name"])),
       logger: { info: () => {} },
       llm: { complete: async () => ({ text: "{}", model: "gpt-5.6-luna" }) },
     };

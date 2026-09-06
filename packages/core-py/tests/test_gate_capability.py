@@ -88,6 +88,7 @@ class FakeCtx:
         )
         self.registered_hooks: list[str] = []
         self.registered_tools: list[str] = []
+        self.registered_toolsets: list[str] = []
         self.messages: list[str] = []
         self._with_tools = with_tools
         self.logger = self
@@ -95,10 +96,15 @@ class FakeCtx:
     def register_hook(self, name, _handler):
         self.registered_hooks.append(name)
 
-    def register_tool(self, schema, _handler):
+    def register_tool(self, name, toolset, schema, handler, **kwargs):
+        """Mirrors hermes_cli.plugins.PluginContext.register_tool's real signature."""
         if not self._with_tools:
             raise AssertionError("register_tool called when unavailable")
-        self.registered_tools.append(schema["name"])
+        assert schema["name"] == name
+        assert callable(handler)
+        assert toolset and "override" not in kwargs
+        self.registered_tools.append(name)
+        self.registered_toolsets.append(toolset)
 
     def info(self, msg, *args):
         self.messages.append(msg % args if args else msg)
@@ -183,6 +189,7 @@ def test_gate_hook_is_registered_and_no_writer_tool_is(tmp_path):
     module.register(ctx)
     assert "pre_tool_call" in ctx.registered_hooks
     assert ctx.registered_tools == ["context_shunt_read"]
+    assert ctx.registered_toolsets == ["context_shunt"]
     assert not any("writ" in t or "patch" in t for t in ctx.registered_tools)
     assert "capability report" in ctx.messages[0]
     assert "transform_tool_result" not in ctx.registered_hooks
