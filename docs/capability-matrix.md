@@ -10,12 +10,15 @@ Both adapters emit this as a machine-readable capability report at startup
 and SDK version, the tools covered, the mode decisions with reasons and evidence, and the
 fixture id the adapter was tested against.
 
+The compatibility evidence in this release is pinned to the exact host versions below.
+An upgrade is unverified until the local integration gate is rerun and reviewed.
+
 ## Mode summary
 
-| Mode | Hermes (`hermes-agent` 0.18.0) | OpenClaw (`openclaw` 2026.9.x) | Default |
+| Mode | Hermes (`hermes-agent` 0.18.2) | OpenClaw (`openclaw` 2026.9.2) | Default |
 | --- | --- | --- | --- |
 | `local_gate` — block oversized/unprovable reads before execution | **supported** | **supported** | on |
-| `reader` — question-driven answers with verified citations, `gpt-5.6-luna` only | **supported** | **supported** | on |
+| `reader` — question-driven answers with verified citations, `gpt-5.6-luna` only | **adapter available; release proof pending** | **supported** | on |
 | `suma_post_tool` — oversized tool/MCP result spill + pointer | **unsupported** | **unsupported** | off |
 | writer / `propose_patch` | **not implemented in v1** | **not implemented in v1** | refused at load |
 
@@ -26,9 +29,12 @@ fixture id the adapter was tested against.
 | Hermes | `pre_tool_call` fires inside `handle_function_call()` before the tool handler runs, and returning `{"action": "block", "message": ...}` short-circuits the call. | `ctx.llm.complete(..., model="gpt-5.6-luna")`, with the model override gated per plugin by `plugins.entries.<id>.llm`. |
 | OpenClaw | `api.on("before_tool_call", ...)` runs before tool execution, can deny the call, and the host fails this hook closed on timeout. | The runtime model bridge, pinned to `gpt-5.6-luna`. |
 
-If the host cannot serve `gpt-5.6-luna`, the reader returns `MODEL_ERROR`. It never
-downgrades to another model: an answer from a different model is not the answer the
-acceptance gates measure.
+If the host cannot serve `gpt-5.6-luna`, the reader returns `MODEL_ERROR`; an answer whose
+reported model differs is rejected. On Hermes 0.18.2, however, the `PluginLlm` facade's
+auxiliary client owns retries and provider fallback below the plugin-visible call. The
+local integration proves the adapter's requested model and original question, but not the
+model used by every upstream attempt. That unresolved provenance is a release blocker for
+the Luna-only requirement, not permission to downgrade silently.
 
 ## Why `suma_post_tool` is unsupported on both hosts
 
@@ -82,23 +88,23 @@ needs comprehensive protection must disable uncontrolled read tools at the host.
 
 | Host | Read | Search | Shell |
 | --- | --- | --- | --- |
-| Hermes | `read_file`, `read`, `view_file` | `search_files`, `grep`, `search` | `terminal`, `bash`, `shell`, `execute_command` |
-| OpenClaw | `read`, `read_file`, `fs_read` | `grep`, `search`, `fs_search` | `exec`, `bash`, `shell` |
+| Hermes | `read_file` | `search_files` | `terminal` |
+| OpenClaw | `read` | none | `exec` |
 
 ## Gate status
 
 | Category | Status |
 | --- | --- |
-| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability) | implemented, passing, no host or provider needed |
-| `integration <host> --mode unsupported` | implemented, passing — deterministic fail-closed behaviour |
+| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability) | implemented; no host or provider needed; run them on the release commit for the result |
+| `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
 | `integration <host> --mode post-tool` | NOT_RUN by design — the mode is unsupported on both hosts |
-| `benchmark core` | implemented, passing — gate/spill latency, envelope caps, context savings, bounded memory |
+| `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
 | `benchmark all` | includes a NOT_RUN provider half: reader latency and token cost need live Luna |
 | `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna |
-| `packaging all` | implemented, passing |
-| `release all` | runs everything; fails while `eval luna` and the provider benchmark are NOT_RUN |
+| `packaging all` | builds and inspects archives; clean-installs/imports/uninstalls both npm packages, the Python wheel, and the Hermes copy bundle |
+| `release all` | runs everything; returns `NOT_RUN` while `eval luna` and the provider benchmark lack live Luna access |
 
 ## Future work, stated plainly
 

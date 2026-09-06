@@ -62,3 +62,7 @@ def assert_supported_blocks(blocks: list[dict]) -> None:
             raise ShuntError("BINARY_UNSUPPORTED", "UNKNOWN_BLOCK")
         if str(block.get("type", "")) not in SAFE_BLOCK_TYPES:
             raise ShuntError("BINARY_UNSUPPORTED", "UNSUPPORTED_BLOCK")
+        if not isinstance(block.get("text"), str):
+            raise ShuntError("BINARY_UNSUPPORTED", "UNKNOWN_BLOCK")
+        if any(key in block for key in ("data", "blob", "image_url", "audio_url", "resource")):
+            raise ShuntError("BINARY_UNSUPPORTED", "UNSUPPORTED_BLOCK")

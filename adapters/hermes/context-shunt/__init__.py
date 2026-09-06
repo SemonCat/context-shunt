@@ -1,6 +1,6 @@
 """Hermes adapter for context-shunt.
 
-Wiring (verified against hermes-agent 0.18.0):
+Wiring (verified against hermes-agent 0.18.2):
 
 * ``ctx.register_hook("pre_tool_call", ...)`` runs inside ``handle_function_call()``
   *before* the tool's handler, and returning ``{"action": "block", "message": ...}``
@@ -22,7 +22,6 @@ reported unsupported and stays off. See docs/capability-matrix.md.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -52,9 +51,9 @@ TOOLSET = "context_shunt"
 
 # Hermes tool ids this adapter claims to cover. A read tool outside this list is not
 # protected, and the capability report says so rather than implying blanket coverage.
-READ_TOOLS = {"read_file": "read", "read": "read", "view_file": "read"}
-SEARCH_TOOLS = {"search_files": "search", "grep": "search", "search": "search"}
-SHELL_TOOLS = {"terminal": "shell", "bash": "shell", "shell": "shell", "execute_command": "shell"}
+READ_TOOLS = {"read_file": "read"}
+SEARCH_TOOLS = {"search_files": "search"}
+SHELL_TOOLS = {"terminal": "shell"}
 
 _sessions: dict[str, ShuntSession] = {}
 _config = None
@@ -120,9 +119,9 @@ def _supported_hooks(ctx: Any) -> set[str]:
         return set(declared)
     # Hermes does not publish the list on the context; fall back to the host constant.
     try:
-        from hermes_cli.plugins import HOOK_NAMES  # type: ignore
+        from hermes_cli.plugins import VALID_HOOKS
 
-        return set(HOOK_NAMES)
+        return set(VALID_HOOKS)
     except Exception:
         return {"pre_tool_call", "post_tool_call", "on_session_start", "on_session_end"}
 
@@ -153,7 +152,10 @@ def normalize_tool_call(tool_name: str, args: dict[str, Any]) -> tuple[str, dict
         return "search", {
             "path": args.get("path") or args.get("directory"),
             "pattern": args.get("pattern") or args.get("query"),
-            "max_matches": args.get("max_matches") or args.get("max_results"),
+            "max_matches": args.get("limit", 50),
+            "target": args.get("target", "content"),
+            "output_mode": args.get("output_mode", "content"),
+            "context": args.get("context", 0),
         }
     if name in SHELL_TOOLS:
         return "shell", {"command": args.get("command") or args.get("cmd") or ""}
@@ -163,8 +165,8 @@ def normalize_tool_call(tool_name: str, args: dict[str, Any]) -> tuple[str, dict
 # -- session plumbing ------------------------------------------------------
 
 
-def _session(task_id: str) -> ShuntSession:
-    key = task_id or "default"
+def _session(task_id: str = "", session_id: str = "") -> ShuntSession:
+    key = session_id or task_id or "unbound"
     session = _sessions.get(key)
     if session is None:
         provider = (
@@ -203,7 +205,13 @@ def _bridge_call(*, system: str, user: str, model: str, max_output_tokens: int, 
 # -- hooks -----------------------------------------------------------------
 
 
-def pre_tool_call(tool_name: str = "", args: dict | None = None, task_id: str = "", **kwargs):
+def pre_tool_call(
+    tool_name: str = "",
+    args: dict | None = None,
+    task_id: str = "",
+    session_id: str = "",
+    **kwargs,
+):
     """Veto an oversized or unprovable read before the tool runs."""
     if _config is None or not _config.gate_enabled:
         return None
@@ -211,9 +219,9 @@ def pre_tool_call(tool_name: str = "", args: dict | None = None, task_id: str = 
     if tool == "other":
         return None
     try:
-        session = _session(task_id)
+        session = _session(task_id, session_id)
         decision = session.evaluate_tool_call(tool, normalized)
-    except ShuntError:
+    except Exception:
         # Fail closed for a read-like call we could not evaluate.
         return {"action": "block", "message": _block_message(fixed_error("req_gate", "HOST_UNSAFE"))}
     if not decision.blocked:
@@ -233,7 +241,7 @@ def _block_message(envelope: dict[str, Any]) -> str:
 
 
 def on_session_end(session_id: str = "", **kwargs):
-    session = _sessions.pop(session_id or "default", None)
+    session = _sessions.pop(session_id or str(kwargs.get("task_id") or "unbound"), None)
     if session is not None:
         session.close()
 
@@ -241,15 +249,17 @@ def on_session_end(session_id: str = "", **kwargs):
 # -- reader tool -----------------------------------------------------------
 
 
-def context_shunt_read(**kwargs) -> str:
+def context_shunt_read(args: dict[str, Any] | None = None, **kwargs) -> str:
     """Answer a question about a registered source. Read-only; returns a bounded envelope."""
-    task_id = str(kwargs.get("task_id") or "default")
-    session = _session(task_id)
-    question = kwargs.get("question")
-    paths = kwargs.get("paths") or []
+    params = {**(args or {}), **kwargs}
+    task_id = str(params.get("task_id") or "")
+    session_id = str(params.get("session_id") or "")
+    session = _session(task_id, session_id)
+    question = params.get("question")
+    paths = params.get("paths") or []
     if isinstance(paths, str):
         paths = [paths]
-    request_id = _request_id(kwargs)
+    request_id = _request_id(params)
 
     try:
         sources = []
@@ -259,28 +269,33 @@ def context_shunt_read(**kwargs) -> str:
                 {
                     "source_id": entry.source_id,
                     "snapshot_id": entry.snapshot.snapshot_id,
-                    "selector": kwargs.get("selector") or {"kind": "all"},
+                    "selector": params.get("selector") or {"kind": "all"},
                 }
             )
     except ShuntError as exc:
         from context_shunt import envelope as E
 
         return _block_message(enforce_or_fixed(E.error_envelope(request_id, exc), _config.limits))
+    except Exception:
+        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
 
-    envelope = session.read(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "request_id": request_id,
-            "operation": "read",
-            "question": question if isinstance(question, str) else "",
-            "sources": sources,
-            "budgets": {
-                "max_chunks": _config.limits.max_chunks_per_request,
-                "max_answer_bytes": _config.limits.max_answer_bytes,
-                "deadline_ms": _config.limits.request_deadline_ms,
-            },
-        }
-    )
+    try:
+        envelope = session.read(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "request_id": request_id,
+                "operation": "read",
+                "question": question if isinstance(question, str) else "",
+                "sources": sources,
+                "budgets": {
+                    "max_chunks": _config.limits.max_chunks_per_request,
+                    "max_answer_bytes": _config.limits.max_answer_bytes,
+                    "deadline_ms": _config.limits.request_deadline_ms,
+                },
+            }
+        )
+    except Exception:
+        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
     return _block_message(envelope)
 
 
@@ -312,9 +327,15 @@ def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
     global _config, _capability, _llm
 
-    raw = dict(getattr(ctx, "plugin_config", None) or getattr(ctx, "config", None) or {})
-    raw.setdefault("workspace_roots", [os.getcwd()])
-    default_cache = Path(os.environ.get("CONTEXT_SHUNT_CACHE", Path.home() / ".cache" / "context-shunt"))
+    for session in _sessions.values():
+        session.close()
+    _sessions.clear()
+    raw = _load_plugin_config(ctx)
+    import os
+
+    default_cache = Path(
+        os.environ.get("CONTEXT_SHUNT_CACHE", Path.home() / ".cache" / "context-shunt")
+    )
     _config = load_config(raw, default_spill_dir=default_cache)
 
     _llm = getattr(ctx, "llm", None)
@@ -344,3 +365,21 @@ def register(ctx: Any) -> None:
 def capability_report() -> dict[str, Any]:
     """Exposed for `scripts/verify` and for operators; contains no source content."""
     return (_capability or build_capability_report(object())).to_dict()
+
+
+def _load_plugin_config(ctx: Any) -> dict[str, Any]:
+    """Read the real Hermes ``plugins.entries.<id>.config`` block."""
+    direct = getattr(ctx, "plugin_config", None)
+    if isinstance(direct, dict):
+        return dict(direct)
+    try:
+        from hermes_cli.config import load_config as load_host_config
+
+        config = load_host_config() or {}
+        plugins = config.get("plugins", {})
+        entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
+        entry = entries.get(PLUGIN_ID, {}) if isinstance(entries, dict) else {}
+        plugin_config = entry.get("config", {}) if isinstance(entry, dict) else {}
+        return dict(plugin_config) if isinstance(plugin_config, dict) else {}
+    except Exception:
+        return {}

@@ -41,6 +41,7 @@ export interface LunaProvider {
     user: string;
     maxOutputTokens: number;
     timeoutMs: number;
+    signal?: AbortSignal | undefined;
   }): Promise<ModelResponse>;
 }
 
@@ -50,10 +51,10 @@ export function transientProviderError(detail = "PROVIDER_CALL_FAILED"): ShuntEr
 }
 
 export interface HostBridgeResult {
-  text?: string;
-  model?: string;
-  input_tokens?: number;
-  output_tokens?: number;
+  text?: unknown;
+  model?: unknown;
+  input_tokens?: unknown;
+  output_tokens?: unknown;
 }
 
 export type HostBridgeCall = (opts: {
@@ -62,6 +63,7 @@ export type HostBridgeCall = (opts: {
   model: string;
   maxOutputTokens: number;
   timeoutMs: number;
+  signal?: AbortSignal | undefined;
 }) => Promise<HostBridgeResult>;
 
 /** Wraps a host-supplied callable and pins the model. */
@@ -77,6 +79,7 @@ export class HostBridgeProvider implements LunaProvider {
     user: string;
     maxOutputTokens: number;
     timeoutMs: number;
+    signal?: AbortSignal | undefined;
   }): Promise<ModelResponse> {
     const capped = Math.min(opts.maxOutputTokens, this.limits.maxOutputTokensPerCall);
     let result: HostBridgeResult;
@@ -87,6 +90,7 @@ export class HostBridgeProvider implements LunaProvider {
         model: this.model,
         maxOutputTokens: capped,
         timeoutMs: opts.timeoutMs,
+        signal: opts.signal,
       });
     } catch (err) {
       if (err instanceof ShuntError) throw err;
@@ -94,18 +98,36 @@ export class HostBridgeProvider implements LunaProvider {
       // dropped here and never reaches a log, metric or envelope.
       throw transientProviderError();
     }
-    const modelUsed = String(result.model ?? "");
+    if (typeof result !== "object" || result === null) {
+      throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", false);
+    }
+    const modelUsed = result.model;
+    const text = result.text;
+    if (typeof modelUsed !== "string" || typeof text !== "string") {
+      throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", false);
+    }
     if (modelUsed !== this.model) {
       throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
     }
-    const inTok = Number(result.input_tokens ?? 0);
-    const outTok = Number(result.output_tokens ?? 0);
+    if (new TextEncoder().encode(text).length > this.limits.maxToolResultBytes) {
+      throw new ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", false);
+    }
+    const inTok = readUsage(result.input_tokens, this.limits.maxRequestInputTokens);
+    const outTok = readUsage(result.output_tokens, capped);
     return {
-      text: String(result.text ?? ""),
+      text,
       model: modelUsed,
       usage: { inputTokens: inTok, outputTokens: outTok, estimated: inTok === 0 && outTok === 0 },
     };
   }
+}
+
+function readUsage(value: unknown, maximum: number): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
+  }
+  return value;
 }
 
 /** Used when the host cannot serve Luna. Fails closed on every call. */

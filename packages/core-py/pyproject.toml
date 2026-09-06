@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=80,<81", "wheel"]
+requires = ["setuptools>=80,<81", "wheel>=0.45,<0.46"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,7 @@ description = "Read-only context shunt core: pre-read gate, question-driven Luna
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "context-shunt contributors" }]
 dependencies = [
   "jsonschema>=4.25,<4.26",

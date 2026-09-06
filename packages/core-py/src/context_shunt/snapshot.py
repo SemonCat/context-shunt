@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,25 +67,69 @@ def read_bounded(path: Path, max_bytes: int) -> bytes:
     return bytes(out)
 
 
+def _read_authorized(authorized: AuthorizedPath, max_bytes: int) -> bytes:
+    """Open once, validate the descriptor, then read only that descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(authorized.real, flags)
+    except OSError:
+        raise ShuntError("SOURCE_CHANGED", "OPEN_FAILED") from None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink > 1:
+            raise ShuntError("SOURCE_CHANGED", "IDENTITY_CHANGED")
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        if before_identity != authorized.identity():
+            raise ShuntError("SOURCE_CHANGED", "IDENTITY_CHANGED")
+
+        out = bytearray()
+        while True:
+            block = os.read(fd, _READ_CHUNK)
+            if not block:
+                break
+            if len(out) + len(block) > max_bytes:
+                raise ShuntError("LIMIT_EXCEEDED", "SOURCE_OVER_BYTE_CAP")
+            out.extend(block)
+
+        after = os.fstat(fd)
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if after_identity != authorized.identity() or after.st_size != len(out):
+            raise ShuntError("SOURCE_CHANGED", "MODIFIED_DURING_READ")
+        return bytes(out)
+    finally:
+        os.close(fd)
+
+
 def snapshot_file(
     authorized: AuthorizedPath,
     *,
     limits: Limits = DEFAULT_LIMITS,
     media_type_hint: str | None = None,
 ) -> Snapshot:
-    data = read_bounded(authorized.real, limits.max_source_bytes)
-    try:
-        after = os.stat(authorized.real)
-    except OSError:
-        raise ShuntError("SOURCE_CHANGED", "DISAPPEARED") from None
-    if (after.st_dev, after.st_ino) != (authorized.dev, authorized.ino):
-        raise ShuntError("SOURCE_CHANGED", "IDENTITY_CHANGED")
-    if after.st_size != len(data) or after.st_mtime_ns != authorized.mtime_ns:
-        raise ShuntError("SOURCE_CHANGED", "MODIFIED_DURING_READ")
-    return snapshot_bytes(data, media_type_hint=media_type_hint)
+    data = _read_authorized(authorized, limits.max_source_bytes)
+    return snapshot_bytes(data, media_type_hint=media_type_hint, limits=limits)
 
 
-def snapshot_bytes(data: bytes, *, media_type_hint: str | None = None) -> Snapshot:
+def snapshot_bytes(
+    data: bytes,
+    *,
+    media_type_hint: str | None = None,
+    limits: Limits = DEFAULT_LIMITS,
+) -> Snapshot:
+    if len(data) > limits.max_source_bytes:
+        raise ShuntError("LIMIT_EXCEEDED", "SOURCE_OVER_BYTE_CAP", retryable=False)
     text = assert_text(data)
     assert_no_secret(data, "SOURCE")
     media_type = media_type_hint or TEXT_MEDIA_TYPE
@@ -91,8 +137,9 @@ def snapshot_bytes(data: bytes, *, media_type_hint: str | None = None) -> Snapsh
     if media_type == JSON_MEDIA_TYPE:
         try:
             json_value = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ShuntError("UNSAFE_SOURCE", "INVALID_JSON") from None
+        json_depth_and_nodes(json_value, limits)
     return Snapshot(
         snapshot_id=_digest(data),
         media_type=media_type,
@@ -185,9 +232,13 @@ def json_depth_and_nodes(value: Any, limits: Limits = DEFAULT_LIMITS) -> tuple[i
             if ident in seen:
                 raise ShuntError("LIMIT_EXCEEDED", "JSON_CYCLE")
             seen.add(ident)
+            if isinstance(node, dict) and any(not isinstance(key, str) for key in node):
+                raise ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE")
             children = node.values() if isinstance(node, dict) else node
             for child in children:
                 stack.append((child, depth + 1))
-        elif not isinstance(node, (str, int, float, bool, type(None))):
+        elif (isinstance(node, float) and not math.isfinite(node)) or not isinstance(
+            node, (str, int, float, bool, type(None))
+        ):
             raise ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE")
     return max_depth, nodes

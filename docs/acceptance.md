@@ -1,8 +1,8 @@
 # Acceptance gates
 
-本文件是待實作的驗收規格，不代表已有測試通過。數值與語意以 [architecture.md](architecture.md) 為準。Opus 必須建立可執行的 `./scripts/verify <suite> <gate> [options]`；成功退出 0，assertion failure、缺失案例或必要能力無法測試都非零退出。每次輸出測試數、結果、版本與耗時到私有 reports 目錄，不輸出來源內容或秘密。
+本文件是 normative 驗收規格，不是目前 checkout 的通過紀錄。數值與語意以 [architecture.md](architecture.md) 為準。可執行入口是 `./scripts/verify <suite> <gate> [options]`；成功退出 0，assertion failure 或缺失案例退出 1，缺少 live host/model prerequisite 則明確 `NOT_RUN` 並退出 2。每次輸出測試數、結果、版本與耗時到 gitignored `reports/`，不輸出來源內容或秘密。
 
-`unit all` 執行全部 unit gates；`integration all` 執行兩 host 的 local、post-tool、unsupported 與共用故障案例。Optional mode 若無安全能力證據，只能記為 disabled 並通過拒絕啟用測試，不能記為功能已通過。缺少必備 host 環境不得以 mock／skip 取得 release pass。
+`unit all` 執行全部 deterministic unit gates。現有 `integration all` 會列舉兩 host 的 local、post-tool、unsupported：local 使用真實 host，unsupported 是 deterministic fail-closed gate，post-tool 因 host 能力不足而 `NOT_RUN`；共用故障、取消與輸出上限案例屬 unit gates，不能冒充 host runtime 測量。Optional mode 若無安全能力證據，只能記為 disabled，不能記為功能已通過。缺少必備 host 環境不得以 mock／skip 取得 release pass。
 
 ## Unit gates
 
@@ -28,7 +28,7 @@
 | `./scripts/verify integration openclaw --mode post-tool` | 用超過 host truncation 門檻但 ≤8 MiB 的頭/中/尾 sentinel payload 證明完整 capture 在 truncation 前，replacement 在 persistence/context 前；pointer 可讀回全部 sentinels，主 context 無原文。若無此順序即 mode disabled。已截斷輸入不能標 complete=true。 |
 | `./scripts/verify integration hermes --mode unsupported` | 模擬 hook 缺失、順序未知、fail-open wrapper 不可用、版本變更或不安全 tracing：啟動拒絕該模式，原始 MCP 路徑不冒充受保護；local gate 可獨立運作。 |
 | `./scripts/verify integration openclaw --mode unsupported` | 模擬 middleware 前 truncation、persistence 先於替換及缺失能力：fail-closed，不啟用 post-tool，不回 raw 作 fallback。 |
-| `./scripts/verify integration all` | 包含上述兩 adapter 全部案例，另測 Suma 預設 off、啟用後無舊 heuristic/dict-list bypass、內部 reader 不遞迴 spill；兩 host 都執行取消／late response、session 隔離、唯讀來源與所有輸出 caps 測試。檢查所有主 context/persistence 路徑，而非僅最終答案。 |
+| `./scripts/verify integration all` | Release 目標是包含上述兩 adapter 的 host-level assertions。現有命令只聚合已實作的 local、unsupported 與明確 `NOT_RUN` 的 post-tool gates；它不宣稱兩 host 都已 runtime 測量取消／late response、所有 persistence 路徑或全部輸出 caps。那些 deterministic assertions 由 unit gates 提供。 |
 
 Post-tool disabled 是 optional capability 的合格安全結果，必須在報告與套件說明中顯示為 disabled；不能省略測試後宣稱支援。更新 host/SDK 版本需重跑 ordering 證據。
 

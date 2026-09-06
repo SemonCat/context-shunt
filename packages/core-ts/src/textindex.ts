@@ -47,33 +47,38 @@ export function countLinesBounded(
 
 /** 1-based inclusive physical-line index. Newlines are never normalized. */
 export class LineIndex {
-  private readonly starts: number[] = [];
-  private readonly ends: number[] = [];
+  private static readonly STRIDE = 64;
+  private readonly checkpoints: number[] = [];
+  private readonly count: number;
 
   constructor(private readonly data: Uint8Array) {
-    if (data.length === 0) return;
-    let pos = 0;
-    while (pos < data.length) {
-      const nl = data.indexOf(LF, pos);
-      if (nl === -1) {
-        this.starts.push(pos);
-        this.ends.push(data.length);
-        break;
-      }
-      this.starts.push(pos);
-      this.ends.push(nl);
-      pos = nl + 1;
+    if (data.length === 0) {
+      this.count = 0;
+      return;
     }
+    this.checkpoints.push(0);
+    let lines = 0;
+    for (let offset = 0; offset < data.length; offset += 1) {
+      if (data[offset] !== LF) continue;
+      lines += 1;
+      const next = offset + 1;
+      if (next < data.length && lines % LineIndex.STRIDE === 0) {
+        this.checkpoints.push(next);
+      }
+    }
+    this.count = lines + (data[data.length - 1] === LF ? 0 : 1);
   }
 
   get lineCount(): number {
-    return this.starts.length;
+    return this.count;
   }
 
   /** Line content without its terminating LF. */
   lineBytes(ordinal: number): Uint8Array {
     if (ordinal < 1 || ordinal > this.lineCount) throw new RangeError("line out of range");
-    return this.data.subarray(this.starts[ordinal - 1] as number, this.ends[ordinal - 1] as number);
+    const start = this.lineStart(ordinal);
+    const newline = this.data.indexOf(LF, start);
+    return this.data.subarray(start, newline === -1 ? this.data.length : newline);
   }
 
   lineText(ordinal: number): string {
@@ -84,11 +89,33 @@ export class LineIndex {
     if (start < 1 || end < start || end > this.lineCount) {
       throw new RangeError("line range out of range");
     }
-    return this.data.subarray(this.starts[start - 1] as number, this.ends[end - 1] as number);
+    const rangeStart = this.lineStart(start);
+    let rangeEnd = rangeStart;
+    for (let ordinal = start; ordinal <= end; ordinal += 1) {
+      const newline = this.data.indexOf(LF, rangeEnd);
+      if (newline === -1) {
+        rangeEnd = this.data.length;
+        break;
+      }
+      rangeEnd = ordinal === end ? newline : newline + 1;
+    }
+    return this.data.subarray(rangeStart, rangeEnd);
   }
 
   rangeText(start: number, end: number): string {
     return decodeStrict(this.rangeBytes(start, end));
+  }
+
+  private lineStart(ordinal: number): number {
+    const block = Math.floor((ordinal - 1) / LineIndex.STRIDE);
+    const baseOrdinal = block * LineIndex.STRIDE + 1;
+    let offset = this.checkpoints[block] as number;
+    for (let current = baseOrdinal; current < ordinal; current += 1) {
+      const newline = this.data.indexOf(LF, offset);
+      if (newline === -1) throw new RangeError("line out of range");
+      offset = newline + 1;
+    }
+    return offset;
   }
 }
 

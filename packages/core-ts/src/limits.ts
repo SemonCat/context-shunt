@@ -147,8 +147,14 @@ export function narrowLimits(limits: Limits, overrides: Partial<Record<keyof Lim
     if (typeof current !== "number" || typeof value !== "number") {
       throw new Error(`limit is not numeric: ${key}`);
     }
+    if (!Number.isSafeInteger(value)) throw new Error(`limit is not a safe integer: ${key}`);
     if (value > current) throw new Error(`limit ${key} may only be narrowed (max ${current})`);
     if (value < 0) throw new Error(`limit ${key} may not be negative`);
+    if (
+      value === 0
+      && ["bytesPerTokenEstimate", "maxChunkBytes", "maxChunkTokens", "maxConcurrentModelCalls"]
+        .includes(key)
+    ) throw new Error(`limit ${key} must be positive`);
     next[key] = value;
   }
   return Object.freeze(next) as unknown as Limits;

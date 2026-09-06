@@ -97,7 +97,9 @@ def test_request_deadline_stops_remaining_chunks_and_reports_partial():
     provider = ClockProvider(clock, 25000, answer_json("", []))
     reader = Reader(registry, provider, clock=clock)
     env = reader.answer("sess", _request(entry))
-    assert provider.calls <= 3, "work stopped once the budget was spent"
+    # Two workers can both start a second round at fake time 50s, while 10s remains.
+    # Their late results are discarded; no third round may start after the 60s check.
+    assert provider.calls <= 2 * L.max_concurrent_model_calls
     assert env["status"] in ("partial", "error")
     if env["status"] == "partial":
         assert any(o["reason"] == "TIMEOUT" for o in env["coverage"]["omitted"])

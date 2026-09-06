@@ -1,6 +1,8 @@
-# Implementation plan for Opus
+# Historical implementation plan
 
-依 [architecture.md](architecture.md) 實作；本文不重開架構決策。v1 read-only，reader 固定 `gpt-5.6-luna`，Suma post-tool mode 預設停用，writer 不實作。以下命令是實作時必須建立的驗收介面，目前尚不存在。
+這是最初的工作分解，不是目前完成狀態；保留未勾選方框供歷史對照。實際能力與最新驗證結果分別以 [capability-matrix.md](capability-matrix.md) 和 `./scripts/verify` 的 release-commit report 為準。下列驗收命令目前已存在。
+
+依 [architecture.md](architecture.md) 實作；本文不重開架構決策。v1 read-only，reader 固定 `gpt-5.6-luna`，Suma post-tool mode 預設停用，writer 不實作。
 
 逐項完成後記錄變更、執行命令與結果；失敗先修復，不能標記完成。順序為 shared core → Hermes → OpenClaw → tests/evals → packaging。每項保留小幅可驗證變更，不建立遠端或 push。
 

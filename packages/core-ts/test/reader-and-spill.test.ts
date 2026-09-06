@@ -342,10 +342,42 @@ describe("suma spill conformance", () => {
     }
   });
 
+  it("contains hostile serialization and store exceptions without leaking them", () => {
+    const secret = "SENTINEL-SPILL-EXCEPTION-31dce2";
+
+    const serializationRegistry = new SourceRegistry();
+    const hostile = new Proxy({}, {
+      get() {
+        throw new Error(secret);
+      },
+    });
+    const serializationOutcome = new SumaSpillEngine(
+      new SpillStore(join(tmp(), "cache")),
+      serializationRegistry,
+      undefined,
+      true,
+    ).evaluate("sess", "req_s", hostile);
+    expect(serializationOutcome).toMatchObject({ action: "error", code: "SPILL_FAILED" });
+    expect(JSON.stringify(serializationOutcome)).not.toContain(secret);
+    expect(serializationRegistry.count("sess")).toBe(0);
+
+    const storeRegistry = new SourceRegistry();
+    const store = new SpillStore(join(tmp(), "cache"));
+    store.write = () => {
+      throw new Error(secret);
+    };
+    const storeOutcome = new SumaSpillEngine(store, storeRegistry, undefined, true)
+      .evaluate("sess", "req_s", "x".repeat(40_000));
+    expect(storeOutcome).toMatchObject({ action: "error", code: "SPILL_FAILED" });
+    expect(JSON.stringify(storeOutcome)).not.toContain(secret);
+    expect(storeRegistry.count("sess")).toBe(0);
+  });
+
   it("writes private files and enforces the session quota", () => {
     const store = new SpillStore(join(tmp(), "cache"));
-    expect(statSync(store.root).mode & 0o777).toBe(0o700);
+    expect(() => statSync(store.root)).toThrow();
     const written = store.write("sess", enc("payload bytes"));
+    expect(statSync(store.root).mode & 0o777).toBe(0o700);
     expect(statSync(written).mode & 0o777).toBe(0o600);
     expect(readdirSync(store.root).length).toBe(1);
     store.seedUsage("sess", L.sessionSpillQuotaBytes);

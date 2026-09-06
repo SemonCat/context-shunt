@@ -10,12 +10,14 @@ falling back to whatever it was given.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .envelope import build, serialized_bytes
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, SCHEMA_VERSION, Limits, legal_pair
 from .paths import contains_secret_marker
+from .schema import validate_envelope
 
 _ALLOWED_KEYS = frozenset(
     {
@@ -39,16 +41,22 @@ class OutputGuardError(Exception):
     """Raised only inside the guard; adapters convert it to the fixed error envelope."""
 
 
+_SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
+
+
 def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]:
     """The smallest legal envelope. Used when nothing else can be trusted."""
     safe_id = (
-        request_id if isinstance(request_id, str) and request_id[:64].strip() else "req_unknown"
+        request_id
+        if isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id)
+        else "req_unknown"
     )
+    safe_code = code if legal_pair("error", code) else "LIMIT_EXCEEDED"
     return {
         "schema_version": SCHEMA_VERSION,
-        "request_id": safe_id[:64],
+        "request_id": safe_id,
         "status": "error",
-        "code": code,
+        "code": safe_code,
         "answer": "",
         "citations": [],
         "coverage": {
@@ -102,10 +110,18 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
     if status != "ok" and coverage.get("complete") is True:
         raise OutputGuardError("non-ok result claims complete coverage")
 
-    for source in envelope.get("sources", []):
+    sources = envelope.get("sources")
+    if not isinstance(sources, list):
+        raise OutputGuardError("sources missing")
+    for source in sources:
         if not isinstance(source, dict) or set(source) - _ALLOWED_SOURCE_KEYS:
             raise OutputGuardError("source handle carries an unexpected field")
-        if int(source.get("bytes", 0)) > limits.max_source_bytes:
+        source_bytes = source.get("bytes")
+        if (
+            type(source_bytes) is not int
+            or source_bytes < 0
+            or source_bytes > limits.max_source_bytes
+        ):
             raise OutputGuardError("source bytes over cap")
 
     if code == "SPILLED" and (answer or citations):
@@ -113,6 +129,8 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
 
     if serialized_bytes(envelope) > limits.max_envelope_bytes:
         raise OutputGuardError("envelope over byte cap")
+    if not validate_envelope(envelope):
+        raise OutputGuardError("envelope schema violation")
     return envelope
 
 

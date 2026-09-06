@@ -9,6 +9,9 @@ pinned to `gpt-5.6-luna`, the optional Suma post-tool mode off, and no writer ke
 Replace `/path/to/your/project` with the roots you actually want readable. Nothing outside
 a configured root can become a source.
 
+Keep each host's adjacent per-plugin LLM policy from the example. It authorizes only the
+fixed reader model; it is deliberately outside the plugin-owned `config` object.
+
 Caps in `limits` may only be **narrowed**. A value wider than the contract default in
 [`contracts/v1/limits.json`](../../contracts/v1/limits.json) is refused when the plugin
 loads, so a config file cannot widen the boundary the acceptance gates measure.

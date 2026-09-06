@@ -33,8 +33,10 @@ v1 is read-only. It never modifies a source.
   that can't be shown bounded gets `UNCLASSIFIABLE_READ`. `head -n 100 /abs/path`,
   `sed -n '10,60p' /abs/path`, `grep -m 20 pat /abs/path` and `wc -l /abs/path` pass.
   `npm test` and `git status` are none of its business.
-- **Answers questions instead.** Every reader call carries your question verbatim to
-  `gpt-5.6-luna` — one call per chunk, at most two at a time, at most one retry.
+- **Answers questions instead.** Every reader request issued by either core carries your
+  question verbatim and requests `gpt-5.6-luna` — one call per chunk, at most two at a
+  time, at most one core retry. Host-routing proof is tracked separately in the
+  capability matrix.
 - **Verifies every citation mechanically.** The verifier re-reads the immutable snapshot
   and checks the handle, the full SHA-256, the range and the exact quote. A claim whose
   citation fails is deleted from the answer; an answer with nothing left becomes
@@ -60,7 +62,7 @@ both is in [`examples/config/`](examples/config/).
 | Mode | Hermes | OpenClaw | Default |
 | --- | --- | --- | --- |
 | Local pre-read gate | supported | supported | on |
-| Question-driven reader (`gpt-5.6-luna` only) | supported | supported | on |
+| Question-driven reader (`gpt-5.6-luna` only) | **release proof pending** | supported | on |
 | Suma oversized-result spill/pointer | **unsupported** | **unsupported** | off |
 | Writer / `propose_patch` | not in v1 | not in v1 | refused at load |
 
@@ -74,6 +76,11 @@ The spill engine itself is implemented and passing — oversized strings, object
 and content blocks all spill to a private pointer with zero model calls and no
 summarization. The engine is not the blocker; host enablement is.
 [`docs/capability-matrix.md`](docs/capability-matrix.md) has the file-and-line evidence.
+
+The Hermes 0.18.2 adapter demonstrably requests Luna through `PluginLlm`, but that host
+facade owns auxiliary retries and provider fallback internally. The current integration
+does not prove every upstream attempt remains on Luna, so the fixed Luna-only release
+requirement remains blocked pending host-routing provenance.
 
 ## Verifying
 

@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -55,8 +56,6 @@ class SpillStore:
         self._limits = limits
         self._lock = threading.RLock()
         self._used_by_session: dict[str, int] = {}
-        self._root.mkdir(parents=True, exist_ok=True)
-        os.chmod(self._root, _DIR_MODE)
 
     @property
     def root(self) -> Path:
@@ -71,10 +70,14 @@ class SpillStore:
             self._used_by_session[session_id] = used
 
     def _session_dir(self, session_id: str) -> Path:
+        self._root.mkdir(parents=True, exist_ok=True)
+        _assert_private_directory(self._root)
         safe = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
         path = self._root / safe
         path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, _DIR_MODE)
+        _assert_private_directory(path)
+        if path.resolve(strict=True).parent != self._root.resolve(strict=True):
+            raise ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", retryable=False)
         return path
 
     def write(self, session_id: str, data: bytes) -> Path:
@@ -83,44 +86,70 @@ class SpillStore:
             used = self._used_by_session.get(session_id, 0)
             if used + len(data) > self._limits.session_spill_quota_bytes:
                 raise ShuntError("SPILL_FAILED", "QUOTA_EXCEEDED", retryable=False)
-        directory = self._session_dir(session_id)
-        digest = hashlib.sha256(data).hexdigest()
-        final = directory / f"{digest}.spill"
-        tmp_fd, tmp_name = tempfile.mkstemp(dir=directory, suffix=".part")
-        try:
-            with os.fdopen(tmp_fd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.chmod(tmp_name, _FILE_MODE)
-            os.replace(tmp_name, final)
-        except OSError:
-            _unlink_quiet(Path(tmp_name))
-            raise ShuntError("SPILL_FAILED", "WRITE_FAILED", retryable=False) from None
-        try:
-            readback = final.read_bytes()
-        except OSError:
-            _unlink_quiet(final)
-            raise ShuntError("SPILL_FAILED", "READBACK_FAILED", retryable=False) from None
-        if hashlib.sha256(readback).hexdigest() != digest:
-            _unlink_quiet(final)
-            raise ShuntError("SPILL_FAILED", "READBACK_MISMATCH", retryable=False)
-        with self._lock:
-            self._used_by_session[session_id] = self.used_bytes(session_id) + len(data)
-        return final
+            tmp_name: str | None = None
+            try:
+                directory = self._session_dir(session_id)
+                digest = hashlib.sha256(data).hexdigest()
+                final = directory / f"{digest}.spill"
+                tmp_fd, tmp_name = tempfile.mkstemp(dir=directory, suffix=".part")
+                with os.fdopen(tmp_fd, "wb") as fh:
+                    fh.write(data)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp_name, _FILE_MODE)
+                os.replace(tmp_name, final)
+            except (OSError, NotImplementedError):
+                if tmp_name is not None:
+                    _unlink_quiet(Path(tmp_name))
+                raise ShuntError("SPILL_FAILED", "WRITE_FAILED", retryable=False) from None
+            try:
+                readback = final.read_bytes()
+            except OSError:
+                _unlink_quiet(final)
+                raise ShuntError("SPILL_FAILED", "READBACK_FAILED", retryable=False) from None
+            if hashlib.sha256(readback).hexdigest() != digest:
+                _unlink_quiet(final)
+                raise ShuntError("SPILL_FAILED", "READBACK_MISMATCH", retryable=False)
+            self._used_by_session[session_id] = used + len(data)
+            return final
 
     def purge_session(self, session_id: str) -> int:
         """Remove a session's artifacts. This is deletion, not secure erasure."""
-        directory = self._root / hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
-        removed = 0
-        if directory.exists():
-            for child in directory.iterdir():
-                _unlink_quiet(child)
-                removed += 1
-            with contextlib.suppress(OSError):
-                # A concurrent write may repopulate it; the TTL sweep gets it next.
-                directory.rmdir()
         with self._lock:
+            directory = self._root / hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+            removed = 0
+            try:
+                root_stat = self._root.lstat()
+            except OSError:
+                self._used_by_session.pop(session_id, None)
+                return 0
+            if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+                self._used_by_session.pop(session_id, None)
+                return 0
+            try:
+                directory_stat = directory.lstat()
+            except OSError:
+                self._used_by_session.pop(session_id, None)
+                return 0
+            if stat.S_ISLNK(directory_stat.st_mode):
+                _unlink_quiet(directory)
+                removed = 1
+            elif stat.S_ISDIR(directory_stat.st_mode):
+                try:
+                    children = list(directory.iterdir())
+                except OSError:
+                    children = []
+                for child in children:
+                    try:
+                        child_stat = child.lstat()
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(child_stat.st_mode) or stat.S_ISLNK(child_stat.st_mode):
+                        _unlink_quiet(child)
+                        removed += 1
+                with contextlib.suppress(OSError):
+                    # A concurrent write may repopulate it; a later teardown gets it.
+                    directory.rmdir()
             self._used_by_session.pop(session_id, None)
         return removed
 
@@ -128,6 +157,19 @@ class SpillStore:
 def _unlink_quiet(path: Path) -> None:
     with contextlib.suppress(OSError):
         path.unlink()
+
+
+def _assert_private_directory(path: Path) -> None:
+    try:
+        path_stat = path.lstat()
+    except (OSError, NotImplementedError):
+        raise ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", retryable=False) from None
+    if not stat.S_ISDIR(path_stat.st_mode) or stat.S_ISLNK(path_stat.st_mode):
+        raise ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", retryable=False)
+    try:
+        os.chmod(path, _DIR_MODE, follow_symlinks=False)
+    except (OSError, NotImplementedError):
+        raise ShuntError("SPILL_FAILED", "PERMISSION_FAILED", retryable=False) from None
 
 
 class SumaSpillEngine:
@@ -159,6 +201,8 @@ class SumaSpillEngine:
         internal_source_id: str | None = None,
     ) -> SpillOutcome:
         """Decide what a host should do with one complete tool result."""
+        if not self._enabled:
+            return SpillOutcome(action="passthrough")
         if internal_source_id and self._registry.is_internal(session_id, internal_source_id):
             # Registry-verified internal envelope: never spill our own pointer again.
             return SpillOutcome(action="passthrough")
@@ -169,6 +213,13 @@ class SumaSpillEngine:
                 action="blocked" if exc.code == "BINARY_UNSUPPORTED" else "error",
                 envelope=E.error_envelope(request_id, exc),
                 code=exc.code,
+            )
+        except Exception:
+            safe = ShuntError("SPILL_FAILED", "SERIALIZE_FAILED", retryable=False)
+            return SpillOutcome(
+                action="error",
+                envelope=E.error_envelope(request_id, safe),
+                code=safe.code,
             )
 
         size = len(serialized)
@@ -184,9 +235,15 @@ class SumaSpillEngine:
             return SpillOutcome(action="passthrough", bytes_measured=size)
 
         try:
-            self._store.write(session_id, serialized)
-            snapshot = snapshot_bytes(serialized, media_type_hint="text/plain")
+            # Validate before persistence so a binary/secret/invalid payload cannot leave
+            # an orphaned raw artifact after the operation is rejected.
+            snapshot = snapshot_bytes(serialized, media_type_hint="text/plain", limits=self._limits)
             entry = self._registry.register(session_id, snapshot, internal=True)
+            try:
+                self._store.write(session_id, serialized)
+            except Exception:
+                self._registry.remove(session_id, entry.source_id)
+                raise
         except ShuntError as exc:
             code = exc.code if exc.code in ("SPILL_FAILED", "UNSAFE_SOURCE") else "SPILL_FAILED"
             safe = ShuntError(code, exc.detail, retryable=False)
@@ -194,6 +251,14 @@ class SumaSpillEngine:
                 action="error",
                 envelope=E.error_envelope(request_id, safe),
                 code=code,
+                bytes_measured=size,
+            )
+        except Exception:
+            safe = ShuntError("SPILL_FAILED", "WRITE_FAILED", retryable=False)
+            return SpillOutcome(
+                action="error",
+                envelope=E.error_envelope(request_id, safe),
+                code=safe.code,
                 bytes_measured=size,
             )
 
@@ -247,20 +312,12 @@ class SumaSpillEngine:
 
 
 def _content_blocks(result: Any) -> list[dict] | None:
-    if (
-        isinstance(result, list)
-        and result
-        and all(isinstance(b, dict) and "type" in b for b in result)
-    ):
-        return result
     if isinstance(result, dict):
         blocks = result.get("content")
-        if (
-            isinstance(blocks, list)
-            and blocks
-            and all(isinstance(b, dict) and "type" in b for b in blocks)
-        ):
+        if isinstance(blocks, list):
             return blocks
+    if isinstance(result, list) and any(isinstance(b, dict) and "type" in b for b in result):
+        return result
     return None
 
 

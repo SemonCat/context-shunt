@@ -1,14 +1,14 @@
 /**
  * OpenClaw plugin entry point for context-shunt.
  *
- * Wiring (verified against the OpenClaw plugin SDK, host 2026.9.x):
+ * Wiring (verified against the OpenClaw plugin SDK, host 2026.9.2):
  *
- * - `api.on("before_tool_call", handler, { matcher })` runs before the tool executes and a
- *   deny decision short-circuits it. That is what makes the large-read gate a
+ * - `api.on("before_tool_call", handler)` runs before the tool executes and a
+ *   `{ block: true }` result short-circuits it. That is what makes the large-read gate a
  *   pre-execution gate: a blocked read never runs. The host fails this hook closed on
  *   timeout, which matches what the gate needs.
- * - The runtime model bridge is pinned to `gpt-5.6-luna`. If the host cannot serve that
- *   model the reader reports `MODEL_ERROR` rather than answering with a substitute.
+ * - `api.runtime.llm.complete` runs a literal-zero-tool isolated completion pinned to
+ *   `openai/gpt-5.6-luna`. If the host cannot serve it, the reader reports `MODEL_ERROR`.
  * - `api.registerTool` exposes the read-only reader. No writer tool is registered.
  *
  * The optional Suma post-tool mode is deliberately not wired: see `src/capability.ts` for
@@ -44,20 +44,38 @@ export const PLUGIN_ID = "context-shunt";
 
 /** The subset of the host plugin API this adapter uses. */
 export interface OpenClawPluginApi {
-  on(hook: string, handler: (event: any, ctx?: any) => unknown, opts?: Record<string, unknown>): void;
-  registerTool?(tool: Record<string, unknown>, opts?: Record<string, unknown>): void;
+  on(
+    hook: string,
+    handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => unknown,
+    opts?: Record<string, unknown>,
+  ): void;
+  registerTool?(
+    tool:
+      | Record<string, unknown>
+      | ((ctx: Record<string, unknown>) => Record<string, unknown> | null | undefined),
+    opts?: { name?: string; names?: string[]; optional?: boolean },
+  ): void;
   pluginConfig?: Record<string, unknown>;
   logger?: { info(msg: string, ...rest: unknown[]): void; warn?(msg: string, ...rest: unknown[]): void };
-  hostVersion?: string;
-  availableHooks?: readonly string[];
-  llm?: {
-    complete(opts: {
-      messages: Array<{ role: string; content: string }>;
-      model: string;
-      maxTokens?: number;
-      temperature?: number;
-      timeoutMs?: number;
-    }): Promise<{ text?: string; model?: string; usage?: { inputTokens?: number; outputTokens?: number } }>;
+  runtime?: {
+    version?: string;
+    llm?: {
+      complete(opts: {
+        messages: [{ role: "user"; content: string }];
+        systemPrompt: string;
+        model: string;
+        maxTokens?: number;
+        temperature?: number;
+        signal?: AbortSignal | undefined;
+        purpose?: string;
+        execution: { mode: "isolated-agent-runtime"; timeoutMs: number };
+      }): Promise<{
+        text?: string;
+        provider?: string;
+        model?: string;
+        usage?: { inputTokens?: number; outputTokens?: number };
+      }>;
+    };
   };
 }
 
@@ -100,19 +118,16 @@ export class ContextShuntPlugin {
 
   constructor(
     private readonly api: OpenClawPluginApi,
-    opts: { defaultRoot?: string; defaultCacheDir?: string } = {},
+    opts: { defaultCacheDir?: string } = {},
   ) {
     const raw = { ...(api.pluginConfig ?? {}) } as Record<string, unknown>;
-    if (!Array.isArray(raw["workspace_roots"]) || (raw["workspace_roots"] as unknown[]).length === 0) {
-      raw["workspace_roots"] = [opts.defaultRoot ?? process.cwd()];
-    }
     const cacheDir =
       opts.defaultCacheDir ?? process.env["CONTEXT_SHUNT_CACHE"] ?? join(homedir(), ".cache", "context-shunt");
     this.config = loadConfig(raw as never, cacheDir);
     this.capability = buildCapabilityReport({
-      hooks: api.availableHooks ?? DEFAULT_HOOKS,
-      hasModelBridge: typeof api.llm?.complete === "function",
-      hostVersion: api.hostVersion ?? "",
+      hooks: DEFAULT_HOOKS,
+      hasModelBridge: typeof api.runtime?.llm?.complete === "function",
+      hostVersion: api.runtime?.version ?? "",
     });
   }
 
@@ -123,7 +138,7 @@ export class ContextShuntPlugin {
     }
     this.api.on("session_end", (event) => this.onSessionEnd(event));
     if (modeEnabled(this.capability, "reader") && typeof this.api.registerTool === "function") {
-      this.api.registerTool(this.readerTool());
+      this.api.registerTool((ctx) => this.readerTool(ctx), { name: READER_TOOL_NAME });
     }
     this.api.logger?.info(
       `context-shunt capability report: ${JSON.stringify(reportToJson(this.capability))}`,
@@ -131,45 +146,53 @@ export class ContextShuntPlugin {
   }
 
   /** Veto an oversized or unprovable read before the tool runs. */
-  onBeforeToolCall(event: any, ctx?: any): { decision: "deny"; reason: string } | undefined {
+  onBeforeToolCall(
+    event: Record<string, unknown>,
+    ctx?: Record<string, unknown>,
+  ): { block: true; blockReason: string } | undefined {
     if (!this.config.gateEnabled) return undefined;
-    const { tool, args } = normalizeToolCall(String(event?.toolName ?? ""), event?.params);
+    const params = event?.params;
+    const { tool, args } = normalizeToolCall(
+      String(event?.toolName ?? ""),
+      typeof params === "object" && params !== null
+        ? params as Record<string, unknown>
+        : undefined,
+    );
     if (tool === "other") return undefined;
-    const session = this.session(String(ctx?.sessionKey ?? event?.sessionKey ?? "default"));
+    const session = this.session(sessionIdOf(ctx, event));
     let decision: GateDecision;
     try {
       decision = session.evaluateToolCall(tool, args);
-    } catch (err) {
-      if (!isShuntError(err)) throw err;
+    } catch {
       // Fail closed for a read-like call we could not evaluate.
-      return { decision: "deny", reason: serialize(session.blockEnvelope(requestIdFrom(event?.toolCallId), {
+      return { block: true, blockReason: serialize(session.blockEnvelope(requestIdFrom(event?.toolCallId), {
         decision: "blocked", form: "unclassifiable", code: "HOST_UNSAFE", reason: "GATE_ERROR",
       })) };
     }
     if (decision.decision !== "blocked") return undefined;
     const envelope = session.blockEnvelope(requestIdFrom(event?.toolCallId), decision);
-    return { decision: "deny", reason: serialize(envelope) };
+    return { block: true, blockReason: serialize(envelope) };
   }
 
   /**
    * The registered tool object. `execute(toolCallId, params)` is the host's shape, and the
    * bounded envelope is returned as a single text content block.
    */
-  readerTool(): Record<string, unknown> {
+  readerTool(toolContext: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       name: READER_TOOL_NAME,
       description: READER_TOOL_DESCRIPTION,
       parameters: READER_TOOL_PARAMETERS,
-      execute: async (toolCallId: string, params: unknown) => {
-        const text = await this.onReaderTool(params, { toolCallId });
+      execute: async (toolCallId: string, params: unknown, signal?: AbortSignal) => {
+        const text = await this.onReaderTool(params, { ...toolContext, toolCallId, signal });
         return { content: [{ type: "text", text }] };
       },
     };
   }
 
   /** Answer a question about registered sources. Read-only. */
-  async onReaderTool(input: any, ctx?: any): Promise<string> {
-    const session = this.session(String(ctx?.sessionKey ?? "default"));
+  async onReaderTool(input: any, ctx?: Record<string, unknown>): Promise<string> {
+    const session = this.session(sessionIdOf(ctx));
     const requestId = requestIdFrom(ctx?.toolCallId ?? "reader");
     const paths: string[] = Array.isArray(input?.paths)
       ? input.paths.map(String)
@@ -203,12 +226,12 @@ export class ContextShuntPlugin {
         max_answer_bytes: this.config.limits.maxAnswerBytes,
         deadline_ms: this.config.limits.requestDeadlineMs,
       },
-    });
+    }, ctx?.["signal"] instanceof AbortSignal ? ctx["signal"] : undefined);
     return serialize(envelope);
   }
 
-  onSessionEnd(event: any): void {
-    const key = String(event?.sessionKey ?? "default");
+  onSessionEnd(event: Record<string, unknown>): void {
+    const key = sessionIdOf(undefined, event);
     const session = this.sessions.get(key);
     if (session) {
       session.close();
@@ -230,23 +253,26 @@ export class ContextShuntPlugin {
   }
 
   private provider(): LunaProvider {
-    const llm = this.api.llm;
+    const llm = this.api.runtime?.llm;
     if (!llm || typeof llm.complete !== "function") {
       return new UnavailableProvider("HOST_LLM_UNAVAILABLE");
     }
-    return new HostBridgeProvider(async ({ system, user, model, maxOutputTokens, timeoutMs }) => {
+    return new HostBridgeProvider(async ({ system, user, model, maxOutputTokens, timeoutMs, signal }) => {
       // The host owns credentials and routing; provider exception text is dropped by
       // HostBridgeProvider so only MODEL_ERROR crosses back.
       const result = await llm.complete({
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        model,
+        messages: [{ role: "user", content: user }],
+        systemPrompt: system,
+        model: `openai/${model}`,
         maxTokens: maxOutputTokens,
         temperature: 0,
-        timeoutMs,
+        signal,
+        purpose: "context-shunt-reader",
+        execution: { mode: "isolated-agent-runtime", timeoutMs },
       });
+      if (result.provider !== "openai") {
+        throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
+      }
       return {
         text: result.text ?? "",
         model: result.model ?? "",
@@ -255,6 +281,16 @@ export class ContextShuntPlugin {
       };
     }, this.config.limits, READER_MODEL);
   }
+}
+
+function sessionIdOf(
+  ctx?: Record<string, unknown>,
+  event?: Record<string, unknown>,
+): string {
+  for (const candidate of [ctx?.["sessionId"], event?.["sessionId"], ctx?.["sessionKey"], event?.["sessionKey"]]) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  return "unbound";
 }
 
 function serialize(envelope: Envelope | Record<string, unknown>): string {

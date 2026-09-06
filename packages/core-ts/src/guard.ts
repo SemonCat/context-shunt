@@ -10,6 +10,7 @@
 import { SCHEMA_VERSION, DEFAULT_LIMITS, Limits, legalPair } from "./limits.js";
 import { Envelope, serializedBytes } from "./envelope.js";
 import { containsSecretMarker } from "./snapshot.js";
+import { validateEnvelope } from "./schema.js";
 import { utf8Length } from "./textindex.js";
 
 const ALLOWED_KEYS = new Set([
@@ -22,14 +23,19 @@ const ALLOWED_SOURCE_KEYS = new Set([
 
 export class OutputGuardError extends Error {}
 
+const SAFE_REQUEST_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
+
 /** The smallest legal envelope. Used when nothing else can be trusted. */
 export function fixedError(requestId: string, code = "LIMIT_EXCEEDED"): Envelope {
-  const safe = typeof requestId === "string" && requestId.trim().length > 0 ? requestId.slice(0, 64) : "req_unknown";
+  const safe = typeof requestId === "string" && SAFE_REQUEST_ID.test(requestId)
+    ? requestId
+    : "req_unknown";
+  const safeCode = legalPair("error", code) ? code : "LIMIT_EXCEEDED";
   return {
     schema_version: SCHEMA_VERSION,
     request_id: safe,
     status: "error",
-    code,
+    code: safeCode,
     answer: "",
     citations: [],
     coverage: {
@@ -93,7 +99,7 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
       }
     }
     const bytes = (source as Record<string, unknown>)["bytes"];
-    if (typeof bytes === "number" && bytes > limits.maxSourceBytes) {
+    if (!Number.isSafeInteger(bytes) || Number(bytes) < 0 || Number(bytes) > limits.maxSourceBytes) {
       throw new OutputGuardError("source bytes over cap");
     }
   }
@@ -104,6 +110,7 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
   if (serializedBytes(env) > limits.maxEnvelopeBytes) {
     throw new OutputGuardError("envelope over byte cap");
   }
+  if (!validateEnvelope(env)) throw new OutputGuardError("envelope schema violation");
   return env as unknown as Envelope;
 }
 

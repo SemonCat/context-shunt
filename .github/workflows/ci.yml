@@ -14,7 +14,8 @@ permissions:
 
 jobs:
   deterministic:
-    # Every gate here runs from the repository alone: no host, no provider, no network.
+    # Gates need no live host, model provider, credentials, or service calls. Dependency
+    # installation still uses the configured Python/npm package registries.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
           ./.venv/bin/pip install -e 'packages/core-py[dev]'
 
       - name: Install Node workspaces
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Vendored contracts match contracts/v1
         run: ./scripts/sync-contracts --check

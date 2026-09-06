@@ -40,18 +40,10 @@ export const ADAPTER_VERSION = "1.0.0";
  */
 export const READ_TOOLS: Record<string, "read"> = {
   read: "read",
-  read_file: "read",
-  fs_read: "read",
 };
-export const SEARCH_TOOLS: Record<string, "search"> = {
-  grep: "search",
-  search: "search",
-  fs_search: "search",
-};
+export const SEARCH_TOOLS: Record<string, "search"> = {};
 export const SHELL_TOOLS: Record<string, "shell"> = {
   exec: "shell",
-  bash: "shell",
-  shell: "shell",
 };
 
 export const SUMA_EVIDENCE: readonly string[] = [

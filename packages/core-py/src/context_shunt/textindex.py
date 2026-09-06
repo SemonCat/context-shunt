@@ -11,6 +11,7 @@ as soon as the answer can no longer change the gate decision.
 
 from __future__ import annotations
 
+from array import array
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -75,37 +76,40 @@ class LineIndex:
     drift every downstream byte offset and therefore every citation.
     """
 
-    __slots__ = ("_data", "_starts", "_ends")
+    __slots__ = ("_checkpoints", "_data", "_line_count")
+
+    _STRIDE = 64
 
     def __init__(self, data: bytes):
         self._data = data
-        starts: list[int] = []
-        ends: list[int] = []
-        if data:
-            pos = 0
-            n = len(data)
-            while pos < n:
-                nl = data.find(_LF, pos)
-                if nl == -1:
-                    starts.append(pos)
-                    ends.append(n)
-                    break
-                starts.append(pos)
-                ends.append(nl)
-                pos = nl + 1
-        self._starts = tuple(starts)
-        self._ends = tuple(ends)
+        checkpoints = array("I")
+        if not data:
+            self._checkpoints = checkpoints
+            self._line_count = 0
+            return
+        checkpoints.append(0)
+        lines = 0
+        position = data.find(_LF)
+        while position != -1:
+            lines += 1
+            next_start = position + 1
+            if next_start < len(data) and lines % self._STRIDE == 0:
+                checkpoints.append(next_start)
+            position = data.find(_LF, next_start)
+        self._checkpoints = checkpoints
+        self._line_count = lines + (0 if data.endswith(b"\n") else 1)
 
     @property
     def line_count(self) -> int:
-        return len(self._starts)
+        return self._line_count
 
     def line_bytes(self, ordinal: int) -> bytes:
         """Line content without its terminating LF. ``ordinal`` is 1-based."""
         if ordinal < 1 or ordinal > self.line_count:
             raise IndexError("line out of range")
-        i = ordinal - 1
-        return self._data[self._starts[i] : self._ends[i]]
+        start = self._line_start(ordinal)
+        end = self._data.find(_LF, start)
+        return self._data[start : len(self._data) if end == -1 else end]
 
     def line_text(self, ordinal: int) -> str:
         return self.line_bytes(ordinal).decode("utf-8", errors="strict")
@@ -113,7 +117,26 @@ class LineIndex:
     def range_bytes(self, start: int, end: int) -> bytes:
         if start < 1 or end < start or end > self.line_count:
             raise IndexError("line range out of range")
-        return self._data[self._starts[start - 1] : self._ends[end - 1]]
+        range_start = self._line_start(start)
+        range_end = range_start
+        for ordinal in range(start, end + 1):
+            newline = self._data.find(_LF, range_end)
+            if newline == -1:
+                range_end = len(self._data)
+                break
+            range_end = newline if ordinal == end else newline + 1
+        return self._data[range_start:range_end]
 
     def range_text(self, start: int, end: int) -> str:
         return self.range_bytes(start, end).decode("utf-8", errors="strict")
+
+    def _line_start(self, ordinal: int) -> int:
+        block = (ordinal - 1) // self._STRIDE
+        base_ordinal = block * self._STRIDE + 1
+        offset = self._checkpoints[block]
+        for _current in range(base_ordinal, ordinal):
+            newline = self._data.find(_LF, offset)
+            if newline == -1:
+                raise IndexError("line out of range")
+            offset = newline + 1
+        return offset

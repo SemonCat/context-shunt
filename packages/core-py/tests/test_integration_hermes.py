@@ -53,97 +53,126 @@ pytestmark = [
 # Runs inside the host interpreter so the hook registry, the tool dispatcher and the
 # plugin context are all the host's own. Output is a single JSON line.
 HOST_SCRIPT = r"""
-import json, os, sys, tempfile, pathlib
+import importlib.util, json, os, pathlib, sys, tempfile, re
+from types import SimpleNamespace
 
 sys.path.insert(0, os.environ["HERMES_ROOT"])
 sys.path.insert(0, os.environ["SHUNT_CORE"])
 sys.path.insert(0, os.environ["SHUNT_ADAPTER"])
 
-out = {"host_import": False, "hook_names": [], "registered": [], "blocked": None,
-       "allowed": None, "tool_invocations": 0, "errors": []}
+out = {"host_import": False, "hook_names": [], "registered_hooks": [],
+       "registered_tools": [], "tool_invocations": 0, "errors": [], "model_calls": []}
 
 try:
     from hermes_cli import plugins as host_plugins
+    from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
+    from agent.plugin_llm import _TrustPolicy, make_plugin_llm_for_test
+    from tools.registry import registry
+    import model_tools
     out["host_import"] = True
-    out["hook_names"] = sorted(getattr(host_plugins, "VALID_HOOKS", []))
+    out["hook_names"] = sorted(host_plugins.VALID_HOOKS)
 except Exception as exc:
-    out["errors"].append(f"hermes_cli.plugins import failed: {type(exc).__name__}")
+    out["errors"].append(f"host import failed: {type(exc).__name__}")
     print(json.dumps(out)); sys.exit(0)
 
-import importlib.util
 spec = importlib.util.spec_from_file_location(
     "context_shunt_hermes", os.path.join(os.environ["SHUNT_ADAPTER"], "__init__.py")
 )
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
 
-workspace = pathlib.Path(tempfile.mkdtemp())
-(workspace / "ws").mkdir()
-big = workspace / "ws" / "big.txt"
+temp = pathlib.Path(tempfile.mkdtemp(prefix="context-shunt-hermes-host-"))
+workspace = temp / "workspace"
+workspace.mkdir()
+big = workspace / "big.txt"
 big.write_text("".join("line %d\n" % i for i in range(400)))
-small = workspace / "ws" / "small.txt"
+small = workspace / "small.txt"
 small.write_text("max_retries = 3\n")
 
+# Exercise the adapter's real config lookup without touching the user's Hermes home.
+hermes_home = temp / "hermes-home"
+hermes_home.mkdir()
+(hermes_home / "config.yaml").write_text(json.dumps({
+    "plugins": {"entries": {"context-shunt": {
+        "config": {"workspace_roots": [str(workspace)],
+                   "spill_dir": str(temp / "spill"),
+                   "suma_post_tool": {"enabled": False}},
+        "llm": {"allow_model_override": True,
+                "allowed_models": ["gpt-5.6-luna"]}
+    }}}
+}))
+os.environ["HERMES_HOME"] = str(hermes_home)
 
-class HostCtx:
-    # Uses the host's own registration entry points where they exist.
+manager = PluginManager()
+host_plugins._plugin_manager = manager
+manifest = PluginManifest(name="context-shunt", key="context-shunt", source="test")
+ctx = PluginContext(manifest, manager)
 
-    def __init__(self):
-        self.plugin_config = {
-            "workspace_roots": [str(workspace / "ws")],
-            "spill_dir": str(workspace / "cache"),
-        }
-        self.llm = None
-        self.registered = []
+def fake_response(text):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=text, role="assistant"),
+                                 finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=8, total_tokens=20),
+    )
 
-    def register_hook(self, name, handler):
-        # Register into the host's own hook registry so the directive query below goes
-        # through the host's dispatch path, not ours.
-        self.registered.append(name)
-        manager = host_plugins.get_plugin_manager()
-        manager._hooks.setdefault(name, []).append(handler)
+def fake_caller(**kwargs):
+    out["model_calls"].append({
+        "model": kwargs.get("model_override"),
+        "provider": kwargs.get("provider_override"),
+        "messages": kwargs.get("messages"),
+    })
+    answer = json.dumps({
+        "answer": "The retry ceiling is three [c1].",
+        "citations": [{"id": "c1", "line_start": 1, "line_end": 1,
+                       "quote": "max_retries = 3"}],
+    })
+    return "openai", "gpt-5.6-luna", fake_response(answer)
 
-    def register_tool(self, schema, handler):
-        self.registered.append("tool:" + schema["name"])
+ctx._llm = make_plugin_llm_for_test(
+    plugin_id="context-shunt",
+    policy=_TrustPolicy(plugin_id="context-shunt", allow_model_override=True,
+                        allowed_models=frozenset({"gpt-5.6-luna"})),
+    sync_caller=fake_caller,
+)
 
-
-ctx = HostCtx()
 try:
     adapter.register(ctx)
-    out["registered"] = list(ctx.registered)
+    out["registered_hooks"] = sorted(manager._hooks)
+    out["registered_tools"] = sorted(manager._plugin_tool_names)
+    out["has_hook"] = bool(host_plugins.has_hook("pre_tool_call"))
 except Exception as exc:
     out["errors"].append(f"register failed: {type(exc).__name__}")
     print(json.dumps(out)); sys.exit(0)
 
-# Ask the host itself whether its pre_tool_call dispatch blocks the call.
-try:
-    out["has_hook"] = bool(host_plugins.has_hook("pre_tool_call"))
-    action, message = host_plugins.get_pre_tool_call_directive(
-        "read_file", {"file_path": str(big)}, "task_local", tool_call_id="tc_host"
-    )
-    out["host_block_action"] = action
-    out["host_block_message"] = (message or "")[:2000]
-    allow_action, allow_message = host_plugins.get_pre_tool_call_directive(
-        "read_file", {"file_path": str(small)}, "task_local"
-    )
-    out["host_allow_action"] = allow_action
-except Exception as exc:
-    out["errors"].append(f"host directive query failed: {type(exc).__name__}")
+# Drive Hermes' real dispatcher. The wrapper counts only actual read_file dispatches;
+# a pre-hook veto must return before it reaches this function.
+real_dispatch = registry.dispatch
+def counting_dispatch(name, args, **kwargs):
+    if name == "read_file":
+        out["tool_invocations"] += 1
+        return json.dumps({"executed": True})
+    return real_dispatch(name, args, **kwargs)
+registry.dispatch = counting_dispatch
 
-# The adapter's own hook must agree, and the read tool must not have run.
 try:
-    original = adapter.pre_tool_call
-    result = original(tool_name="read_file", args={"file_path": str(big)}, task_id="task_local",
-                      tool_call_id="tc_live")
-    out["adapter_block"] = json.dumps(result)[:800] if result else None
-    # No dispatcher was handed to the gate, so a blocked call has nowhere to execute.
-    out["tool_invocations"] = 0
-    out["adapter_allow_at_threshold"] = original(
-        tool_name="read_file", args={"file_path": str(small)}, task_id="task_local"
-    ) is None
+    out["blocked_result"] = model_tools.handle_function_call(
+        "read_file", {"path": str(big)}, task_id="task-local", session_id="session-local",
+        tool_call_id="tc-blocked"
+    )
+    out["invocations_after_block"] = out["tool_invocations"]
+    out["allowed_result"] = model_tools.handle_function_call(
+        "read_file", {"path": str(small)}, task_id="task-local", session_id="session-local",
+        tool_call_id="tc-allowed"
+    )
+    out["invocations_after_allow"] = out["tool_invocations"]
+    out["reader_result"] = model_tools.handle_function_call(
+        "context_shunt_read",
+        {"question": "What is the retry ceiling?", "paths": [str(small)]},
+        task_id="task-local", session_id="session-local", tool_call_id="tc-reader"
+    )
     out["capability"] = adapter.capability_report()
 except Exception as exc:
-    out["errors"].append(f"adapter hook failed: {type(exc).__name__}")
+    out["errors"].append(f"host dispatch failed: {type(exc).__name__}")
 
 print(json.dumps(out))
 """
@@ -175,39 +204,40 @@ def test_host_module_imports_and_exposes_pre_tool_call(host_result):
 
 
 def test_adapter_registers_the_pre_execution_gate_and_no_writer(host_result):
-    assert "pre_tool_call" in host_result["registered"], host_result["errors"]
-    tools = [name for name in host_result["registered"] if name.startswith("tool:")]
+    assert "pre_tool_call" in host_result["registered_hooks"], host_result["errors"]
+    tools = host_result["registered_tools"]
+    assert tools == ["context_shunt_read"]
     assert not any("writ" in name or "patch" in name for name in tools)
 
 
 def test_real_host_dispatch_blocks_an_oversized_full_read(host_result):
-    """The host's own directive resolution returns block, with our envelope as the reason."""
-    assert host_result.get("host_block_action") == "block", host_result["errors"]
-    envelope = json.loads(host_result["host_block_message"])
+    """The host returns the block envelope without invoking its tool dispatcher."""
+    outer = json.loads(host_result["blocked_result"])
+    envelope = json.loads(outer["error"])
     assert envelope["status"] == "blocked" and envelope["code"] == "LARGE_READ"
     assert envelope["coverage"]["complete"] is False
-    assert host_result["tool_invocations"] == 0
+    assert host_result["invocations_after_block"] == 0
 
 
 def test_real_host_dispatch_allows_a_small_read(host_result):
-    assert host_result.get("host_allow_action") is None, host_result["errors"]
+    assert json.loads(host_result["allowed_result"])["executed"] is True
+    assert host_result["invocations_after_allow"] == 1
 
 
-def test_adapter_hook_agrees_with_host_dispatch(host_result):
-    assert host_result.get("adapter_block"), host_result["errors"]
-    directive = json.loads(host_result["adapter_block"])
-    assert directive["action"] == "block"
-    envelope = json.loads(directive["message"])
-    assert envelope["status"] == "blocked" and envelope["code"] == "LARGE_READ"
-
-
-def test_real_host_allows_a_small_read(host_result):
-    assert host_result.get("adapter_allow_at_threshold") is True, host_result["errors"]
+def test_real_host_reader_requests_luna_and_the_original_question(host_result):
+    envelope = json.loads(host_result["reader_result"])
+    assert envelope["code"] == "ANSWERED"
+    assert envelope["citations"][0]["verified"] is True
+    assert len(host_result["model_calls"]) == 1
+    call = host_result["model_calls"][0]
+    assert call["model"] == "gpt-5.6-luna"
+    assert "What is the retry ceiling?" in call["messages"][1]["content"]
 
 
 def test_capability_report_names_the_real_host_version(host_result):
     capability = host_result.get("capability") or {}
     assert capability.get("host", {}).get("name") == "hermes-agent"
+    assert capability.get("host", {}).get("version") == "0.18.2"
     assert capability.get("reader_model") == "gpt-5.6-luna"
     suma = next(m for m in capability["modes"] if m["mode"] == "suma_post_tool")
     assert suma["enabled"] is False

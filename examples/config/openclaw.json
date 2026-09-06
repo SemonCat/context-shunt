@@ -4,6 +4,11 @@
     "entries": {
       "context-shunt": {
         "enabled": true,
+        "llm": {
+          "allowModelOverride": true,
+          "allowedModels": ["openai/gpt-5.6-luna"],
+          "allowedCompletionModels": ["openai/gpt-5.6-luna"]
+        },
         "config": {
           "workspace_roots": ["/path/to/your/project"],
           "spill_dir": "~/.cache/context-shunt",

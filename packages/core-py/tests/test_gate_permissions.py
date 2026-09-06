@@ -189,8 +189,10 @@ def test_session_expiry_drops_every_handle():
 
 def test_spill_directory_and_files_are_private(tmp_path):
     store = SpillStore(tmp_path / "cache")
-    assert stat.S_IMODE(os.stat(store.root).st_mode) == 0o700
+    # Disabled/default sessions do not create cache artifacts merely by being built.
+    assert not store.root.exists()
     written = store.write("sess", b"payload bytes")
+    assert stat.S_IMODE(os.stat(store.root).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(written).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(written.parent).st_mode) == 0o700
     assert written.read_bytes() == b"payload bytes"

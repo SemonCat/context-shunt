@@ -157,7 +157,27 @@ def test_normalization_covers_read_search_and_shell():
         "read",
         {"file_path": "/x", "offset": None, "limit": 5},
     )
-    assert module.normalize_tool_call("grep", {"pattern": "a", "max_matches": 5})[0] == "search"
+    assert module.normalize_tool_call(
+        "search_files",
+        {
+            "pattern": "a",
+            "limit": 5,
+            "target": "content",
+            "output_mode": "content",
+            "context": 0,
+        },
+    ) == (
+        "search",
+        {
+            "path": None,
+            "pattern": "a",
+            "max_matches": 5,
+            "target": "content",
+            "output_mode": "content",
+            "context": 0,
+        },
+    )
+    assert module.normalize_tool_call("grep", {"pattern": "a", "max_matches": 5})[0] == "other"
     assert module.normalize_tool_call("terminal", {"command": "cat /x"}) == (
         "shell",
         {"command": "cat /x"},

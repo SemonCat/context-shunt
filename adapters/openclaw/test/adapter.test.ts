@@ -36,32 +36,44 @@ function fakeApi(overrides: Record<string, unknown> = {}) {
   const api: any = {
     pluginConfig: {},
     hostVersion: "2026.9.2",
-    availableHooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
     on(hook: string, handler: (event: any, ctx?: any) => unknown) {
       registered.hooks.push(hook);
       handlers.set(hook, handler);
     },
-    registerTool(tool: Record<string, unknown>, opts?: Record<string, unknown>) {
-      // Mirrors OpenClaw's registerTool(tool, opts?): one AnyAgentTool-shaped object.
+    registerTool(
+      factory: (ctx: Record<string, unknown>) => Record<string, unknown>,
+      opts?: Record<string, unknown>,
+    ) {
+      // Mirrors OpenClaw's registerTool(factory, { name }): the factory receives the
+      // session-scoped tool context and returns one AnyAgentTool-shaped object.
+      const tool = factory({ sessionKey: "s1", sessionId: "sid1" });
       if (typeof tool["execute"] !== "function") {
         throw new Error("registerTool needs a tool object with execute()");
       }
-      if (opts !== undefined) throw new Error("no tool options are expected");
+      if (opts?.["name"] !== tool["name"]) throw new Error("declared tool name mismatch");
       registered.tools.push(String(tool["name"]));
       handlers.set(`tool:${String(tool["name"])}`, tool["execute"] as never);
     },
     logger: { info: (msg: string) => logs.push(msg), warn: (msg: string) => logs.push(msg) },
-    llm: {
-      async complete(opts: any) {
-        modelCalls.push({ model: opts.model, system: opts.messages[0].content, user: opts.messages[1].content });
-        return {
-          text: JSON.stringify({
-            answer: "The retry ceiling is three [c1].",
-            citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "max_retries = 3" }],
-          }),
-          model: opts.model,
-          usage: { inputTokens: 12, outputTokens: 8 },
-        };
+    runtime: {
+      version: "2026.9.2",
+      llm: {
+        async complete(opts: any) {
+          modelCalls.push({
+            model: opts.model,
+            system: opts.systemPrompt,
+            user: opts.messages[0].content,
+          });
+          return {
+            text: JSON.stringify({
+              answer: "The retry ceiling is three [c1].",
+              citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "max_retries = 3" }],
+            }),
+            provider: "openai",
+            model: "gpt-5.6-luna",
+            usage: { inputTokens: 12, outputTokens: 8 },
+          };
+        },
       },
     },
     ...overrides,
@@ -87,7 +99,7 @@ describe("normalization", () => {
       tool: "read",
       args: { file_path: "/x", offset: undefined, limit: 5 },
     });
-    expect(normalizeToolCall("grep", { pattern: "a", max_matches: 5 }).tool).toBe("search");
+    expect(normalizeToolCall("grep", { pattern: "a", max_matches: 5 }).tool).toBe("other");
     expect(normalizeToolCall("exec", { command: "cat /x" })).toEqual({
       tool: "shell",
       args: { command: "cat /x" },
@@ -165,12 +177,13 @@ describe("registration", () => {
     expect(logs.join("\n")).toContain("capability report");
   });
 
-  it("does not register the gate when the host lacks the hook", () => {
+  it("does not register the reader when the isolated model bridge is absent", () => {
     const dir = workspace();
     const { api, registered } = configured(dir);
-    api.availableHooks = ["after_tool_call"];
+    delete api.runtime.llm;
     new ContextShuntPlugin(api).register();
-    expect(registered.hooks).not.toContain("before_tool_call");
+    expect(registered.hooks).toContain("before_tool_call");
+    expect(registered.tools).toEqual([]);
   });
 
   it("refuses to load with writer.enabled and reports the refusal", () => {
@@ -222,8 +235,8 @@ describe("before_tool_call gate", () => {
     const p = new ContextShuntPlugin(api);
     const path = planted(dir, 351);
     const result = p.onBeforeToolCall({ toolName: "read", params: { file_path: path }, toolCallId: "tc1" }, { sessionKey: "s1" });
-    expect(result?.decision).toBe("deny");
-    const envelope = JSON.parse(String(result?.reason));
+    expect(result?.block).toBe(true);
+    const envelope = JSON.parse(String(result?.blockReason));
     expect(envelope.status).toBe("blocked");
     expect(envelope.code).toBe("LARGE_READ");
     expect(envelope.coverage.complete).toBe(false);
@@ -246,7 +259,7 @@ describe("before_tool_call gate", () => {
     const { api } = configured(dir);
     const p = new ContextShuntPlugin(api);
     const denied = p.onBeforeToolCall({ toolName: "exec", params: { command: `cat ${planted(dir, 400)} | grep x` } });
-    expect(JSON.parse(String(denied?.reason)).code).toBe("UNCLASSIFIABLE_READ");
+    expect(JSON.parse(String(denied?.blockReason)).code).toBe("UNCLASSIFIABLE_READ");
     expect(p.onBeforeToolCall({ toolName: "exec", params: { command: "npm test" } })).toBeUndefined();
   });
 
@@ -278,7 +291,7 @@ describe("reader tool", () => {
     expect(out.code).toBe("ANSWERED");
     expect(out.citations[0].verified).toBe(true);
     expect(modelCalls).toHaveLength(1);
-    expect(modelCalls[0]!.model).toBe(READER_MODEL);
+    expect(modelCalls[0]!.model).toBe(`openai/${READER_MODEL}`);
     expect(modelCalls[0]!.user).toContain("What is the retry ceiling?");
   });
 
@@ -311,7 +324,11 @@ describe("reader tool", () => {
     const path = join(dir, "ws", "conf.txt");
     writeFileSync(path, "max_retries = 3\n");
     const { api } = configured(dir);
-    api.llm.complete = async () => ({ text: "{}", model: "gpt-5.6-sol" });
+    api.runtime.llm.complete = async () => ({
+      text: "{}",
+      provider: "openai",
+      model: "gpt-5.6-sol",
+    });
     const out = JSON.parse(
       await new ContextShuntPlugin(api).onReaderTool({ question: "What is it?", paths: [path] }, {}),
     );

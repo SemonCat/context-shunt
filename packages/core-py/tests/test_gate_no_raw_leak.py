@@ -134,6 +134,34 @@ def test_spill_failures_never_return_raw(tmp_path, inject, caplog):
     _assert_clean(json.dumps(outcome.envelope), caplog.text)
 
 
+def test_spill_contains_hostile_serialization_and_store_exceptions(tmp_path):
+    class HostileResult(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError(HEAD)
+
+    serialization_registry = SourceRegistry()
+    serialization_engine = SumaSpillEngine(
+        SpillStore(tmp_path / "serialization-cache"), serialization_registry, enabled=True
+    )
+    outcome = serialization_engine.evaluate("sess", "req_leak", HostileResult())
+    assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
+    _assert_clean(json.dumps(outcome.envelope))
+    assert serialization_registry.count("sess") == 0
+
+    store_registry = SourceRegistry()
+    store = SpillStore(tmp_path / "store-cache")
+
+    def fail_with_payload(*_args, **_kwargs):
+        raise RuntimeError(MID)
+
+    store.write = fail_with_payload
+    store_engine = SumaSpillEngine(store, store_registry, enabled=True)
+    outcome = store_engine.evaluate("sess", "req_leak", "x" * 40_000)
+    assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
+    _assert_clean(json.dumps(outcome.envelope))
+    assert store_registry.count("sess") == 0
+
+
 def test_successful_spill_pointer_carries_no_payload(tmp_path):
     registry = SourceRegistry()
     engine = SumaSpillEngine(SpillStore(tmp_path / "cache"), registry, enabled=True)

@@ -114,12 +114,23 @@ class Limits:
             if not hasattr(self, key):
                 raise ValueError(f"unknown limit: {key}")
             current = getattr(self, key)
-            if not isinstance(current, int):
+            if (
+                not isinstance(current, int)
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+            ):
                 raise ValueError(f"limit is not numeric: {key}")
             if value > current:
                 raise ValueError(f"limit {key} may only be narrowed (max {current})")
             if value < 0:
                 raise ValueError(f"limit {key} may not be negative")
+            if value == 0 and key in {
+                "bytes_per_token_estimate",
+                "max_chunk_bytes",
+                "max_chunk_tokens",
+                "max_concurrent_model_calls",
+            }:
+                raise ValueError(f"limit {key} must be positive")
         return replace(self, **overrides)
 
 

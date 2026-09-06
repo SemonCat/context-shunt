@@ -1,7 +1,7 @@
 # Install, verify, uninstall
 
-Two adapters, one shared contract. Pick the host you run; the semantics are identical
-either way because both cores are validated against the same fixtures in
+Two adapters, one shared contract. Pick the host you run; both cores are checked for
+contract parity against the same fixtures in
 [`contracts/v1`](../contracts/v1).
 
 Before installing, read [`capability-matrix.md`](capability-matrix.md): it says which
@@ -13,12 +13,15 @@ modes each host actually supports and why the optional Suma post-tool mode is of
 | --- | --- |
 | Python (Hermes adapter) | 3.11 or newer |
 | Node (OpenClaw adapter) | 20 or newer |
-| Hermes | `hermes-agent` 0.18.0 or newer, with plugin hooks enabled |
-| OpenClaw | `openclaw` 2026.9.x or newer, with native plugins enabled |
+| Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled |
+| OpenClaw | compatibility verified against `openclaw` 2026.9.2, with native plugins enabled |
 | Reader model | a host bridge that serves `gpt-5.6-luna` |
 
 Without a `gpt-5.6-luna` bridge the local gate still works; the reader reports
 `MODEL_ERROR` rather than answering with another model.
+
+Other host versions are not claimed compatible. Rerun the real local integration gate
+and review the host hook/model APIs before upgrading either host.
 
 ## Build and self-check first
 
@@ -100,6 +103,10 @@ openclaw plugins enable context-shunt
 # 4. Inspect what the host actually loaded.
 openclaw plugins inspect context-shunt --runtime --json
 ```
+
+The `llm` policy beside the plugin's `config` block is required. OpenClaw independently
+authorizes model overrides and completion targets; the example grants this plugin only
+`openai/gpt-5.6-luna`. Without that policy the reader fails closed with `MODEL_ERROR`.
 
 `before_tool_call` needs no conversation-access opt-in. The reader tool is registered only
 when the capability probe finds a working model bridge.

@@ -5,6 +5,6 @@ description: >-
   questions about large sources with a fixed cheap reader model, returning a bounded,
   citation-verified envelope instead of the file. Registers no writer tool.
 author: context-shunt contributors
-kind: backend
+kind: standalone
 provides_tools:
   - context_shunt_read

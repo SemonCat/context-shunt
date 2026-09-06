@@ -22,23 +22,50 @@ _NARROWABLE = {
     "full_read_max_lines",
     "targeted_read_max_lines",
     "targeted_search_max_matches",
+    "probe_max_lines_scanned",
     "max_tool_result_bytes",
     "max_envelope_bytes",
+    "max_targeted_read_bytes",
     "max_source_bytes",
     "max_chunk_bytes",
     "max_answer_bytes",
     "max_quote_bytes",
+    "max_question_bytes",
     "session_spill_quota_bytes",
     "max_sources_per_request",
     "max_chunks_per_request",
     "max_citations",
     "max_concurrent_model_calls",
+    "max_chunk_overlap_lines",
+    "max_transient_retries",
     "max_chunk_tokens",
     "max_request_input_tokens",
     "max_output_tokens_per_call",
+    "bytes_per_token_estimate",
+    "gate_probe_deadline_ms",
+    "spill_io_deadline_ms",
     "request_deadline_ms",
     "model_call_deadline_ms",
     "spill_ttl_seconds",
+    "json_max_depth",
+    "json_max_nodes",
+}
+_POSITIVE_LIMITS = {
+    "bytes_per_token_estimate",
+    "max_chunk_bytes",
+    "max_chunk_tokens",
+    "max_concurrent_model_calls",
+}
+_CONFIG_KEYS = {
+    "workspace_roots",
+    "spill_dir",
+    "denylist",
+    "gate_enabled",
+    "reader",
+    "suma_post_tool",
+    "writer",
+    "operations",
+    "limits",
 }
 
 
@@ -68,7 +95,28 @@ class Config:
 
 
 def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
+    if raw is not None and not isinstance(raw, dict):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     raw = dict(raw or {})
+    if set(raw) - _CONFIG_KEYS:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+
+    for key in ("reader", "suma_post_tool", "writer", "limits"):
+        if key in raw and not isinstance(raw[key], dict):
+            raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    operations = raw.get("operations")
+    if operations is not None and (
+        not isinstance(operations, list) or any(not isinstance(item, str) for item in operations)
+    ):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    for value in (
+        raw.get("gate_enabled"),
+        (raw.get("reader") or {}).get("enabled"),
+        (raw.get("suma_post_tool") or {}).get("enabled"),
+        (raw.get("writer") or {}).get("enabled"),
+    ):
+        if value is not None and not isinstance(value, bool):
+            raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
 
     writer = raw.get("writer") or {}
     if writer.get("enabled"):
@@ -77,36 +125,67 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     if "operations" in raw and "propose_patch" in (raw.get("operations") or []):
         raise ShuntError("INVALID_REQUEST", "WRITER_UNSUPPORTED_CONFIGURATION", retryable=False)
 
-    roots = tuple(raw.get("workspace_roots") or [])
-    if not roots:
+    roots_raw = raw.get("workspace_roots")
+    if (
+        not isinstance(roots_raw, list)
+        or not roots_raw
+        or any(not isinstance(root, str) or not root for root in roots_raw)
+    ):
         raise ShuntError("UNSAFE_SOURCE", "NO_WORKSPACE_ROOT", retryable=False)
+    roots = tuple(str(Path(root).expanduser().resolve(strict=False)) for root in roots_raw)
+
+    spill_value = raw.get("spill_dir")
+    if spill_value is not None and not isinstance(spill_value, str):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
 
     reader_raw = raw.get("reader") or {}
-    model = str(reader_raw.get("model", DEFAULT_LIMITS.reader_model))
+    model = reader_raw.get("model", DEFAULT_LIMITS.reader_model)
+    if not isinstance(model, str):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     if model != DEFAULT_LIMITS.reader_model:
         # v1 is a single-model contract; a different model is a configuration error, not
         # a silent substitution.
         raise ShuntError("MODEL_ERROR", "MODEL_NOT_ALLOWED", retryable=False)
 
     limits = DEFAULT_LIMITS
-    overrides = {k: int(v) for k, v in (raw.get("limits") or {}).items() if k in _NARROWABLE}
-    unknown = set(raw.get("limits") or {}) - _NARROWABLE
+    raw_limits = raw.get("limits") or {}
+    unknown = set(raw_limits) - _NARROWABLE
     if unknown:
         raise ShuntError("INVALID_REQUEST", "UNKNOWN_LIMIT_OVERRIDE", retryable=False)
+    overrides: dict[str, int] = {}
+    for key, value in raw_limits.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            or (value == 0 and key in _POSITIVE_LIMITS)
+        ):
+            raise ShuntError("INVALID_REQUEST", "BAD_LIMIT_OVERRIDE", retryable=False)
+        overrides[key] = value
     if overrides:
         try:
             limits = limits.narrow(**overrides)
         except ValueError:
             raise ShuntError("INVALID_REQUEST", "LIMIT_MAY_ONLY_NARROW", retryable=False) from None
 
+    spill_dir = Path(spill_value or default_spill_dir).expanduser().resolve(strict=False)
+    if any(spill_dir == Path(root) or Path(root) in spill_dir.parents for root in roots):
+        raise ShuntError("UNSAFE_SOURCE", "SPILL_INSIDE_WORKSPACE", retryable=False)
+
     return Config(
         workspace_roots=roots,
-        spill_dir=Path(raw.get("spill_dir") or default_spill_dir).expanduser(),
-        denylist=tuple(raw.get("denylist") or ()),
-        gate_enabled=bool(raw.get("gate_enabled", True)),
-        reader=ReaderConfig(enabled=bool(reader_raw.get("enabled", True)), model=model),
-        suma_post_tool=SumaConfig(
-            enabled=bool((raw.get("suma_post_tool") or {}).get("enabled", False))
-        ),
+        spill_dir=spill_dir,
+        denylist=_read_denylist(raw.get("denylist")),
+        gate_enabled=raw.get("gate_enabled", True),
+        reader=ReaderConfig(enabled=reader_raw.get("enabled", True), model=model),
+        suma_post_tool=SumaConfig(enabled=(raw.get("suma_post_tool") or {}).get("enabled", False)),
         limits=limits,
     )
+
+
+def _read_denylist(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    return tuple(value)

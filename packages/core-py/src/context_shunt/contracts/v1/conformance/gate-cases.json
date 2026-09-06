@@ -1018,6 +1018,369 @@
         "code": "UNCLASSIFIABLE_READ",
         "form": "unclassifiable"
       }
+    },
+    {
+      "id": "read_targeted_longline_over_byte_cap_blocked",
+      "input": {
+        "tool": "read",
+        "args": {
+          "file_path": "/ws/longline.txt",
+          "offset": 1,
+          "limit": 1
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "bounded_lines"
+      }
+    },
+    {
+      "id": "search_longline_over_byte_cap_blocked",
+      "input": {
+        "tool": "search",
+        "args": {
+          "path": "/ws/longline.txt",
+          "pattern": "A",
+          "max_matches": 1
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "bounded_search"
+      }
+    },
+    {
+      "id": "shell_head_longline_over_byte_cap_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "head -n 1 /ws/longline.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "bounded_lines"
+      }
+    },
+    {
+      "id": "shell_tail_longline_over_byte_cap_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "tail -n 1 /ws/longline.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "bounded_lines"
+      }
+    },
+    {
+      "id": "shell_grep_longline_over_byte_cap_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "grep -m 1 A /ws/longline.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "bounded_search"
+      }
+    },
+    {
+      "id": "shell_grep_context_amplification_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "grep -m 1 -A 100000 retry /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_command_wrapper_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "command cat /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "full_read"
+      }
+    },
+    {
+      "id": "shell_env_wrapper_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "env cat /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "full_read"
+      }
+    },
+    {
+      "id": "shell_assignment_wrapper_cat_unclassifiable",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "LC_ALL=C cat /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_interpreter_wrapper_cat_unclassifiable",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "sh -c 'cat /ws/huge.txt'"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_mixed_missing_and_large_still_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "cat /ws/missing.txt /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "LARGE_READ",
+        "form": "full_read"
+      }
+    },
+    {
+      "id": "search_context_amplification_blocked",
+      "input": {
+        "tool": "search",
+        "args": {
+          "path": "/ws/huge.txt",
+          "pattern": "retry",
+          "max_matches": 1,
+          "context": 100000
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "search_non_content_target_blocked",
+      "input": {
+        "tool": "search",
+        "args": {
+          "path": "/ws/huge.txt",
+          "pattern": "*.txt",
+          "max_matches": 1,
+          "target": "files"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "search_alternate_output_mode_blocked",
+      "input": {
+        "tool": "search",
+        "args": {
+          "path": "/ws/huge.txt",
+          "pattern": "retry",
+          "max_matches": 1,
+          "output_mode": "files_only"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_time_wrapper_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "time cat /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_if_wrapper_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "if cat /ws/huge.txt; then true; fi"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_source_file_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "source /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_file_list_flag_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "file -f /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_full_reader_unknown_flag_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "less -N /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_command_substitution_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "echo \"$(cat /ws/huge.txt)\""
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_command_substitution_implicit_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "echo \"$(< /ws/huge.txt)\""
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_input_redirection_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "tee /tmp/out < /ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_eval_wrapper_cat_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "eval 'cat /ws/huge.txt'"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_copy_to_stdout_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "cp /ws/huge.txt /dev/stdout"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "shell_wc_file_list_flag_blocked",
+      "input": {
+        "tool": "shell",
+        "args": {
+          "command": "wc --files0-from=/ws/huge.txt"
+        }
+      },
+      "expect": {
+        "decision": "blocked",
+        "code": "UNCLASSIFIABLE_READ",
+        "form": "unclassifiable"
+      }
     }
   ]
 }

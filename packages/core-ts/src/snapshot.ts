@@ -24,6 +24,12 @@ const BINARY_MAGICS: readonly number[][] = [
   [0x25, 0x50, 0x44, 0x46],
   [0x50, 0x4b, 0x03, 0x04],
   [0x1f, 0x8b],
+  [0x42, 0x5a, 0x68],
+  [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00],
+  [0x4f, 0x67, 0x67, 0x53],
+  [0x52, 0x49, 0x46, 0x46],
+  [0xca, 0xfe, 0xba, 0xbe],
+  [0x4d, 0x5a],
 ];
 const TEXT_CONTROL_ALLOWLIST = new Set([0x09, 0x0a, 0x0d, 0x0c, 0x1b]);
 const CONTROL_DENSITY_LIMIT = 0.3;
@@ -45,7 +51,8 @@ const SECRET_MARKERS = [
 ];
 
 export function containsSecretMarker(text: string): boolean {
-  return SECRET_MARKERS.some((marker) => text.includes(marker));
+  const lowered = text.toLowerCase();
+  return SECRET_MARKERS.some((marker) => lowered.includes(marker.toLowerCase()));
 }
 
 export function assertNoSecret(text: string, stage: string): void {
@@ -89,6 +96,13 @@ export function assertSupportedBlocks(blocks: readonly unknown[]): void {
     if (!SAFE_BLOCK_TYPES.has(type)) {
       throw new ShuntError("BINARY_UNSUPPORTED", "UNSUPPORTED_BLOCK");
     }
+    const record = block as Record<string, unknown>;
+    if (typeof record["text"] !== "string") {
+      throw new ShuntError("BINARY_UNSUPPORTED", "UNKNOWN_BLOCK");
+    }
+    if (["data", "blob", "image_url", "audio_url", "resource"].some((key) => key in record)) {
+      throw new ShuntError("BINARY_UNSUPPORTED", "UNSUPPORTED_BLOCK");
+    }
   }
 }
 
@@ -106,7 +120,14 @@ export function digest(data: Uint8Array): string {
   return "sha256:" + createHash("sha256").update(data).digest("hex");
 }
 
-export function snapshotBytes(data: Uint8Array, mediaTypeHint = TEXT_MEDIA_TYPE): Snapshot {
+export function snapshotBytes(
+  data: Uint8Array,
+  mediaTypeHint = TEXT_MEDIA_TYPE,
+  limits: Limits = DEFAULT_LIMITS,
+): Snapshot {
+  if (data.length > limits.maxSourceBytes) {
+    throw new ShuntError("LIMIT_EXCEEDED", "SOURCE_OVER_BYTE_CAP", false);
+  }
   const text = assertText(data);
   assertNoSecret(text, "SOURCE");
   let jsonValue: unknown;
@@ -116,6 +137,7 @@ export function snapshotBytes(data: Uint8Array, mediaTypeHint = TEXT_MEDIA_TYPE)
     } catch {
       throw new ShuntError("UNSAFE_SOURCE", "INVALID_JSON");
     }
+    jsonDepthAndNodes(jsonValue, limits);
   }
   const lineIndex = new LineIndex(data);
   return {
@@ -212,8 +234,29 @@ export function jsonDepthAndNodes(
     if (typeof node === "object" && node !== null) {
       if (seen.has(node)) throw new ShuntError("LIMIT_EXCEEDED", "JSON_CYCLE");
       seen.add(node);
-      const children = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>);
+      let children: unknown[];
+      if (Array.isArray(node)) {
+        children = node;
+      } else {
+        const prototype = Object.getPrototypeOf(node);
+        if (prototype !== Object.prototype && prototype !== null) {
+          throw new ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE");
+        }
+        const descriptors = Object.getOwnPropertyDescriptors(node);
+        if (Reflect.ownKeys(node).some((key) => typeof key !== "string")) {
+          throw new ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE");
+        }
+        children = [];
+        for (const descriptor of Object.values(descriptors)) {
+          if (!("value" in descriptor) || descriptor.enumerable !== true) {
+            throw new ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE");
+          }
+          children.push(descriptor.value);
+        }
+      }
       for (const child of children) stack.push({ node: child, depth: depth + 1 });
+    } else if (typeof node === "number" && !Number.isFinite(node)) {
+      throw new ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE");
     } else if (!["string", "number", "boolean", "undefined"].includes(typeof node) && node !== null) {
       throw new ShuntError("LIMIT_EXCEEDED", "JSON_UNSUPPORTED_VALUE");
     } else if (typeof node === "undefined") {

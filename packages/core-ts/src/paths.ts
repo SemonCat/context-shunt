@@ -5,7 +5,17 @@
  * a regular file, and survives the secret policy. Rejections carry a code and a bounded
  * token - never the path, and never the matched value.
  */
-import { lstatSync, openSync, readSync, closeSync, realpathSync, statSync } from "node:fs";
+import {
+  type BigIntStats,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 
 import { ShuntError } from "./errors.js";
@@ -46,6 +56,7 @@ export interface AuthorizedPath {
   readonly ino: number;
   readonly size: number;
   readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
 }
 
 function isSecretPath(real: string, policy: PathPolicy): boolean {
@@ -60,17 +71,36 @@ function isSecretPath(real: string, policy: PathPolicy): boolean {
 function matchesDenylist(real: string, policy: PathPolicy): boolean {
   for (const root of policy.roots) {
     if (!real.startsWith(root + sep)) continue;
-    const rel = real.slice(root.length + 1);
+    const rel = real.slice(root.length + 1).split(sep).join("/");
     for (const pattern of policy.denylist) {
-      const rx = new RegExp(
-        "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*") + "$",
-      );
+      const rx = globPattern(pattern);
       if (rx.test(rel)) return true;
-      const dir = rel.split("/")[0];
-      if (dir !== undefined && rx.test(`${dir}/*`)) return true;
     }
   }
   return false;
+}
+
+function globPattern(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index] as string;
+    if (char === "*" && pattern[index + 1] === "*") {
+      index += 1;
+      if (pattern[index + 1] === "/") {
+        index += 1;
+        source += "(?:.*/)?";
+      } else {
+        source += ".*";
+      }
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else if (char === "?") {
+      source += "[^/]";
+    } else {
+      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(source + "$");
 }
 
 /** Canonicalize and authorize one source path, or throw a bounded ShuntError. */
@@ -113,7 +143,59 @@ export function authorize(path: string, policy: PathPolicy): AuthorizedPath {
     ino: Number(st.ino),
     size: Number(st.size),
     mtimeNs: st.mtimeNs,
+    ctimeNs: st.ctimeNs,
   };
+}
+
+function descriptorMatches(
+  st: BigIntStats,
+  authorized: AuthorizedPath,
+): boolean {
+  return (
+    Number(st.dev) === authorized.dev &&
+    Number(st.ino) === authorized.ino &&
+    Number(st.size) === authorized.size &&
+    st.mtimeNs === authorized.mtimeNs &&
+    st.ctimeNs === authorized.ctimeNs
+  );
+}
+
+/** Open once, validate the descriptor, then read only that descriptor. */
+export function readAuthorizedBounded(authorized: AuthorizedPath, maxBytes: number): Uint8Array {
+  // Node opens descriptors close-on-exec internally; O_NOFOLLOW binds this open to the
+  // already-authorized non-symlink target.
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW;
+  let fd: number;
+  try {
+    fd = openSync(authorized.real, flags);
+  } catch {
+    throw new ShuntError("SOURCE_CHANGED", "OPEN_FAILED");
+  }
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile() || before.nlink > 1n || !descriptorMatches(before, authorized)) {
+      throw new ShuntError("SOURCE_CHANGED", "IDENTITY_CHANGED");
+    }
+    for (;;) {
+      const buf = Buffer.allocUnsafe(256 * 1024);
+      const read = readSync(fd, buf, 0, buf.length, null);
+      if (read === 0) break;
+      if (total + read > maxBytes) {
+        throw new ShuntError("LIMIT_EXCEEDED", "SOURCE_OVER_BYTE_CAP");
+      }
+      parts.push(buf.subarray(0, read));
+      total += read;
+    }
+    const after = fstatSync(fd, { bigint: true });
+    if (!descriptorMatches(after, authorized) || Number(after.size) !== total) {
+      throw new ShuntError("SOURCE_CHANGED", "MODIFIED_DURING_READ");
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return Buffer.concat(parts, total);
 }
 
 /** Stream a file, refusing at the cap instead of allocating past it. */

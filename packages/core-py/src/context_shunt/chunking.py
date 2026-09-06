@@ -8,9 +8,11 @@ and every chunk records the source, snapshot and exact line/record range it came
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from .binaryguard import JSON_MEDIA_TYPE
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, Limits
 from .snapshot import Snapshot, canonical_json, record_at, record_count, resolve_pointer
@@ -34,16 +36,21 @@ class Plan:
     omitted: tuple[dict[str, Any], ...]
 
 
-def per_call_overhead_tokens(limits: Limits = DEFAULT_LIMITS) -> int:
+def per_call_overhead_tokens(
+    limits: Limits = DEFAULT_LIMITS,
+    question: str = "",
+    locator: dict[str, Any] | None = None,
+) -> int:
     """Tokens each call spends on the fixed instruction and the excerpt wrapper.
 
     The request budget covers *all* prompt input, not just chunk text, so the planner has
     to reserve this per chunk or an eight-chunk plan silently overruns the cap.
     """
-    from .provider import READER_SYSTEM_PROMPT
+    from .provider import READER_SYSTEM_PROMPT, build_user_message
 
-    fixed = len(READER_SYSTEM_PROMPT.encode("utf-8")) + 256  # wrapper, locator, question
-    return max(1, -(-fixed // limits.bytes_per_token_estimate))
+    return estimate_tokens(READER_SYSTEM_PROMPT, limits) + estimate_tokens(
+        build_user_message(question, "", locator or {}), limits
+    )
 
 
 def chunk_byte_budget(limits: Limits = DEFAULT_LIMITS) -> int:
@@ -60,13 +67,43 @@ def estimate_tokens(text: str, limits: Limits = DEFAULT_LIMITS) -> int:
     return max(1, -(-len(text.encode("utf-8")) // limits.bytes_per_token_estimate))
 
 
+def _split_utf8(text: str, budget: int) -> list[str]:
+    raw = text.encode("utf-8")
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(raw):
+        end = min(len(raw), cursor + budget)
+        while end > cursor:
+            try:
+                parts.append(raw[cursor:end].decode("utf-8"))
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        if end == cursor:
+            raise ShuntError("LIMIT_EXCEEDED", "CHUNK_BOUNDARY_INVALID")
+        cursor = end
+    return parts
+
+
 def _line_chunks(
     snapshot: Snapshot, source_id: str, start: int, end: int, limits: Limits
-) -> list[Chunk]:
-    chunks: list[Chunk] = []
+) -> Iterator[Chunk]:
     budget = chunk_byte_budget(limits)
     cursor = start
     while cursor <= end:
+        line = snapshot.line_index.line_text(cursor)
+        if len(line.encode("utf-8")) > budget:
+            for part in _split_utf8(line, budget):
+                yield Chunk(
+                    source_id=source_id,
+                    snapshot_id=snapshot.snapshot_id,
+                    locator={"kind": "lines", "start": cursor, "end": cursor},
+                    text=part,
+                    bytes_len=len(part.encode("utf-8")),
+                    est_tokens=estimate_tokens(part, limits),
+                )
+            cursor += 1
+            continue
         lo = cursor
         size = 0
         hi = lo - 1
@@ -82,41 +119,40 @@ def _line_chunks(
         if hi < lo:
             hi = lo
         text = snapshot.line_index.range_text(lo, hi)
-        if len(text.encode("utf-8")) > budget:
-            # One physical line longer than a chunk: cut on a UTF-8 boundary, but the
-            # citation locator still points at the original line.
-            raw = text.encode("utf-8")[:budget]
-            while raw:
-                try:
-                    text = raw.decode("utf-8")
-                    break
-                except UnicodeDecodeError:
-                    raw = raw[:-1]
-        chunks.append(
-            Chunk(
-                source_id=source_id,
-                snapshot_id=snapshot.snapshot_id,
-                locator={"kind": "lines", "start": lo, "end": hi},
-                text=text,
-                bytes_len=len(text.encode("utf-8")),
-                est_tokens=estimate_tokens(text, limits),
-            )
+        yield Chunk(
+            source_id=source_id,
+            snapshot_id=snapshot.snapshot_id,
+            locator={"kind": "lines", "start": lo, "end": hi},
+            text=text,
+            bytes_len=len(text.encode("utf-8")),
+            est_tokens=estimate_tokens(text, limits),
         )
         cursor = hi + 1
-    return chunks
 
 
 def _record_chunks(
     snapshot: Snapshot, source_id: str, pointer: str, start: int, end: int, limits: Limits
-) -> list[Chunk]:
+) -> Iterator[Chunk]:
     node = resolve_pointer(snapshot.json_value, pointer)
     total = record_count(node)
     if start < 1 or end < start or end > total:
         raise ShuntError("INVALID_REQUEST", "RECORD_OUT_OF_RANGE")
-    chunks: list[Chunk] = []
     budget = chunk_byte_budget(limits)
     lo = start
     while lo <= end:
+        rendered_first = canonical_json(record_at(node, lo))
+        if len(rendered_first.encode("utf-8")) > budget:
+            for part in _split_utf8(rendered_first, budget):
+                yield Chunk(
+                    source_id=source_id,
+                    snapshot_id=snapshot.snapshot_id,
+                    locator={"kind": "records", "pointer": pointer, "start": lo, "end": lo},
+                    text=part,
+                    bytes_len=len(part.encode("utf-8")),
+                    est_tokens=estimate_tokens(part, limits),
+                )
+            lo += 1
+            continue
         parts: list[str] = []
         size = 0
         hi = lo - 1
@@ -128,18 +164,15 @@ def _record_chunks(
             size += len(rendered.encode("utf-8"))
             hi += 1
         text = "\n".join(parts)
-        chunks.append(
-            Chunk(
-                source_id=source_id,
-                snapshot_id=snapshot.snapshot_id,
-                locator={"kind": "records", "pointer": pointer, "start": lo, "end": hi},
-                text=text,
-                bytes_len=len(text.encode("utf-8")),
-                est_tokens=estimate_tokens(text, limits),
-            )
+        yield Chunk(
+            source_id=source_id,
+            snapshot_id=snapshot.snapshot_id,
+            locator={"kind": "records", "pointer": pointer, "start": lo, "end": hi},
+            text=text,
+            bytes_len=len(text.encode("utf-8")),
+            est_tokens=estimate_tokens(text, limits),
         )
         lo = hi + 1
-    return chunks
 
 
 def plan(
@@ -147,10 +180,10 @@ def plan(
     *,
     max_chunks: int,
     limits: Limits = DEFAULT_LIMITS,
+    question: str = "",
 ) -> Plan:
     """Build a bounded plan. Ranges that do not fit become explicit omissions."""
     budget_chunks = min(max_chunks, limits.max_chunks_per_request)
-    overhead = per_call_overhead_tokens(limits)
     produced: list[Chunk] = []
     omitted: list[dict[str, Any]] = []
     truncated = False
@@ -159,7 +192,7 @@ def plan(
     for source_id, snapshot, selector in selections:
         kind = selector.get("kind")
         if kind == "all":
-            if snapshot.json_value is not None:
+            if snapshot.media_type == JSON_MEDIA_TYPE:
                 candidates = _record_chunks(
                     snapshot, source_id, "", 1, record_count(snapshot.json_value), limits
                 )
@@ -187,17 +220,24 @@ def plan(
         for chunk in candidates:
             if chunk.est_tokens > limits.max_chunk_tokens:
                 raise ShuntError("LIMIT_EXCEEDED", "CHUNK_OVER_TOKEN_CAP")
-            projected = spent_tokens + chunk.est_tokens + overhead
+            from .provider import READER_SYSTEM_PROMPT, build_user_message
+
+            call_tokens = estimate_tokens(READER_SYSTEM_PROMPT, limits) + estimate_tokens(
+                build_user_message(question, chunk.text, chunk.locator), limits
+            )
+            projected = spent_tokens + call_tokens
             if len(produced) >= budget_chunks or projected > limits.max_request_input_tokens:
                 truncated = True
+                # One bounded omission represents the unprocessed remainder. Enumerating
+                # it could itself exhaust memory and exceed the envelope omission cap.
                 omitted.append(
-                    {"source_id": source_id, "selector": chunk.locator, "reason": "BUDGET_EXCEEDED"}
+                    {"source_id": source_id, "selector": selector, "reason": "BUDGET_EXCEEDED"}
                 )
-                continue
+                break
             spent_tokens = projected
             produced.append(chunk)
 
-    total = sum(c.est_tokens for c in produced) + overhead * len(produced)
+    total = spent_tokens
     if total > limits.max_request_input_tokens:
         raise ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP")
     return Plan(

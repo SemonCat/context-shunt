@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "main": "./index.ts",
-  "files": ["index.ts", "src", "openclaw.plugin.json", "README.md"],
+  "files": ["index.ts", "src", "openclaw.plugin.json", "README.md", "LICENSE"],
   "openclaw": {
     "extensions": ["./index.ts"]
   },

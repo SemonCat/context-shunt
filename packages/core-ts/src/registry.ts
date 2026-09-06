@@ -38,6 +38,12 @@ export class SourceRegistry {
 
   register(sessionId: string, snapshot: Snapshot, internal = false): RegisteredSource {
     if (!sessionId) throw new ShuntError("UNSAFE_SOURCE", "NO_SESSION");
+    this.sweepSession(sessionId);
+    const used = [...(this.bySession.get(sessionId)?.values() ?? [])]
+      .reduce((total, current) => total + current.snapshot.bytesLen, 0);
+    if (used + snapshot.bytesLen > this.limits.sessionSpillQuotaBytes) {
+      throw new ShuntError("LIMIT_EXCEEDED", "SESSION_SOURCE_QUOTA", false);
+    }
     const entry: RegisteredSource = {
       sourceId: mintId(),
       sessionId,
@@ -52,6 +58,13 @@ export class SourceRegistry {
     }
     bucket.set(entry.sourceId, entry);
     return entry;
+  }
+
+  remove(sessionId: string, sourceId: string): boolean {
+    const bucket = this.bySession.get(sessionId);
+    const removed = bucket?.delete(sourceId) ?? false;
+    if (bucket?.size === 0) this.bySession.delete(sessionId);
+    return removed;
   }
 
   resolve(sessionId: string, sourceId: string): RegisteredSource {
@@ -79,6 +92,27 @@ export class SourceRegistry {
   expireSession(sessionId: string): number {
     const removed = this.bySession.get(sessionId)?.size ?? 0;
     this.bySession.delete(sessionId);
+    return removed;
+  }
+
+  sweep(): number {
+    let removed = 0;
+    for (const sessionId of [...this.bySession.keys()]) removed += this.sweepSession(sessionId);
+    return removed;
+  }
+
+  private sweepSession(sessionId: string): number {
+    const bucket = this.bySession.get(sessionId);
+    if (!bucket) return 0;
+    const now = this.timeFn();
+    let removed = 0;
+    for (const [sourceId, entry] of bucket) {
+      if (now >= entry.expiresAtEpoch) {
+        bucket.delete(sourceId);
+        removed += 1;
+      }
+    }
+    if (bucket.size === 0) this.bySession.delete(sessionId);
     return removed;
   }
 

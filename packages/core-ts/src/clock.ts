@@ -20,16 +20,23 @@ export class FakeClock implements Clock {
 }
 
 export class Deadline {
-  private cancelled = false;
+  private readonly controller = new AbortController();
 
   private constructor(
     private readonly clock: Clock,
     private readonly startedMs: number,
     private readonly budgetMs: number,
-  ) {}
+    externalSignal?: AbortSignal,
+  ) {
+    if (externalSignal?.aborted) {
+      this.controller.abort();
+    } else if (externalSignal) {
+      externalSignal.addEventListener("abort", () => this.controller.abort(), { once: true });
+    }
+  }
 
-  static start(clock: Clock, budgetMs: number): Deadline {
-    return new Deadline(clock, clock.nowMs(), budgetMs);
+  static start(clock: Clock, budgetMs: number, signal?: AbortSignal): Deadline {
+    return new Deadline(clock, clock.nowMs(), budgetMs, signal);
   }
 
   elapsedMs(): number {
@@ -45,16 +52,20 @@ export class Deadline {
   }
 
   cancel(): void {
-    this.cancelled = true;
+    this.controller.abort();
   }
 
   isCancelled(): boolean {
-    return this.cancelled;
+    return this.controller.signal.aborted;
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
   }
 
   /** Called before starting new work and before publishing anything. */
   check(stage: string): void {
-    if (this.cancelled) throw new ShuntError("CANCELLED", stage, false);
+    if (this.isCancelled()) throw new ShuntError("CANCELLED", stage, false);
     if (this.expired()) throw new ShuntError("TIMEOUT", stage, true);
   }
 

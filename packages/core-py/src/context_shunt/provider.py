@@ -102,31 +102,52 @@ class HostBridgeProvider:
             # It is dropped here and never reaches a log, metric or envelope.
             raise TransientProviderError("PROVIDER_CALL_FAILED") from None
 
-        text, model_used, in_tok, out_tok = _unpack(result)
+        text, model_used, in_tok, out_tok = _unpack(result, self._limits, capped)
         if model_used != self._model:
             raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
         return ModelResponse(
             text=text,
             model=model_used,
             usage=ModelUsage(
-                input_tokens=int(in_tok or 0),
-                output_tokens=int(out_tok or 0),
-                estimated=not (in_tok or out_tok),
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                estimated=in_tok == 0 and out_tok == 0,
             ),
         )
 
 
-def _unpack(result: Any) -> tuple[str, str, int, int]:
+def _unpack(result: Any, limits: Limits, output_cap: int) -> tuple[str, str, int, int]:
     if isinstance(result, dict):
-        return (
-            str(result.get("text", "")),
-            str(result.get("model", "")),
-            int(result.get("input_tokens", 0) or 0),
-            int(result.get("output_tokens", 0) or 0),
+        values = (
+            result.get("text"),
+            result.get("model"),
+            result.get("input_tokens", 0),
+            result.get("output_tokens", 0),
         )
-    if isinstance(result, (tuple, list)) and len(result) == 4:
-        return str(result[0]), str(result[1]), int(result[2] or 0), int(result[3] or 0)
-    raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
+    elif isinstance(result, (tuple, list)) and len(result) == 4:
+        values = tuple(result)
+    else:
+        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
+
+    text, model, input_tokens, output_tokens = values
+    if not isinstance(text, str) or not isinstance(model, str):
+        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
+    if len(text.encode("utf-8")) > limits.max_tool_result_bytes:
+        raise ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
+    return (
+        text,
+        model,
+        _usage_value(input_tokens, limits.max_request_input_tokens),
+        _usage_value(output_tokens, output_cap),
+    )
+
+
+def _usage_value(value: Any, maximum: int) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
+    return value
 
 
 class UnavailableProvider:

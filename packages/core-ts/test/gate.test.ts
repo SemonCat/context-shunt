@@ -1,10 +1,12 @@
 /** unit pre-read (TypeScript core) - the same fixture corpus as the Python core. */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { PreReadGate, type ProbeResult } from "../src/gate.js";
-import { contractsDir } from "../src/limits.js";
+import { PreReadGate, type ProbeResult, type ProbeSelection } from "../src/gate.js";
+import { contractsDir, DEFAULT_LIMITS } from "../src/limits.js";
+import { fileProber } from "../src/probe.js";
 import { countLines, countLinesBounded, LineIndex } from "../src/textindex.js";
 
 const conformance = (name: string) =>
@@ -14,14 +16,41 @@ const gateCases = conformance("gate-cases.json");
 const lineCases = conformance("line-count-cases.json");
 
 function tableProber(table: Record<string, Record<string, unknown>>) {
-  return (path: string): ProbeResult => {
+  return (path: string, selection: ProbeSelection = { mode: "full" }): ProbeResult => {
     const entry = table[path];
     if (!entry || entry["missing"]) return { exists: false };
+    const kind = (entry["kind"] as ProbeResult["kind"]) ?? "file";
+    if (kind !== "file") return { exists: true, kind };
+    const lines = (entry["lines"] as number) ?? 0;
+    const bytes = (entry["bytes"] as number) ?? 0;
+    const maxLine = (entry["max_line_bytes"] as number) ?? Math.ceil(bytes / Math.max(1, lines));
+    if (selection.mode === "metadata") {
+      return { exists: true, kind, lines: 0, bytes: 0, exact: true };
+    }
+    if (selection.mode === "lines" || selection.mode === "tail") {
+      return {
+        exists: true,
+        kind,
+        lines: Math.min(selection.limit, lines),
+        bytes: Math.min(bytes, selection.limit * maxLine),
+        exact: true,
+      };
+    }
+    if (selection.mode === "search") {
+      const matches = Math.min(selection.maxMatches, lines);
+      return {
+        exists: true,
+        kind,
+        lines: matches,
+        bytes: matches * (maxLine + new TextEncoder().encode(path).length + 64),
+        exact: true,
+      };
+    }
     return {
       exists: true,
-      kind: (entry["kind"] as ProbeResult["kind"]) ?? "file",
-      lines: (entry["lines"] as number) ?? 0,
-      bytes: (entry["bytes"] as number) ?? 0,
+      kind,
+      lines,
+      bytes,
       exact: true,
     };
   };
@@ -73,4 +102,43 @@ describe("pre-read gate conformance", () => {
       expect(got).toEqual(want);
     });
   }
+});
+
+describe("real selected-output byte proofs", () => {
+  it("blocks one oversized selected line for read, head, tail, and grep", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-gate-"));
+    const path = join(dir, "long.txt");
+    writeFileSync(path, "A".repeat(20_000) + "\n");
+    const gate = new PreReadGate(fileProber());
+    for (const [tool, args] of [
+      ["read", { file_path: path, offset: 1, limit: 1 }],
+      ["shell", { command: `head -n 1 ${path}` }],
+      ["shell", { command: `tail -n 1 ${path}` }],
+      ["shell", { command: `grep -m 1 A ${path}` }],
+    ] as const) {
+      const decision = gate.evaluate(tool, args);
+      expect(decision.decision).toBe("blocked");
+      expect(decision.code).toBe("LARGE_READ");
+    }
+  });
+
+  it("stops a full-file probe at the output threshold", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-gate-"));
+    const path = join(dir, "no-newlines.txt");
+    writeFileSync(path, "A".repeat(1_000_000));
+    const probe = fileProber()(path);
+    expect(probe.exact).toBe(false);
+    expect(probe.bytes).toBe(DEFAULT_LIMITS.maxTargetedReadBytes + 1);
+  });
+
+  it("blocks bounded-metadata output amplification before probing", () => {
+    const files = Array.from({ length: 300 }, () => "/ws/a.txt");
+    const gate = new PreReadGate(tableProber(gateCases.probe_table));
+    const decision = gate.evaluate("shell", { command: `wc ${files.join(" ")}` });
+    expect(decision).toMatchObject({
+      decision: "blocked",
+      code: "LARGE_READ",
+      form: "bounded_metadata",
+    });
+  });
 });

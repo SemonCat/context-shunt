@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from .binaryguard import JSON_MEDIA_TYPE
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, Limits
 from .registry import SourceRegistry
@@ -78,7 +79,7 @@ class CitationVerifier:
         return VerificationResult(False, Reason.LOCATOR_UNSUPPORTED)
 
     def _verify_lines(self, snapshot, locator: dict[str, Any], quote: str) -> VerificationResult:
-        if snapshot.json_value is not None:
+        if snapshot.media_type == JSON_MEDIA_TYPE:
             # A JSON snapshot is addressed by record, never by pretty-printed line number.
             return VerificationResult(False, Reason.LOCATOR_UNSUPPORTED)
         start, end = locator.get("start"), locator.get("end")
@@ -95,7 +96,7 @@ class CitationVerifier:
         return VerificationResult(True, Reason.OK)
 
     def _verify_records(self, snapshot, locator: dict[str, Any], quote: str) -> VerificationResult:
-        if snapshot.json_value is None:
+        if snapshot.media_type != JSON_MEDIA_TYPE:
             return VerificationResult(False, Reason.LOCATOR_UNSUPPORTED)
         pointer = locator.get("pointer")
         start, end = locator.get("start"), locator.get("end")

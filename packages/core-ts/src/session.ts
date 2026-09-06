@@ -13,7 +13,7 @@ import { ShuntError, isShuntError } from "./errors.js";
 import { GateDecision, PreReadGate, guidanceFor } from "./gate.js";
 import { enforceOrFixed } from "./guard.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
-import { assertUnchanged, authorize, pathPolicy, readBounded } from "./paths.js";
+import { authorize, pathPolicy, readAuthorizedBounded } from "./paths.js";
 import { fileProber } from "./probe.js";
 import { LunaProvider, UnavailableProvider } from "./provider.js";
 import { Reader } from "./reader.js";
@@ -92,13 +92,12 @@ export class ShuntSession {
 
   registerPath(path: string, mediaType?: string): RegisteredSource {
     const authorized = authorize(path, pathPolicy(this.config.workspaceRoots, this.config.denylist));
-    const data = readBounded(authorized.real, this.config.limits.maxSourceBytes);
-    assertUnchanged(authorized, data.length);
+    const data = readAuthorizedBounded(authorized, this.config.limits.maxSourceBytes);
     const hint = mediaType ?? (authorized.real.toLowerCase().endsWith(".json") ? JSON_MEDIA_TYPE : TEXT_MEDIA_TYPE);
-    return this.registry.register(this.sessionId, snapshotBytes(data, hint));
+    return this.registry.register(this.sessionId, snapshotBytes(data, hint, this.config.limits));
   }
 
-  async read(request: unknown): Promise<Envelope> {
+  async read(request: unknown, signal?: AbortSignal): Promise<Envelope> {
     if (!this.config.readerEnabled) {
       const err = new ShuntError("INVALID_REQUEST", "READER_DISABLED", false);
       const requestId =
@@ -107,7 +106,7 @@ export class ShuntSession {
           : "req_unknown";
       return enforceOrFixed(errorEnvelope(requestId, err), this.config.limits);
     }
-    const envelope = await this.reader.answer(this.sessionId, request);
+    const envelope = await this.reader.answer(this.sessionId, request, undefined, signal);
     return enforceOrFixed(envelope, this.config.limits);
   }
 

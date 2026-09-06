@@ -1,11 +1,14 @@
 /**
  * integration openclaw --mode local: the real host checkout, or nothing.
  *
- * Two things are verified against the installed host rather than against a stand-in:
+ * These checks use the installed host rather than a stand-in:
  *
- * 1. The hooks the adapter depends on exist in the host's own typed-hook catalogue, and
+ * 1. The real plugin loader activates this adapter and accepts its tool factory.
+ * 2. The host's real before-tool wrapper vetoes a 400-line read before the wrapped
+ *    executor runs; the observed executor count remains zero.
+ * 3. The hooks the adapter depends on exist in the host's own typed-hook catalogue, and
  *    `after_tool_call` is still documented as observe-only.
- * 2. The ordering evidence behind the disabled Suma post-tool mode still holds in the
+ * 4. The ordering evidence behind the disabled Suma post-tool mode still holds in the
  *    host source: the persistence cap runs *before* the plugin's persist hook. If a host
  *    upgrade changes that, this gate fails and the capability decision has to be redone -
  *    which is exactly what "re-run the ordering evidence on upgrade" means.
@@ -20,13 +23,15 @@
  *
  * Without that, `scripts/verify` reports NOT_RUN (exit 2), never a pass.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { modeEnabled } from "@context-shunt/core";
 
-import { ContextShuntPlugin } from "../index.js";
 import { buildCapabilityReport } from "../src/capability.js";
 
 const ROOT = process.env["CONTEXT_SHUNT_OPENCLAW_ROOT"] ?? "";
@@ -42,7 +47,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   it("reads the installed host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     expect(pkg.name).toBe("openclaw");
-    expect(String(pkg.version)).toMatch(/^\d{4}\.\d+/);
+    expect(String(pkg.version)).toBe("2026.9.2");
   });
 
   it("exposes the typed hooks the adapter depends on", () => {
@@ -93,24 +98,68 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(manifest.contracts.tools).toContain("context_shunt_read");
   });
 
-  it("loads against the host version and registers only the read-only surface", () => {
-    const pkg = JSON.parse(hostFile("package.json"));
-    const hooks: string[] = [];
-    const tools: string[] = [];
-    const api: any = {
-      pluginConfig: { workspace_roots: [ROOT] },
-      hostVersion: String(pkg.version),
-      availableHooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
-      on: (hook: string) => hooks.push(hook),
-      registerTool: (tool: Record<string, unknown>) => tools.push(String(tool["name"])),
-      logger: { info: () => {} },
-      llm: { complete: async () => ({ text: "{}", model: "gpt-5.6-luna" }) },
-    };
-    new ContextShuntPlugin(api).register();
-    expect(hooks).toContain("before_tool_call");
-    expect(tools).toEqual(["context_shunt_read"]);
-    expect(hooks).not.toContain("tool_result_persist");
-  });
+  it("loads through the real host and vetoes before the wrapped tool executes", () => {
+    const temp = mkdtempSync(join(tmpdir(), "context-shunt-openclaw-host-"));
+    const workspace = join(temp, "workspace");
+    mkdirSync(workspace);
+    const source = join(workspace, "large.txt");
+    writeFileSync(source, Array.from({ length: 400 }, (_, i) => `line ${i}\n`).join(""));
+    const pluginRoot = fileURLToPath(new URL("..", import.meta.url));
+    const script = String.raw`
+      import { join } from "node:path";
+      import { pathToFileURL } from "node:url";
+      const root = process.env.HOST_ROOT;
+      const pluginRoot = process.env.PLUGIN_ROOT;
+      const workspace = process.env.TEST_WORKSPACE;
+      const source = process.env.TEST_SOURCE;
+      const loader = await import(pathToFileURL(join(root, "dist/plugins/loader.js")).href);
+      const harness = await import(pathToFileURL(join(root, "dist/plugin-sdk/agent-harness-runtime.js")).href);
+      const config = { plugins: { allow: ["context-shunt"], load: { paths: [pluginRoot] }, entries: {
+        "context-shunt": { enabled: true, llm: { allowModelOverride: true,
+          allowedModels: ["openai/gpt-5.6-luna"],
+          allowedCompletionModels: ["openai/gpt-5.6-luna"] },
+          config: { workspace_roots: [workspace], spill_dir: join(workspace, ".spill"),
+            suma_post_tool: { enabled: false } } }
+      } } };
+      const registry = loader.loadOpenClawPlugins({ cache: false, activate: true, workspaceDir: workspace, config });
+      const record = registry.plugins.find((entry) => entry.id === "context-shunt");
+      const registration = registry.tools.find((entry) => entry.names.includes("context_shunt_read"));
+      const reader = registration?.factory({ sessionKey: "agent:main:shunt", sessionId: "shunt" });
+      let executions = 0;
+      const rawTool = { name: "read", label: "read", description: "sentinel",
+        parameters: { type: "object", additionalProperties: false,
+          properties: { path: { type: "string" } }, required: ["path"] },
+        execute: async () => { executions += 1; return { content: [{ type: "text", text: "EXECUTED" }] }; } };
+      const wrapped = harness.wrapToolWithBeforeToolCallHook(rawTool, {
+        config, sessionKey: "agent:main:shunt", sessionId: "shunt", agentId: "main", runId: "run-shunt"
+      }, { emitDiagnostics: false });
+      const result = await wrapped.execute("tc-host", { path: source });
+      console.log(JSON.stringify({ status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
+        hooks: registry.typedHooks.map((entry) => entry.hookName), reader: reader?.name,
+        executions, blocked: result?.details?.status, envelope: JSON.parse(result.content[0].text) }));
+    `;
+    const stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        ...process.env,
+        HOST_ROOT: ROOT,
+        PLUGIN_ROOT: pluginRoot,
+        TEST_WORKSPACE: workspace,
+        TEST_SOURCE: source,
+      },
+    });
+    const result = JSON.parse(stdout.trim().split("\n").at(-1)!);
+    expect(result.status).toBe("loaded");
+    expect(result.errors).toEqual([]);
+    expect(result.hooks).toContain("before_tool_call");
+    expect(result.hooks).not.toContain("tool_result_persist");
+    expect(result.reader).toBe("context_shunt_read");
+    expect(result.executions).toBe(0);
+    expect(result.blocked).toBe("blocked");
+    expect(result.envelope.code).toBe("LARGE_READ");
+  }, 70_000);
 });
 
 describe.skipIf(available)("openclaw host integration prerequisites", () => {

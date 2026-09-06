@@ -17,8 +17,22 @@
  * the mode stays disabled there.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 
 import { Coverage, Envelope, buildEnvelope, errorEnvelope, isoExpiry } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
@@ -43,10 +57,7 @@ export class SpillStore {
   constructor(
     readonly root: string,
     readonly limits: Limits = DEFAULT_LIMITS,
-  ) {
-    mkdirSync(root, { recursive: true, mode: DIR_MODE });
-    chmodSync(root, DIR_MODE);
-  }
+  ) {}
 
   usedBytes(sessionId: string): number {
     return this.usedBySession.get(sessionId) ?? 0;
@@ -57,10 +68,15 @@ export class SpillStore {
   }
 
   private sessionDir(sessionId: string): string {
+    mkdirSync(this.root, { recursive: true, mode: DIR_MODE });
+    assertPrivateDirectory(this.root);
     const safe = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
     const dir = join(this.root, safe);
     mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-    chmodSync(dir, DIR_MODE);
+    assertPrivateDirectory(dir);
+    if (dirname(realpathSync(dir)) !== realpathSync(this.root)) {
+      throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
+    }
     return dir;
   }
 
@@ -107,19 +123,65 @@ export class SpillStore {
     const safe = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
     const dir = join(this.root, safe);
     let removed = 0;
-    if (existsSync(dir)) {
+    let rootStat;
+    try {
+      rootStat = lstatSync(this.root);
+    } catch {
+      this.usedBySession.delete(sessionId);
+      return 0;
+    }
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      this.usedBySession.delete(sessionId);
+      return 0;
+    }
+    let dirStat;
+    try {
+      dirStat = lstatSync(dir);
+    } catch {
+      this.usedBySession.delete(sessionId);
+      return 0;
+    }
+    if (dirStat.isSymbolicLink()) {
+      unlinkQuiet(dir);
+      removed = 1;
+    } else if (dirStat.isDirectory()) {
       for (const name of readdirSync(dir)) {
-        unlinkQuiet(join(dir, name));
-        removed += 1;
+        const child = join(dir, name);
+        try {
+          const childStat = lstatSync(child);
+          if (childStat.isFile() || childStat.isSymbolicLink()) {
+            unlinkSync(child);
+            removed += 1;
+          }
+        } catch {
+          /* changed concurrently; never follow or recurse */
+        }
       }
       try {
         rmdirSync(dir);
       } catch {
-        /* a concurrent write may repopulate it; the TTL sweep gets it next */
+        /* a concurrent write may repopulate it; a later teardown gets it */
       }
     }
     this.usedBySession.delete(sessionId);
     return removed;
+  }
+}
+
+function assertPrivateDirectory(path: string): void {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
+  }
+  try {
+    chmodSync(path, DIR_MODE);
+  } catch {
+    throw new ShuntError("SPILL_FAILED", "PERMISSION_FAILED", false);
   }
 }
 
@@ -146,6 +208,7 @@ export class SumaSpillEngine {
     result: unknown,
     internalSourceId?: string,
   ): SpillOutcome {
+    if (!this.enabled) return { action: "passthrough", bytesMeasured: 0 };
     if (internalSourceId && this.registry.isInternal(sessionId, internalSourceId)) {
       // Registry-verified internal envelope: never spill our own pointer again.
       return { action: "passthrough", bytesMeasured: 0 };
@@ -155,11 +218,13 @@ export class SumaSpillEngine {
     try {
       serialized = this.serialize(result);
     } catch (err) {
-      if (!isShuntError(err)) throw err;
+      const safe = isShuntError(err)
+        ? err
+        : new ShuntError("SPILL_FAILED", "SERIALIZE_FAILED", false);
       return {
-        action: err.code === "BINARY_UNSUPPORTED" ? "blocked" : "error",
-        envelope: errorEnvelope(requestId, err),
-        code: err.code,
+        action: safe.code === "BINARY_UNSUPPORTED" ? "blocked" : "error",
+        envelope: errorEnvelope(requestId, safe),
+        code: safe.code,
         bytesMeasured: 0,
       };
     }
@@ -175,8 +240,16 @@ export class SumaSpillEngine {
 
     let entry;
     try {
-      this.store.write(sessionId, serialized);
-      entry = this.registry.register(sessionId, snapshotBytes(serialized), true);
+      // Validate before persistence so a binary/secret/invalid payload cannot leave an
+      // orphaned raw artifact after the operation is rejected.
+      const snapshot = snapshotBytes(serialized, undefined, this.limits);
+      entry = this.registry.register(sessionId, snapshot, true);
+      try {
+        this.store.write(sessionId, serialized);
+      } catch (err) {
+        this.registry.remove(sessionId, entry.sourceId);
+        throw err;
+      }
     } catch (err) {
       const code = isShuntError(err) && err.code === "UNSAFE_SOURCE" ? "UNSAFE_SOURCE" : "SPILL_FAILED";
       const detail = isShuntError(err) ? err.detail : undefined;
@@ -230,14 +303,15 @@ export class SumaSpillEngine {
 }
 
 function contentBlocks(result: unknown): unknown[] | null {
-  const isBlockList = (value: unknown): value is unknown[] =>
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.every((b) => typeof b === "object" && b !== null && "type" in (b as object));
-  if (isBlockList(result)) return result;
   if (typeof result === "object" && result !== null) {
     const content = (result as Record<string, unknown>)["content"];
-    if (isBlockList(content)) return content;
+    if (Array.isArray(content)) return content;
+  }
+  if (
+    Array.isArray(result) &&
+    result.some((b) => typeof b === "object" && b !== null && "type" in (b as object))
+  ) {
+    return result;
   }
   return null;
 }

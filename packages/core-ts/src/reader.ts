@@ -15,7 +15,7 @@
  *    evidence, and only then decide status/coverage.
  * 6. Hand the result to the output guard.
  */
-import { Chunk, planChunks } from "./chunking.js";
+import { Chunk, estimateTokens, planChunks } from "./chunking.js";
 import { CitationVerifier, referencedIds, stripUnsupportedAssertions } from "./citations.js";
 import { Clock, Deadline, monotonicClock } from "./clock.js";
 import {
@@ -24,7 +24,9 @@ import {
 import { ShuntError, isShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits, READER_MODEL } from "./limits.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
-import { LunaProvider, READER_SYSTEM_PROMPT, buildUserMessage } from "./provider.js";
+import {
+  LunaProvider, ModelResponse, READER_SYSTEM_PROMPT, buildUserMessage, transientProviderError,
+} from "./provider.js";
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
 import { ReaderRequest, validateRequest } from "./schema.js";
@@ -40,6 +42,19 @@ interface ChunkOutcome {
   outputTokens: number;
 }
 
+class InputTokenBudget {
+  private spent = 0;
+
+  constructor(private readonly maximum: number) {}
+
+  spend(tokens: number): void {
+    if (!Number.isSafeInteger(tokens) || tokens < 0 || this.spent + tokens > this.maximum) {
+      throw new ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP", false);
+    }
+    this.spent += tokens;
+  }
+}
+
 export class Reader {
   private readonly verifier: CitationVerifier;
 
@@ -53,9 +68,15 @@ export class Reader {
     this.verifier = new CitationVerifier(registry, limits);
   }
 
-  async answer(sessionId: string, request: unknown, deadline?: Deadline): Promise<Envelope> {
+  async answer(
+    sessionId: string,
+    request: unknown,
+    deadline?: Deadline,
+    signal?: AbortSignal,
+  ): Promise<Envelope> {
     const requestId = readRequestId(request);
-    const budget = deadline ?? Deadline.start(this.clock, this.limits.requestDeadlineMs);
+    const requestedDeadline = readRequestedDeadline(request, this.limits.requestDeadlineMs);
+    const budget = deadline ?? Deadline.start(this.clock, requestedDeadline, signal);
     try {
       return await this.run(sessionId, request, requestId, budget);
     } catch (err) {
@@ -105,6 +126,7 @@ export class Reader {
     const plan = planChunks(planned, {
       maxChunks: request.budgets.max_chunks,
       limits: this.limits,
+      question: request.question,
     });
 
     const coverage = new Coverage();
@@ -126,13 +148,19 @@ export class Reader {
       });
     }
 
-    const outcomes = await this.runChunks(request.question, plan.chunks, deadline);
+    const outcomes = await this.runChunks(
+      request.question,
+      plan.chunks,
+      deadline,
+      new InputTokenBudget(this.limits.maxRequestInputTokens),
+    );
 
     const answers: string[] = [];
     const rawCitations: Array<Record<string, unknown>> = [];
     let totalCalls = 0;
     let usageIn = 0;
     let usageOut = 0;
+    let nextCitation = 1;
     for (const outcome of outcomes) {
       totalCalls += outcome.calls;
       usageIn += outcome.inputTokens;
@@ -142,8 +170,10 @@ export class Reader {
         continue;
       }
       coverage.processedChunks += 1;
-      if (outcome.answer) answers.push(outcome.answer);
-      rawCitations.push(...outcome.citations);
+      const namespaced = namespaceOutcome(outcome, nextCitation);
+      nextCitation += namespaced.idsAllocated;
+      if (namespaced.answer) answers.push(namespaced.answer);
+      rawCitations.push(...namespaced.citations);
     }
     this.metrics.observe("reader_model_calls", totalCalls, { model: READER_MODEL });
     this.metrics.observe("reader_input_tokens", usageIn, { model: READER_MODEL });
@@ -153,13 +183,15 @@ export class Reader {
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
     this.metrics.observe("citations_rejected", rejected, { result: "rejected" });
 
-    let answer = stripUnsupportedAssertions(
-      answers.join(" "),
-      new Set(verified.map((c) => c.id)),
-    );
-    const usedIds = new Set(referencedIds(answer));
-    const citations = verified.filter((c) => usedIds.has(c.id)).slice(0, this.limits.maxCitations);
+    const allowed = verified.slice(0, this.limits.maxCitations);
+    const allowedIds = new Set(allowed.map((c) => c.id));
+    let answer = stripUnsupportedAssertions(answers.join(" "), allowedIds);
     answer = capBytes(answer, Math.min(request.budgets.max_answer_bytes, this.limits.maxAnswerBytes));
+    // Byte truncation can remove a marker or split an assertion. Re-run the deterministic
+    // evidence filter on the exact bytes that will be published.
+    answer = stripUnsupportedAssertions(answer, allowedIds);
+    const usedIds = new Set(referencedIds(answer));
+    const citations = allowed.filter((c) => usedIds.has(c.id));
 
     deadline.check("PUBLISH");
     const complete =
@@ -198,6 +230,7 @@ export class Reader {
     question: string,
     chunks: Chunk[],
     deadline: Deadline,
+    inputBudget: InputTokenBudget,
   ): Promise<ChunkOutcome[]> {
     const results: ChunkOutcome[] = new Array(chunks.length);
     let next = 0;
@@ -207,14 +240,24 @@ export class Reader {
         const index = next;
         next += 1;
         if (index >= chunks.length) return;
-        results[index] = await this.runChunk(question, chunks[index] as Chunk, deadline);
+        results[index] = await this.runChunk(
+          question,
+          chunks[index] as Chunk,
+          deadline,
+          inputBudget,
+        );
       }
     };
     await Promise.all(Array.from({ length: workers }, runWorker));
     return results;
   }
 
-  private async runChunk(question: string, chunk: Chunk, deadline: Deadline): Promise<ChunkOutcome> {
+  private async runChunk(
+    question: string,
+    chunk: Chunk,
+    deadline: Deadline,
+    inputBudget: InputTokenBudget,
+  ): Promise<ChunkOutcome> {
     const outcome: ChunkOutcome = {
       chunk, answer: "", citations: [], failedReason: null, calls: 0, inputTokens: 0, outputTokens: 0,
     };
@@ -227,33 +270,92 @@ export class Reader {
         return outcome;
       }
       try {
-        const response = await this.provider.complete({
-          system: READER_SYSTEM_PROMPT,
-          user: buildUserMessage(question, chunk.text, chunk.locator),
-          maxOutputTokens: this.limits.maxOutputTokensPerCall,
-          timeoutMs: deadline.subBudget(this.limits.modelCallDeadlineMs),
-        });
+        const user = buildUserMessage(question, chunk.text, chunk.locator);
+        inputBudget.spend(
+          estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits),
+        );
         outcome.calls += 1;
+        const response = await this.completeWithinDeadline({
+          system: READER_SYSTEM_PROMPT,
+          user,
+          maxOutputTokens: this.limits.maxOutputTokensPerCall,
+        }, deadline);
+        validateModelResponse(response, this.limits);
         outcome.inputTokens = response.usage.inputTokens;
         outcome.outputTokens = response.usage.outputTokens;
-        const parsed = parseModelJson(response.text);
-        outcome.answer = String(parsed["answer"] ?? "");
+        const parsed = parseModelJson(response.text, this.limits.maxToolResultBytes);
+        if (typeof parsed["answer"] !== "string" || !Array.isArray(parsed["citations"])) {
+          throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
+        }
+        assertNoSecret(parsed["answer"], "ANSWER");
+        outcome.answer = parsed["answer"];
         outcome.citations = normalizeCitations(parsed["citations"], chunk);
         return outcome;
       } catch (err) {
-        outcome.calls += 1;
-        if (!isShuntError(err)) throw err;
-        if (err.retryable && attempt + 1 < attempts && !deadline.expired()) continue;
+        const safe = isShuntError(err) ? err : transientProviderError();
+        if (
+          safe.code === "MODEL_ERROR"
+          && safe.retryable
+          && attempt + 1 < attempts
+          && !deadline.expired()
+        ) continue;
         outcome.failedReason =
-          err.code === "MODEL_ERROR" ? "MODEL_ERROR"
-          : err.code === "INVALID_MODEL_OUTPUT" ? "INVALID_MODEL_OUTPUT"
-          : err.code === "TIMEOUT" ? "TIMEOUT"
+          safe.code === "MODEL_ERROR" ? "MODEL_ERROR"
+          : safe.code === "INVALID_MODEL_OUTPUT" ? "INVALID_MODEL_OUTPUT"
+          : safe.code === "LIMIT_EXCEEDED" ? "BUDGET_EXCEEDED"
+          : safe.code === "TIMEOUT" ? "TIMEOUT"
+          : safe.code === "CANCELLED" ? "CANCELLED"
           : "CHUNK_FAILED";
         return outcome;
       }
     }
     outcome.failedReason = "CHUNK_FAILED";
     return outcome;
+  }
+
+  private async completeWithinDeadline(
+    opts: { system: string; user: string; maxOutputTokens: number },
+    deadline: Deadline,
+  ): Promise<ModelResponse> {
+    deadline.check("MODEL_CALL");
+    const timeoutMs = deadline.subBudget(this.limits.modelCallDeadlineMs);
+    if (timeoutMs <= 0) throw new ShuntError("TIMEOUT", "MODEL_CALL", true);
+
+    const controller = new AbortController();
+    const cancel = (): void => controller.abort();
+    deadline.signal.addEventListener("abort", cancel, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectCancelled: ((reason: ShuntError) => void) | undefined;
+    const onDeadlineCancelled = (): void => {
+      rejectCancelled?.(new ShuntError("CANCELLED", "MODEL_CALL", false));
+    };
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new ShuntError("TIMEOUT", "MODEL_CALL", true));
+      }, timeoutMs);
+    });
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectCancelled = reject;
+      if (deadline.signal.aborted) {
+        reject(new ShuntError("CANCELLED", "MODEL_CALL", false));
+        return;
+      }
+      deadline.signal.addEventListener("abort", onDeadlineCancelled, { once: true });
+    });
+    try {
+      const response = await Promise.race([
+        this.provider.complete({ ...opts, timeoutMs, signal: controller.signal }),
+        timeout,
+        cancelled,
+      ]);
+      deadline.check("MODEL_CALL");
+      return response;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      deadline.signal.removeEventListener("abort", cancel);
+      deadline.signal.removeEventListener("abort", onDeadlineCancelled);
+    }
   }
 
   private verifyAll(
@@ -281,12 +383,27 @@ export class Reader {
 function readRequestId(request: unknown): string {
   if (typeof request === "object" && request !== null) {
     const candidate = (request as Record<string, unknown>)["request_id"];
-    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    if (typeof candidate === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(candidate)) {
+      return candidate;
+    }
   }
   return "req_unknown";
 }
 
-function parseModelJson(text: string): Record<string, unknown> {
+function readRequestedDeadline(request: unknown, maximum: number): number {
+  if (typeof request !== "object" || request === null) return maximum;
+  const budgets = (request as Record<string, unknown>)["budgets"];
+  if (typeof budgets !== "object" || budgets === null) return maximum;
+  const value = (budgets as Record<string, unknown>)["deadline_ms"];
+  return Number.isSafeInteger(value) && Number(value) > 0
+    ? Math.min(Number(value), maximum)
+    : maximum;
+}
+
+function parseModelJson(text: string, maxBytes: number): Record<string, unknown> {
+  if (new TextEncoder().encode(text).length > maxBytes) {
+    throw new ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", false);
+  }
   let stripped = text.trim();
   if (stripped.startsWith("```")) {
     stripped = stripped.slice(stripped.indexOf("\n") + 1);
@@ -315,11 +432,18 @@ function normalizeCitations(raw: unknown, chunk: Chunk): Array<Record<string, un
   for (const item of raw.slice(0, 64)) {
     if (typeof item !== "object" || item === null) continue;
     const rec = item as Record<string, unknown>;
-    const id = String(rec["id"] ?? "");
+    const id = rec["id"];
     const quote = rec["quote"];
-    if (!id || typeof quote !== "string") continue;
+    if (typeof id !== "string" || !/^c\d{1,3}$/.test(id)) continue;
+    if (typeof quote !== "string" || quote.length === 0 || !chunk.text.includes(quote)) {
+      out.push(invalidCitation(id, chunk));
+      continue;
+    }
     const locator = locatorFor(rec, chunk);
-    if (!locator) continue;
+    if (!locator) {
+      out.push(invalidCitation(id, chunk));
+      continue;
+    }
     out.push({
       id,
       source_id: chunk.sourceId,
@@ -331,17 +455,79 @@ function normalizeCitations(raw: unknown, chunk: Chunk): Array<Record<string, un
   return out;
 }
 
+function invalidCitation(id: string, chunk: Chunk): Record<string, unknown> {
+  return {
+    id,
+    source_id: chunk.sourceId,
+    snapshot_id: chunk.snapshotId,
+    locator: chunk.locator,
+    quote: "",
+  };
+}
+
 function locatorFor(item: Record<string, unknown>, chunk: Chunk): Record<string, unknown> | null {
   if (chunk.locator["kind"] === "lines") {
     const start = item["line_start"];
     const end = item["line_end"] ?? start;
     if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+    if (
+      Number(start) < Number(chunk.locator["start"])
+      || Number(end) > Number(chunk.locator["end"])
+      || Number(end) < Number(start)
+    ) return null;
     return { kind: "lines", start, end };
   }
   const start = item["record_start"] ?? item["line_start"];
   const end = item["record_end"] ?? item["line_end"] ?? start;
   if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+  if (
+    Number(start) < Number(chunk.locator["start"])
+    || Number(end) > Number(chunk.locator["end"])
+    || Number(end) < Number(start)
+  ) return null;
   return { kind: "records", pointer: chunk.locator["pointer"] ?? "", start, end };
+}
+
+function validateModelResponse(response: ModelResponse, limits: Limits): void {
+  if (typeof response !== "object" || response === null || typeof response.text !== "string") {
+    throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
+  }
+  if (response.model !== READER_MODEL) {
+    throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
+  }
+  const usage = response.usage;
+  if (
+    typeof usage !== "object" || usage === null
+    || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0
+    || usage.inputTokens > limits.maxRequestInputTokens
+    || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0
+    || usage.outputTokens > limits.maxOutputTokensPerCall
+    || typeof usage.estimated !== "boolean"
+  ) {
+    throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
+  }
+}
+
+function namespaceOutcome(
+  outcome: ChunkOutcome,
+  firstId: number,
+): { answer: string; citations: Array<Record<string, unknown>>; idsAllocated: number } {
+  const names = new Map<string, string>();
+  const citations: Array<Record<string, unknown>> = [];
+  for (const citation of outcome.citations) {
+    const local = String(citation["id"]);
+    let global = names.get(local);
+    if (!global) {
+      global = `c${firstId + names.size}`;
+      names.set(local, global);
+    }
+    citations.push({ ...citation, id: global });
+  }
+  const answer = outcome.answer.replace(/\[(c\d{1,3})\]/g, (whole, local: string) => {
+    const global = names.get(local);
+    return global ? `[${global}]` : whole;
+  });
+  return { answer, citations, idsAllocated: names.size };
 }
 
 /**

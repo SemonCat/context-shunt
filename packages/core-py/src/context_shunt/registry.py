@@ -45,16 +45,32 @@ class SourceRegistry:
     ) -> RegisteredSource:
         if not session_id:
             raise ShuntError("UNSAFE_SOURCE", "NO_SESSION")
-        entry = RegisteredSource(
-            source_id=_mint_id(),
-            session_id=session_id,
-            snapshot=snapshot,
-            expires_at_epoch=self._time() + self._limits.spill_ttl_seconds,
-            internal=internal,
-        )
         with self._lock:
-            self._by_session.setdefault(session_id, {})[entry.source_id] = entry
+            now = self._time()
+            bucket = self._by_session.setdefault(session_id, {})
+            for source_id, current in list(bucket.items()):
+                if now >= current.expires_at_epoch:
+                    del bucket[source_id]
+            used = sum(current.snapshot.bytes_len for current in bucket.values())
+            if used + snapshot.bytes_len > self._limits.session_spill_quota_bytes:
+                raise ShuntError("LIMIT_EXCEEDED", "SESSION_SOURCE_QUOTA", retryable=False)
+            entry = RegisteredSource(
+                source_id=_mint_id(),
+                session_id=session_id,
+                snapshot=snapshot,
+                expires_at_epoch=now + self._limits.spill_ttl_seconds,
+                internal=internal,
+            )
+            bucket[entry.source_id] = entry
         return entry
+
+    def remove(self, session_id: str, source_id: str) -> bool:
+        with self._lock:
+            bucket = self._by_session.get(session_id)
+            removed = bucket.pop(source_id, None) is not None if bucket is not None else False
+            if bucket is not None and not bucket:
+                self._by_session.pop(session_id, None)
+            return removed
 
     def resolve(self, session_id: str, source_id: str) -> RegisteredSource:
         with self._lock:

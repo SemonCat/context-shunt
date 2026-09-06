@@ -8,9 +8,10 @@ bounded token - never the path, and never the matched value.
 from __future__ import annotations
 
 import os
+import re
 import stat
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .errors import ShuntError
 
@@ -90,9 +91,10 @@ class AuthorizedPath:
     ino: int
     size: int
     mtime_ns: int
+    ctime_ns: int
 
-    def identity(self) -> tuple[int, int, int, int]:
-        return (self.dev, self.ino, self.size, self.mtime_ns)
+    def identity(self) -> tuple[int, int, int, int, int]:
+        return (self.dev, self.ino, self.size, self.mtime_ns, self.ctime_ns)
 
 
 def _is_secret_path(real: Path, policy: PathPolicy) -> bool:
@@ -115,11 +117,34 @@ def _matches_denylist(real: Path, policy: PathPolicy) -> bool:
             rel = real.relative_to(root)
         except ValueError:
             continue
-        posix = PurePosixPath(rel.as_posix())
+        posix = rel.as_posix()
         for pattern in policy.denylist:
-            if posix.match(pattern):
+            if re.fullmatch(_glob_pattern(pattern), posix):
                 return True
     return False
+
+
+def _glob_pattern(pattern: str) -> str:
+    out = ["^"]
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*" and index + 1 < len(pattern) and pattern[index + 1] == "*":
+            index += 1
+            if index + 1 < len(pattern) and pattern[index + 1] == "/":
+                index += 1
+                out.append("(?:.*/)?")
+            else:
+                out.append(".*")
+        elif char == "*":
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    out.append("$")
+    return "".join(out)
 
 
 def authorize(path: str, policy: PathPolicy) -> AuthorizedPath:
@@ -154,12 +179,18 @@ def authorize(path: str, policy: PathPolicy) -> AuthorizedPath:
         # A hardlinked file can be re-pointed outside the root between checks.
         raise ShuntError("UNSAFE_SOURCE", "HARDLINKED")
     return AuthorizedPath(
-        real=real, dev=st.st_dev, ino=st.st_ino, size=st.st_size, mtime_ns=st.st_mtime_ns
+        real=real,
+        dev=st.st_dev,
+        ino=st.st_ino,
+        size=st.st_size,
+        mtime_ns=st.st_mtime_ns,
+        ctime_ns=st.st_ctime_ns,
     )
 
 
 def contains_secret_marker(data: bytes) -> bool:
-    return any(marker in data for marker in _SECRET_CONTENT_MARKERS)
+    lowered = data.lower()
+    return any(marker.lower() in lowered for marker in _SECRET_CONTENT_MARKERS)
 
 
 def assert_no_secret(data: bytes, stage: str) -> None:
