@@ -289,7 +289,7 @@ def test_the_reader_is_registered_as_a_host_auxiliary_task(host_result):
 
 
 def test_user_auxiliary_config_overrides_the_plugin_default(host_result):
-    """"auto" is the host's inherit sentinel; a real value wins over the plugin default."""
+    """ "auto" is the host's inherit sentinel; a real value wins over the plugin default."""
     assert host_result["reader_target_auto"] == ["", "gpt-5.6-luna"]
     assert host_result["reader_target_pinned"] == ["openrouter", "gpt-5.6-sol"]
 
