@@ -25,14 +25,14 @@
 import {
   type CapabilityReport,
   type DisabledReason,
+  EMITTED_SCHEMA_VERSION,
   READER_MODEL,
-  SCHEMA_VERSION,
   supported,
   unsupported,
 } from "@context-shunt/core";
 
 export const ADAPTER = "openclaw";
-export const ADAPTER_VERSION = "1.0.0";
+export const ADAPTER_VERSION = "1.1.0";
 
 /**
  * OpenClaw tool ids this adapter claims to cover. A read tool outside this list is not
@@ -60,6 +60,11 @@ export interface ProbeInput {
   readonly hostVersion: string;
   /** Set when the host cannot disable provider prompt tracing. */
   readonly unsafeTracing?: boolean;
+  /**
+   * The reader model this deployment configured. The report states what was *requested*;
+   * whether the host actually served it is a provenance question the envelope answers.
+   */
+  readonly readerModel?: string;
 }
 
 export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
@@ -84,7 +89,32 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
   modes.push(
     readerReasons.length > 0
       ? unsupported("reader", readerReasons)
-      : supported("reader", [`runtime model bridge pinned to ${READER_MODEL}`]),
+      : supported("reader", [
+          `isolated runtime completion requested with model=${input.readerModel ?? READER_MODEL}`,
+          "attribution ceiling: the host reports its own post-policy selection, which is a "
+            + "routing fact - this adapter reports attribution_status=resolved, never actual",
+        ]),
+  );
+
+  // Deterministic extraction and stats need no provider at all, so they survive an
+  // unavailable model bridge.
+  modes.push(
+    supported("deterministic_inspect", [
+      "no provider reference on the inspect path; zero model calls",
+    ]),
+  );
+  modes.push(supported("session_stats", ["store-backed, session-scoped only"]));
+
+  // Real lifecycle boundaries, so recovery handles survive a compaction rotation.
+  modes.push(
+    hooks.has("session_end")
+      ? supported("session_lifecycle", [
+          'openclaw session_end carries a reason enum; "compaction" rotates mid-conversation',
+          "handles are revoked only for new/reset/deleted; every other reason relies on TTL",
+        ])
+      : unsupported("session_lifecycle", ["HOOK_MISSING"], [
+          "no session_end hook; handle teardown falls back to TTL",
+        ]),
   );
 
   modes.push(
@@ -100,8 +130,8 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
     adapterVersion: ADAPTER_VERSION,
     hostName: "openclaw",
     hostVersion: input.hostVersion || "unknown",
-    contractVersion: SCHEMA_VERSION,
-    readerModel: READER_MODEL,
+    contractVersion: EMITTED_SCHEMA_VERSION,
+    readerModel: input.readerModel ?? READER_MODEL,
     toolsCovered: [
       ...Object.keys(READ_TOOLS),
       ...Object.keys(SEARCH_TOOLS),

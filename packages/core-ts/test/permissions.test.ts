@@ -7,8 +7,11 @@ import { describe, expect, it } from "vitest";
 
 import { ShuntError } from "../src/errors.js";
 import { authorize, pathPolicy } from "../src/paths.js";
+import { DEFAULT_LIMITS } from "../src/limits.js";
 import { SourceRegistry } from "../src/registry.js";
 import { assertNoSecret, assertSupportedBlocks, assertText, looksBinary, snapshotBytes } from "../src/snapshot.js";
+import { ScopeIdentity, SnapshotStore } from "../src/store.js";
+import { makeIdentity, makeRegistry } from "./support.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -160,12 +163,44 @@ describe("content policy", () => {
 });
 
 describe("handle isolation", () => {
+  function scopedStore(sessionId: string, clock?: { now: number }) {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-scope-"));
+    const store = clock
+      ? new SnapshotStore(join(dir, "cache"), DEFAULT_LIMITS, () => clock.now)
+      : new SnapshotStore(join(dir, "cache"));
+    const identity = makeIdentity(sessionId);
+    store.openScope(identity);
+    return { store, identity, registry: new SourceRegistry(store, identity) };
+  }
+
   it("does not resolve a handle across sessions", () => {
-    const registry = new SourceRegistry();
-    const entry = registry.register("sess_a", snapshotBytes(enc("alpha\n")));
-    expect(registry.resolve("sess_a", entry.sourceId).sourceId).toBe(entry.sourceId);
+    const mine = scopedStore("sess_a");
+    const entry = mine.registry.register("sess_a", snapshotBytes(enc("alpha\n")));
+    expect(mine.registry.resolve("sess_a", entry.sourceId).sourceId).toBe(entry.sourceId);
+
+    // A second scope over the same store: same file, different trusted identity.
+    const theirs = new ScopeIdentity({
+      host: "test-host", profile: "test", principal: "local", session: "sess_b",
+    });
+    mine.store.openScope(theirs);
+    const other = new SourceRegistry(mine.store, theirs);
     try {
-      registry.resolve("sess_b", entry.sourceId);
+      other.resolve("sess_b", entry.sourceId);
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect((err as ShuntError).code).toBe("SOURCE_EXPIRED");
+      // A foreign scope learns nothing beyond "unknown".
+      expect((err as ShuntError).detail).toBe("UNKNOWN_HANDLE");
+    }
+  });
+
+  it("does not resolve a handle across session generations", () => {
+    const first = scopedStore("sess");
+    const entry = first.registry.register("sess", snapshotBytes(enc("alpha\n")));
+    const next = first.identity.withGeneration(2);
+    first.store.openScope(next);
+    try {
+      new SourceRegistry(first.store, next).resolve("sess", entry.sourceId);
       throw new Error("expected rejection");
     } catch (err) {
       expect((err as ShuntError).code).toBe("SOURCE_EXPIRED");
@@ -173,19 +208,32 @@ describe("handle isolation", () => {
   });
 
   it("refuses an expired handle instead of re-fetching", () => {
-    const registry = new SourceRegistry();
-    const entry = registry.register("sess", snapshotBytes(enc("alpha\n")));
-    registry.setTimeFn(() => Date.now() / 1000 + 1e6);
+    const clock = { now: 1_700_000_000_000 };
+    const scoped = scopedStore("sess", clock);
+    const entry = scoped.registry.register("sess", snapshotBytes(enc("alpha\n")));
+    clock.now += (DEFAULT_LIMITS.storeHandleTtlSeconds + 1) * 1000;
     try {
-      registry.resolve("sess", entry.sourceId);
+      scoped.registry.resolve("sess", entry.sourceId);
       throw new Error("expected rejection");
     } catch (err) {
       expect((err as ShuntError).detail).toBe("TTL_ELAPSED");
     }
   });
 
+  it("does not let a clock rollback revive an expired handle", () => {
+    const clock = { now: 1_700_000_000_000 };
+    const scoped = scopedStore("sess", clock);
+    const entry = scoped.registry.register("sess", snapshotBytes(enc("alpha\n")));
+    const ttlMs = (DEFAULT_LIMITS.storeHandleTtlSeconds + 1) * 1000;
+    clock.now += ttlMs;
+    expect(() => scoped.registry.resolve("sess", entry.sourceId)).toThrowError(ShuntError);
+    // Winding the wall clock back must not make the handle readable again.
+    clock.now -= ttlMs;
+    expect(() => scoped.registry.resolve("sess", entry.sourceId)).toThrowError(ShuntError);
+  });
+
   it("drops every handle when the session ends", () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-end-")), { sessionId: "sess" });
     registry.register("sess", snapshotBytes(enc("a\n")));
     registry.register("sess", snapshotBytes(enc("b\n")));
     expect(registry.expireSession("sess")).toBe(2);

@@ -1,4 +1,8 @@
 /** unit citations (TypeScript core) - the same fixture corpus as the Python core. */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { CitationVerifier, stripUnsupportedAssertions } from "../src/citations.js";
@@ -7,13 +11,14 @@ import { Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
 import { conformance } from "./fixtures.js";
-import { FakeLuna, answerJson } from "./support.js";
+import { ScopeIdentity, SnapshotStore } from "../src/store.js";
+import { FakeLuna, answerJson, makeIdentity, makeRegistry } from "./support.js";
 
 const cases = conformance("citation-cases.json");
 const enc = (s: string) => new TextEncoder().encode(s);
 
 function registryWithSources() {
-  const registry = new SourceRegistry();
+  const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-cit-")), { sessionId: "sess_a" });
   const entries: Record<string, ReturnType<SourceRegistry["register"]>> = {};
   for (const [name, spec] of Object.entries<any>(cases.sources)) {
     const media = spec.media_type === "application/json" ? JSON_MEDIA_TYPE : TEXT_MEDIA_TYPE;
@@ -40,9 +45,17 @@ describe("citation verification conformance", () => {
       let sourceId = c.source_id ?? entry.sourceId;
       let snapshotId = c.snapshot_id ?? entry.snapshot.snapshotId;
       if (c.expired) {
-        const expiring = new SourceRegistry();
+        const clock = { now: 1_700_000_000_000 };
+        const expiringStore = new SnapshotStore(
+          join(mkdtempSync(join(tmpdir(), "shunt-exp-")), "cache"),
+          DEFAULT_LIMITS,
+          () => clock.now,
+        );
+        const expiringIdentity = makeIdentity("sess_a");
+        expiringStore.openScope(expiringIdentity);
+        const expiring = new SourceRegistry(expiringStore, expiringIdentity);
         const handle = expiring.register("sess_a", entry.snapshot);
-        expiring.setTimeFn(() => Date.now() / 1000 + 1e6);
+        clock.now += (DEFAULT_LIMITS.storeHandleTtlSeconds + 1) * 1000;
         verifier = new CitationVerifier(expiring);
         sourceId = handle.sourceId;
         session = "sess_a";
@@ -80,26 +93,26 @@ function request(entry: { sourceId: string; snapshot: { snapshotId: string } }, 
 
 describe("the verifier is the only writer of `verified`", () => {
   it("ignores a model that claims verified", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-cit-")), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("alpha\nbeta\n")));
     const reply = JSON.stringify({
       answer: "It says gamma [c1].",
       citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "gamma", verified: true }],
     });
-    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry));
+    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry)).then((r) => r.envelope);
     expect(env.code).toBe("CITATION_INVALID");
     expect(env.citations).toEqual([]);
     expect(env.answer).toBe("");
   });
 
   it("removes assertions without valid evidence and keeps the valid ones", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-cit-")), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("alpha\nbeta\n")));
     const reply = answerJson("The first line is alpha [c1]. The third line is gamma [c2].", [
       { id: "c1", line_start: 1, line_end: 1, quote: "alpha" },
       { id: "c2", line_start: 3, line_end: 3, quote: "gamma" },
     ]);
-    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry));
+    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry)).then((r) => r.envelope);
     expect(env.code).toBe("ANSWERED");
     expect(env.answer).toContain("alpha");
     expect(env.answer).not.toContain("gamma");
@@ -113,7 +126,7 @@ describe("the verifier is the only writer of `verified`", () => {
   });
 
   it("rejects a quote over the byte cap even when it is present in the source", () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-cit-")), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("Z".repeat(600) + "\n")));
     const result = new CitationVerifier(registry).verify("sess", {
       source_id: entry.sourceId,
@@ -125,7 +138,7 @@ describe("the verifier is the only writer of `verified`", () => {
   });
 
   it("rejects a citation that mixes two snapshots", () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(mkdtempSync(join(tmpdir(), "shunt-cit-")), { sessionId: "sess" });
     const first = registry.register("sess", snapshotBytes(enc("alpha\n")));
     const second = registry.register("sess", snapshotBytes(enc("changed\n")));
     const result = new CitationVerifier(registry).verify("sess", {

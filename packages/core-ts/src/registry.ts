@@ -1,15 +1,29 @@
 /**
- * Session-scoped source registry.
+ * Scope-bound source registry over the hybrid store.
  *
- * A `sourceId` is an opaque capability, not an address: minted per session, carrying the
- * authorization decision made when the source was registered, and never resolving in
- * another session. Expired handles are refused rather than silently re-fetched.
+ * A `sourceId` is an opaque capability, not an address: it is minted by the store, it
+ * carries the authorization decision that was made when the source was captured, and it
+ * resolves only inside the trusted (host, profile, principal, session, generation) scope
+ * that created it. Expired, revoked, closed-scope and stale-generation handles are refused
+ * rather than silently re-fetching the underlying file - the source may have changed, and
+ * answering from a newer version of it under an older snapshot hash would be a lie.
+ *
+ * This layer adds one thing to the store: rehydrating a payload into a `Snapshot` with its
+ * line and record indexes. The payload is hash-verified on every load, and the rehydrated
+ * snapshot is cached per handle because it is immutable by construction. The cache is
+ * bounded so a session cannot pin more than a handful of payloads in memory.
  */
-import { randomBytes } from "node:crypto";
-
 import { ShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits } from "./limits.js";
-import { Snapshot } from "./snapshot.js";
+import { Snapshot, snapshotBytes } from "./snapshot.js";
+import {
+  type Capture,
+  type PublishedHandle,
+  ScopeIdentity,
+  SnapshotStore,
+  expiresAtEpochOf,
+  snapshotIdOf,
+} from "./store.js";
 
 export interface RegisteredSource {
   readonly sourceId: string;
@@ -17,111 +31,161 @@ export interface RegisteredSource {
   readonly snapshot: Snapshot;
   readonly expiresAtEpoch: number;
   readonly internal: boolean;
-}
-
-function mintId(): string {
-  return "src_" + randomBytes(8).toString("hex");
+  readonly kind: string;
 }
 
 export class SourceRegistry {
-  private readonly bySession = new Map<string, Map<string, RegisteredSource>>();
+  /**
+   * How many rehydrated payloads one session may keep resident. One request may name up to
+   * `maxSourcesPerRequest` sources, so the cache holds at least that many.
+   */
+  private static readonly CACHE_ENTRIES = 8;
+
+  private readonly cache = new Map<string, Snapshot>();
 
   constructor(
+    readonly store: SnapshotStore,
+    readonly identity: ScopeIdentity,
     private readonly limits: Limits = DEFAULT_LIMITS,
-    private timeFn: () => number = () => Date.now() / 1000,
   ) {}
 
-  /** Test seam for TTL assertions; production always uses the wall clock. */
-  setTimeFn(fn: () => number): void {
-    this.timeFn = fn;
+  get sessionId(): string {
+    return this.identity.session;
   }
 
-  register(sessionId: string, snapshot: Snapshot, internal = false): RegisteredSource {
-    if (!sessionId) throw new ShuntError("UNSAFE_SOURCE", "NO_SESSION");
-    this.sweepSession(sessionId);
-    const used = [...(this.bySession.get(sessionId)?.values() ?? [])]
-      .reduce((total, current) => total + current.snapshot.bytesLen, 0);
-    if (used + snapshot.bytesLen > this.limits.sessionSpillQuotaBytes) {
-      throw new ShuntError("LIMIT_EXCEEDED", "SESSION_SOURCE_QUOTA", false);
-    }
-    const entry: RegisteredSource = {
-      sourceId: mintId(),
-      sessionId,
-      snapshot,
-      expiresAtEpoch: this.timeFn() + this.limits.spillTtlSeconds,
+  // -- capture ---------------------------------------------------------------
+
+  /** Publish one snapshot. Convenience wrapper over the all-or-none batch path. */
+  register(
+    sessionId: string,
+    snapshot: Snapshot,
+    internal = false,
+    kind = "shunted_read",
+  ): RegisteredSource {
+    return this.registerBatch(sessionId, [snapshot], internal, kind)[0] as RegisteredSource;
+  }
+
+  /**
+   * Publish a batch. Every handle appears or none does: a multi-source capture that
+   * half-succeeded would leave the caller holding handles for part of a request it will be
+   * told was refused, so the store commits the whole batch in one transaction.
+   */
+  registerBatch(
+    sessionId: string,
+    snapshots: readonly Snapshot[],
+    internal = false,
+    kind = "shunted_read",
+  ): RegisteredSource[] {
+    this.assertSession(sessionId);
+    const captures: Capture[] = snapshots.map((snapshot) => ({
+      data: snapshot.data,
+      mediaType: snapshot.mediaType,
+      lineCount: snapshot.lineCount,
+      kind,
       internal,
-    };
-    let bucket = this.bySession.get(sessionId);
-    if (!bucket) {
-      bucket = new Map();
-      this.bySession.set(sessionId, bucket);
-    }
-    bucket.set(entry.sourceId, entry);
-    return entry;
+    }));
+    const published = this.store.publish(this.identity, captures);
+    return published.map((handle, index) => {
+      const snapshot = snapshots[index] as Snapshot;
+      if (snapshotIdOf(handle) !== snapshot.snapshotId) {
+        // Content addressing guarantees this; asserting it makes a future change to either
+        // side fail loudly instead of publishing a mislabelled handle.
+        throw new ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", false);
+      }
+      this.remember(handle.handleId, snapshot);
+      return this.entry(handle, snapshot);
+    });
   }
 
-  remove(sessionId: string, sourceId: string): boolean {
-    const bucket = this.bySession.get(sessionId);
-    const removed = bucket?.delete(sourceId) ?? false;
-    if (bucket?.size === 0) this.bySession.delete(sessionId);
-    return removed;
-  }
+  // -- resolution ------------------------------------------------------------
 
   resolve(sessionId: string, sourceId: string): RegisteredSource {
-    const entry = this.bySession.get(sessionId)?.get(sourceId);
-    if (!entry) {
-      // A handle from another session is indistinguishable from an unknown one, which is
-      // deliberate: cross-session probing learns nothing.
-      throw new ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE");
-    }
-    if (this.timeFn() >= entry.expiresAtEpoch) {
-      throw new ShuntError("SOURCE_EXPIRED", "TTL_ELAPSED");
-    }
-    return entry;
+    this.assertSession(sessionId);
+    const handle = this.store.resolve(this.identity, sourceId);
+    return this.entry(handle, this.snapshotFor(handle));
   }
 
-  /** Registry-verified recursion guard. A payload claiming `internal` proves nothing. */
+  /** Authorize without rehydrating the payload. */
+  handle(sessionId: string, sourceId: string): PublishedHandle {
+    this.assertSession(sessionId);
+    return this.store.resolve(this.identity, sourceId);
+  }
+
+  /** Store-verified recursion guard. A payload claiming `internal` proves nothing. */
   isInternal(sessionId: string, sourceId: string): boolean {
     try {
-      return this.resolve(sessionId, sourceId).internal;
+      return this.handle(sessionId, sourceId).internal;
     } catch {
       return false;
     }
   }
 
+  remove(sessionId: string, sourceId: string): boolean {
+    this.assertSession(sessionId);
+    this.cache.delete(sourceId);
+    return this.store.revoke(this.identity, sourceId);
+  }
+
+  /** Revoke every handle in this scope. Only a real session boundary calls this. */
   expireSession(sessionId: string): number {
-    const removed = this.bySession.get(sessionId)?.size ?? 0;
-    this.bySession.delete(sessionId);
-    return removed;
+    this.assertSession(sessionId);
+    this.cache.clear();
+    return this.store.closeScope(this.identity);
   }
 
   sweep(): number {
-    let removed = 0;
-    for (const sessionId of [...this.bySession.keys()]) removed += this.sweepSession(sessionId);
-    return removed;
-  }
-
-  private sweepSession(sessionId: string): number {
-    const bucket = this.bySession.get(sessionId);
-    if (!bucket) return 0;
-    const now = this.timeFn();
-    let removed = 0;
-    for (const [sourceId, entry] of bucket) {
-      if (now >= entry.expiresAtEpoch) {
-        bucket.delete(sourceId);
-        removed += 1;
-      }
-    }
-    if (bucket.size === 0) this.bySession.delete(sessionId);
-    return removed;
+    return this.store.sweep().expiredHandles;
   }
 
   count(sessionId?: string): number {
-    if (sessionId === undefined) {
-      let total = 0;
-      for (const bucket of this.bySession.values()) total += bucket.size;
-      return total;
+    if (sessionId !== undefined) this.assertSession(sessionId);
+    return this.store.stats().handles;
+  }
+
+  // -- internals -------------------------------------------------------------
+
+  /** A registry is bound to one scope; another session's id is not resolvable here. */
+  private assertSession(sessionId: string): void {
+    if (sessionId && sessionId !== this.identity.session) {
+      throw new ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE");
     }
-    return this.bySession.get(sessionId)?.size ?? 0;
+  }
+
+  private entry(handle: PublishedHandle, snapshot: Snapshot): RegisteredSource {
+    return {
+      sourceId: handle.handleId,
+      sessionId: this.identity.session,
+      snapshot,
+      expiresAtEpoch: expiresAtEpochOf(handle),
+      internal: handle.internal,
+      kind: handle.kind,
+    };
+  }
+
+  private snapshotFor(handle: PublishedHandle): Snapshot {
+    const cached = this.cache.get(handle.handleId);
+    if (cached !== undefined && cached.snapshotId === snapshotIdOf(handle)) {
+      // Refresh recency.
+      this.cache.delete(handle.handleId);
+      this.cache.set(handle.handleId, cached);
+      return cached;
+    }
+    const data = this.store.loadPayload(handle);
+    const snapshot = snapshotBytes(data, handle.mediaType, this.limits);
+    if (snapshot.snapshotId !== snapshotIdOf(handle)) {
+      throw new ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", false);
+    }
+    this.remember(handle.handleId, snapshot);
+    return snapshot;
+  }
+
+  private remember(handleId: string, snapshot: Snapshot): void {
+    this.cache.delete(handleId);
+    this.cache.set(handleId, snapshot);
+    while (this.cache.size > SourceRegistry.CACHE_ENTRIES) {
+      const oldest = this.cache.keys().next();
+      if (oldest.done) break;
+      this.cache.delete(oldest.value);
+    }
   }
 }

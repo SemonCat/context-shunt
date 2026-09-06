@@ -9,13 +9,20 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SCHEMA_VERSION = "1.0" as const;
-
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** Works from `src/` (checkout) and from `dist/` (installed package). */
 export function contractsDir(): string {
   return join(here, "..", "contracts", "v1");
+}
+
+/** The normative store DDL, read from the vendored contract rather than embedded. */
+export function storeDdlPath(): string {
+  return join(here, "..", "contracts", "store", "v1.sql");
+}
+
+export function storeDdl(): string {
+  return readFileSync(storeDdlPath(), "utf8");
 }
 
 function loadJson<T>(name: string): T {
@@ -24,6 +31,7 @@ function loadJson<T>(name: string): T {
 
 export interface RawLimits {
   reader_model: string;
+  contract: { emitted_version: string; supported_request_versions: string[] };
   gate: Record<string, number>;
   bytes: Record<string, number>;
   counts: Record<string, number>;
@@ -31,6 +39,10 @@ export interface RawLimits {
   deadlines_ms: Record<string, number>;
   spill: { ttl_seconds: number; dir_mode: string; file_mode: string };
   json: Record<string, number>;
+  inspect: Record<string, number>;
+  disclosure: Record<string, number>;
+  store: Record<string, number | string>;
+  accounting: Record<string, number | string>;
 }
 
 export interface StatusCodePairs {
@@ -84,6 +96,26 @@ export interface Limits {
   readonly spillTtlSeconds: number;
   readonly jsonMaxDepth: number;
   readonly jsonMaxNodes: number;
+  // -- 1.1 additions --
+  readonly maxExtendedEnvelopeBytes: number;
+  readonly maxExtractionBytes: number;
+  readonly inspectMaxResultBytes: number;
+  readonly inspectMaxSegments: number;
+  readonly inspectMaxLinesPerPage: number;
+  readonly inspectMaxBytesPerPage: number;
+  readonly inspectMaxScanLines: number;
+  readonly inspectMaxScanBytes: number;
+  readonly inspectMaxSearchMatches: number;
+  readonly inspectMaxNeedleBytes: number;
+  readonly disclosureMaxPerSourceBytes: number;
+  readonly disclosureMaxPerSessionBytes: number;
+  readonly storeDdlVersion: number;
+  readonly storeBusyTimeoutMs: number;
+  readonly storeMaxEntries: number;
+  readonly storeMaxBytes: number;
+  readonly storeHandleTtlSeconds: number;
+  readonly statsMaxRecordsPerPage: number;
+  readonly statsMaxPages: number;
 }
 
 function pick(group: Record<string, number>, key: string): number {
@@ -128,11 +160,85 @@ export function defaultLimits(): Limits {
     spillTtlSeconds: raw.spill.ttl_seconds,
     jsonMaxDepth: pick(raw.json, "max_depth"),
     jsonMaxNodes: pick(raw.json, "max_nodes"),
+    maxExtendedEnvelopeBytes: pick(raw.bytes, "max_extended_envelope_bytes"),
+    maxExtractionBytes: pick(raw.bytes, "max_extraction_bytes"),
+    inspectMaxResultBytes: pick(raw.inspect, "max_result_bytes"),
+    inspectMaxSegments: pick(raw.inspect, "max_segments"),
+    inspectMaxLinesPerPage: pick(raw.inspect, "max_lines_per_page"),
+    inspectMaxBytesPerPage: pick(raw.inspect, "max_bytes_per_page"),
+    inspectMaxScanLines: pick(raw.inspect, "max_scan_lines"),
+    inspectMaxScanBytes: pick(raw.inspect, "max_scan_bytes"),
+    inspectMaxSearchMatches: pick(raw.inspect, "max_search_matches"),
+    inspectMaxNeedleBytes: pick(raw.inspect, "max_needle_bytes"),
+    disclosureMaxPerSourceBytes: pick(raw.disclosure, "max_per_source_bytes"),
+    disclosureMaxPerSessionBytes: pick(raw.disclosure, "max_per_session_bytes"),
+    storeDdlVersion: pick(raw.store as Record<string, number>, "ddl_version"),
+    storeBusyTimeoutMs: pick(raw.store as Record<string, number>, "busy_timeout_ms"),
+    storeMaxEntries: pick(raw.store as Record<string, number>, "max_entries"),
+    storeMaxBytes: pick(raw.store as Record<string, number>, "max_bytes"),
+    storeHandleTtlSeconds: pick(raw.store as Record<string, number>, "handle_ttl_seconds"),
+    statsMaxRecordsPerPage: pick(
+      raw.accounting as Record<string, number>,
+      "max_stats_records_per_page",
+    ),
+    statsMaxPages: pick(raw.accounting as Record<string, number>, "max_stats_pages"),
   });
 }
 
 export const DEFAULT_LIMITS: Limits = defaultLimits();
 export const READER_MODEL = DEFAULT_LIMITS.readerModel;
+
+/**
+ * Contract revision. Two constants, deliberately separate: `EMITTED_SCHEMA_VERSION` is
+ * what every envelope this core builds declares, `SUPPORTED_REQUEST_VERSIONS` is what it
+ * will accept on input. Revision 1.1 is backward compatible - a 1.0 request is still
+ * accepted and a 1.0 envelope still validates - but a request that declares 1.0 while
+ * carrying a 1.1 field is refused rather than accepted with the field ignored.
+ */
+export const EMITTED_SCHEMA_VERSION: string = rawLimits().contract.emitted_version;
+export const SUPPORTED_REQUEST_VERSIONS: ReadonlySet<string> = new Set(
+  rawLimits().contract.supported_request_versions,
+);
+/** Backward-compatible alias. New code should say which of the two it means. */
+export const SCHEMA_VERSION: string = EMITTED_SCHEMA_VERSION;
+
+/** Fields and operations that only exist from 1.1 onward. */
+export const V11_ONLY_REQUEST_FIELDS: ReadonlySet<string> = new Set(["refined"]);
+export const V11_ONLY_OPERATIONS: ReadonlySet<string> = new Set(["inspect", "stats"]);
+export const V11_ONLY_ENVELOPE_FIELDS: ReadonlySet<string> = new Set([
+  "result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery",
+]);
+
+/** Deterministic estimator name recorded whenever provider usage is unavailable. */
+export const BASELINE_ESTIMATE_METHOD = String(rawLimits().accounting["baseline_method"]);
+
+export function supportedRequestVersion(version: unknown): boolean {
+  return typeof version === "string" && SUPPORTED_REQUEST_VERSIONS.has(version);
+}
+
+/**
+ * The serialized cap that applies to one envelope.
+ *
+ * Deterministic extraction and stats carry a bounded payload of their own - up to
+ * `maxExtractionBytes` of exact snapshot bytes, or one page of operation records - so they
+ * are measured against `maxExtendedEnvelopeBytes`. Every other envelope keeps the original
+ * 16 KiB cap. Both values live in `contracts/v1/limits.json`.
+ */
+export function envelopeByteCap(
+  resultKind: string | undefined,
+  limits: Limits = DEFAULT_LIMITS,
+): number {
+  return resultKind === "deterministic_extraction" || resultKind === "stats"
+    ? limits.maxExtendedEnvelopeBytes
+    : limits.maxEnvelopeBytes;
+}
+
+/** Caps a deployment may not set to zero, because zero would disable rather than tighten. */
+export const POSITIVE_LIMITS: ReadonlySet<string> = new Set([
+  "bytesPerTokenEstimate", "maxChunkBytes", "maxChunkTokens", "maxConcurrentModelCalls",
+  "inspectMaxResultBytes", "inspectMaxScanLines", "storeDdlVersion", "storeBusyTimeoutMs",
+  "statsMaxRecordsPerPage", "statsMaxPages",
+]);
 
 /** Chunk byte budget: the smaller of the byte cap and the token cap in bytes. */
 export function chunkByteBudget(limits: Limits = DEFAULT_LIMITS): number {
@@ -150,11 +256,9 @@ export function narrowLimits(limits: Limits, overrides: Partial<Record<keyof Lim
     if (!Number.isSafeInteger(value)) throw new Error(`limit is not a safe integer: ${key}`);
     if (value > current) throw new Error(`limit ${key} may only be narrowed (max ${current})`);
     if (value < 0) throw new Error(`limit ${key} may not be negative`);
-    if (
-      value === 0
-      && ["bytesPerTokenEstimate", "maxChunkBytes", "maxChunkTokens", "maxConcurrentModelCalls"]
-        .includes(key)
-    ) throw new Error(`limit ${key} must be positive`);
+    if (value === 0 && POSITIVE_LIMITS.has(key)) {
+      throw new Error(`limit ${key} must be positive`);
+    }
     next[key] = value;
   }
   return Object.freeze(next) as unknown as Limits;

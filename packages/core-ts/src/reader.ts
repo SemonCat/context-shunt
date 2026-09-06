@@ -3,18 +3,34 @@
  *
  * Order of operations, and why:
  *
- * 1. Validate against the v1 contract. A missing or blank question stops here, so the
- *    model invocation count for such a request is provably zero.
- * 2. Resolve every source handle in this session and confirm the snapshot hash the caller
- *    named still matches. One unsafe source rejects the whole request rather than
- *    answering from the remaining ones.
+ * 1. Validate against the contract. A missing or blank question stops here, so the model
+ *    invocation count for such a request is provably zero.
+ * 2. Resolve every source handle in this scope and confirm the snapshot hash the caller
+ *    named still matches. One unsafe source rejects the whole request rather than answering
+ *    from the remaining ones. A refined question reuses that same immutable snapshot - it
+ *    never silently recaptures the source.
  * 3. Plan chunks under the token budget before any call is made.
- * 4. Call Luna once per chunk with the original question, at most two concurrently, with
- *    at most one transient retry that spends the same shared budget.
+ * 4. Call the reader model once per chunk with the original question, at most two
+ *    concurrently, with at most one transient retry that spends the same shared budget.
  * 5. Verify every citation against the snapshot, delete assertions that lost their
  *    evidence, and only then decide status/coverage.
- * 6. Hand the result to the output guard.
+ * 6. Attach truthful provenance and hand the result to the output guard.
+ *
+ * Every answer is labelled `model_derived` with `provenance.derived = true`: it is a
+ * model's reading of the source, not the source. The provenance block keeps requested,
+ * resolved and reported provider/model apart and states the strongest attribution the host
+ * actually supports.
+ *
+ * A provider failure, a timeout, a malformed response, a citation failure or a provenance
+ * failure leaves every handle valid. The failure envelope says so and names deterministic
+ * next steps, so the caller retries or refines over the same snapshot instead of paying to
+ * capture the source again.
  */
+import {
+  type ReaderCost,
+  estimateTokens as accountingTokens,
+  noReaderCost,
+} from "./accounting.js";
 import { Chunk, estimateTokens, planChunks } from "./chunking.js";
 import { CitationVerifier, referencedIds, stripUnsupportedAssertions } from "./citations.js";
 import { Clock, Deadline, monotonicClock } from "./clock.js";
@@ -22,14 +38,30 @@ import {
   Citation, Coverage, Envelope, SourceHandle, buildEnvelope, errorEnvelope, isoExpiry,
 } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
-import { DEFAULT_LIMITS, Limits, READER_MODEL } from "./limits.js";
+import { DEFAULT_LIMITS, Limits } from "./limits.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
 import {
-  LunaProvider, ModelResponse, READER_SYSTEM_PROMPT, buildUserMessage, transientProviderError,
+  type Attribution,
+  type Confidence,
+  type ModelIdentity,
+  NO_USAGE,
+  type Provenance,
+  type Usage,
+  UNKNOWN_IDENTITY,
+  enforceAttributionPolicy,
+  identityKnown,
+  mergeUsage,
+  usageComplete,
+  weakestAttribution,
+  type AttributionPolicy,
+} from "./provenance.js";
+import {
+  ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider, buildUserMessage,
+  providerTargetOf, responseAttribution, targetIdentity, transientProviderError,
 } from "./provider.js";
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
-import { ReaderRequest, validateRequest } from "./schema.js";
+import { type ReaderRequest, READ_OPERATIONS, validateRequest } from "./schema.js";
 import { capBytes } from "./textindex.js";
 
 interface ChunkOutcome {
@@ -38,8 +70,22 @@ interface ChunkOutcome {
   citations: Array<Record<string, unknown>>;
   failedReason: string | null;
   calls: number;
-  inputTokens: number;
-  outputTokens: number;
+  usageCompleteCalls: number;
+  usage: Usage;
+  promptBytes: number;
+  completionBytes: number;
+  attribution: { status: Attribution; confidence: Confidence };
+  resolved: ModelIdentity;
+  reported: ModelIdentity;
+  fallbackUsed: boolean;
+}
+
+/** What the session needs to finish the operation: an envelope plus its true cost. */
+export interface ReaderResult {
+  envelope: Envelope;
+  provenance: Provenance;
+  cost: ReaderCost;
+  sourceIds: string[];
 }
 
 class InputTokenBudget {
@@ -60,10 +106,11 @@ export class Reader {
 
   constructor(
     private readonly registry: SourceRegistry,
-    private readonly provider: LunaProvider,
+    private readonly provider: ReaderProvider,
     private readonly limits: Limits = DEFAULT_LIMITS,
     private readonly clock: Clock = monotonicClock,
     private readonly metrics: MetricsSink = nullMetrics,
+    private readonly policy: AttributionPolicy = "allow_unverified",
   ) {
     this.verifier = new CitationVerifier(registry, limits);
   }
@@ -71,19 +118,61 @@ export class Reader {
   async answer(
     sessionId: string,
     request: unknown,
-    deadline?: Deadline,
-    signal?: AbortSignal,
-  ): Promise<Envelope> {
+    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
+  ): Promise<ReaderResult> {
     const requestId = readRequestId(request);
     const requestedDeadline = readRequestedDeadline(request, this.limits.requestDeadlineMs);
-    const budget = deadline ?? Deadline.start(this.clock, requestedDeadline, signal);
+    const budget = opts.deadline ?? Deadline.start(this.clock, requestedDeadline, opts.signal);
     try {
-      return await this.run(sessionId, request, requestId, budget);
+      return await this.run(sessionId, request, requestId, budget, opts.accountingId);
     } catch (err) {
       if (!isShuntError(err)) throw err;
       this.metrics.count("reader_error", { code: err.code });
-      return errorEnvelope(requestId, err);
+      const provenance = this.failureProvenance(err);
+      const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
+        provenance,
+        handlesValid: handlesSurvive(err),
+      };
+      if (opts.accountingId !== undefined) envelopeOpts.accountingId = opts.accountingId;
+      return {
+        envelope: errorEnvelope(requestId, err, envelopeOpts),
+        provenance,
+        cost: noReaderCost(),
+        sourceIds: [],
+      };
     }
+  }
+
+  private noOutputProvenance(): Provenance {
+    return {
+      derived: true,
+      label: "no_model_output",
+      attributionStatus: "not_applicable",
+      attributionConfidence: "none",
+      attributionPolicy: "not_applicable",
+      attemptsStarted: 0,
+      usageComplete: true,
+      citationsMechanicallyVerified: true,
+      requested: targetIdentity(providerTargetOf(this.provider)),
+    };
+  }
+
+  private failureProvenance(err: ShuntError): Provenance {
+    const unknownAttribution =
+      err.code === "MODEL_ERROR"
+      || err.code === "INVALID_MODEL_OUTPUT"
+      || err.code === "PROVENANCE_UNAVAILABLE";
+    return {
+      derived: false,
+      label: "no_model_output",
+      attributionStatus: unknownAttribution ? "unknown" : "not_applicable",
+      attributionConfidence: "none",
+      attributionPolicy: this.policy,
+      attemptsStarted: 0,
+      usageComplete: false,
+      citationsMechanicallyVerified: true,
+      requested: targetIdentity(providerTargetOf(this.provider)),
+    };
   }
 
   private async run(
@@ -91,18 +180,23 @@ export class Reader {
     rawRequest: unknown,
     requestId: string,
     deadline: Deadline,
-  ): Promise<Envelope> {
-    const request: ReaderRequest = validateRequest(rawRequest);
+    accountingId: string | undefined,
+  ): Promise<ReaderResult> {
+    const request = validateRequest(rawRequest, READ_OPERATIONS) as ReaderRequest;
     assertNoSecret(request.question, "QUESTION");
 
     deadline.check("RESOLVE");
     const selections: Array<{ sourceId: string; snapshot: Snapshot; selector: Record<string, unknown> }> = [];
     const handles: SourceHandle[] = [];
+    const sourceIds: string[] = [];
     for (const source of request.sources) {
       const entry = this.registry.resolve(sessionId, source.source_id);
       if (entry.snapshot.snapshotId !== source.snapshot_id) {
+        // A refined question must address the snapshot it was given. Recapturing here
+        // would answer a new question about a different file under the old hash.
         throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
       }
+      sourceIds.push(entry.sourceId);
       const selector =
         source.selector["kind"] === "search"
           ? searchSelectorToLines(entry.snapshot, source.selector)
@@ -136,16 +230,27 @@ export class Reader {
     }
 
     if (plan.chunks.length === 0) {
+      // Nothing to read means nothing was generated: the answer is empty and the
+      // provenance says no model output rather than claiming a derived answer.
       const complete = new Coverage();
       complete.complete = true;
       complete.upstreamTruncated = false;
-      return buildEnvelope({
-        requestId,
-        status: "ok",
-        code: "NO_MATCH",
-        coverage: complete,
-        sources: handles,
-      });
+      const provenance = this.noOutputProvenance();
+      return {
+        envelope: buildEnvelope({
+          requestId,
+          status: "ok",
+          code: "NO_MATCH",
+          coverage: complete,
+          sources: handles,
+          resultKind: "model_derived",
+          provenance,
+          ...(accountingId !== undefined ? { accountingId } : {}),
+        }),
+        provenance,
+        cost: noReaderCost(),
+        sourceIds,
+      };
     }
 
     const outcomes = await this.runChunks(
@@ -158,13 +263,30 @@ export class Reader {
     const answers: string[] = [];
     const rawCitations: Array<Record<string, unknown>> = [];
     let totalCalls = 0;
-    let usageIn = 0;
-    let usageOut = 0;
+    let usageCompleteCalls = 0;
+    let usage: Usage = { method: "not_applicable" };
+    let promptBytes = 0;
+    let completionBytes = 0;
     let nextCitation = 1;
+    let attribution: { status: Attribution; confidence: Confidence } = {
+      status: "not_applicable",
+      confidence: "none",
+    };
+    let resolved: ModelIdentity = UNKNOWN_IDENTITY;
+    let reported: ModelIdentity = UNKNOWN_IDENTITY;
+    let fallbackUsed = false;
     for (const outcome of outcomes) {
       totalCalls += outcome.calls;
-      usageIn += outcome.inputTokens;
-      usageOut += outcome.outputTokens;
+      usageCompleteCalls += outcome.usageCompleteCalls;
+      usage = mergeUsage(usage, outcome.usage);
+      promptBytes += outcome.promptBytes;
+      completionBytes += outcome.completionBytes;
+      fallbackUsed = fallbackUsed || outcome.fallbackUsed;
+      if (outcome.calls > 0) {
+        attribution = weakestAttribution(attribution, outcome.attribution);
+        if (!identityKnown(resolved)) resolved = outcome.resolved;
+        if (!identityKnown(reported)) reported = outcome.reported;
+      }
       if (outcome.failedReason) {
         coverage.omit(outcome.chunk.sourceId, outcome.chunk.locator, outcome.failedReason);
         continue;
@@ -175,9 +297,17 @@ export class Reader {
       if (namespaced.answer) answers.push(namespaced.answer);
       rawCitations.push(...namespaced.citations);
     }
-    this.metrics.observe("reader_model_calls", totalCalls, { model: READER_MODEL });
-    this.metrics.observe("reader_input_tokens", usageIn, { model: READER_MODEL });
-    this.metrics.observe("reader_output_tokens", usageOut, { model: READER_MODEL });
+    this.metrics.observe("reader_model_calls", totalCalls);
+    this.metrics.observe("reader_attempts_usage_complete", usageCompleteCalls);
+
+    const cost = readerCostOf({
+      usage,
+      attempts: totalCalls,
+      usageCompleteCalls,
+      promptBytes,
+      completionBytes,
+      limits: this.limits,
+    });
 
     const { verified, rejected } = this.verifyAll(sessionId, rawCitations);
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
@@ -193,6 +323,43 @@ export class Reader {
     const usedIds = new Set(referencedIds(answer));
     const citations = allowed.filter((c) => usedIds.has(c.id));
 
+    const provenance: Provenance = {
+      derived: true,
+      label: totalCalls > 0 ? "model_generated_answer" : "no_model_output",
+      attributionStatus: attribution.status,
+      attributionConfidence: attribution.confidence,
+      attributionPolicy: totalCalls > 0 ? this.policy : "not_applicable",
+      attemptsStarted: totalCalls,
+      usageComplete: totalCalls > 0 && usageCompleteCalls === totalCalls,
+      citationsMechanicallyVerified: true,
+      requested: targetIdentity(providerTargetOf(this.provider)),
+      resolved,
+      reported,
+      ...(totalCalls > 0 ? { fallbackUsed } : {}),
+    };
+    // Policy runs before publication so a refused attribution never ships an answer. The
+    // failure keeps the provenance it was judged on: an operator needs to see the value
+    // that contradicted the request, not a blank "unknown".
+    try {
+      enforceAttributionPolicy(provenance, this.policy);
+    } catch (err) {
+      if (!isShuntError(err)) throw err;
+      this.metrics.count("reader_error", { code: err.code });
+      const refused: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+      const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
+        provenance: refused,
+        sources: handles,
+        handlesValid: true,
+      };
+      if (accountingId !== undefined) envelopeOpts.accountingId = accountingId;
+      return {
+        envelope: errorEnvelope(requestId, err, envelopeOpts),
+        provenance: refused,
+        cost,
+        sourceIds,
+      };
+    }
+
     deadline.check("PUBLISH");
     const complete =
       coverage.omitted.length === 0 &&
@@ -202,28 +369,62 @@ export class Reader {
 
     if (answer.length === 0) {
       if (rejected > 0 && verified.length === 0 && rawCitations.length > 0) {
-        throw new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
+        // The handles are still valid and the caller is told so, so they have to be listed
+        // too: "recovery.handles_valid: true" is only actionable if the envelope still says
+        // which handles survived.
+        const failure = new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
+        // Nothing survived verification, so nothing model-generated is published: the
+        // failure is labelled not-derived while keeping the attribution facts.
+        const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+        const failureOpts: Parameters<typeof errorEnvelope>[2] = {
+          provenance: failed,
+          sources: handles,
+          handlesValid: true,
+        };
+        if (accountingId !== undefined) failureOpts.accountingId = accountingId;
+        return {
+          envelope: errorEnvelope(requestId, failure, failureOpts),
+          provenance: failed,
+          cost,
+          sourceIds,
+        };
       }
       coverage.complete = complete;
-      return buildEnvelope({
-        requestId,
-        status: complete ? "ok" : "partial",
-        code: "NO_MATCH",
-        coverage,
-        sources: handles,
-      });
+      return {
+        envelope: buildEnvelope({
+          requestId,
+          status: complete ? "ok" : "partial",
+          code: "NO_MATCH",
+          coverage,
+          sources: handles,
+          resultKind: "model_derived",
+          provenance,
+          ...(accountingId !== undefined ? { accountingId } : {}),
+        }),
+        provenance,
+        cost,
+        sourceIds,
+      };
     }
 
     coverage.complete = complete;
-    return buildEnvelope({
-      requestId,
-      status: complete ? "ok" : "partial",
-      code: "ANSWERED",
-      answer,
-      citations,
-      coverage,
-      sources: handles,
-    });
+    return {
+      envelope: buildEnvelope({
+        requestId,
+        status: complete ? "ok" : "partial",
+        code: "ANSWERED",
+        answer,
+        citations,
+        coverage,
+        sources: handles,
+        resultKind: "model_derived",
+        provenance,
+        ...(accountingId !== undefined ? { accountingId } : {}),
+      }),
+      provenance,
+      cost,
+      sourceIds,
+    };
   }
 
   private async runChunks(
@@ -259,7 +460,19 @@ export class Reader {
     inputBudget: InputTokenBudget,
   ): Promise<ChunkOutcome> {
     const outcome: ChunkOutcome = {
-      chunk, answer: "", citations: [], failedReason: null, calls: 0, inputTokens: 0, outputTokens: 0,
+      chunk,
+      answer: "",
+      citations: [],
+      failedReason: null,
+      calls: 0,
+      usageCompleteCalls: 0,
+      usage: NO_USAGE,
+      promptBytes: 0,
+      completionBytes: 0,
+      attribution: { status: "unknown", confidence: "none" },
+      resolved: UNKNOWN_IDENTITY,
+      reported: UNKNOWN_IDENTITY,
+      fallbackUsed: false,
     };
     const attempts = 1 + this.limits.maxTransientRetries;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -275,14 +488,25 @@ export class Reader {
           estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits),
         );
         outcome.calls += 1;
+        outcome.promptBytes +=
+          new TextEncoder().encode(READER_SYSTEM_PROMPT).length
+          + new TextEncoder().encode(user).length;
         const response = await this.completeWithinDeadline({
           system: READER_SYSTEM_PROMPT,
           user,
           maxOutputTokens: this.limits.maxOutputTokensPerCall,
         }, deadline);
         validateModelResponse(response, this.limits);
-        outcome.inputTokens = response.usage.inputTokens;
-        outcome.outputTokens = response.usage.outputTokens;
+        outcome.completionBytes += new TextEncoder().encode(response.text).length;
+        outcome.usage = mergeUsage(outcome.usage, response.usage);
+        if (usageComplete(response.usage)) outcome.usageCompleteCalls += 1;
+        outcome.attribution = responseAttribution(response);
+        outcome.resolved = response.resolved;
+        outcome.reported = response.reported;
+        outcome.fallbackUsed = outcome.fallbackUsed || response.fallbackUsed;
+        if (outcome.attribution.status === "mismatch") {
+          throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
+        }
         const parsed = parseModelJson(response.text, this.limits.maxToolResultBytes);
         if (typeof parsed["answer"] !== "string" || !Array.isArray(parsed["citations"])) {
           throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
@@ -305,6 +529,7 @@ export class Reader {
           : safe.code === "LIMIT_EXCEEDED" ? "BUDGET_EXCEEDED"
           : safe.code === "TIMEOUT" ? "TIMEOUT"
           : safe.code === "CANCELLED" ? "CANCELLED"
+          : safe.code === "PROVENANCE_UNAVAILABLE" ? "PROVENANCE_UNAVAILABLE"
           : "CHUNK_FAILED";
         return outcome;
       }
@@ -488,24 +713,65 @@ function locatorFor(item: Record<string, unknown>, chunk: Chunk): Record<string,
   return { kind: "records", pointer: chunk.locator["pointer"] ?? "", start, end };
 }
 
+/**
+ * Shape and bounds only. *Which* model answered is a provenance question, not a validation
+ * one: it is classified truthfully and then judged by the configured policy, rather than
+ * being asserted here from what we happened to request.
+ */
 function validateModelResponse(response: ModelResponse, limits: Limits): void {
   if (typeof response !== "object" || response === null || typeof response.text !== "string") {
     throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
   }
-  if (response.model !== READER_MODEL) {
-    throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
-  }
   const usage = response.usage;
-  if (
-    typeof usage !== "object" || usage === null
-    || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0
-    || usage.inputTokens > limits.maxRequestInputTokens
-    || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0
-    || usage.outputTokens > limits.maxOutputTokensPerCall
-    || typeof usage.estimated !== "boolean"
-  ) {
+  if (typeof usage !== "object" || usage === null) {
     throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
   }
+  const bounds: Array<[number | undefined, number]> = [
+    [usage.inputTokens, limits.maxRequestInputTokens],
+    [usage.outputTokens, limits.maxOutputTokensPerCall],
+    [usage.cacheTokens, limits.maxRequestInputTokens],
+  ];
+  for (const [value, maximum] of bounds) {
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+      throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
+    }
+  }
+}
+
+/** Only a failure of the handle itself invalidates it. */
+function handlesSurvive(err: ShuntError): boolean {
+  return !["SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE"].includes(err.code);
+}
+
+/** Exact provider usage wins; otherwise a named deterministic estimate. */
+function readerCostOf(input: {
+  usage: Usage;
+  attempts: number;
+  usageCompleteCalls: number;
+  promptBytes: number;
+  completionBytes: number;
+  limits: Limits;
+}): ReaderCost {
+  if (input.attempts === 0) return noReaderCost();
+  if (usageComplete(input.usage)) {
+    return {
+      inputTokens: input.usage.inputTokens,
+      outputTokens: input.usage.outputTokens,
+      cacheTokens: input.usage.cacheTokens,
+      method: "exact",
+      attemptsStarted: input.attempts,
+      attemptsUsageComplete: input.usageCompleteCalls,
+    };
+  }
+  return {
+    inputTokens: accountingTokens(input.promptBytes, input.limits),
+    outputTokens: accountingTokens(input.completionBytes, input.limits),
+    cacheTokens: undefined,
+    method: "bytes_div_4",
+    attemptsStarted: input.attempts,
+    attemptsUsageComplete: input.usageCompleteCalls,
+  };
 }
 
 function namespaceOutcome(

@@ -18,6 +18,12 @@ export const SAFE_MESSAGES: Record<string, string> = {
   INVALID_MODEL_OUTPUT: "reader model output did not match the required shape",
   CITATION_INVALID: "no assertion survived citation verification",
   SPILL_FAILED: "oversized result could not be spilled",
+  STORE_FAILED: "snapshot store could not publish or authorize a handle",
+  DISCLOSURE_EXHAUSTED: "cumulative disclosure ceiling reached for this source or session",
+  PROVENANCE_UNAVAILABLE:
+    "reader provenance could not be established under the configured policy",
+  EXTRACTED: "deterministic extraction returned exact snapshot bytes",
+  STATS: "session accounting returned",
   HOST_UNSAFE: "host cannot guarantee the required interception order",
   CANCELLED: "request cancelled",
   LARGE_READ: "full read exceeds the configured line or byte threshold",

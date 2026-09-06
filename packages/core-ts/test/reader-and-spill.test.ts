@@ -12,17 +12,23 @@ import { describe, expect, it } from "vitest";
 import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
-import { DEFAULT_LIMITS as L, READER_MODEL } from "../src/limits.js";
+import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
 import { InMemoryMetrics } from "../src/metrics.js";
 import { Deadline, FakeClock } from "../src/clock.js";
-import { HostBridgeProvider, UnavailableProvider } from "../src/provider.js";
+import {
+  HostBridgeProvider, UnavailableProvider, responseAttribution,
+} from "../src/provider.js";
 import { Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
-import { SpillStore, SumaSpillEngine } from "../src/spill.js";
+import { SpillEngine } from "../src/spill.js";
+import { ScopeIdentity, SnapshotStore } from "../src/store.js";
 import { ShuntSession } from "../src/session.js";
 import { conformance } from "./fixtures.js";
-import { FakeLuna, answerJson, makeCapability, makeConfig } from "./support.js";
+import {
+  FakeLuna, answerJson, derivedProvenance, makeCapability, makeConfig, makeIdentity,
+  makeRegistry,
+} from "./support.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const SOURCE = 'import os\nmax_retries = 3\nbackoff = "exponential"\ntimeout_seconds = 30\n';
@@ -54,7 +60,7 @@ function request(
 }
 
 function fixture(reply?: string, content = SOURCE) {
-  const registry = new SourceRegistry();
+  const registry = makeRegistry(tmp(), { sessionId: "sess" });
   const entry = registry.register("sess", snapshotBytes(enc(content)));
   const luna = new FakeLuna(reply === undefined ? [] : [reply]);
   return { registry, entry, luna, reader: new Reader(registry, luna) };
@@ -65,7 +71,7 @@ describe("reader gate", () => {
     const { entry, luna, reader } = fixture();
     const req = request(entry) as Record<string, unknown>;
     delete req["question"];
-    const env = await reader.answer("sess", req);
+    const env = await reader.answer("sess", req).then((r) => r.envelope);
     expect(luna.callCount).toBe(0);
     expect(env.status).toBe("error");
     expect(env.code).toBe("INVALID_REQUEST");
@@ -74,7 +80,7 @@ describe("reader gate", () => {
   for (const question of ["", "   ", "\n\t "]) {
     it(`makes zero model calls for a blank question ${JSON.stringify(question)}`, async () => {
       const { entry, luna, reader } = fixture();
-      const env = await reader.answer("sess", request(entry, { question }));
+      const env = await reader.answer("sess", request(entry, { question })).then((r) => r.envelope);
       expect(luna.callCount).toBe(0);
       expect(env.status).toBe("error");
     });
@@ -85,7 +91,7 @@ describe("reader gate", () => {
       { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
     ]);
     const { entry, luna, reader } = fixture(reply);
-    const env = await reader.answer("sess", request(entry));
+    const env = await reader.answer("sess", request(entry)).then((r) => r.envelope);
     expect(env.code).toBe("ANSWERED");
     expect(luna.callCount).toBe(1);
     expect(luna.calls[0]!.model).toBe(READER_MODEL);
@@ -94,27 +100,27 @@ describe("reader gate", () => {
   });
 
   it("retries a transient failure exactly once, question intact", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const good = answerJson("Three [c1].", [
       { id: "c1", line_start: 2, line_end: 2, quote: "max_retries" },
     ]);
     const luna = new FakeLuna([new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true), good]);
-    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    const env = await new Reader(registry, luna).answer("sess", request(entry)).then((r) => r.envelope);
     expect(luna.callCount).toBe(2);
     expect(luna.calls.every((c) => c.user.includes(QUESTION))).toBe(true);
     expect(env.code).toBe("ANSWERED");
   });
 
   it("stops after one retry", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const luna = new FakeLuna([
       new ShuntError("MODEL_ERROR", "X", true),
       new ShuntError("MODEL_ERROR", "X", true),
       "never used",
     ]);
-    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    const env = await new Reader(registry, luna).answer("sess", request(entry)).then((r) => r.envelope);
     expect(luna.callCount).toBe(2);
     expect(env.status).toBe("partial");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
@@ -122,7 +128,7 @@ describe("reader gate", () => {
 
   it("passes no host conversation and no tool surface", async () => {
     const { entry, luna, reader } = fixture(answerJson("", []));
-    await reader.answer("sess", request(entry));
+    await reader.answer("sess", request(entry)).then((r) => r.envelope);
     const call = luna.calls[0]!;
     expect(call.user.toLowerCase()).not.toContain("conversation");
     expect(call.user.split("SOURCE EXCERPT").length - 1).toBe(1);
@@ -130,24 +136,80 @@ describe("reader gate", () => {
   });
 
   it("reports MODEL_ERROR rather than substituting a model", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
-    const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry));
+    const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry)).then((r) => r.envelope);
     expect(env.status).toBe("partial");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
     expect(env.answer).toBe("");
   });
 
-  it("rejects a host bridge that returns a different model", async () => {
+  it("refuses a reported model that contradicts the request", async () => {
+    // A different model is a wrong answer, not a weakly attributed one.
     const provider = new HostBridgeProvider(async () => ({
       text: "{}",
-      model: "gpt-5.6-sol",
+      reported_provider: "openai",
+      reported_model: "gpt-5.6-sol",
+      provider_confirms_generation: true,
       input_tokens: 1,
       output_tokens: 1,
-    }));
-    await expect(
-      provider.complete({ system: "s", user: "u", maxOutputTokens: 10, timeoutMs: 100 }),
-    ).rejects.toMatchObject({ code: "MODEL_ERROR", detail: "MODEL_SUBSTITUTED", retryable: false });
+      usage_exact: true,
+    }), undefined, READER_MODEL, "openai");
+    const response = await provider.complete({
+      system: "s", user: "u", maxOutputTokens: 10, timeoutMs: 100,
+    });
+    expect(responseAttribution(response).status).toBe("mismatch");
+
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const env = await new Reader(registry, provider)
+      .answer("sess", request(entry)).then((r) => r.envelope);
+    // Refused outright rather than published under the requested model's name.
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("MODEL_ERROR");
+    expect(env.answer).toBe("");
+    expect(env.provenance!.attribution_status).toBe("mismatch");
+    expect(env.provenance!.reported_model).toBe("gpt-5.6-sol");
+    expect(env.provenance!.requested_model).toBe(READER_MODEL);
+    // A model failure is not a handle failure.
+    expect(env.recovery!.handles_valid).toBe(true);
+  });
+
+  it("labels an unprovable attribution unverified and never claims actual", async () => {
+    // The host echoed the request back; that is not a provider confirmation.
+    const provider = new HostBridgeProvider(async () => ({
+      text: answerJson("The retry ceiling is three [c1].", [
+        { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+      ]),
+      reported_provider: "openai",
+      reported_model: READER_MODEL,
+      provider_confirms_generation: false,
+      usage_exact: false,
+    }), undefined, READER_MODEL, "openai");
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const result = await new Reader(registry, provider).answer("sess", request(entry));
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.provenance!.attribution_status).toBe("unverified");
+    expect(result.envelope.provenance!.usage_complete).toBe(false);
+    // Absent provider usage becomes a named estimate, never a zero.
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.inputTokens).toBeGreaterThan(0);
+  });
+
+  it("refuses an unverified attribution under the require_match policy", async () => {
+    const provider = new HostBridgeProvider(async () => ({
+      text: answerJson("", []),
+      provider_confirms_generation: false,
+    }), undefined, READER_MODEL, "openai");
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const env = await new Reader(registry, provider, undefined, undefined, undefined, "require_match")
+      .answer("sess", request(entry)).then((r) => r.envelope);
+    expect(env.code).toBe("PROVENANCE_UNAVAILABLE");
+    // A provenance failure is not a handle failure: recovery keeps the snapshot.
+    expect(env.recovery!.handles_valid).toBe(true);
+    expect(env.recovery!.actions).toContain("CONFIGURE_READER_MODEL");
   });
 
   it("returns NO_MATCH for a search with no hits and no model call", async () => {
@@ -163,7 +225,7 @@ describe("reader gate", () => {
           },
         ],
       }),
-    );
+    ).then((r) => r.envelope);
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("NO_MATCH");
     expect(env.status).toBe("ok");
@@ -171,13 +233,13 @@ describe("reader gate", () => {
 
   it("is partial when a chunk is omitted by budget", async () => {
     const body = Array.from({ length: 5000 }, (_, i) => `line ${i} value`).join("\n") + "\n";
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(body)));
     const luna = new FakeLuna([], answerJson("", []));
     const env = await new Reader(registry, luna).answer(
       "sess",
       request(entry, { budgets: { max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000 } }),
-    );
+    ).then((r) => r.envelope);
     expect(env.status).toBe("partial");
     expect(env.coverage.complete).toBe(false);
     expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
@@ -185,7 +247,7 @@ describe("reader gate", () => {
 
   it("does not retry invalid model output and leaks none of it", async () => {
     const { entry, luna, reader } = fixture("this is not json at all");
-    const env = await reader.answer("sess", request(entry));
+    const env = await reader.answer("sess", request(entry)).then((r) => r.envelope);
     expect(luna.callCount).toBe(1);
     expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
     expect(JSON.stringify(env)).not.toContain("not json");
@@ -195,14 +257,14 @@ describe("reader gate", () => {
     const { entry, luna, reader } = fixture();
     const req = request(entry) as any;
     req.sources[0].snapshot_id = "sha256:" + "0".repeat(64);
-    const env = await reader.answer("sess", req);
+    const env = await reader.answer("sess", req).then((r) => r.envelope);
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("SOURCE_CHANGED");
   });
 
   it("answers a JSON source with record citations", async () => {
     const doc = JSON.stringify({ items: [{ name: "alpha", retries: 1 }, { name: "beta", retries: 3 }] });
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(doc), JSON_MEDIA_TYPE));
     const reply = answerJson("beta retries three times [c1].", [
       { id: "c1", record_start: 2, record_end: 2, quote: '"name":"beta"' },
@@ -218,7 +280,7 @@ describe("reader gate", () => {
           },
         ],
       }),
-    );
+    ).then((r) => r.envelope);
     expect(env.code).toBe("ANSWERED");
     expect(env.citations[0]!.locator["kind"]).toBe("records");
   });
@@ -290,23 +352,22 @@ describe("suma spill conformance", () => {
 
   for (const c of spillCases.cases) {
     it(`handles ${c.id}`, () => {
-      const dir = tmp();
-      const registry = new SourceRegistry();
-      const store = new SpillStore(join(dir, "cache"));
-      if (c.session_spill_used_bytes !== undefined) {
-        store.seedUsage("sess", c.session_spill_used_bytes);
-      }
-      if (c.inject === "write_failure") {
-        store.write = () => {
-          throw new ShuntError("SPILL_FAILED", "WRITE_FAILED", false);
+      const limits = c.store_quota_bytes !== undefined
+        ? narrowLimits(L, { storeMaxBytes: c.store_quota_bytes })
+        : L;
+      const registry = makeRegistry(tmp(), { sessionId: "sess", limits });
+      const store = registry.store;
+      if (c.inject === "publish_write_failure") {
+        store.publish = () => {
+          throw new ShuntError("STORE_FAILED", "WRITE_FAILED", false);
         };
       }
-      if (c.inject === "readback_mismatch") {
-        store.write = () => {
-          throw new ShuntError("SPILL_FAILED", "READBACK_MISMATCH", false);
+      if (c.inject === "publish_content_mismatch") {
+        store.publish = () => {
+          throw new ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", false);
         };
       }
-      const engine = new SumaSpillEngine(store, registry, undefined, true);
+      const engine = new SpillEngine(registry, limits, true);
       let internalId: string | undefined;
       if (c.result.kind === "internal_envelope") {
         internalId = registry.register("sess", snapshotBytes(enc("internal")), true).sourceId;
@@ -318,7 +379,7 @@ describe("suma spill conformance", () => {
   }
 
   it("never calls a model and never summarizes", () => {
-    const engine = new SumaSpillEngine(new SpillStore(join(tmp(), "cache")), new SourceRegistry(), undefined, true);
+    const engine = new SpillEngine(makeRegistry(tmp(), { sessionId: "sess" }), undefined, true);
     const outcome = engine.evaluate("sess", "req_s", "x".repeat(40000));
     expect(outcome.action).toBe("spill");
     expect(outcome.envelope!.answer).toBe("");
@@ -326,7 +387,7 @@ describe("suma spill conformance", () => {
   });
 
   it("keeps the pointer envelope under the cap for any payload size", () => {
-    const engine = new SumaSpillEngine(new SpillStore(join(tmp(), "cache")), new SourceRegistry(), undefined, true);
+    const engine = new SpillEngine(makeRegistry(tmp(), { sessionId: "sess" }), undefined, true);
     const outcome = engine.evaluate("sess", "req_s", "y".repeat(4_000_000));
     const env = enforce(outcome.envelope);
     expect(serializedBytes(env)).toBeLessThanOrEqual(L.maxEnvelopeBytes);
@@ -334,7 +395,7 @@ describe("suma spill conformance", () => {
   });
 
   it("spills strings, objects and arrays alike", () => {
-    const engine = new SumaSpillEngine(new SpillStore(join(tmp(), "cache")), new SourceRegistry(), undefined, true);
+    const engine = new SpillEngine(makeRegistry(tmp(), { sessionId: "sess" }), undefined, true);
     for (const payload of ["s".repeat(40000), { k: "v".repeat(40000) }, ["item".repeat(4000), "item".repeat(4000), "item".repeat(4000), "item".repeat(4000)]]) {
       const outcome = engine.evaluate("sess", "req_s", payload);
       expect(outcome.action).toBe("spill");
@@ -345,49 +406,51 @@ describe("suma spill conformance", () => {
   it("contains hostile serialization and store exceptions without leaking them", () => {
     const secret = "SENTINEL-SPILL-EXCEPTION-31dce2";
 
-    const serializationRegistry = new SourceRegistry();
+    const serializationRegistry = makeRegistry(tmp(), { sessionId: "sess" });
     const hostile = new Proxy({}, {
       get() {
         throw new Error(secret);
       },
     });
-    const serializationOutcome = new SumaSpillEngine(
-      new SpillStore(join(tmp(), "cache")),
-      serializationRegistry,
-      undefined,
-      true,
-    ).evaluate("sess", "req_s", hostile);
+    const serializationOutcome = new SpillEngine(serializationRegistry, undefined, true)
+      .evaluate("sess", "req_s", hostile);
     expect(serializationOutcome).toMatchObject({ action: "error", code: "SPILL_FAILED" });
     expect(JSON.stringify(serializationOutcome)).not.toContain(secret);
     expect(serializationRegistry.count("sess")).toBe(0);
 
-    const storeRegistry = new SourceRegistry();
-    const store = new SpillStore(join(tmp(), "cache"));
-    store.write = () => {
+    const storeRegistry = makeRegistry(tmp(), { sessionId: "sess" });
+    storeRegistry.store.publish = () => {
       throw new Error(secret);
     };
-    const storeOutcome = new SumaSpillEngine(store, storeRegistry, undefined, true)
+    const storeOutcome = new SpillEngine(storeRegistry, undefined, true)
       .evaluate("sess", "req_s", "x".repeat(40_000));
     expect(storeOutcome).toMatchObject({ action: "error", code: "SPILL_FAILED" });
     expect(JSON.stringify(storeOutcome)).not.toContain(secret);
     expect(storeRegistry.count("sess")).toBe(0);
   });
 
-  it("writes private files and enforces the session quota", () => {
-    const store = new SpillStore(join(tmp(), "cache"));
-    expect(() => statSync(store.root)).toThrow();
-    const written = store.write("sess", enc("payload bytes"));
+  it("writes private files and enforces the store byte quota", () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const store = registry.store;
+    registry.register("sess", snapshotBytes(enc("payload bytes")));
     expect(statSync(store.root).mode & 0o777).toBe(0o700);
-    expect(statSync(written).mode & 0o777).toBe(0o600);
-    expect(readdirSync(store.root).length).toBe(1);
-    store.seedUsage("sess", L.sessionSpillQuotaBytes);
-    expect(() => store.write("sess", enc("one more"))).toThrowError(ShuntError);
+    const blobs = readdirSync(join(store.root, "blobs"));
+    expect(blobs.length).toBe(1);
+
+    const narrow = makeRegistry(tmp(), {
+      sessionId: "sess",
+      limits: narrowLimits(L, { storeMaxBytes: 8 }),
+    });
+    expect(() => narrow.register("sess", snapshotBytes(enc("far too many bytes"))))
+      .toThrowError(ShuntError);
+    expect(narrow.count("sess")).toBe(0);
   });
 
-  it("purges a session's artifacts", () => {
-    const store = new SpillStore(join(tmp(), "cache"));
-    store.write("sess", enc("payload"));
-    expect(store.purgeSession("sess")).toBe(1);
+  it("purges a scope's artifacts at a real session boundary", () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    registry.register("sess", snapshotBytes(enc("payload")));
+    expect(registry.expireSession("sess")).toBe(1);
+    expect(registry.count("sess")).toBe(0);
   });
 });
 
@@ -414,6 +477,8 @@ describe("output guard", () => {
       answer: "a [c1]",
       citations: [citation()],
       coverage,
+      provenance: derivedProvenance(),
+      accountingId: "acc_" + "0".repeat(15) + "3",
     });
   };
 
@@ -441,7 +506,7 @@ describe("output guard", () => {
   });
 
   it("caps the reader answer to the requested budget", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("alpha value here\n")));
     const reply = answerJson("Alpha is present [c1]. ".repeat(2000), [
       { id: "c1", line_start: 1, line_end: 1, quote: "alpha" },
@@ -449,7 +514,7 @@ describe("output guard", () => {
     const env = await new Reader(registry, new FakeLuna([], reply)).answer(
       "sess",
       request(entry, { budgets: { max_chunks: 8, max_answer_bytes: 512, deadline_ms: 60000 } }),
-    );
+    ).then((r) => r.envelope);
     expect(new TextEncoder().encode(env.answer).length).toBeLessThanOrEqual(512);
     expect(() => enforce(env)).not.toThrow();
   });
@@ -497,19 +562,19 @@ describe("cancellation and deadlines", () => {
 
   it("makes zero provider calls when cancelled while queued", async () => {
     const clock = new FakeClock();
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const luna = new FakeLuna([], answerJson("", []));
     const deadline = Deadline.start(clock, L.requestDeadlineMs);
     deadline.cancel();
-    const env = await new Reader(registry, luna, undefined, clock).answer("sess", request(entry), deadline);
+    const env = await new Reader(registry, luna, undefined, clock).answer("sess", request(entry), deadline).then((r) => r.envelope);
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("CANCELLED");
   });
 
   it("publishes nothing once the budget is spent", async () => {
     const clock = new FakeClock();
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const slow: any = {
       async complete() {
@@ -523,7 +588,7 @@ describe("cancellation and deadlines", () => {
         };
       },
     };
-    const env = await new Reader(registry, slow, undefined, clock).answer("sess", request(entry));
+    const env = await new Reader(registry, slow, undefined, clock).answer("sess", request(entry)).then((r) => r.envelope);
     expect(env.answer).toBe("");
     expect(env.coverage.complete).toBe(false);
   });
@@ -539,7 +604,7 @@ describe("no raw leak and no writes", () => {
     HEAD + "\n" + Array.from({ length: 3000 }, (_, i) => `filler line ${i}`).join("\n") + "\n" + MID + "\n";
 
   it("returns no sentinel on any reader failure", async () => {
-    const registry = new SourceRegistry();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(payload())));
     const metrics = new InMemoryMetrics();
     const bridge = new HostBridgeProvider(async () => {
@@ -548,7 +613,7 @@ describe("no raw leak and no writes", () => {
     const env = await new Reader(registry, bridge, undefined, undefined, metrics).answer(
       "sess",
       request(entry),
-    );
+    ).then((r) => r.envelope);
     for (const blob of [JSON.stringify(env), metrics.rendered()]) {
       expect(blob).not.toContain(HEAD);
       expect(blob).not.toContain(MID);

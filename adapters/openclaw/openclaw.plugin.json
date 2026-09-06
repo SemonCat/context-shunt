@@ -1,13 +1,15 @@
 {
   "id": "context-shunt",
   "name": "Context Shunt",
-  "description": "Blocks oversized full reads before they run and answers questions about large sources with a fixed cheap reader model, returning a bounded citation-verified envelope. Read-only: registers no writer tool.",
+  "description": "Blocks oversized full reads before they run and answers questions about large sources with a configurable reader model, returning a bounded citation-verified envelope. Adds a zero-model exact inspector under a cumulative disclosure ceiling and a read-only session accounting view. Read-only: registers no writer tool, and no tool can retrieve a full payload.",
   "activation": {
     "onStartup": true
   },
   "contracts": {
     "tools": [
-      "context_shunt_read"
+      "context_shunt_read",
+      "context_shunt_inspect",
+      "context_shunt_stats"
     ]
   },
   "configSchema": {
@@ -20,8 +22,13 @@
           "type": "string"
         }
       },
+      "cache_dir": {
+        "type": "string",
+        "description": "Private cache root: SQLite authorization metadata plus content-addressed payload files. Must be outside every workspace root."
+      },
       "spill_dir": {
-        "type": "string"
+        "type": "string",
+        "description": "Deprecated alias for cache_dir, kept so a 1.0 configuration keeps working."
       },
       "denylist": {
         "type": "array",
@@ -43,8 +50,56 @@
           },
           "model": {
             "type": "string",
-            "const": "gpt-5.6-luna",
-            "default": "gpt-5.6-luna"
+            "default": "gpt-5.6-luna",
+            "maxLength": 128,
+            "description": "Reader model. Configurable from 1.1; the envelope's provenance block states what was requested and how strongly the attribution can be believed, so a different model can never be passed off as the default."
+          },
+          "provider": {
+            "type": "string",
+            "default": "",
+            "maxLength": 128,
+            "description": "Optional provider to pin. Empty lets the host route."
+          },
+          "attribution_policy": {
+            "enum": ["allow_unverified", "require_match"],
+            "default": "allow_unverified",
+            "description": "What to do when attribution cannot be proven. allow_unverified publishes the truthful unverified label; require_match refuses to answer instead. A contradiction is refused either way."
+          },
+          "fallback_chain": {
+            "type": "array",
+            "maxItems": 4,
+            "description": "Availability-only fallback targets. Never a remedy for a poor-quality answer: every attempt keeps its own reported provenance and usage, and reaching one is recorded as fallback_used.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "model": { "type": "string", "maxLength": 128 },
+                "provider": { "type": "string", "maxLength": 128 }
+              },
+              "required": ["model"]
+            }
+          }
+        }
+      },
+      "inspect": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Deterministic exact extraction. Zero model calls, 16 KiB per page, and every page charged against a cumulative per-source and per-session disclosure ceiling."
+          }
+        }
+      },
+      "stats": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Read-only session accounting. Cannot reset a counter, change retention, reach another session or reveal content."
           }
         }
       },
@@ -55,13 +110,13 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Optional oversized-result spill mode. Default off, and refused unless the capability probe proves the host captures before truncation and replaces before persistence."
+            "description": "Optional oversized-result spill mode. Default off, and refused on this host: the capability probe cannot prove capture before truncation or replacement before persistence."
           }
         }
       },
       "limits": {
         "type": "object",
-        "description": "Deployment caps. Values may only be narrower than the contract defaults.",
+        "description": "Deployment caps. Values may only be narrower than the contract defaults; a widened cap is refused at load time.",
         "additionalProperties": {
           "type": "integer",
           "minimum": 0

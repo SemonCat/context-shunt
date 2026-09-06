@@ -1,19 +1,35 @@
 /**
  * Configuration.
  *
- * Two rules matter more than the rest:
+ * Rules that matter more than the rest:
  *
- * - `writer.enabled = true` is refused at load time. v1 has no writer, so accepting the
+ * - `writer.enabled = true` is refused at load time. There is no writer, so accepting the
  *   flag and quietly ignoring it would turn a missing feature into a hidden one.
  * - `suma_post_tool.enabled` defaults to `false` and, even when set, only takes effect if
  *   the adapter's capability probe proves a safe capture/replacement order.
+ * - A cap may be narrowed, never widened.
+ *
+ * Changed in 1.1: the reader model and provider are configurable. Revision 1.0 refused any
+ * `reader.model` other than `gpt-5.6-luna`; that was a single-model contract and it is
+ * deliberately relaxed here. `gpt-5.6-luna` remains the **default**, and what replaces the
+ * old hard refusal is truthful provenance: every envelope states the requested model,
+ * whatever the host reported, and how strongly the attribution can be believed, so a
+ * different model can never be passed off as the default one.
+ *
+ * `reader.attribution_policy` decides what happens when attribution cannot be proven.
+ * `allow_unverified` (the default) publishes the answer with `attribution_status =
+ * unverified`; `require_match` refuses instead. A contradiction is refused either way.
+ *
+ * `reader.fallback_chain` is availability-only. Every entry keeps its own reported
+ * provenance and usage, and reaching one is recorded as `fallback_used`.
  */
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 
 import { ShuntError } from "./errors.js";
-import { DEFAULT_LIMITS, Limits, narrowLimits } from "./limits.js";
+import { DEFAULT_LIMITS, Limits, POSITIVE_LIMITS, narrowLimits } from "./limits.js";
+import type { AttributionPolicy } from "./provenance.js";
 
 const NARROWABLE = new Set<keyof Limits>([
   "fullReadMaxLines", "targetedReadMaxLines", "targetedSearchMaxMatches", "maxToolResultBytes",
@@ -24,6 +40,13 @@ const NARROWABLE = new Set<keyof Limits>([
   "maxRequestInputTokens", "maxOutputTokensPerCall", "bytesPerTokenEstimate",
   "gateProbeDeadlineMs", "spillIoDeadlineMs", "requestDeadlineMs", "modelCallDeadlineMs",
   "spillTtlSeconds", "jsonMaxDepth", "jsonMaxNodes",
+  // -- 1.1 --
+  "maxExtendedEnvelopeBytes", "maxExtractionBytes", "inspectMaxResultBytes",
+  "inspectMaxSegments", "inspectMaxLinesPerPage", "inspectMaxBytesPerPage",
+  "inspectMaxScanLines", "inspectMaxScanBytes", "inspectMaxSearchMatches",
+  "inspectMaxNeedleBytes", "disclosureMaxPerSourceBytes", "disclosureMaxPerSessionBytes",
+  "storeDdlVersion", "storeBusyTimeoutMs", "storeMaxEntries", "storeMaxBytes",
+  "storeHandleTtlSeconds", "statsMaxRecordsPerPage", "statsMaxPages",
 ]);
 
 const SNAKE_LIMITS: Record<string, keyof Limits> = {
@@ -57,18 +80,51 @@ const SNAKE_LIMITS: Record<string, keyof Limits> = {
   spill_ttl_seconds: "spillTtlSeconds",
   json_max_depth: "jsonMaxDepth",
   json_max_nodes: "jsonMaxNodes",
+  max_extended_envelope_bytes: "maxExtendedEnvelopeBytes",
+  max_extraction_bytes: "maxExtractionBytes",
+  inspect_max_result_bytes: "inspectMaxResultBytes",
+  inspect_max_segments: "inspectMaxSegments",
+  inspect_max_lines_per_page: "inspectMaxLinesPerPage",
+  inspect_max_bytes_per_page: "inspectMaxBytesPerPage",
+  inspect_max_scan_lines: "inspectMaxScanLines",
+  inspect_max_scan_bytes: "inspectMaxScanBytes",
+  inspect_max_search_matches: "inspectMaxSearchMatches",
+  inspect_max_needle_bytes: "inspectMaxNeedleBytes",
+  disclosure_max_per_source_bytes: "disclosureMaxPerSourceBytes",
+  disclosure_max_per_session_bytes: "disclosureMaxPerSessionBytes",
+  store_ddl_version: "storeDdlVersion",
+  store_busy_timeout_ms: "storeBusyTimeoutMs",
+  store_max_entries: "storeMaxEntries",
+  store_max_bytes: "storeMaxBytes",
+  store_handle_ttl_seconds: "storeHandleTtlSeconds",
+  stats_max_records_per_page: "statsMaxRecordsPerPage",
+  stats_max_pages: "statsMaxPages",
 };
-const POSITIVE_LIMITS = new Set<keyof Limits>([
-  "bytesPerTokenEstimate", "maxChunkBytes", "maxChunkTokens", "maxConcurrentModelCalls",
+const MAX_MODEL_REF_BYTES = 128;
+const MAX_FALLBACK_ENTRIES = 4;
+const READER_KEYS = new Set([
+  "enabled", "model", "provider", "attribution_policy", "fallback_chain",
 ]);
+
+/** One availability target: a model, optionally pinned to a provider. */
+export interface ProviderRef {
+  readonly model: string;
+  readonly provider: string;
+}
 
 export interface Config {
   readonly workspaceRoots: readonly string[];
+  /** Private cache root: SQLite metadata plus content-addressed payload files. */
   readonly spillDir: string;
   readonly denylist: readonly string[];
   readonly gateEnabled: boolean;
   readonly readerEnabled: boolean;
   readonly readerModel: string;
+  readonly readerProvider: string;
+  readonly readerAttributionPolicy: AttributionPolicy;
+  readonly readerFallbackChain: readonly ProviderRef[];
+  readonly inspectEnabled: boolean;
+  readonly statsEnabled: boolean;
   readonly sumaPostToolEnabled: boolean;
   readonly limits: Limits;
 }
@@ -76,9 +132,18 @@ export interface Config {
 export interface RawConfig {
   workspace_roots?: string[];
   spill_dir?: string;
+  cache_dir?: string;
   denylist?: string[];
   gate_enabled?: boolean;
-  reader?: { enabled?: boolean; model?: string };
+  reader?: {
+    enabled?: boolean;
+    model?: string;
+    provider?: string;
+    attribution_policy?: string;
+    fallback_chain?: Array<{ model?: string; provider?: string }>;
+  };
+  inspect?: { enabled?: boolean };
+  stats?: { enabled?: boolean };
   suma_post_tool?: { enabled?: boolean };
   writer?: { enabled?: boolean };
   operations?: string[];
@@ -88,7 +153,7 @@ export interface RawConfig {
 export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string): Config {
   const cfg = raw ?? {};
 
-  for (const nested of [cfg.reader, cfg.suma_post_tool, cfg.writer]) {
+  for (const nested of [cfg.reader, cfg.inspect, cfg.stats, cfg.suma_post_tool, cfg.writer]) {
     if (nested !== undefined && (
       typeof nested !== "object" || nested === null || Array.isArray(nested)
     )) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
@@ -108,9 +173,14 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   if (cfg.denylist !== undefined && (
     !Array.isArray(cfg.denylist) || cfg.denylist.some((item) => typeof item !== "string")
   )) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  for (const key of Object.keys(cfg.reader ?? {})) {
+    if (!READER_KEYS.has(key)) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
   for (const value of [
     cfg.gate_enabled,
     cfg.reader?.enabled,
+    cfg.inspect?.enabled,
+    cfg.stats?.enabled,
     cfg.suma_post_tool?.enabled,
     cfg.writer?.enabled,
   ]) {
@@ -129,12 +199,30 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
 
   const roots = rootsRaw.map(canonicalConfigPath);
 
-  const model = cfg.reader?.model ?? DEFAULT_LIMITS.readerModel;
-  if (model !== DEFAULT_LIMITS.readerModel) {
-    // v1 is a single-model contract; a different model is a configuration error, not a
-    // silent substitution.
-    throw new ShuntError("MODEL_ERROR", "MODEL_NOT_ALLOWED", false);
+  const model = readModelRef(cfg.reader?.model ?? DEFAULT_LIMITS.readerModel, true);
+  const provider = readModelRef(cfg.reader?.provider ?? "", false);
+  const policyRaw = cfg.reader?.attribution_policy ?? "allow_unverified";
+  if (policyRaw !== "allow_unverified" && policyRaw !== "require_match") {
+    throw new ShuntError("INVALID_REQUEST", "BAD_ATTRIBUTION_POLICY", false);
   }
+  const chainRaw = cfg.reader?.fallback_chain ?? [];
+  if (!Array.isArray(chainRaw) || chainRaw.length > MAX_FALLBACK_ENTRIES) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
+  const fallbackChain: ProviderRef[] = chainRaw.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+    }
+    for (const key of Object.keys(entry)) {
+      if (key !== "model" && key !== "provider") {
+        throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+      }
+    }
+    return {
+      model: readModelRef(entry.model ?? "", true),
+      provider: readModelRef(entry.provider ?? "", false),
+    };
+  });
 
   let limits = DEFAULT_LIMITS;
   const rawOverrides = cfg.limits ?? {};
@@ -167,7 +255,7 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     }
   }
 
-  const spillDir = canonicalConfigPath(cfg.spill_dir ?? defaultSpillDir);
+  const spillDir = canonicalConfigPath(cfg.cache_dir ?? cfg.spill_dir ?? defaultSpillDir);
   if (roots.some((root) => spillDir === root || spillDir.startsWith(root + sep))) {
     throw new ShuntError("UNSAFE_SOURCE", "SPILL_INSIDE_WORKSPACE", false);
   }
@@ -179,9 +267,25 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     gateEnabled: cfg.gate_enabled ?? true,
     readerEnabled: cfg.reader?.enabled ?? true,
     readerModel: model,
+    readerProvider: provider,
+    readerAttributionPolicy: policyRaw as AttributionPolicy,
+    readerFallbackChain: fallbackChain,
+    inspectEnabled: cfg.inspect?.enabled ?? true,
+    statsEnabled: cfg.stats?.enabled ?? true,
     sumaPostToolEnabled: cfg.suma_post_tool?.enabled ?? false,
     limits,
   };
+}
+
+function readModelRef(value: unknown, required: boolean): string {
+  if (typeof value !== "string" || new TextEncoder().encode(value).length > MAX_MODEL_REF_BYTES) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
+  const trimmed = value.trim();
+  if (required && trimmed.length === 0) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
+  return trimmed;
 }
 
 function canonicalConfigPath(value: string): string {

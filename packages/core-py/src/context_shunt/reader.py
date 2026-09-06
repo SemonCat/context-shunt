@@ -352,19 +352,7 @@ class Reader:
             enforce_policy(provenance, self._policy)
         except ShuntError as exc:
             self._metrics.count("reader_error", {"code": exc.code})
-            refused = Provenance(
-                derived=False,
-                label=ProvenanceLabel.NO_MODEL_OUTPUT,
-                attribution_status=provenance.attribution_status,
-                attribution_confidence=provenance.attribution_confidence,
-                attribution_policy=self._policy,
-                attempts_started=provenance.attempts_started,
-                usage_complete=provenance.usage_complete,
-                requested=provenance.requested,
-                resolved=provenance.resolved,
-                reported=provenance.reported,
-                fallback_used=provenance.fallback_used,
-            )
+            refused = _as_failure_provenance(provenance)
             return ReaderResult(
                 envelope=E.error_envelope(
                     request_id,
@@ -389,7 +377,26 @@ class Reader:
 
         if not answer:
             if rejected and not verified and raw_citations:
-                raise ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
+                # The handles are still valid and the caller is told so, so they have to be
+                # listed too: "recovery.handles_valid: true" is only actionable if the
+                # envelope still says which handles survived.
+                exc = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
+                # Nothing survived verification, so nothing model-generated is published:
+                # the failure is labelled not-derived while keeping the attribution facts.
+                failed = _as_failure_provenance(provenance)
+                return ReaderResult(
+                    envelope=E.error_envelope(
+                        request_id,
+                        exc,
+                        accounting_id=accounting_id,
+                        provenance=failed,
+                        sources=handles,
+                        handles_valid=True,
+                    ),
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
             coverage.complete = complete
             return ReaderResult(
                 envelope=E.build(
@@ -626,6 +633,24 @@ def _target_of(provider: Any) -> ProviderTarget:
         return target
     model = getattr(provider, "model", None)
     return ProviderTarget(model=model if isinstance(model, str) else DEFAULT_LIMITS.reader_model)
+
+
+def _as_failure_provenance(provenance: Provenance) -> Provenance:
+    """The same attribution facts, relabelled for an envelope that publishes no answer."""
+    return Provenance(
+        derived=False,
+        label=ProvenanceLabel.NO_MODEL_OUTPUT,
+        attribution_status=provenance.attribution_status,
+        attribution_confidence=provenance.attribution_confidence,
+        attribution_policy=provenance.attribution_policy,
+        attempts_started=provenance.attempts_started,
+        usage_complete=provenance.usage_complete,
+        citations_mechanically_verified=provenance.citations_mechanically_verified,
+        requested=provenance.requested,
+        resolved=provenance.resolved,
+        reported=provenance.reported,
+        fallback_used=provenance.fallback_used,
+    )
 
 
 def _handles_survive(exc: ShuntError) -> bool:

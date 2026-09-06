@@ -1,201 +1,46 @@
 /**
- * Optional Suma oversized-result mode: pure spill and pointer.
+ * Optional oversized post-tool mode: pure spill and pointer.
  *
- * This engine never summarizes. It has no model bridge at all, which is the point: the
- * old heuristic compactor is replaced, not chained. An oversized result is written to a
- * private cache, read back and hash-verified, registered as an internal source, and only
- * then replaced with a pointer envelope. Reading it later goes through the question-driven
- * reader like any other source.
+ * This engine never summarizes. It has no model bridge at all, which is the point: the old
+ * heuristic compactor is replaced, not chained. An eligible oversized result is validated,
+ * published through the hybrid store as an internal handle, and only then replaced with a
+ * pointer envelope. Reading it later goes through the question-driven reader or the
+ * deterministic inspect path like any other handle.
  *
  * Failure never falls back to the raw payload: quota exhaustion, a full disk, a permission
- * error, an unserializable value and a readback mismatch all produce the same bounded
- * `SPILL_FAILED` envelope.
+ * error, an unserializable value and a content mismatch all produce the same bounded
+ * failure envelope with no handle.
+ *
+ * Only an *explicitly eligible oversized candidate* is captured: a result that serializes
+ * above `maxToolResultBytes`. A short result passes through untouched and is never stored,
+ * so this path cannot become a shadow log of every tool call.
  *
  * Enabling this on a host additionally requires proof that the host captures the complete
  * result before truncation and accepts a safe replacement before persistence and context
  * insertion. On OpenClaw that proof does not exist - see `docs/capability-matrix.md` - so
- * the mode stays disabled there.
+ * the mode stays disabled there. The engine remains present and tested behind that
+ * capability gate rather than being deleted, so the day a host does provide the ordering
+ * there is a tested implementation to enable.
  */
-import { createHash, randomBytes } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  renameSync,
-  rmdirSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-
 import { Coverage, Envelope, buildEnvelope, errorEnvelope, isoExpiry } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits } from "./limits.js";
+import { deterministicProvenance } from "./provenance.js";
 import { SourceRegistry } from "./registry.js";
-import { assertSupportedBlocks, canonicalJson, jsonDepthAndNodes, snapshotBytes } from "./snapshot.js";
-
-const DIR_MODE = 0o700;
-const FILE_MODE = 0o600;
+import {
+  assertSupportedBlocks, canonicalJson, jsonDepthAndNodes, snapshotBytes,
+} from "./snapshot.js";
 
 export interface SpillOutcome {
   readonly action: "passthrough" | "spill" | "blocked" | "error";
   readonly envelope?: Envelope;
   readonly code?: string;
   readonly bytesMeasured: number;
+  readonly sourceId?: string;
 }
 
-/** Private, quota'd, TTL'd cache outside every workspace root. */
-export class SpillStore {
-  private readonly usedBySession = new Map<string, number>();
-
+export class SpillEngine {
   constructor(
-    readonly root: string,
-    readonly limits: Limits = DEFAULT_LIMITS,
-  ) {}
-
-  usedBytes(sessionId: string): number {
-    return this.usedBySession.get(sessionId) ?? 0;
-  }
-
-  seedUsage(sessionId: string, used: number): void {
-    this.usedBySession.set(sessionId, used);
-  }
-
-  private sessionDir(sessionId: string): string {
-    mkdirSync(this.root, { recursive: true, mode: DIR_MODE });
-    assertPrivateDirectory(this.root);
-    const safe = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
-    const dir = join(this.root, safe);
-    mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-    assertPrivateDirectory(dir);
-    if (dirname(realpathSync(dir)) !== realpathSync(this.root)) {
-      throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
-    }
-    return dir;
-  }
-
-  /** Atomically publish, then read back and verify before the caller may use it. */
-  write(sessionId: string, data: Uint8Array): string {
-    if (this.usedBytes(sessionId) + data.length > this.limits.sessionSpillQuotaBytes) {
-      throw new ShuntError("SPILL_FAILED", "QUOTA_EXCEEDED", false);
-    }
-    const dir = this.sessionDir(sessionId);
-    const hex = createHash("sha256").update(data).digest("hex");
-    const final = join(dir, `${hex}.spill`);
-    const tmp = join(dir, `${randomBytes(8).toString("hex")}.part`);
-    try {
-      const fd = openSync(tmp, "wx", FILE_MODE);
-      try {
-        writeSync(fd, data);
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
-      chmodSync(tmp, FILE_MODE);
-      renameSync(tmp, final);
-    } catch {
-      unlinkQuiet(tmp);
-      throw new ShuntError("SPILL_FAILED", "WRITE_FAILED", false);
-    }
-    let readback: Buffer;
-    try {
-      readback = readFileSync(final);
-    } catch {
-      unlinkQuiet(final);
-      throw new ShuntError("SPILL_FAILED", "READBACK_FAILED", false);
-    }
-    if (createHash("sha256").update(readback).digest("hex") !== hex) {
-      unlinkQuiet(final);
-      throw new ShuntError("SPILL_FAILED", "READBACK_MISMATCH", false);
-    }
-    this.usedBySession.set(sessionId, this.usedBytes(sessionId) + data.length);
-    return final;
-  }
-
-  /** Remove a session's artifacts. This is deletion, not secure erasure. */
-  purgeSession(sessionId: string): number {
-    const safe = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
-    const dir = join(this.root, safe);
-    let removed = 0;
-    let rootStat;
-    try {
-      rootStat = lstatSync(this.root);
-    } catch {
-      this.usedBySession.delete(sessionId);
-      return 0;
-    }
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      this.usedBySession.delete(sessionId);
-      return 0;
-    }
-    let dirStat;
-    try {
-      dirStat = lstatSync(dir);
-    } catch {
-      this.usedBySession.delete(sessionId);
-      return 0;
-    }
-    if (dirStat.isSymbolicLink()) {
-      unlinkQuiet(dir);
-      removed = 1;
-    } else if (dirStat.isDirectory()) {
-      for (const name of readdirSync(dir)) {
-        const child = join(dir, name);
-        try {
-          const childStat = lstatSync(child);
-          if (childStat.isFile() || childStat.isSymbolicLink()) {
-            unlinkSync(child);
-            removed += 1;
-          }
-        } catch {
-          /* changed concurrently; never follow or recurse */
-        }
-      }
-      try {
-        rmdirSync(dir);
-      } catch {
-        /* a concurrent write may repopulate it; a later teardown gets it */
-      }
-    }
-    this.usedBySession.delete(sessionId);
-    return removed;
-  }
-}
-
-function assertPrivateDirectory(path: string): void {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
-  }
-  if (!st.isDirectory() || st.isSymbolicLink()) {
-    throw new ShuntError("SPILL_FAILED", "UNSAFE_CACHE_PATH", false);
-  }
-  try {
-    chmodSync(path, DIR_MODE);
-  } catch {
-    throw new ShuntError("SPILL_FAILED", "PERMISSION_FAILED", false);
-  }
-}
-
-function unlinkQuiet(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch {
-    /* already gone */
-  }
-}
-
-export class SumaSpillEngine {
-  constructor(
-    private readonly store: SpillStore,
     private readonly registry: SourceRegistry,
     private readonly limits: Limits = DEFAULT_LIMITS,
     readonly enabled = false,
@@ -210,7 +55,7 @@ export class SumaSpillEngine {
   ): SpillOutcome {
     if (!this.enabled) return { action: "passthrough", bytesMeasured: 0 };
     if (internalSourceId && this.registry.isInternal(sessionId, internalSourceId)) {
-      // Registry-verified internal envelope: never spill our own pointer again.
+      // Store-verified internal envelope: never spill our own pointer again.
       return { action: "passthrough", bytesMeasured: 0 };
     }
 
@@ -235,23 +80,21 @@ export class SumaSpillEngine {
       return { action: "error", envelope: errorEnvelope(requestId, err), code: err.code, bytesMeasured: size };
     }
     if (size <= this.limits.maxToolResultBytes) {
+      // Not an eligible oversized candidate. Nothing is captured.
       return { action: "passthrough", bytesMeasured: size };
     }
 
     let entry;
     try {
       // Validate before persistence so a binary/secret/invalid payload cannot leave an
-      // orphaned raw artifact after the operation is rejected.
+      // orphaned artifact after the operation is rejected.
       const snapshot = snapshotBytes(serialized, undefined, this.limits);
-      entry = this.registry.register(sessionId, snapshot, true);
-      try {
-        this.store.write(sessionId, serialized);
-      } catch (err) {
-        this.registry.remove(sessionId, entry.sourceId);
-        throw err;
-      }
+      entry = this.registry.register(sessionId, snapshot, true, "spilled_tool");
     } catch (err) {
-      const code = isShuntError(err) && err.code === "UNSAFE_SOURCE" ? "UNSAFE_SOURCE" : "SPILL_FAILED";
+      const passthroughCodes = ["SPILL_FAILED", "UNSAFE_SOURCE", "STORE_FAILED", "LIMIT_EXCEEDED"];
+      const code = isShuntError(err) && passthroughCodes.includes(err.code)
+        ? err.code
+        : "SPILL_FAILED";
       const detail = isShuntError(err) ? err.detail : undefined;
       const safe = new ShuntError(code, detail, false);
       return { action: "error", envelope: errorEnvelope(requestId, safe), code, bytesMeasured: size };
@@ -282,11 +125,20 @@ export class SumaSpillEngine {
         expires_at: expiresAt,
         internal: true,
       },
+      resultKind: "pointer",
+      provenance: deterministicProvenance("pointer_only"),
       guidance:
         "The tool result was too large for this conversation and was moved out of it. " +
-        "Ask the context-shunt reader a question about this pointer to get a cited answer.",
+        "Ask the context-shunt reader a question about this pointer for a cited answer, " +
+        "or use context_shunt_inspect for exact lines.",
     });
-    return { action: "spill", envelope, code: "SPILLED", bytesMeasured: size };
+    return {
+      action: "spill",
+      envelope,
+      code: "SPILLED",
+      bytesMeasured: size,
+      sourceId: entry.sourceId,
+    };
   }
 
   /** Deterministic serialization of string, object, array or content-block results. */
@@ -315,3 +167,7 @@ function contentBlocks(result: unknown): unknown[] | null {
   }
   return null;
 }
+
+/** Historical name kept so existing adapters and gates keep importing successfully. */
+export const SumaSpillEngine = SpillEngine;
+export type SumaSpillEngine = SpillEngine;

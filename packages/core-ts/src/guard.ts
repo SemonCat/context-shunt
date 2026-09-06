@@ -3,12 +3,28 @@
  *
  * Nothing reaches the host without passing through here. The guard measures the
  * *serialized* envelope - every field, every citation, every metadata value - against the
- * 16 KiB cap, re-checks the per-field caps, refuses unknown fields, and refuses any
- * citation not marked verified. A guard failure yields a fixed small error envelope,
- * never the input it was handed.
+ * cap that applies to its `result_kind`, re-checks the per-field caps, refuses unknown
+ * fields, and refuses any citation not marked verified. A guard failure yields a fixed
+ * small error envelope, never the input it was handed.
+ *
+ * Two caps, both normative. Most envelopes are capped at 16 KiB. A deterministic
+ * extraction or a stats page carries a bounded payload of its own - up to 16 KiB of exact
+ * snapshot bytes, or one page of records - so those are measured against
+ * `maxExtendedEnvelopeBytes` (20 KiB), leaving 4 KiB for the envelope around a full-size
+ * extraction. The extraction payload itself is measured separately against the 16 KiB
+ * per-result cap, so the escape hatch cannot widen by hiding bytes in envelope overhead.
+ *
+ * Adding a field to the envelope means adding it here too: `ALLOWED_KEYS` is a closed set.
  */
-import { SCHEMA_VERSION, DEFAULT_LIMITS, Limits, legalPair } from "./limits.js";
-import { Envelope, serializedBytes } from "./envelope.js";
+import {
+  DEFAULT_LIMITS,
+  EMITTED_SCHEMA_VERSION,
+  Limits,
+  SUPPORTED_REQUEST_VERSIONS,
+  envelopeByteCap,
+  legalPair,
+} from "./limits.js";
+import { buildEnvelope, Envelope, serializedBytes } from "./envelope.js";
 import { containsSecretMarker } from "./snapshot.js";
 import { validateEnvelope } from "./schema.js";
 import { utf8Length } from "./textindex.js";
@@ -16,10 +32,15 @@ import { utf8Length } from "./textindex.js";
 const ALLOWED_KEYS = new Set([
   "schema_version", "request_id", "status", "code", "answer", "citations", "coverage",
   "sources", "retryable", "guidance", "pointer",
+  // -- 1.1 --
+  "result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery",
 ]);
 const ALLOWED_SOURCE_KEYS = new Set([
   "source_id", "snapshot_id", "media_type", "bytes", "expires_at",
 ]);
+const REQUIRED_V11_KEYS = ["result_kind", "provenance", "accounting_id"] as const;
+const OPTIONAL_V11_KEYS = ["extraction", "stats", "recovery"] as const;
+const SAFE_ACCOUNTING_ID = /^acc_[0-9a-f]{16}$/;
 
 export class OutputGuardError extends Error {}
 
@@ -31,23 +52,75 @@ export function fixedError(requestId: string, code = "LIMIT_EXCEEDED"): Envelope
     ? requestId
     : "req_unknown";
   const safeCode = legalPair("error", code) ? code : "LIMIT_EXCEEDED";
-  return {
-    schema_version: SCHEMA_VERSION,
-    request_id: safe,
+  return buildEnvelope({
+    requestId: safe,
     status: "error",
     code: safeCode,
-    answer: "",
-    citations: [],
-    coverage: {
-      complete: false,
-      processed_chunks: 0,
-      planned_chunks: 0,
-      omitted: [],
-      upstream_truncated: null,
-    },
-    sources: [],
     retryable: false,
-  };
+  });
+}
+
+/**
+ * Version and content must agree in both directions. A 1.1 envelope missing a mandatory
+ * 1.1 field is refused rather than published with the field quietly absent; a 1.0 envelope
+ * carrying a 1.1 field is refused rather than published under a version string that
+ * understates what it contains.
+ */
+function checkVersionFields(env: Record<string, unknown>, version: string): void {
+  const presentV11 = [...REQUIRED_V11_KEYS, ...OPTIONAL_V11_KEYS].filter((key) => key in env);
+  if (version === "1.0") {
+    if (presentV11.length > 0) throw new OutputGuardError("1.0 envelope carries a 1.1 field");
+    return;
+  }
+  for (const key of REQUIRED_V11_KEYS) {
+    if (!(key in env)) throw new OutputGuardError("1.1 envelope missing a mandatory field");
+  }
+  if (!SAFE_ACCOUNTING_ID.test(String(env["accounting_id"]))) {
+    throw new OutputGuardError("bad accounting id");
+  }
+  const provenance = env["provenance"];
+  if (typeof provenance !== "object" || provenance === null) {
+    throw new OutputGuardError("provenance must be an object");
+  }
+  const derived = (provenance as Record<string, unknown>)["derived"];
+  if (typeof derived !== "boolean") {
+    throw new OutputGuardError("provenance.derived must be a boolean");
+  }
+  if (derived !== (env["result_kind"] === "model_derived")) {
+    throw new OutputGuardError("provenance.derived disagrees with result_kind");
+  }
+}
+
+function checkExtraction(env: Record<string, unknown>, limits: Limits): void {
+  const extraction = env["extraction"];
+  if (extraction === undefined) return;
+  if (typeof extraction !== "object" || extraction === null) {
+    throw new OutputGuardError("extraction must be an object");
+  }
+  const block = extraction as Record<string, unknown>;
+  if (block["deterministic"] !== true) {
+    throw new OutputGuardError("extraction must declare itself deterministic");
+  }
+  const segments = block["segments"];
+  if (!Array.isArray(segments) || segments.length > limits.inspectMaxSegments) {
+    throw new OutputGuardError("extraction segments over cap");
+  }
+  let total = 0;
+  for (const segment of segments) {
+    if (typeof segment !== "object" || segment === null) {
+      throw new OutputGuardError("extraction segment malformed");
+    }
+    const text = (segment as Record<string, unknown>)["text"];
+    if (typeof text !== "string") throw new OutputGuardError("extraction segment malformed");
+    if (containsSecretMarker(text)) throw new OutputGuardError("secret marker in extraction");
+    total += utf8Length(text);
+  }
+  if (total > limits.maxExtractionBytes) {
+    throw new OutputGuardError("extraction over per-result cap");
+  }
+  if (block["result_bytes"] !== total) {
+    throw new OutputGuardError("extraction result_bytes disagrees with its segments");
+  }
 }
 
 export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Envelope {
@@ -56,12 +129,17 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
   for (const key of Object.keys(env)) {
     if (!ALLOWED_KEYS.has(key)) throw new OutputGuardError("unknown envelope field");
   }
-  if (env["schema_version"] !== SCHEMA_VERSION) throw new OutputGuardError("bad schema version");
+  const version = env["schema_version"];
+  if (typeof version !== "string" || !SUPPORTED_REQUEST_VERSIONS.has(version)) {
+    throw new OutputGuardError("bad schema version");
+  }
   const status = env["status"];
   const code = env["code"];
   if (typeof status !== "string" || typeof code !== "string" || !legalPair(status, code)) {
     throw new OutputGuardError("illegal status/code pairing");
   }
+
+  checkVersionFields(env, version);
 
   const answer = env["answer"];
   if (typeof answer !== "string") throw new OutputGuardError("answer must be a string");
@@ -104,17 +182,27 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
     }
   }
 
-  if (code === "SPILLED" && (answer.length > 0 || citations.length > 0)) {
-    throw new OutputGuardError("SPILLED must not carry an answer");
+  if (
+    (code === "SPILLED" || code === "EXTRACTED" || code === "STATS")
+    && (answer.length > 0 || citations.length > 0)
+  ) {
+    throw new OutputGuardError(`${code} must not carry an answer`);
   }
-  if (serializedBytes(env) > limits.maxEnvelopeBytes) {
-    throw new OutputGuardError("envelope over byte cap");
-  }
+
+  checkExtraction(env, limits);
+
+  const cap = envelopeByteCap(
+    typeof env["result_kind"] === "string" ? (env["result_kind"] as string) : undefined,
+    limits,
+  );
+  if (serializedBytes(env) > cap) throw new OutputGuardError("envelope over byte cap");
   if (!validateEnvelope(env)) throw new OutputGuardError("envelope schema violation");
   return env as unknown as Envelope;
 }
 
 /** Never throws. A guard failure yields the fixed error envelope, never the input. */
+export { EMITTED_SCHEMA_VERSION };
+
 export function enforceOrFixed(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Envelope {
   let requestId = "req_unknown";
   try {
