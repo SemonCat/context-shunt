@@ -1,0 +1,10 @@
+name: context-shunt
+version: "1.0.0"
+description: >-
+  Read-only context shunt. Blocks oversized full reads before they run and answers
+  questions about large sources with a fixed cheap reader model, returning a bounded,
+  citation-verified envelope instead of the file. Registers no writer tool.
+author: context-shunt contributors
+kind: backend
+provides_tools:
+  - context_shunt_read

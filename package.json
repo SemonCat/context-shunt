@@ -1,0 +1,15 @@
+{
+  "name": "context-shunt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only context shunt: keep large sources out of the main agent's context and answer questions about them with verified citations.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": ["packages/core-ts", "adapters/openclaw"],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspace @context-shunt/core"
+  },
+  "engines": { "node": ">=20" }
+}
