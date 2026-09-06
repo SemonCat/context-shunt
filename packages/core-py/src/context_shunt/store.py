@@ -958,16 +958,20 @@ class SnapshotStore:
                             disclosed_bytes_session=used_session,
                             limit_reached=True,
                         )
-                    conn.execute(
-                        "UPDATE handles SET disclosed_bytes = disclosed_bytes + ? "
-                        " WHERE handle_id = ? AND scope_id = ?",
-                        (want_bytes, handle_id, identity.scope_id),
-                    )
-                    conn.execute(
-                        "INSERT INTO disclosure_events (scope_id, handle_id, kind, bytes, at_ms) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (identity.scope_id, handle_id, kind, want_bytes, now),
-                    )
+                    if want_bytes > 0:
+                        # A page that disclosed nothing has nothing to account for. Writing
+                        # a zero row anyway would let a caller paging a fruitless search
+                        # grow an uncapped table without ever disclosing a byte.
+                        conn.execute(
+                            "UPDATE handles SET disclosed_bytes = disclosed_bytes + ? "
+                            " WHERE handle_id = ? AND scope_id = ?",
+                            (want_bytes, handle_id, identity.scope_id),
+                        )
+                        conn.execute(
+                            "INSERT INTO disclosure_events "
+                            "(scope_id, handle_id, kind, bytes, at_ms) VALUES (?, ?, ?, ?, ?)",
+                            (identity.scope_id, handle_id, kind, want_bytes, now),
+                        )
                     return DisclosureCharge(
                         granted=True,
                         charged_bytes=want_bytes,

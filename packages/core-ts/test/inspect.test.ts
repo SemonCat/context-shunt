@@ -8,6 +8,7 @@
  * payload in the main context.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,6 +21,15 @@ import { UnavailableProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
 import { LineIndex } from "../src/textindex.js";
 import { FakeLuna, makeCapability, makeConfig } from "./support.js";
+
+// The store loads node:sqlite through createRequire for bundler independence; the test
+// reads the same database the same way.
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: new (path: string) => {
+    prepare(sql: string): { get(): unknown };
+    close(): void;
+  };
+};
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const CANARY_HEAD = "CANARY-HEAD-1a2b3c";
@@ -285,6 +295,28 @@ describe("the cumulative disclosure ceiling", () => {
     expect(disclosed).toBeLessThanOrEqual(4096);
     // Well short of the whole file: the payload cannot be reassembled this way.
     expect(disclosed).toBeLessThan(entry.snapshot.bytesLen);
+  });
+
+  it("records nothing for a page that discloses nothing", () => {
+    // Otherwise a caller paging a fruitless search grows an uncapped table for free.
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s);
+    for (let i = 0; i < 30; i += 1) {
+      const env = s.inspect(
+        request(
+          entry,
+          { kind: "search", needle: "no-such-token", max_matches: 5 },
+          { maxScanLines: 1 },
+        ),
+      );
+      expect(env.extraction!.result_bytes).toBe(0);
+    }
+    expect(s.store.disclosedBytes(s.identity)).toBe(0);
+    const db = new DatabaseSync(join(s.store.root, "store.sqlite3"));
+    const row = db.prepare("SELECT COUNT(*) AS n FROM disclosure_events").get() as { n: number };
+    db.close();
+    expect(Number(row.n)).toBe(0);
   });
 
   it("reports the ceiling on every page", () => {

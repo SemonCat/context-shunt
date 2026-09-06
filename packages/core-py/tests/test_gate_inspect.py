@@ -286,6 +286,29 @@ def test_repeated_pages_cannot_refill_the_main_context(tmp_path):
     assert disclosed < entry.snapshot.bytes_len
 
 
+def test_a_page_that_discloses_nothing_records_nothing(tmp_path):
+    """Otherwise a caller paging a fruitless search grows an uncapped table for free."""
+    import sqlite3
+
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session)
+    for _ in range(30):
+        env = session.inspect(
+            _request(
+                entry,
+                {"kind": "search", "needle": "no-such-token", "max_matches": 5},
+                max_scan_lines=1,
+            )
+        )
+        assert env["extraction"]["result_bytes"] == 0
+    connection = sqlite3.connect(session.store.root / "store.sqlite3")
+    rows, total = next(
+        iter(connection.execute("SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM disclosure_events"))
+    )
+    connection.close()
+    assert (rows, total) == (0, 0)
+
+
 def test_the_ceiling_is_reported_on_every_page(tmp_path):
     session = _session(tmp_path, limits={"disclosure_max_per_source_bytes": 8192})
     entry = _captured(tmp_path, session)

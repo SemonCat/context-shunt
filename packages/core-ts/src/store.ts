@@ -933,14 +933,19 @@ export class SnapshotStore {
             limitReached: true,
           };
         }
-        db.prepare(
-          "UPDATE handles SET disclosed_bytes = disclosed_bytes + ? "
-            + " WHERE handle_id = ? AND scope_id = ?",
-        ).run(wantBytes, handleId, identity.scopeId);
-        db.prepare(
-          "INSERT INTO disclosure_events (scope_id, handle_id, kind, bytes, at_ms) "
-            + "VALUES (?, ?, ?, ?, ?)",
-        ).run(identity.scopeId, handleId, kind, wantBytes, now);
+        if (wantBytes > 0) {
+          // A page that disclosed nothing has nothing to account for. Writing a zero row
+          // anyway would let a caller paging a fruitless search grow an uncapped table
+          // without ever disclosing a byte.
+          db.prepare(
+            "UPDATE handles SET disclosed_bytes = disclosed_bytes + ? "
+              + " WHERE handle_id = ? AND scope_id = ?",
+          ).run(wantBytes, handleId, identity.scopeId);
+          db.prepare(
+            "INSERT INTO disclosure_events (scope_id, handle_id, kind, bytes, at_ms) "
+              + "VALUES (?, ?, ?, ?, ?)",
+          ).run(identity.scopeId, handleId, kind, wantBytes, now);
+        }
         return {
           granted: true,
           chargedBytes: wantBytes,
