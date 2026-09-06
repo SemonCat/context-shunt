@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/context-shunt/contracts/v1/tool-args.schema.json",
+  "title": "context-shunt v1.1 escape-hatch tool arguments",
+  "description": "The three read-only tools an agent may call, validated identically by both cores so the two hosts cannot drift. Paths appear here and nowhere else: they are authorized and discarded at capture time, and never enter request.schema.json, the envelope, the store or a metric label. No tool in this contract can retrieve a full payload.",
+  "oneOf": [
+    { "$ref": "#/$defs/readArgs" },
+    { "$ref": "#/$defs/inspectArgs" },
+    { "$ref": "#/$defs/statsArgs" }
+  ],
+  "$defs": {
+    "sourceId": { "type": "string", "minLength": 4, "maxLength": 64, "pattern": "^src_[A-Za-z0-9]{4,58}$" },
+    "snapshotId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "readArgs": {
+      "description": "context_shunt_read. Exactly one source form: either paths (an initial capture) or handles (a refined question over snapshots the caller already holds). Supplying both, or neither, is rejected. A refined question re-uses the named immutable snapshot and never silently recaptures the source.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "question"],
+      "properties": {
+        "tool": { "const": "context_shunt_read" },
+        "question": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "\\S" },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "handles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_id", "snapshot_id"],
+            "properties": {
+              "source_id": { "$ref": "#/$defs/sourceId" },
+              "snapshot_id": { "$ref": "#/$defs/snapshotId" }
+            }
+          }
+        },
+        "selector": { "$ref": "#/$defs/readSelector" }
+      },
+      "oneOf": [
+        { "required": ["paths"], "not": { "required": ["handles"] } },
+        { "required": ["handles"], "not": { "required": ["paths"] } }
+      ]
+    },
+    "readSelector": {
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "all" } } },
+        { "additionalProperties": false, "required": ["kind", "start", "end"],
+          "properties": { "kind": { "const": "lines" }, "start": { "type": "integer", "minimum": 1, "maximum": 100000000 }, "end": { "type": "integer", "minimum": 1, "maximum": 100000000 } } },
+        { "additionalProperties": false, "required": ["kind", "pointer", "start", "end"],
+          "properties": { "kind": { "const": "records" }, "pointer": { "type": "string", "maxLength": 1024, "pattern": "^(/([^/~]|~[01])*)*$" }, "start": { "type": "integer", "minimum": 1, "maximum": 100000000 }, "end": { "type": "integer", "minimum": 1, "maximum": 100000000 } } },
+        { "additionalProperties": false, "required": ["kind", "pattern", "max_matches"],
+          "properties": { "kind": { "const": "search" }, "pattern": { "type": "string", "minLength": 1, "maxLength": 512 }, "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 } } }
+      ]
+    },
+    "inspectArgs": {
+      "description": "context_shunt_inspect. Zero model calls. Addresses an existing handle plus the snapshot hash the caller believes it holds; a mismatch is refused rather than answered from a newer snapshot. Each result is capped at 16 KiB and every byte counts against the cumulative per-source and per-session disclosure ceilings.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "source_id", "snapshot_id", "selector"],
+      "properties": {
+        "tool": { "const": "context_shunt_inspect" },
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "selector": { "$ref": "#/$defs/inspectSelector" },
+        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "max_scan_lines": { "type": "integer", "minimum": 1, "maximum": 20000 },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^csr_[A-Za-z0-9_-]{8,504}$" }
+      }
+    },
+    "inspectSelector": {
+      "description": "Strict union: exactly one of lines, bytes or search. lines are 1-based inclusive ordinals; bytes are 0-based half-open offsets; search takes a literal needle, never a regular expression.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "additionalProperties": false, "required": ["kind", "start", "end"],
+          "properties": { "kind": { "const": "lines" }, "start": { "type": "integer", "minimum": 1, "maximum": 100000000 }, "end": { "type": "integer", "minimum": 1, "maximum": 100000000 } } },
+        { "additionalProperties": false, "required": ["kind", "start", "end"],
+          "properties": { "kind": { "const": "bytes" }, "start": { "type": "integer", "minimum": 0, "maximum": 8388608 }, "end": { "type": "integer", "minimum": 0, "maximum": 8388608 } } },
+        { "additionalProperties": false, "required": ["kind", "needle", "max_matches"],
+          "properties": { "kind": { "const": "search" }, "needle": { "type": "string", "minLength": 1, "maxLength": 512 }, "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 }, "context_lines": { "type": "integer", "minimum": 0, "maximum": 4 } } }
+      ]
+    },
+    "statsArgs": {
+      "description": "context_shunt_stats. Read-only. It cannot reset a counter, change retention, name another session, reveal content, or accept a caller-supplied label of any kind.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool"],
+      "properties": {
+        "tool": { "const": "context_shunt_stats" },
+        "page": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    }
+  }
+}

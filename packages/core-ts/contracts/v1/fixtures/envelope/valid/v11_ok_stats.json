@@ -1,0 +1,101 @@
+{
+  "note": "1.1 session stats: null reader tokens mean not reported and are never rendered as zero; net savings are signed and negative here because a refined question paid overhead against an already-credited baseline",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_stats_01",
+    "status": "ok",
+    "code": "STATS",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "result_kind": "stats",
+    "provenance": {
+      "derived": false,
+      "label": "session_metrics",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 0,
+      "usage_complete": true,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_9999aaaabbbbcccc",
+    "stats": {
+      "scope": "session",
+      "totals": {
+        "operations": 3,
+        "raw_input_bytes": 2097152,
+        "baseline_credit_tokens": 524288,
+        "main_model_envelope_tokens": 1420,
+        "reader_input_tokens": 8200,
+        "reader_output_tokens": 640,
+        "reader_cache_tokens": null,
+        "main_context_tokens_saved": 522868,
+        "net_tokens_saved": 514028,
+        "attempts_started": 3,
+        "attempts_usage_complete": 2,
+        "disclosed_bytes": 16384
+      },
+      "records": [
+        {
+          "operation_id": "acc_0123456789abcdef",
+          "kind": "read",
+          "status": "ok",
+          "code": "ANSWERED",
+          "raw_input_bytes": 2097152,
+          "raw_input_baseline_tokens": 524288,
+          "baseline_kind": "full_payload_counterfactual",
+          "baseline_method": "bytes_div_4",
+          "baseline_credit_tokens": 524288,
+          "main_model_envelope_bytes": 2048,
+          "main_model_envelope_tokens": 512,
+          "envelope_token_method": "bytes_div_4",
+          "reader_input_tokens": 6100,
+          "reader_output_tokens": 420,
+          "reader_cache_tokens": null,
+          "reader_token_method": "exact",
+          "attempts_started": 1,
+          "attempts_usage_complete": 1,
+          "delivery_boundary": "envelope",
+          "main_context_tokens_saved": 523776,
+          "net_tokens_saved": 517256
+        },
+        {
+          "operation_id": "acc_00000000deadbeef",
+          "kind": "refined_read",
+          "status": "ok",
+          "code": "ANSWERED",
+          "raw_input_bytes": 2097152,
+          "raw_input_baseline_tokens": 524288,
+          "baseline_kind": "full_payload_counterfactual",
+          "baseline_method": "bytes_div_4",
+          "baseline_credit_tokens": 0,
+          "main_model_envelope_bytes": 1600,
+          "main_model_envelope_tokens": 400,
+          "envelope_token_method": "bytes_div_4",
+          "reader_input_tokens": 2100,
+          "reader_output_tokens": 220,
+          "reader_cache_tokens": null,
+          "reader_token_method": "exact",
+          "attempts_started": 1,
+          "attempts_usage_complete": 1,
+          "delivery_boundary": "envelope",
+          "main_context_tokens_saved": -400,
+          "net_tokens_saved": -2720
+        }
+      ],
+      "page": 1,
+      "page_size": 8,
+      "total_records": 3,
+      "next_page": null
+    }
+  }
+}

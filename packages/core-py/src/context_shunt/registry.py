@@ -1,21 +1,30 @@
-"""Session-scoped source registry.
+"""Scope-bound source registry over the hybrid store.
 
-A ``source_id`` is an opaque capability, not an address: it is minted per session, it
-carries the authorization decision that was made when the source was registered, and it
-never resolves in another session. Expired handles are refused rather than silently
-re-fetching the underlying file.
+A ``source_id`` is an opaque capability, not an address: it is minted by the store, it
+carries the authorization decision that was made when the source was captured, and it
+resolves only inside the trusted (host, profile, principal, session, generation) scope
+that created it. Expired, revoked, closed-scope and stale-generation handles are refused
+rather than silently re-fetching the underlying file - the source may have changed, and
+answering from a newer version of it under an older snapshot hash would be a lie.
+
+This layer adds one thing to the store: rehydrating a payload into a
+:class:`~context_shunt.snapshot.Snapshot` with its line and record indexes. The payload is
+hash-verified on every load, and the rehydrated snapshot is cached per handle because it
+is immutable by construction. The cache is bounded so a session cannot pin more than a
+handful of payloads in memory.
 """
 
 from __future__ import annotations
 
-import secrets
 import threading
-import time
+from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, Limits
-from .snapshot import Snapshot
+from .snapshot import Snapshot, snapshot_bytes
+from .store import Capture, PublishedHandle, ScopeIdentity, SnapshotStore
 
 
 @dataclass(frozen=True)
@@ -25,91 +34,165 @@ class RegisteredSource:
     snapshot: Snapshot
     expires_at_epoch: float
     internal: bool = False
-
-
-def _mint_id() -> str:
-    return "src_" + secrets.token_hex(8)
+    kind: str = "shunted_read"
 
 
 class SourceRegistry:
-    """Thread-safe registry isolated per session/tenant."""
+    """Thread-safe, scope-bound view of the store."""
 
-    def __init__(self, limits: Limits = DEFAULT_LIMITS, time_fn=time.time):
+    #: How many rehydrated payloads one session may keep resident. One request may name
+    #: up to ``max_sources_per_request`` sources, so the cache holds at least that many.
+    _CACHE_ENTRIES = 8
+
+    def __init__(
+        self,
+        store: SnapshotStore,
+        identity: ScopeIdentity,
+        limits: Limits = DEFAULT_LIMITS,
+    ):
+        self._store = store
+        self._identity = identity
         self._limits = limits
-        self._time = time_fn
         self._lock = threading.RLock()
-        self._by_session: dict[str, dict[str, RegisteredSource]] = {}
+        self._cache: OrderedDict[str, Snapshot] = OrderedDict()
+
+    @property
+    def identity(self) -> ScopeIdentity:
+        return self._identity
+
+    @property
+    def session_id(self) -> str:
+        return self._identity.session
+
+    @property
+    def store(self) -> SnapshotStore:
+        return self._store
+
+    # -- capture -----------------------------------------------------------
 
     def register(
-        self, session_id: str, snapshot: Snapshot, *, internal: bool = False
+        self,
+        session_id: str,
+        snapshot: Snapshot,
+        *,
+        internal: bool = False,
+        kind: str = "shunted_read",
     ) -> RegisteredSource:
-        if not session_id:
-            raise ShuntError("UNSAFE_SOURCE", "NO_SESSION")
-        with self._lock:
-            now = self._time()
-            bucket = self._by_session.setdefault(session_id, {})
-            for source_id, current in list(bucket.items()):
-                if now >= current.expires_at_epoch:
-                    del bucket[source_id]
-            used = sum(current.snapshot.bytes_len for current in bucket.values())
-            if used + snapshot.bytes_len > self._limits.session_spill_quota_bytes:
-                raise ShuntError("LIMIT_EXCEEDED", "SESSION_SOURCE_QUOTA", retryable=False)
-            entry = RegisteredSource(
-                source_id=_mint_id(),
-                session_id=session_id,
-                snapshot=snapshot,
-                expires_at_epoch=now + self._limits.spill_ttl_seconds,
+        """Publish one snapshot. Convenience wrapper over the all-or-none batch path."""
+        return self.register_batch(session_id, [snapshot], internal=internal, kind=kind)[0]
+
+    def register_batch(
+        self,
+        session_id: str,
+        snapshots: Sequence[Snapshot],
+        *,
+        internal: bool = False,
+        kind: str = "shunted_read",
+    ) -> list[RegisteredSource]:
+        """Publish a batch. Every handle appears or none does.
+
+        A multi-source capture that half-succeeded would leave the caller holding handles
+        for part of a request it will be told was refused, so the store commits the whole
+        batch in one transaction.
+        """
+        self._assert_session(session_id)
+        captures = [
+            Capture(
+                data=snapshot.data,
+                media_type=snapshot.media_type,
+                line_count=snapshot.line_count,
+                kind=kind,
                 internal=internal,
             )
-            bucket[entry.source_id] = entry
-        return entry
+            for snapshot in snapshots
+        ]
+        published = self._store.publish(self._identity, captures)
+        out: list[RegisteredSource] = []
+        for handle, snapshot in zip(published, snapshots, strict=True):
+            if handle.snapshot_id != snapshot.snapshot_id:
+                # Content addressing guarantees this; asserting it makes a future change
+                # to either side fail loudly instead of publishing a mislabelled handle.
+                raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+            self._remember(handle.handle_id, snapshot)
+            out.append(self._entry(handle, snapshot))
+        return out
 
-    def remove(self, session_id: str, source_id: str) -> bool:
-        with self._lock:
-            bucket = self._by_session.get(session_id)
-            removed = bucket.pop(source_id, None) is not None if bucket is not None else False
-            if bucket is not None and not bucket:
-                self._by_session.pop(session_id, None)
-            return removed
+    # -- resolution --------------------------------------------------------
 
     def resolve(self, session_id: str, source_id: str) -> RegisteredSource:
-        with self._lock:
-            entry = self._by_session.get(session_id, {}).get(source_id)
-        if entry is None:
-            # A handle from another session is indistinguishable from an unknown one,
-            # which is deliberate: cross-session probing learns nothing.
-            raise ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE")
-        if self._time() >= entry.expires_at_epoch:
-            raise ShuntError("SOURCE_EXPIRED", "TTL_ELAPSED")
-        return entry
+        self._assert_session(session_id)
+        handle = self._store.resolve(self._identity, source_id)
+        return self._entry(handle, self._snapshot_for(handle))
+
+    def handle(self, session_id: str, source_id: str) -> PublishedHandle:
+        """Authorize without rehydrating the payload."""
+        self._assert_session(session_id)
+        return self._store.resolve(self._identity, source_id)
 
     def is_internal(self, session_id: str, source_id: str) -> bool:
-        """Registry-verified recursion guard. A payload claiming ``internal`` proves nothing."""
+        """Store-verified recursion guard. A payload claiming ``internal`` proves nothing."""
         try:
-            return self.resolve(session_id, source_id).internal
+            return self.handle(session_id, source_id).internal
         except ShuntError:
             return False
 
-    def expire_session(self, session_id: str) -> int:
+    def remove(self, session_id: str, source_id: str) -> bool:
+        self._assert_session(session_id)
         with self._lock:
-            removed = self._by_session.pop(session_id, {})
-        return len(removed)
+            self._cache.pop(source_id, None)
+        return self._store.revoke(self._identity, source_id)
+
+    def expire_session(self, session_id: str) -> int:
+        """Revoke every handle in this scope. Only a real session boundary calls this."""
+        self._assert_session(session_id)
+        with self._lock:
+            self._cache.clear()
+        return self._store.close_scope(self._identity)
 
     def sweep(self) -> int:
-        now = self._time()
-        removed = 0
-        with self._lock:
-            for session_id, entries in list(self._by_session.items()):
-                for source_id, entry in list(entries.items()):
-                    if now >= entry.expires_at_epoch:
-                        del entries[source_id]
-                        removed += 1
-                if not entries:
-                    del self._by_session[session_id]
-        return removed
+        return self._store.sweep().expired_handles
 
     def count(self, session_id: str | None = None) -> int:
+        if session_id is not None:
+            self._assert_session(session_id)
+        return self._store.stats().handles
+
+    # -- internals ---------------------------------------------------------
+
+    def _assert_session(self, session_id: str) -> None:
+        """A registry is bound to one scope; another session's id is not resolvable here."""
+        if session_id and session_id != self._identity.session:
+            raise ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE")
+
+    def _entry(self, handle: PublishedHandle, snapshot: Snapshot) -> RegisteredSource:
+        return RegisteredSource(
+            source_id=handle.handle_id,
+            session_id=self._identity.session,
+            snapshot=snapshot,
+            expires_at_epoch=handle.expires_at_epoch,
+            internal=handle.internal,
+            kind=handle.kind,
+        )
+
+    def _snapshot_for(self, handle: PublishedHandle) -> Snapshot:
         with self._lock:
-            if session_id is None:
-                return sum(len(v) for v in self._by_session.values())
-            return len(self._by_session.get(session_id, {}))
+            cached = self._cache.get(handle.handle_id)
+            if cached is not None and cached.snapshot_id == handle.snapshot_id:
+                self._cache.move_to_end(handle.handle_id)
+                return cached
+        data = self._store.load_payload(handle)
+        snapshot = snapshot_bytes(data, media_type_hint=handle.media_type, limits=self._limits)
+        if snapshot.snapshot_id != handle.snapshot_id:
+            raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+        self._remember(handle.handle_id, snapshot)
+        return snapshot
+
+    def _remember(self, handle_id: str, snapshot: Snapshot) -> None:
+        with self._lock:
+            self._cache[handle_id] = snapshot
+            self._cache.move_to_end(handle_id)
+            while len(self._cache) > self._CACHE_ENTRIES:
+                self._cache.popitem(last=False)
+
+
+__all__ = ["RegisteredSource", "SourceRegistry"]

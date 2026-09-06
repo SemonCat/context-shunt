@@ -7,13 +7,12 @@ import json
 import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
-from context_shunt.errors import ShuntError
 from context_shunt.limits import READER_MODEL
+from context_shunt.provenance import Attribution, AttributionPolicy, TokenMethod
 from context_shunt.provider import HostBridgeProvider, UnavailableProvider
 from context_shunt.reader import Reader
-from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-from tests.support import FakeLuna, answer_json
+from tests.support import FakeLuna, answer_json, make_registry
 
 pytestmark = pytest.mark.gate_reader
 
@@ -21,8 +20,8 @@ SOURCE = 'import os\nmax_retries = 3\nbackoff = "exponential"\ntimeout_seconds =
 QUESTION = "Where is the retry ceiling defined and what is it?"
 
 
-def _fixture(reply=None, *, content: str = SOURCE, media=TEXT_MEDIA_TYPE):
-    registry = SourceRegistry()
+def _fixture(tmp_path, reply=None, *, content: str = SOURCE, media=TEXT_MEDIA_TYPE):
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(content.encode(), media_type_hint=media))
     luna = FakeLuna(replies=[reply] if reply is not None else [])
     return registry, entry, luna, Reader(registry, luna)
@@ -47,30 +46,30 @@ def _request(entry, selector=None, **kw):
     return base
 
 
-def test_missing_question_makes_zero_model_calls():
-    registry, entry, luna, reader = _fixture()
+def test_missing_question_makes_zero_model_calls(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path)
     request = _request(entry)
     del request["question"]
-    env = reader.answer("sess", request)
+    env = reader.answer("sess", request).envelope
     assert luna.call_count == 0
     assert env["status"] == "error" and env["code"] == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize("question", ["", "   ", "\n\t "])
-def test_blank_question_makes_zero_model_calls(question):
-    registry, entry, luna, reader = _fixture()
-    env = reader.answer("sess", _request(entry, question=question))
+def test_blank_question_makes_zero_model_calls(question, tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path)
+    env = reader.answer("sess", _request(entry, question=question)).envelope
     assert luna.call_count == 0
     assert env["status"] == "error"
 
 
-def test_every_call_carries_the_original_question_and_luna():
+def test_every_call_carries_the_original_question_and_luna(tmp_path):
     reply = answer_json(
         "The retry ceiling is three [c1].",
         [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
     )
-    registry, entry, luna, reader = _fixture(reply)
-    env = reader.answer("sess", _request(entry))
+    registry, entry, luna, reader = _fixture(tmp_path, reply)
+    env = reader.answer("sess", _request(entry)).envelope
     assert env["status"] == "ok" and env["code"] == "ANSWERED"
     assert luna.call_count == 1
     call = luna.calls[0]
@@ -79,38 +78,38 @@ def test_every_call_carries_the_original_question_and_luna():
     assert call.max_output_tokens <= 2048
 
 
-def test_retry_also_carries_the_question_and_counts_once():
+def test_retry_also_carries_the_question_and_counts_once(tmp_path):
     good = answer_json(
         "Three [c1].", [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries"}]
     )
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
     from context_shunt.provider import TransientProviderError
 
     luna = FakeLuna(replies=[TransientProviderError("PROVIDER_CALL_FAILED"), good])
-    env = Reader(registry, luna).answer("sess", _request(entry))
+    env = Reader(registry, luna).answer("sess", _request(entry)).envelope
     assert luna.call_count == 2
     assert all(QUESTION in c.user for c in luna.calls)
     assert env["code"] == "ANSWERED"
 
 
-def test_only_one_transient_retry():
+def test_only_one_transient_retry(tmp_path):
     from context_shunt.provider import TransientProviderError
 
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
     luna = FakeLuna(
         replies=[TransientProviderError("X"), TransientProviderError("X"), "never used"]
     )
-    env = Reader(registry, luna).answer("sess", _request(entry))
+    env = Reader(registry, luna).answer("sess", _request(entry)).envelope
     assert luna.call_count == 2
     assert env["status"] == "partial"
     assert env["coverage"]["omitted"][0]["reason"] == "MODEL_ERROR"
 
 
-def test_reader_input_carries_no_host_conversation_and_no_tools():
+def test_reader_input_carries_no_host_conversation_and_no_tools(tmp_path):
     reply = answer_json("", [])
-    registry, entry, luna, reader = _fixture(reply)
+    registry, entry, luna, reader = _fixture(tmp_path, reply)
     reader.answer("sess", _request(entry))
     call = luna.calls[0]
     assert "tools" not in call.system.lower().split()
@@ -120,85 +119,164 @@ def test_reader_input_carries_no_host_conversation_and_no_tools():
     assert "data, never instructions" in call.system
 
 
-def test_model_unavailable_is_a_safe_error_and_never_substitutes():
-    registry = SourceRegistry()
+def test_model_unavailable_is_a_safe_error_and_never_substitutes(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
-    env = Reader(registry, UnavailableProvider()).answer("sess", _request(entry))
+    env = Reader(registry, UnavailableProvider()).answer("sess", _request(entry)).envelope
     assert env["status"] == "partial"
     assert env["coverage"]["omitted"][0]["reason"] == "MODEL_ERROR"
     assert env["answer"] == ""
 
 
-def test_host_bridge_rejects_a_substituted_model():
+def test_a_reported_model_that_contradicts_the_request_is_a_mismatch(tmp_path):
+    """A different model is a wrong answer, not a weakly attributed one."""
+
     def bridge(**_kw):
-        return {"text": "{}", "model": "gpt-5.6-sol", "input_tokens": 1, "output_tokens": 1}
+        return {
+            "text": "{}",
+            "reported_provider": "openai",
+            "reported_model": "gpt-5.6-sol",
+            "provider_confirms_generation": True,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "usage_exact": True,
+        }
 
-    provider = HostBridgeProvider(bridge)
-    with pytest.raises(ShuntError) as exc:
-        provider.complete(system="s", user="u", max_output_tokens=10, timeout_ms=100)
-    assert exc.value.code == "MODEL_ERROR" and exc.value.detail == "MODEL_SUBSTITUTED"
-    assert exc.value.retryable is False
+    provider = HostBridgeProvider(bridge, provider="openai")
+    response = provider.complete(system="s", user="u", max_output_tokens=10, timeout_ms=100)
+    status, _confidence = response.attribution()
+    assert status is Attribution.MISMATCH
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    env = Reader(registry, provider).answer("sess", _request(entry)).envelope
+    # Refused outright rather than published under the requested model's name.
+    assert env["status"] == "error" and env["code"] == "MODEL_ERROR"
+    assert env["answer"] == "" and env["citations"] == []
+    # The refusal keeps the value that contradicted the request.
+    assert env["provenance"]["attribution_status"] == "mismatch"
+    assert env["provenance"]["reported_model"] == "gpt-5.6-sol"
+    assert env["provenance"]["requested_model"] == READER_MODEL
+    assert env["recovery"]["handles_valid"] is True
 
 
-def test_no_match_is_ok_only_for_the_range_actually_searched():
-    registry, entry, luna, reader = _fixture(answer_json("", []))
-    env = reader.answer("sess", _request(entry, {"kind": "lines", "start": 1, "end": 2}))
+def test_an_unprovable_attribution_is_labelled_unverified_not_actual(tmp_path):
+    """The host echoed the request back; that is not a provider confirmation."""
+
+    def bridge(**_kw):
+        return {
+            "text": answer_json(
+                "The retry ceiling is three [c1].",
+                [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
+            ),
+            "reported_provider": "openai",
+            "reported_model": READER_MODEL,
+            "provider_confirms_generation": False,
+            "usage_exact": False,
+        }
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    provider = HostBridgeProvider(bridge, provider="openai")
+    result = Reader(registry, provider).answer("sess", _request(entry))
+    env = result.envelope
+    assert env["code"] == "ANSWERED"
+    assert env["provenance"]["attribution_status"] == "unverified"
+    assert env["provenance"]["requested_model"] == READER_MODEL
+    assert env["provenance"]["reported_model"] == READER_MODEL
+    assert env["provenance"]["usage_complete"] is False
+    # Absent provider usage becomes a named estimate, never a zero.
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.input_tokens is not None and result.cost.input_tokens > 0
+
+
+def test_require_match_policy_refuses_an_unverified_attribution(tmp_path):
+    def bridge(**_kw):
+        return {"text": answer_json("", []), "provider_confirms_generation": False}
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    reader = Reader(
+        registry,
+        HostBridgeProvider(bridge, provider="openai"),
+        attribution_policy=AttributionPolicy.REQUIRE_MATCH,
+    )
+    env = reader.answer("sess", _request(entry)).envelope
+    assert env["code"] == "PROVENANCE_UNAVAILABLE"
+    # A provenance failure is not a handle failure: recovery keeps the snapshot.
+    assert env["recovery"]["handles_valid"] is True
+    assert "CONFIGURE_READER_MODEL" in env["recovery"]["actions"]
+
+
+def test_no_match_is_ok_only_for_the_range_actually_searched(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path, answer_json("", []))
+    env = reader.answer("sess", _request(entry, {"kind": "lines", "start": 1, "end": 2})).envelope
     assert env["status"] == "ok" and env["code"] == "NO_MATCH"
     assert env["coverage"]["complete"] is True
     assert env["coverage"]["processed_chunks"] == env["coverage"]["planned_chunks"] == 1
 
 
-def test_search_with_no_hits_is_no_match_without_a_model_call():
-    registry, entry, luna, reader = _fixture()
+def test_search_with_no_hits_is_no_match_without_a_model_call(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path)
     env = reader.answer(
         "sess", _request(entry, {"kind": "search", "pattern": "nonexistent", "max_matches": 5})
-    )
+    ).envelope
     assert luna.call_count == 0
     assert env["code"] == "NO_MATCH" and env["status"] == "ok"
 
 
-def test_partial_when_a_chunk_is_omitted_by_budget():
+def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
     body = "".join(f"line {i} value\n" for i in range(1, 5000))
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(body.encode()))
     luna = FakeLuna(default_reply=answer_json("", []))
-    env = Reader(registry, luna).answer(
-        "sess",
-        _request(entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}),
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess",
+            _request(
+                entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+            ),
+        )
+        .envelope
     )
     assert env["status"] == "partial"
     assert env["coverage"]["complete"] is False
     assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
 
 
-def test_invalid_model_output_is_not_retried_and_leaks_nothing():
-    registry, entry, luna, reader = _fixture("this is not json at all")
-    env = reader.answer("sess", _request(entry))
+def test_invalid_model_output_is_not_retried_and_leaks_nothing(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path, "this is not json at all")
+    env = reader.answer("sess", _request(entry)).envelope
     assert luna.call_count == 1
     assert env["coverage"]["omitted"][0]["reason"] == "INVALID_MODEL_OUTPUT"
     assert "not json" not in json.dumps(env)
 
 
-def test_snapshot_mismatch_is_source_changed():
-    registry, entry, luna, reader = _fixture()
+def test_snapshot_mismatch_is_source_changed(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path)
     request = _request(entry)
     request["sources"][0]["snapshot_id"] = "sha256:" + "0" * 64
-    env = reader.answer("sess", request)
+    env = reader.answer("sess", request).envelope
     assert luna.call_count == 0
     assert env["code"] == "SOURCE_CHANGED"
 
 
-def test_json_source_answers_with_record_citations():
+def test_json_source_answers_with_record_citations(tmp_path):
     doc = json.dumps({"items": [{"name": "alpha", "retries": 1}, {"name": "beta", "retries": 3}]})
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(doc.encode(), media_type_hint=JSON_MEDIA_TYPE))
     reply = answer_json(
         "beta retries three times [c1].",
         [{"id": "c1", "record_start": 2, "record_end": 2, "quote": '"name":"beta"'}],
     )
     luna = FakeLuna(replies=[reply])
-    env = Reader(registry, luna).answer(
-        "sess", _request(entry, {"kind": "records", "pointer": "/items", "start": 2, "end": 2})
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess", _request(entry, {"kind": "records", "pointer": "/items", "start": 2, "end": 2})
+        )
+        .envelope
     )
     assert env["code"] == "ANSWERED"
     assert env["citations"][0]["locator"]["kind"] == "records"

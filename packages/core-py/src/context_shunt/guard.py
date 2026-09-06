@@ -1,10 +1,23 @@
 """The final output boundary.
 
 Nothing reaches a host without passing through here. The guard measures the *serialized*
-envelope - every field, every citation, every metadata value - against the 16 KiB cap,
-re-checks the per-field caps, refuses unknown fields, and refuses any citation not marked
-verified. If the guard itself fails it emits a fixed small error envelope rather than
-falling back to whatever it was given.
+envelope - every field, every citation, every metadata value - against the cap that
+applies to its ``result_kind``, re-checks the per-field caps, refuses unknown fields, and
+refuses any citation not marked verified. If the guard itself fails it emits a fixed small
+error envelope rather than falling back to whatever it was given.
+
+Two caps, both normative
+------------------------
+Most envelopes are capped at 16 KiB. A deterministic extraction or a stats page carries a
+bounded payload of its own - up to 16 KiB of exact snapshot bytes, or one page of records
+- so those are measured against ``max_extended_envelope_bytes`` (20 KiB), leaving 4 KiB
+for the envelope around a full-size extraction. The extraction payload itself is measured
+separately against the 16 KiB per-result cap, so the escape hatch cannot widen by hiding
+bytes in envelope overhead.
+
+Adding a field to the envelope means adding it here too. ``_ALLOWED_KEYS`` is a closed
+set, and an envelope carrying anything outside it is converted to the fixed error
+envelope rather than published.
 """
 
 from __future__ import annotations
@@ -15,7 +28,14 @@ from typing import Any
 
 from .envelope import build, serialized_bytes
 from .errors import ShuntError
-from .limits import DEFAULT_LIMITS, SCHEMA_VERSION, Limits, legal_pair
+from .limits import (
+    DEFAULT_LIMITS,
+    EMITTED_SCHEMA_VERSION,
+    SUPPORTED_REQUEST_VERSIONS,
+    Limits,
+    envelope_byte_cap,
+    legal_pair,
+)
 from .paths import contains_secret_marker
 from .schema import validate_envelope
 
@@ -32,9 +52,17 @@ _ALLOWED_KEYS = frozenset(
         "retryable",
         "guidance",
         "pointer",
+        # -- 1.1 --
+        "result_kind",
+        "provenance",
+        "accounting_id",
+        "extraction",
+        "stats",
+        "recovery",
     }
 )
 _ALLOWED_SOURCE_KEYS = frozenset({"source_id", "snapshot_id", "media_type", "bytes", "expires_at"})
+_REQUIRED_V11_KEYS = frozenset({"result_kind", "provenance", "accounting_id"})
 
 
 class OutputGuardError(Exception):
@@ -42,6 +70,7 @@ class OutputGuardError(Exception):
 
 
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
+_SAFE_ACCOUNTING_ID = re.compile(r"acc_[0-9a-f]{16}\Z")
 
 
 def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]:
@@ -52,23 +81,12 @@ def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]
         else "req_unknown"
     )
     safe_code = code if legal_pair("error", code) else "LIMIT_EXCEEDED"
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "request_id": safe_id,
-        "status": "error",
-        "code": safe_code,
-        "answer": "",
-        "citations": [],
-        "coverage": {
-            "complete": False,
-            "processed_chunks": 0,
-            "planned_chunks": 0,
-            "omitted": [],
-            "upstream_truncated": None,
-        },
-        "sources": [],
-        "retryable": False,
-    }
+    return build(
+        request_id=safe_id,
+        status="error",
+        code=safe_code,
+        retryable=False,
+    )
 
 
 def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[str, Any]:
@@ -78,11 +96,14 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
     unknown = set(envelope) - _ALLOWED_KEYS
     if unknown:
         raise OutputGuardError("unknown envelope field")
-    if envelope.get("schema_version") != SCHEMA_VERSION:
+    version = envelope.get("schema_version")
+    if version not in SUPPORTED_REQUEST_VERSIONS:
         raise OutputGuardError("bad schema version")
     status, code = envelope.get("status"), envelope.get("code")
     if not isinstance(status, str) or not isinstance(code, str) or not legal_pair(status, code):
         raise OutputGuardError("illegal status/code pairing")
+
+    _check_version_fields(envelope, version)
 
     answer = envelope.get("answer")
     if not isinstance(answer, str):
@@ -124,14 +145,70 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
         ):
             raise OutputGuardError("source bytes over cap")
 
-    if code == "SPILLED" and (answer or citations):
-        raise OutputGuardError("SPILLED must not carry an answer")
+    if code in ("SPILLED", "EXTRACTED", "STATS") and (answer or citations):
+        raise OutputGuardError(f"{code} must not carry an answer")
 
-    if serialized_bytes(envelope) > limits.max_envelope_bytes:
+    _check_extraction(envelope, limits)
+
+    if serialized_bytes(envelope) > envelope_byte_cap(envelope.get("result_kind"), limits):
         raise OutputGuardError("envelope over byte cap")
     if not validate_envelope(envelope):
         raise OutputGuardError("envelope schema violation")
     return envelope
+
+
+def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
+    """Version and content must agree in both directions.
+
+    A 1.1 envelope missing a mandatory 1.1 field is refused rather than published with the
+    field quietly absent; a 1.0 envelope carrying a 1.1 field is refused rather than
+    published under a version string that understates what it contains.
+    """
+    present_v11 = {key for key in _ALLOWED_KEYS if key in envelope} & (
+        _REQUIRED_V11_KEYS | {"extraction", "stats", "recovery"}
+    )
+    if version == "1.0":
+        if present_v11:
+            raise OutputGuardError("1.0 envelope carries a 1.1 field")
+        return
+    missing = _REQUIRED_V11_KEYS - set(envelope)
+    if missing:
+        raise OutputGuardError("1.1 envelope missing a mandatory field")
+    if not _SAFE_ACCOUNTING_ID.fullmatch(str(envelope.get("accounting_id", ""))):
+        raise OutputGuardError("bad accounting id")
+    provenance = envelope.get("provenance")
+    if not isinstance(provenance, dict):
+        raise OutputGuardError("provenance must be an object")
+    derived = provenance.get("derived")
+    if not isinstance(derived, bool):
+        raise OutputGuardError("provenance.derived must be a boolean")
+    if derived != (envelope.get("result_kind") == "model_derived"):
+        raise OutputGuardError("provenance.derived disagrees with result_kind")
+
+
+def _check_extraction(envelope: dict[str, Any], limits: Limits) -> None:
+    extraction = envelope.get("extraction")
+    if extraction is None:
+        return
+    if not isinstance(extraction, dict):
+        raise OutputGuardError("extraction must be an object")
+    if extraction.get("deterministic") is not True:
+        raise OutputGuardError("extraction must declare itself deterministic")
+    segments = extraction.get("segments")
+    if not isinstance(segments, list) or len(segments) > limits.inspect_max_segments:
+        raise OutputGuardError("extraction segments over cap")
+    total = 0
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get("text"), str):
+            raise OutputGuardError("extraction segment malformed")
+        text = segment["text"].encode("utf-8")
+        if contains_secret_marker(text):
+            raise OutputGuardError("secret marker in extraction")
+        total += len(text)
+    if total > limits.max_extraction_bytes:
+        raise OutputGuardError("extraction over per-result cap")
+    if extraction.get("result_bytes") != total:
+        raise OutputGuardError("extraction result_bytes disagrees with its segments")
 
 
 def enforce_or_fixed(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[str, Any]:
@@ -160,6 +237,7 @@ def _reject(_value: Any) -> Any:
 
 
 __all__ = [
+    "EMITTED_SCHEMA_VERSION",
     "OutputGuardError",
     "build",
     "enforce",

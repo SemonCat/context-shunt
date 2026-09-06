@@ -1,0 +1,30 @@
+{
+  "note": "a 1.0 envelope must stay exactly a 1.0 envelope: adding a 1.1 block while still declaring 1.0 is a version lie, not a compatible extension",
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "status": "ok",
+    "code": "NO_MATCH",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 1,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "provenance": {
+      "derived": true,
+      "label": "model_generated_answer",
+      "attribution_status": "unverified",
+      "attribution_confidence": "low",
+      "attribution_policy": "allow_unverified",
+      "attempts_started": 1,
+      "usage_complete": false,
+      "citations_mechanically_verified": true
+    }
+  }
+}

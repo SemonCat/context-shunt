@@ -22,11 +22,16 @@ SAFE_MESSAGES: dict[str, str] = {
     "INVALID_MODEL_OUTPUT": "reader model output did not match the required shape",
     "CITATION_INVALID": "no assertion survived citation verification",
     "SPILL_FAILED": "oversized result could not be spilled",
+    "STORE_FAILED": "snapshot store could not publish or authorize a handle",
+    "DISCLOSURE_EXHAUSTED": "cumulative disclosure ceiling reached for this source or session",
+    "PROVENANCE_UNAVAILABLE": "reader provenance could not be established under the configured policy",
     "HOST_UNSAFE": "host cannot guarantee the required interception order",
     "CANCELLED": "request cancelled",
     "LARGE_READ": "full read exceeds the configured line or byte threshold",
     "UNCLASSIFIABLE_READ": "read-like command could not be proven bounded and safe",
     "UPSTREAM_TRUNCATED": "upstream result was already truncated",
+    "EXTRACTED": "deterministic extraction returned exact snapshot bytes",
+    "STATS": "session accounting returned",
 }
 
 RETRYABLE_CODES = frozenset({"MODEL_ERROR", "TIMEOUT"})

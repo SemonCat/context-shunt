@@ -57,6 +57,9 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "permissions": ("gate_permissions", [(CORE_TS, "test/permissions.test.ts")]),
     "no-writes": ("gate_no_writes", [(CORE_TS, "test/reader-and-spill.test.ts")]),
     "capability": ("gate_capability", [(OPENCLAW_ADAPTER, "test/adapter.test.ts")]),
+    "store": ("gate_store", [(CORE_TS, "test/store.test.ts")]),
+    "inspect": ("gate_inspect", [(CORE_TS, "test/inspect.test.ts")]),
+    "accounting": ("gate_accounting", [(CORE_TS, "test/accounting.test.ts")]),
 }
 
 INTEGRATION_HOSTS = ("hermes", "openclaw")

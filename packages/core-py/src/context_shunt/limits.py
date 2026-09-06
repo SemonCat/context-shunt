@@ -3,6 +3,22 @@
 Both language cores read ``contracts/v1/limits.json``. A deployment may lower a cap
 (``Limits.narrow``); raising one is rejected here so a config file can never widen the
 security envelope that the acceptance gates measure.
+
+Contract revision
+-----------------
+Two version constants, deliberately separate:
+
+* :data:`EMITTED_SCHEMA_VERSION` - the revision every envelope this core builds declares.
+* :data:`SUPPORTED_REQUEST_VERSIONS` - the revisions this core will accept on input.
+
+Revision 1.1 is backward compatible: a 1.0 request is still accepted unchanged, and a 1.0
+envelope still validates. What 1.1 adds is mandatory *for envelopes that declare 1.1* -
+``result_kind``, ``provenance`` and ``accounting_id`` - plus the optional extraction,
+stats and recovery blocks and the inspect/stats operations. A request that declares 1.0
+and carries a 1.1 field is rejected rather than accepted with the field ignored.
+
+:data:`SCHEMA_VERSION` is kept as an alias of the emitted revision so existing call sites
+keep working; new code should say which of the two it means.
 """
 
 from __future__ import annotations
@@ -13,8 +29,9 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-CONTRACTS_DIR = Path(__file__).resolve().parent / "contracts" / "v1"
-SCHEMA_VERSION = "1.0"
+CONTRACTS_ROOT = Path(__file__).resolve().parent / "contracts"
+CONTRACTS_DIR = CONTRACTS_ROOT / "v1"
+STORE_DDL_PATH = CONTRACTS_ROOT / "store" / "v1.sql"
 
 
 @cache
@@ -33,6 +50,27 @@ def status_code_pairs() -> dict[str, Any]:
     return _load("status-code-pairs.json")
 
 
+EMITTED_SCHEMA_VERSION: str = raw_limits()["contract"]["emitted_version"]
+SUPPORTED_REQUEST_VERSIONS: frozenset[str] = frozenset(
+    raw_limits()["contract"]["supported_request_versions"]
+)
+#: Backward-compatible alias. Prefer the explicit constant that says which side you mean.
+SCHEMA_VERSION: str = EMITTED_SCHEMA_VERSION
+
+#: Fields that only exist from 1.1 onward. A request declaring an earlier revision that
+#: carries one of these is refused, so an unknown mandatory field is never ignored.
+V11_ONLY_REQUEST_FIELDS: frozenset[str] = frozenset({"refined"})
+V11_ONLY_OPERATIONS: frozenset[str] = frozenset({"inspect", "stats"})
+V11_ONLY_ENVELOPE_FIELDS: frozenset[str] = frozenset(
+    {"result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery"}
+)
+
+
+def store_ddl() -> str:
+    """The normative store DDL, read from the vendored contract."""
+    return STORE_DDL_PATH.read_text(encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class Limits:
     """Effective caps for one deployment. Frozen: nothing mutates caps at runtime."""
@@ -44,7 +82,9 @@ class Limits:
     probe_max_lines_scanned: int
     max_tool_result_bytes: int
     max_envelope_bytes: int
+    max_extended_envelope_bytes: int
     max_targeted_read_bytes: int
+    max_extraction_bytes: int
     max_source_bytes: int
     max_chunk_bytes: int
     max_answer_bytes: int
@@ -68,6 +108,24 @@ class Limits:
     spill_ttl_seconds: int
     json_max_depth: int
     json_max_nodes: int
+    # -- 1.1 additions ---------------------------------------------------
+    inspect_max_result_bytes: int
+    inspect_max_segments: int
+    inspect_max_lines_per_page: int
+    inspect_max_bytes_per_page: int
+    inspect_max_scan_lines: int
+    inspect_max_scan_bytes: int
+    inspect_max_search_matches: int
+    inspect_max_needle_bytes: int
+    disclosure_max_per_source_bytes: int
+    disclosure_max_per_session_bytes: int
+    store_ddl_version: int
+    store_busy_timeout_ms: int
+    store_max_entries: int
+    store_max_bytes: int
+    store_handle_ttl_seconds: int
+    stats_max_records_per_page: int
+    stats_max_pages: int
 
     @classmethod
     def defaults(cls) -> Limits:
@@ -80,7 +138,9 @@ class Limits:
             probe_max_lines_scanned=raw["gate"]["probe_max_lines_scanned"],
             max_tool_result_bytes=raw["bytes"]["max_tool_result_bytes"],
             max_envelope_bytes=raw["bytes"]["max_envelope_bytes"],
+            max_extended_envelope_bytes=raw["bytes"]["max_extended_envelope_bytes"],
             max_targeted_read_bytes=raw["bytes"]["max_targeted_read_bytes"],
+            max_extraction_bytes=raw["bytes"]["max_extraction_bytes"],
             max_source_bytes=raw["bytes"]["max_source_bytes"],
             max_chunk_bytes=raw["bytes"]["max_chunk_bytes"],
             max_answer_bytes=raw["bytes"]["max_answer_bytes"],
@@ -104,6 +164,23 @@ class Limits:
             spill_ttl_seconds=raw["spill"]["ttl_seconds"],
             json_max_depth=raw["json"]["max_depth"],
             json_max_nodes=raw["json"]["max_nodes"],
+            inspect_max_result_bytes=raw["inspect"]["max_result_bytes"],
+            inspect_max_segments=raw["inspect"]["max_segments"],
+            inspect_max_lines_per_page=raw["inspect"]["max_lines_per_page"],
+            inspect_max_bytes_per_page=raw["inspect"]["max_bytes_per_page"],
+            inspect_max_scan_lines=raw["inspect"]["max_scan_lines"],
+            inspect_max_scan_bytes=raw["inspect"]["max_scan_bytes"],
+            inspect_max_search_matches=raw["inspect"]["max_search_matches"],
+            inspect_max_needle_bytes=raw["inspect"]["max_needle_bytes"],
+            disclosure_max_per_source_bytes=raw["disclosure"]["max_per_source_bytes"],
+            disclosure_max_per_session_bytes=raw["disclosure"]["max_per_session_bytes"],
+            store_ddl_version=raw["store"]["ddl_version"],
+            store_busy_timeout_ms=raw["store"]["busy_timeout_ms"],
+            store_max_entries=raw["store"]["max_entries"],
+            store_max_bytes=raw["store"]["max_bytes"],
+            store_handle_ttl_seconds=raw["store"]["handle_ttl_seconds"],
+            stats_max_records_per_page=raw["accounting"]["max_stats_records_per_page"],
+            stats_max_pages=raw["accounting"]["max_stats_pages"],
         )
 
     def narrow(self, **overrides: int) -> Limits:
@@ -124,20 +201,50 @@ class Limits:
                 raise ValueError(f"limit {key} may only be narrowed (max {current})")
             if value < 0:
                 raise ValueError(f"limit {key} may not be negative")
-            if value == 0 and key in {
-                "bytes_per_token_estimate",
-                "max_chunk_bytes",
-                "max_chunk_tokens",
-                "max_concurrent_model_calls",
-            }:
+            if value == 0 and key in POSITIVE_LIMITS:
                 raise ValueError(f"limit {key} must be positive")
         return replace(self, **overrides)
 
 
+#: Caps a deployment may not set to zero, because zero would disable rather than tighten.
+POSITIVE_LIMITS = frozenset(
+    {
+        "bytes_per_token_estimate",
+        "max_chunk_bytes",
+        "max_chunk_tokens",
+        "max_concurrent_model_calls",
+        "inspect_max_result_bytes",
+        "inspect_max_scan_lines",
+        "store_ddl_version",
+        "store_busy_timeout_ms",
+        "stats_max_records_per_page",
+        "stats_max_pages",
+    }
+)
+
 DEFAULT_LIMITS = Limits.defaults()
 READER_MODEL = DEFAULT_LIMITS.reader_model
+#: Deterministic estimator name recorded whenever provider usage is not available.
+BASELINE_ESTIMATE_METHOD: str = raw_limits()["accounting"]["baseline_method"]
 
 
 def legal_pair(status: str, code: str) -> bool:
     pairs = status_code_pairs()["pairs"]
     return status in pairs and code in pairs[status]
+
+
+def supported_request_version(version: Any) -> bool:
+    return isinstance(version, str) and version in SUPPORTED_REQUEST_VERSIONS
+
+
+def envelope_byte_cap(result_kind: str | None, limits: Limits = DEFAULT_LIMITS) -> int:
+    """The serialized cap that applies to one envelope.
+
+    Deterministic extraction and stats carry a bounded payload of their own - up to
+    ``max_extraction_bytes`` of exact snapshot bytes, or one page of operation records -
+    so they are measured against ``max_extended_envelope_bytes``. Every other envelope
+    keeps the original 16 KiB cap. Both values live in ``contracts/v1/limits.json``.
+    """
+    if result_kind in ("deterministic_extraction", "stats"):
+        return limits.max_extended_envelope_bytes
+    return limits.max_envelope_bytes

@@ -1,0 +1,51 @@
+{
+  "note": "stats records are closed enums and counters only: a provider or model name, a path, a question or an error string may never appear as a field or a label",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_stats_01",
+    "status": "ok",
+    "code": "STATS",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "result_kind": "stats",
+    "provenance": {
+      "derived": false,
+      "label": "session_metrics",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 0,
+      "usage_complete": true,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_9999aaaabbbbcccc",
+    "stats": {
+      "scope": "session",
+      "totals": {
+        "operations": 1,
+        "raw_input_bytes": 0,
+        "baseline_credit_tokens": 0,
+        "main_model_envelope_tokens": 0,
+        "main_context_tokens_saved": 0,
+        "net_tokens_saved": 0,
+        "attempts_started": 0,
+        "attempts_usage_complete": 0,
+        "disclosed_bytes": 0,
+        "model": "gpt-5.6-luna"
+      },
+      "records": [],
+      "page": 1,
+      "page_size": 8,
+      "total_records": 0
+    }
+  }
+}

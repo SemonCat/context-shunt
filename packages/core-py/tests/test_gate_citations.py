@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
@@ -13,13 +12,14 @@ from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-from tests.support import FakeLuna, answer_json
+from context_shunt.store import SnapshotStore
+from tests.support import FakeLuna, answer_json, make_identity, make_registry
 
 pytestmark = pytest.mark.gate_citations
 
 
-def _registry_with(cases):
-    registry = SourceRegistry()
+def _registry_with(cases, tmp_path):
+    registry = make_registry(tmp_path, session_id="sess_a")
     entries = {}
     for name, spec in cases["sources"].items():
         media = JSON_MEDIA_TYPE if spec["media_type"] == "application/json" else TEXT_MEDIA_TYPE
@@ -29,17 +29,23 @@ def _registry_with(cases):
     return registry, entries
 
 
-def test_every_conformance_case(citation_cases):
-    registry, entries = _registry_with(citation_cases)
+def test_every_conformance_case(citation_cases, tmp_path):
+    registry, entries = _registry_with(citation_cases, tmp_path)
     verifier = CitationVerifier(registry)
     failures = []
     for case in citation_cases["cases"]:
         entry = entries[case["source"]]
         session = "sess_b" if case.get("foreign_session") else "sess_a"
         if case.get("expired"):
-            expiring = SourceRegistry()
+            clock = {"now": 1_700_000_000_000}
+            store = SnapshotStore(
+                tmp_path / f"expiring-{case['id']}",
+                wall_clock_ms=lambda state=clock: state["now"],
+            )
+            identity = make_identity("sess_a")
+            expiring = SourceRegistry(store, identity)
             handle = expiring.register("sess_a", entry.snapshot)
-            expiring._time = lambda: time.time() + 10**6  # noqa: SLF001 - TTL fast-forward
+            clock["now"] += (DEFAULT_LIMITS.store_handle_ttl_seconds + 1) * 1000
             result = CitationVerifier(expiring).verify(
                 "sess_a",
                 {
@@ -72,8 +78,8 @@ def test_conformance_corpus_covers_text_and_json_and_failures(citation_cases):
     assert {"OK", "QUOTE_NOT_FOUND", "LINE_OUT_OF_RANGE", "SNAPSHOT_MISMATCH"} <= reasons
 
 
-def test_model_claiming_verified_does_not_make_it_verified():
-    registry = SourceRegistry()
+def test_model_claiming_verified_does_not_make_it_verified(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
     reply = json.dumps(
         {
@@ -84,14 +90,14 @@ def test_model_claiming_verified_does_not_make_it_verified():
         }
     )
     luna = FakeLuna(replies=[reply])
-    env = Reader(registry, luna).answer("sess", _req(entry))
+    env = Reader(registry, luna).answer("sess", _req(entry)).envelope
     assert env["code"] == "CITATION_INVALID"
     assert env["citations"] == []
     assert env["answer"] == ""
 
 
-def test_assertions_without_valid_evidence_are_removed_but_valid_ones_survive():
-    registry = SourceRegistry()
+def test_assertions_without_valid_evidence_are_removed_but_valid_ones_survive(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
     reply = answer_json(
         "The first line is alpha [c1]. The third line is gamma [c2].",
@@ -100,7 +106,7 @@ def test_assertions_without_valid_evidence_are_removed_but_valid_ones_survive():
             {"id": "c2", "line_start": 3, "line_end": 3, "quote": "gamma"},
         ],
     )
-    env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _req(entry))
+    env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _req(entry)).envelope
     assert env["code"] == "ANSWERED"
     assert "alpha" in env["answer"] and "gamma" not in env["answer"]
     assert [c["id"] for c in env["citations"]] == ["c1"]
@@ -111,22 +117,22 @@ def test_uncited_sentences_do_not_survive():
     assert kept == "Alpha is here [c1]."
 
 
-def test_long_line_split_across_chunks_still_cites_the_original_line():
+def test_long_line_split_across_chunks_still_cites_the_original_line(tmp_path):
     body = ("Q" * 40000) + " needle\n" + "second\n"
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(body.encode()))
     reply = answer_json(
         "The marker is on line one [c1].",
         [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "QQQQQQQQ"}],
     )
-    env = Reader(registry, FakeLuna(default_reply=reply)).answer("sess", _req(entry))
+    env = Reader(registry, FakeLuna(default_reply=reply)).answer("sess", _req(entry)).envelope
     assert env["code"] in ("ANSWERED", "NO_MATCH")
     if env["citations"]:
         assert env["citations"][0]["locator"] == {"kind": "lines", "start": 1, "end": 1}
 
 
-def test_quote_over_cap_is_rejected_even_when_present_in_the_source():
-    registry = SourceRegistry()
+def test_quote_over_cap_is_rejected_even_when_present_in_the_source(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     body = b"Z" * 600 + b"\n"
     entry = registry.register("sess", snapshot_bytes(body))
     verifier = CitationVerifier(registry)
@@ -142,8 +148,8 @@ def test_quote_over_cap_is_rejected_even_when_present_in_the_source():
     assert not result.verified and result.reason.value == "QUOTE_OVER_CAP"
 
 
-def test_source_change_between_snapshot_and_citation_is_rejected():
-    registry = SourceRegistry()
+def test_source_change_between_snapshot_and_citation_is_rejected(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     first = registry.register("sess", snapshot_bytes(b"alpha\n"))
     second = registry.register("sess", snapshot_bytes(b"changed\n"))
     verifier = CitationVerifier(registry)

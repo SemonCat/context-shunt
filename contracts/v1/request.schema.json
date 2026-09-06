@@ -1,42 +1,100 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/context-shunt/contracts/v1/request.schema.json",
-  "title": "context-shunt v1 reader request",
+  "title": "context-shunt v1 core request",
+  "description": "Revision 1.1. A 1.0 read request is still valid unchanged; the inspect and stats operations are additions that require schema_version 1.1. Sources are always opaque session-scoped handles - a filesystem path never enters this contract.",
   "type": "object",
-  "additionalProperties": false,
-  "required": ["schema_version", "request_id", "operation", "question", "sources", "budgets"],
-  "properties": {
-    "schema_version": { "const": "1.0" },
-    "request_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
-    "operation": {
-      "description": "v1 accepts read only. propose_patch is reserved for a future schema version and MUST be rejected here.",
-      "enum": ["read"]
-    },
-    "question": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "\\S" },
-    "sources": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 8,
-      "items": { "$ref": "#/$defs/requestSource" }
-    },
-    "budgets": { "$ref": "#/$defs/budgets" }
-  },
+  "required": ["schema_version", "request_id", "operation"],
+  "oneOf": [
+    { "$ref": "#/$defs/readRequest" },
+    { "$ref": "#/$defs/inspectRequest" },
+    { "$ref": "#/$defs/statsRequest" }
+  ],
   "$defs": {
+    "schemaVersion": { "enum": ["1.0", "1.1"] },
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "readRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "operation", "question", "sources", "budgets"],
+      "properties": {
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "operation": {
+          "description": "v1 accepts read, inspect and stats. propose_patch is reserved for a future schema version and MUST be rejected here.",
+          "const": "read"
+        },
+        "question": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "\\S" },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/requestSource" }
+        },
+        "budgets": { "$ref": "#/$defs/budgets" },
+        "refined": {
+          "description": "1.1: true when this question re-uses handles the caller already holds. A refined question MUST reuse the same immutable snapshot and MUST NOT recapture the source. Absent means false.",
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "schema_version": { "const": "1.0" } }, "required": ["schema_version"] },
+          "then": { "not": { "required": ["refined"] } }
+        }
+      ]
+    },
+    "inspectRequest": {
+      "description": "1.1: zero-model deterministic extraction by handle and snapshot identity.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "operation", "source_id", "snapshot_id", "selector", "budgets"],
+      "properties": {
+        "schema_version": { "const": "1.1" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "operation": { "const": "inspect" },
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "selector": { "$ref": "#/$defs/inspectSelector" },
+        "budgets": { "$ref": "#/$defs/inspectBudgets" },
+        "cursor": {
+          "description": "Opaque authenticated continuation cursor from a previous inspect result. Bound to handle, snapshot and selector; a tampered or foreign cursor is refused.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^csr_[A-Za-z0-9_-]{8,504}$"
+        }
+      }
+    },
+    "statsRequest": {
+      "description": "1.1: read-only session aggregate plus a bounded page of operation records. Cannot reset metrics, change retention, or address another session.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "operation"],
+      "properties": {
+        "schema_version": { "const": "1.1" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "operation": { "const": "stats" },
+        "page": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "page_size": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
     "requestSource": {
       "type": "object",
       "additionalProperties": false,
       "required": ["source_id", "snapshot_id", "selector"],
       "properties": {
-        "source_id": {
-          "description": "Opaque session-scoped capability handle issued by the registry. Never a filesystem path.",
-          "type": "string",
-          "minLength": 4,
-          "maxLength": 64,
-          "pattern": "^src_[A-Za-z0-9]{4,58}$"
-        },
+        "source_id": { "$ref": "#/$defs/sourceId" },
         "snapshot_id": { "$ref": "#/$defs/snapshotId" },
         "selector": { "$ref": "#/$defs/selector" }
       }
+    },
+    "sourceId": {
+      "description": "Opaque session-scoped capability handle issued by the store. Never a filesystem path.",
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 64,
+      "pattern": "^src_[A-Za-z0-9]{4,58}$"
     },
     "snapshotId": {
       "description": "Full SHA-256 of the immutable snapshot bytes.",
@@ -83,6 +141,41 @@
         }
       ]
     },
+    "inspectSelector": {
+      "description": "Strict union. lines: 1-based inclusive ordinals. bytes: 0-based half-open offsets. search: literal needle only, never a regular expression.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["kind", "start", "end"],
+          "properties": {
+            "kind": { "const": "lines" },
+            "start": { "type": "integer", "minimum": 1, "maximum": 100000000 },
+            "end": { "type": "integer", "minimum": 1, "maximum": 100000000 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "start", "end"],
+          "properties": {
+            "kind": { "const": "bytes" },
+            "start": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+            "end": { "type": "integer", "minimum": 0, "maximum": 8388608 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "needle", "max_matches"],
+          "properties": {
+            "kind": { "const": "search" },
+            "needle": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "context_lines": { "type": "integer", "minimum": 0, "maximum": 4 }
+          }
+        }
+      ]
+    },
     "budgets": {
       "type": "object",
       "additionalProperties": false,
@@ -91,6 +184,15 @@
         "max_chunks": { "type": "integer", "minimum": 1, "maximum": 8 },
         "max_answer_bytes": { "type": "integer", "minimum": 1, "maximum": 8192 },
         "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 60000 }
+      }
+    },
+    "inspectBudgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_result_bytes", "max_scan_lines"],
+      "properties": {
+        "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "max_scan_lines": { "type": "integer", "minimum": 1, "maximum": 20000 }
       }
     }
   }

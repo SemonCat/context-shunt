@@ -1,0 +1,19 @@
+{
+  "note": "1.1 byte-range extraction: 0-based half-open offsets",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_inspect_bytes",
+    "operation": "inspect",
+    "source_id": "src_01ab",
+    "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+    "selector": {
+      "kind": "bytes",
+      "start": 0,
+      "end": 4096
+    },
+    "budgets": {
+      "max_result_bytes": 4096,
+      "max_scan_lines": 1
+    }
+  }
+}

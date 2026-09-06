@@ -1,0 +1,21 @@
+{
+  "note": "1.1 literal search continued from an opaque authenticated cursor",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_inspect_search",
+    "operation": "inspect",
+    "source_id": "src_01ab",
+    "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+    "selector": {
+      "kind": "search",
+      "needle": "max_transient_retries",
+      "max_matches": 25,
+      "context_lines": 2
+    },
+    "budgets": {
+      "max_result_bytes": 8192,
+      "max_scan_lines": 5000
+    },
+    "cursor": "csr_bGluZXM6MTIwOjE2MC5mMGEx"
+  }
+}

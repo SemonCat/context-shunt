@@ -1,28 +1,35 @@
 {
-  "schema_version": "1.0",
-  "description": "Legal status/code pairings for the v1 envelope. Any pair not listed here MUST be rejected by both cores and by envelope.schema.json.",
+  "schema_version": "1.1",
+  "description": "Legal status/code pairings for the v1 envelope. Any pair not listed here MUST be rejected by both cores and by envelope.schema.json. Revision 1.1 adds EXTRACTED, STATS, STORE_FAILED, DISCLOSURE_EXHAUSTED and PROVENANCE_UNAVAILABLE; every 1.0 pairing is unchanged.",
   "statuses": ["ok", "partial", "blocked", "error"],
   "codes": [
     "ANSWERED", "NO_MATCH", "LARGE_READ", "UNCLASSIFIABLE_READ", "SPILLED",
+    "EXTRACTED", "STATS",
     "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
     "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
     "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
+    "STORE_FAILED", "DISCLOSURE_EXHAUSTED", "PROVENANCE_UNAVAILABLE",
     "HOST_UNSAFE", "UPSTREAM_TRUNCATED", "CANCELLED"
   ],
   "pairs": {
-    "ok": ["ANSWERED", "NO_MATCH", "SPILLED"],
-    "partial": ["ANSWERED", "NO_MATCH", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "TIMEOUT", "CANCELLED"],
+    "ok": ["ANSWERED", "NO_MATCH", "SPILLED", "EXTRACTED", "STATS"],
+    "partial": ["ANSWERED", "NO_MATCH", "EXTRACTED", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "TIMEOUT", "CANCELLED"],
     "blocked": ["LARGE_READ", "UNCLASSIFIABLE_READ", "UNSAFE_SOURCE", "BINARY_UNSUPPORTED", "HOST_UNSAFE"],
     "error": [
       "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
       "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
       "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
+      "STORE_FAILED", "DISCLOSURE_EXHAUSTED", "PROVENANCE_UNAVAILABLE",
       "HOST_UNSAFE", "CANCELLED"
     ]
   },
   "constraints": {
     "coverage_complete_requires_status": ["ok"],
     "spilled_requires_empty_answer": true,
-    "retryable_allowed_statuses": ["error", "partial"]
+    "extracted_requires_empty_answer": true,
+    "stats_requires_empty_answer": true,
+    "retryable_allowed_statuses": ["error", "partial"],
+    "emitted_schema_version": "1.1",
+    "accepted_request_schema_versions": ["1.0", "1.1"]
   }
 }

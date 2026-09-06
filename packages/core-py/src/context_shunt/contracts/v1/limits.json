@@ -1,7 +1,11 @@
 {
-  "schema_version": "1.0",
-  "description": "Normative v1 caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these.",
+  "schema_version": "1.1",
+  "description": "Normative caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these. Revision 1.1 adds the contract/inspect/disclosure/store/accounting blocks and leaves every 1.0 value unchanged.",
   "reader_model": "gpt-5.6-luna",
+  "contract": {
+    "emitted_version": "1.1",
+    "supported_request_versions": ["1.0", "1.1"]
+  },
   "gate": {
     "full_read_max_lines": 350,
     "targeted_read_max_lines": 350,
@@ -12,7 +16,9 @@
   "bytes": {
     "max_tool_result_bytes": 16384,
     "max_envelope_bytes": 16384,
+    "max_extended_envelope_bytes": 20480,
     "max_targeted_read_bytes": 16384,
+    "max_extraction_bytes": 16384,
     "max_source_bytes": 8388608,
     "max_chunk_bytes": 32768,
     "max_answer_bytes": 8192,
@@ -49,5 +55,32 @@
   "json": {
     "max_depth": 64,
     "max_nodes": 100000
+  },
+  "inspect": {
+    "max_result_bytes": 16384,
+    "max_segments": 64,
+    "max_lines_per_page": 400,
+    "max_bytes_per_page": 16384,
+    "max_scan_lines": 20000,
+    "max_scan_bytes": 8388608,
+    "max_search_matches": 200,
+    "max_needle_bytes": 512
+  },
+  "disclosure": {
+    "max_per_source_bytes": 262144,
+    "max_per_session_bytes": 1048576
+  },
+  "store": {
+    "ddl": "contracts/store/v1.sql",
+    "ddl_version": 1,
+    "busy_timeout_ms": 5000,
+    "max_entries": 512,
+    "max_bytes": 268435456,
+    "handle_ttl_seconds": 3600
+  },
+  "accounting": {
+    "baseline_method": "bytes_div_4",
+    "max_stats_records_per_page": 8,
+    "max_stats_pages": 64
   }
 }

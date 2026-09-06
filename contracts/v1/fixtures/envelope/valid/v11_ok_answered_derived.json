@@ -1,0 +1,56 @@
+{
+  "note": "1.1 model-derived answer: labelled derived, exact provider usage, mechanically verified citation",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_01",
+    "status": "ok",
+    "code": "ANSWERED",
+    "answer": "The transient retry limit is 1 [c1].",
+    "citations": [
+      {
+        "id": "c1",
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "locator": { "kind": "lines", "start": 42, "end": 42 },
+        "quote": "max_transient_retries: 1",
+        "verified": true
+      }
+    ],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 1,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "media_type": "text/plain",
+        "bytes": 4096,
+        "expires_at": "2026-09-07T12:00:00Z"
+      }
+    ],
+    "retryable": false,
+    "result_kind": "model_derived",
+    "provenance": {
+      "derived": true,
+      "label": "model_generated_answer",
+      "requested_provider": "openai",
+      "requested_model": "gpt-5.6-luna",
+      "resolved_provider": "openai",
+      "resolved_model": "gpt-5.6-luna",
+      "reported_provider": "openai",
+      "reported_model": "gpt-5.6-luna",
+      "attribution_status": "actual",
+      "attribution_confidence": "high",
+      "attribution_policy": "require_match",
+      "attempts_started": 1,
+      "usage_complete": true,
+      "citations_mechanically_verified": true,
+      "fallback_used": false
+    },
+    "accounting_id": "acc_0123456789abcdef"
+  }
+}

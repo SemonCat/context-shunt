@@ -11,10 +11,12 @@ import pytest
 
 from context_shunt.binaryguard import assert_supported_blocks, assert_text, looks_binary
 from context_shunt.errors import ShuntError
+from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.paths import PathPolicy, assert_no_secret, authorize
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes, snapshot_file
-from context_shunt.spill import SpillStore
+from context_shunt.store import Capture, ScopeIdentity, SnapshotStore
+from tests.support import make_registry
 
 pytestmark = pytest.mark.gate_permissions
 
@@ -161,69 +163,131 @@ def test_race_replacement_between_probe_and_read_is_source_changed(workspace):
     assert exc.value.code == "SOURCE_CHANGED"
 
 
-def test_handles_do_not_resolve_across_sessions():
-    registry = SourceRegistry()
-    entry = registry.register("sess_a", snapshot_bytes(b"alpha\n"))
-    registry.resolve("sess_a", entry.source_id)
+def test_handles_do_not_resolve_across_sessions(tmp_path):
+    registry_a = make_registry(tmp_path, session_id="sess_a")
+    entry = registry_a.register("sess_a", snapshot_bytes(b"alpha\n"))
+    registry_a.resolve("sess_a", entry.source_id)
+    # A second scope over the same store: same file, different trusted identity.
+    store = registry_a.store
+    identity_b = ScopeIdentity(
+        host="test-host", profile="test", principal="local", session="sess_b"
+    )
+    store.open_scope(identity_b)
+    registry_b = SourceRegistry(store, identity_b)
     with pytest.raises(ShuntError) as exc:
-        registry.resolve("sess_b", entry.source_id)
+        registry_b.resolve("sess_b", entry.source_id)
     assert exc.value.code == "SOURCE_EXPIRED"
 
 
-def test_expired_handles_are_refused_and_not_refetched():
-    registry = SourceRegistry()
+def test_handles_do_not_resolve_across_session_generations(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess", generation=1)
     entry = registry.register("sess", snapshot_bytes(b"alpha\n"))
-    registry._time = lambda: time.time() + 10**6  # noqa: SLF001 - TTL fast-forward
+    store = registry.store
+    next_generation = ScopeIdentity(
+        host="test-host", profile="test", principal="local", session="sess", generation=2
+    )
+    store.open_scope(next_generation)
+    with pytest.raises(ShuntError) as exc:
+        SourceRegistry(store, next_generation).resolve("sess", entry.source_id)
+    assert exc.value.code == "SOURCE_EXPIRED"
+
+
+def test_expired_handles_are_refused_and_not_refetched(tmp_path):
+    clock = {"now": 1_700_000_000_000}
+    store = SnapshotStore(tmp_path / "cache", wall_clock_ms=lambda: clock["now"])
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    registry = SourceRegistry(store, identity)
+    entry = registry.register("sess", snapshot_bytes(b"alpha\n"))
+    clock["now"] += (DEFAULT_LIMITS.store_handle_ttl_seconds + 1) * 1000
     with pytest.raises(ShuntError) as exc:
         registry.resolve("sess", entry.source_id)
-    assert exc.value.detail == "TTL_ELAPSED"
+    assert exc.value.code == "SOURCE_EXPIRED"
 
 
-def test_session_expiry_drops_every_handle():
-    registry = SourceRegistry()
+def test_a_clock_rollback_cannot_revive_an_expired_handle(tmp_path):
+    clock = {"now": 1_700_000_000_000}
+    store = SnapshotStore(tmp_path / "cache", wall_clock_ms=lambda: clock["now"])
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    registry = SourceRegistry(store, identity)
+    entry = registry.register("sess", snapshot_bytes(b"alpha\n"))
+    clock["now"] += (DEFAULT_LIMITS.store_handle_ttl_seconds + 1) * 1000
+    with pytest.raises(ShuntError):
+        registry.resolve("sess", entry.source_id)
+    # Winding the wall clock back must not make the handle readable again.
+    clock["now"] -= (DEFAULT_LIMITS.store_handle_ttl_seconds + 1) * 1000
+    with pytest.raises(ShuntError) as exc:
+        registry.resolve("sess", entry.source_id)
+    assert exc.value.code == "SOURCE_EXPIRED"
+
+
+def test_session_expiry_drops_every_handle(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     registry.register("sess", snapshot_bytes(b"a\n"))
     registry.register("sess", snapshot_bytes(b"b\n"))
     assert registry.expire_session("sess") == 2
     assert registry.count("sess") == 0
 
 
-def test_spill_directory_and_files_are_private(tmp_path):
-    store = SpillStore(tmp_path / "cache")
-    # Disabled/default sessions do not create cache artifacts merely by being built.
-    assert not store.root.exists()
-    written = store.write("sess", b"payload bytes")
+def test_store_directories_and_blob_files_are_private(tmp_path):
+    store = SnapshotStore(tmp_path / "cache")
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    handle = store.publish(
+        identity, [Capture(data=b"payload bytes", media_type="text/plain", line_count=1)]
+    )[0]
     assert stat.S_IMODE(os.stat(store.root).st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(written).st_mode) == 0o600
-    assert stat.S_IMODE(os.stat(written.parent).st_mode) == 0o700
-    assert written.read_bytes() == b"payload bytes"
+    blobs = list((store.root / "blobs").rglob("*.bin"))
+    assert len(blobs) == 1
+    assert stat.S_IMODE(os.stat(blobs[0]).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(blobs[0].parent).st_mode) == 0o700
+    assert store.load_payload(handle) == b"payload bytes"
 
 
-def test_spill_lives_outside_every_workspace_root(tmp_path, workspace):
+def test_store_lives_outside_every_workspace_root(tmp_path, workspace):
     root, _ = workspace
-    store = SpillStore(tmp_path / "cache")
+    store = SnapshotStore(tmp_path / "cache")
     assert root not in store.root.parents and store.root != root
 
 
-def test_spill_quota_is_enforced(tmp_path):
-    store = SpillStore(tmp_path / "cache")
-    store.seed_usage("sess", store._limits.session_spill_quota_bytes)  # noqa: SLF001
+def test_store_byte_quota_is_enforced(tmp_path):
+    narrow = DEFAULT_LIMITS.narrow(store_max_bytes=16)
+    store = SnapshotStore(tmp_path / "cache", narrow)
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
     with pytest.raises(ShuntError) as exc:
-        store.write("sess", b"one more byte")
-    assert exc.value.code == "SPILL_FAILED" and exc.value.detail == "QUOTA_EXCEEDED"
+        store.publish(identity, [Capture(data=b"x" * 32, media_type="text/plain", line_count=1)])
+    assert exc.value.code == "LIMIT_EXCEEDED" and exc.value.detail == "STORE_BYTE_QUOTA"
+    assert store.stats().handles == 0
 
 
 def test_publish_is_atomic_and_leaves_no_partial_files(tmp_path):
-    store = SpillStore(tmp_path / "cache")
-    store.write("sess", b"complete payload")
-    leftovers = [p for p in store.root.rglob("*.part")]
-    assert leftovers == []
+    store = SnapshotStore(tmp_path / "cache")
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    store.publish(
+        identity, [Capture(data=b"complete payload", media_type="text/plain", line_count=1)]
+    )
+    assert list(store.root.rglob("*.part")) == []
 
 
 def test_session_cleanup_removes_private_artifacts(tmp_path):
-    store = SpillStore(tmp_path / "cache")
-    store.write("sess", b"payload")
-    assert store.purge_session("sess") == 1
-    assert list(store.root.rglob("*.spill")) == []
+    store = SnapshotStore(tmp_path / "cache")
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    store.publish(identity, [Capture(data=b"payload", media_type="text/plain", line_count=1)])
+    assert store.close_scope(identity) == 1
+    assert list((store.root / "blobs").rglob("*.bin")) == []
+
+
+def test_legacy_spill_artifacts_are_never_imported_as_handles(tmp_path):
+    root = tmp_path / "cache"
+    legacy = root / ("a" * 32)
+    legacy.mkdir(parents=True)
+    (legacy / ("b" * 64 + ".spill")).write_bytes(b"pre-1.1 artifact")
+    store = SnapshotStore(root)
+    identity = ScopeIdentity(host="test-host", profile="test", principal="local", session="sess")
+    store.open_scope(identity)
+    # The file exists on disk and is not a capability: no handle refers to it.
+    assert store.stats().handles == 0
+    assert store.legacy_artifact_count() == 1
+    assert store.purge_legacy_artifacts() == 1
+    assert store.legacy_artifact_count() == 0
 
 
 def test_error_messages_expose_no_paths_or_values(workspace):

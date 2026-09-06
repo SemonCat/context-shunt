@@ -1,0 +1,10 @@
+{
+  "note": "1.1 stats: this session only, one bounded page, no caller-supplied labels",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_stats_01",
+    "operation": "stats",
+    "page": 2,
+    "page_size": 8
+  }
+}

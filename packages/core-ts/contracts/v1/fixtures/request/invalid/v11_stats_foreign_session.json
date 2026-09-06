@@ -1,0 +1,10 @@
+{
+  "note": "stats has no session parameter at all; naming another session is an unknown field, not an authorization question",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_stats_foreign",
+    "operation": "stats",
+    "session_id": "someone-elses-session",
+    "page": 1
+  }
+}

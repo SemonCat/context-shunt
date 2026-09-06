@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
-"""Copy contracts/v1 into each language package so installed plugins are self-contained.
+"""Copy the shared contracts into each language package so installed plugins are self-contained.
 
 Usage: scripts/sync-contracts [--check]
 `--check` exits non-zero when a vendored copy has drifted, and is what CI runs.
+
+Two trees are synced:
+
+* ``contracts/v1``    - JSON Schemas, normative limits, status/code pairs, conformance
+                        corpora and fixtures.
+* ``contracts/store`` - the normative SQLite DDL. Both cores execute this file verbatim
+                        rather than embedding an equivalent CREATE TABLE, so the DDL has
+                        to ship inside each package too.
+
+Comparison covers every file, not only ``*.json``: a drifted ``.sql`` is exactly the kind
+of divergence that would otherwise surface as a cross-language store incompatibility.
 """
 from __future__ import annotations
 
@@ -12,43 +23,51 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "contracts" / "v1"
-TARGETS = [
-    ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts" / "v1",
-    ROOT / "packages" / "core-ts" / "contracts" / "v1",
+PY_CONTRACTS = ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts"
+TS_CONTRACTS = ROOT / "packages" / "core-ts" / "contracts"
+
+# (source tree, [vendored destinations])
+TREES: list[tuple[Path, list[Path]]] = [
+    (ROOT / "contracts" / "v1", [PY_CONTRACTS / "v1", TS_CONTRACTS / "v1"]),
+    (ROOT / "contracts" / "store", [PY_CONTRACTS / "store", TS_CONTRACTS / "store"]),
 ]
 
 
 def _files(root: Path) -> list[Path]:
-    return sorted(p.relative_to(root) for p in root.rglob("*.json"))
+    return sorted(p.relative_to(root) for p in root.rglob("*") if p.is_file())
 
 
 def main() -> int:
     check = "--check" in sys.argv[1:]
     drift: list[str] = []
-    for target in TARGETS:
-        if check:
-            if not target.exists():
-                drift.append(f"missing vendored contracts: {target.relative_to(ROOT)}")
-                continue
-            if _files(SRC) != _files(target):
-                drift.append(f"file set differs: {target.relative_to(ROOT)}")
-                continue
-            for rel in _files(SRC):
-                if not filecmp.cmp(SRC / rel, target / rel, shallow=False):
-                    drift.append(f"content differs: {(target / rel).relative_to(ROOT)}")
-        else:
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(SRC, target)
-            print(f"synced -> {target.relative_to(ROOT)}")
+    for source, targets in TREES:
+        if not source.is_dir():
+            drift.append(f"missing source tree: {source.relative_to(ROOT)}")
+            continue
+        for target in targets:
+            if check:
+                if not target.exists():
+                    drift.append(f"missing vendored contracts: {target.relative_to(ROOT)}")
+                    continue
+                if _files(source) != _files(target):
+                    drift.append(f"file set differs: {target.relative_to(ROOT)}")
+                    continue
+                for rel in _files(source):
+                    if not filecmp.cmp(source / rel, target / rel, shallow=False):
+                        drift.append(f"content differs: {(target / rel).relative_to(ROOT)}")
+            else:
+                if target.exists():
+                    shutil.rmtree(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, target)
+                print(f"synced {source.relative_to(ROOT)} -> {target.relative_to(ROOT)}")
     if drift:
         for line in drift:
             print(f"contract drift: {line}", file=sys.stderr)
         print("run scripts/sync-contracts to refresh", file=sys.stderr)
         return 1
     if check:
-        print("vendored contracts match contracts/v1")
+        print("vendored contracts match contracts/")
     return 0
 
 

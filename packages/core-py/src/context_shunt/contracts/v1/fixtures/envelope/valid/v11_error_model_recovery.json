@@ -1,0 +1,51 @@
+{
+  "note": "1.1 reader failure preserves the handles and names deterministic next steps; a poor answer is retried with a refined question over the same snapshot, never rescued by an availability fallback",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_03",
+    "status": "error",
+    "code": "MODEL_ERROR",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": false,
+      "processed_chunks": 0,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": null
+    },
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "media_type": "text/plain",
+        "bytes": 4096,
+        "expires_at": "2026-09-07T12:00:00Z"
+      }
+    ],
+    "retryable": true,
+    "result_kind": "failure",
+    "provenance": {
+      "derived": false,
+      "label": "no_model_output",
+      "requested_provider": "openai",
+      "requested_model": "gpt-5.6-luna",
+      "resolved_provider": null,
+      "resolved_model": null,
+      "reported_provider": null,
+      "reported_model": null,
+      "attribution_status": "unknown",
+      "attribution_confidence": "none",
+      "attribution_policy": "allow_unverified",
+      "attempts_started": 2,
+      "usage_complete": false,
+      "citations_mechanically_verified": true,
+      "fallback_used": false
+    },
+    "accounting_id": "acc_ddddeeeeffff0000",
+    "recovery": {
+      "handles_valid": true,
+      "actions": ["RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"]
+    }
+  }
+}

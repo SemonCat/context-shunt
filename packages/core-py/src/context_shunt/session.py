@@ -1,30 +1,81 @@
 """Per-session wiring shared by both adapters.
 
 Adapters normalize host events into ``(tool, args)`` and model calls; everything below -
-gate, registration, reader, spill, guard, metrics - lives here so the two hosts cannot
-drift apart on semantics.
+gate, capture, store, reader, inspect, stats, spill, guard, accounting - lives here so the
+two hosts cannot drift apart on semantics.
+
+Capture scope
+-------------
+Only content that is *actually being withheld* is captured: a read the gate blocked, or an
+explicitly eligible oversized post-tool candidate. Short results and ordinary file reads
+are never pre-stored, so the store never becomes a shadow copy of the workspace.
+
+Storage failure never becomes passthrough
+-----------------------------------------
+If the store cannot publish, the original operation stays blocked and the caller gets a
+fixed safe error with no handle. There is no path in which a capture failure lets the raw
+payload through instead.
+
+Session lifecycle
+-----------------
+:meth:`ShuntSession.close` revokes handles and is reserved for a *real* session boundary.
+An ordinary per-turn event must call :meth:`end_turn` instead, which does nothing but an
+opportunistic sweep - on Hermes ``on_session_end`` fires at the end of every
+``run_conversation`` call, so closing there would delete the recovery handles the next turn
+depends on.
 """
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from . import envelope as E
+from .accounting import (
+    Baseline,
+    DeliveryBoundary,
+    Egress,
+    OperationKind,
+    ReaderCost,
+    compose,
+    new_operation_id,
+    totals_to_dict,
+)
 from .binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from .capability import CapabilityReport
 from .clock import Clock, MonotonicClock
 from .config import Config
 from .errors import ShuntError
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
-from .guard import enforce_or_fixed
+from .guard import enforce_or_fixed, fixed_error
+from .inspect import Inspector, decode_cursor, encode_cursor
+from .limits import EMITTED_SCHEMA_VERSION
 from .metrics import MetricsSink, NullMetrics
 from .paths import authorize
 from .probe import FileProber
-from .provider import LunaProvider, UnavailableProvider
-from .reader import Reader
+from .provenance import (
+    AttributionPolicy,
+    Provenance,
+    ProvenanceLabel,
+    ResultKind,
+    TokenMethod,
+    deterministic,
+)
+from .provider import (
+    FallbackChainProvider,
+    HostBridgeProvider,
+    ReaderProvider,
+    UnavailableProvider,
+)
+from .reader import Reader, ReaderResult
 from .registry import RegisteredSource, SourceRegistry
+from .schema import validate_request
 from .snapshot import snapshot_file
-from .spill import SpillStore, SumaSpillEngine
+from .spill import SpillEngine
+from .store import ScopeIdentity, SnapshotStore
+
+_INSPECT_OPERATIONS = frozenset({"inspect"})
+_STATS_OPERATIONS = frozenset({"stats"})
 
 
 class ShuntSession:
@@ -34,17 +85,27 @@ class ShuntSession:
         config: Config,
         capability: CapabilityReport,
         *,
-        provider: LunaProvider | None = None,
+        provider: ReaderProvider | None = None,
         clock: Clock | None = None,
         metrics: MetricsSink | None = None,
-        registry: SourceRegistry | None = None,
+        store: SnapshotStore | None = None,
+        identity: ScopeIdentity | None = None,
     ):
         self.session_id = session_id
         self.config = config
         self.capability = capability
         self._clock = clock or MonotonicClock()
         self._metrics = metrics or NullMetrics()
-        self._registry = registry or SourceRegistry(config.limits)
+        self._store = store or SnapshotStore(config.cache_root, config.limits)
+        self._identity = identity or ScopeIdentity(
+            host=capability.host_name or "unknown",
+            profile=capability.adapter or "default",
+            principal="local",
+            session=session_id,
+            generation=1,
+        )
+        self._store.open_scope(self._identity)
+        self._registry = SourceRegistry(self._store, self._identity, config.limits)
         self._gate = PreReadGate(FileProber(config.limits), config.limits, self._clock)
         self._provider = provider or UnavailableProvider()
         self._reader = Reader(
@@ -53,12 +114,11 @@ class ShuntSession:
             limits=config.limits,
             clock=self._clock,
             metrics=self._metrics,
+            attribution_policy=config.reader.attribution_policy,
         )
-        self._spill_store = SpillStore(config.spill_dir, config.limits)
+        self._inspector = Inspector(config.limits)
         suma_enabled = config.suma_post_tool.enabled and capability.enabled("suma_post_tool")
-        self._spill = SumaSpillEngine(
-            self._spill_store, self._registry, limits=config.limits, enabled=suma_enabled
-        )
+        self._spill = SpillEngine(self._registry, limits=config.limits, enabled=suma_enabled)
 
     # -- accessors ---------------------------------------------------------
     @property
@@ -66,7 +126,15 @@ class ShuntSession:
         return self._registry
 
     @property
-    def spill(self) -> SumaSpillEngine:
+    def store(self) -> SnapshotStore:
+        return self._store
+
+    @property
+    def identity(self) -> ScopeIdentity:
+        return self._identity
+
+    @property
+    def spill(self) -> SpillEngine:
         return self._spill
 
     @property
@@ -89,6 +157,7 @@ class ShuntSession:
         return decision
 
     def block_envelope(self, request_id: str, decision: GateDecision) -> dict[str, Any]:
+        operation_id = new_operation_id()
         env = E.build(
             request_id=request_id,
             status="blocked",
@@ -96,51 +165,551 @@ class ShuntSession:
             coverage=E.Coverage(upstream_truncated=None),
             retryable=False,
             guidance=guidance_for(decision),
+            result_kind=ResultKind.GATE_DECISION,
+            provenance=deterministic(ProvenanceLabel.GATE_DECISION),
+            accounting_id=operation_id,
+            recovery={
+                "handles_valid": False,
+                "actions": ["INSPECT_HANDLE", "NARROW_SELECTOR"],
+            },
         )
-        return enforce_or_fixed(env, self.config.limits)
+        published = enforce_or_fixed(env, self.config.limits)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.GATE_BLOCK,
+            envelope=published,
+            baseline=Baseline.none(),
+            baseline_credited=False,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.BLOCK_MESSAGE,
+        )
+        return published
 
-    # -- sources -----------------------------------------------------------
+    # -- capture -----------------------------------------------------------
     def register_path(self, path: str, *, media_type: str | None = None) -> RegisteredSource:
-        authorized = authorize(path, self.config.path_policy())
-        hint = media_type or (
-            JSON_MEDIA_TYPE if authorized.real.suffix.lower() == ".json" else TEXT_MEDIA_TYPE
-        )
-        snapshot = snapshot_file(authorized, limits=self.config.limits, media_type_hint=hint)
-        return self._registry.register(self.session_id, snapshot)
+        """Authorize, snapshot and publish one path. Only ever called for withheld content."""
+        return self.register_paths([path], media_type=media_type)[0]
+
+    def register_paths(
+        self, paths: list[str], *, media_type: str | None = None
+    ) -> list[RegisteredSource]:
+        """Authorize every path, then publish all handles as one batch or none.
+
+        The whole request is validated before anything is captured: one unsafe, secret,
+        binary or oversized path rejects the batch, so a partially authorized multi-source
+        capture can never leave usable handles behind.
+        """
+        if not paths:
+            raise ShuntError("INVALID_REQUEST", "NO_SOURCE", retryable=False)
+        if len(paths) > self.config.limits.max_sources_per_request:
+            raise ShuntError("LIMIT_EXCEEDED", "TOO_MANY_SOURCES", retryable=False)
+        policy = self.config.path_policy()
+        snapshots = []
+        for path in paths:
+            authorized = authorize(path, policy)
+            hint = media_type or (
+                JSON_MEDIA_TYPE if authorized.real.suffix.lower() == ".json" else TEXT_MEDIA_TYPE
+            )
+            snapshots.append(
+                snapshot_file(authorized, limits=self.config.limits, media_type_hint=hint)
+            )
+        return self._registry.register_batch(self.session_id, snapshots)
 
     # -- reader ------------------------------------------------------------
     def read(self, request: dict[str, Any]) -> dict[str, Any]:
+        request_id = str((request or {}).get("request_id") or "req_unknown")
         if not self.config.reader.enabled:
             exc = ShuntError("INVALID_REQUEST", "READER_DISABLED", retryable=False)
-            return enforce_or_fixed(
-                E.error_envelope(str((request or {}).get("request_id") or "req_unknown"), exc),
-                self.config.limits,
+            return self._publish_failure(request_id, exc, OperationKind.READ)
+
+        operation_id = new_operation_id()
+        result: ReaderResult = self._reader.answer(
+            self.session_id, request, accounting_id=operation_id
+        )
+        published = enforce_or_fixed(result.envelope, self.config.limits)
+        refined = bool((request or {}).get("refined"))
+        baseline, credited = self._baseline_for(result.source_ids)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.REFINED_READ if refined else OperationKind.READ,
+            envelope=published,
+            baseline=baseline,
+            baseline_credited=credited,
+            reader=result.cost,
+            boundary=DeliveryBoundary.ENVELOPE,
+        )
+        return published
+
+    def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, bool]:
+        """The withheld-payload baseline, credited at most once per snapshot."""
+        total = 0
+        credited = False
+        for source_id in source_ids:
+            try:
+                handle = self._registry.handle(self.session_id, source_id)
+            except ShuntError:
+                continue
+            total += handle.bytes_len
+            # credit_baseline flips a persisted flag, so it returns True exactly once per
+            # handle no matter how many reads, refinements or retries follow.
+            credited = self._store.credit_baseline(self._identity, source_id) or credited
+        if total == 0:
+            return Baseline.none(), False
+        return Baseline.withheld_payload(total, limits=self.config.limits), credited
+
+    # -- inspect -----------------------------------------------------------
+    def inspect(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Deterministic extraction. No provider is consulted on this path at all."""
+        request_id = str((request or {}).get("request_id") or "req_unknown")
+        if not self.config.tools.inspect_enabled:
+            exc = ShuntError("INVALID_REQUEST", "INSPECT_DISABLED", retryable=False)
+            return self._publish_failure(request_id, exc, OperationKind.INSPECT)
+        operation_id = new_operation_id()
+        try:
+            return self._inspect(request, request_id, operation_id)
+        except ShuntError as exc:
+            return self._publish_failure(
+                request_id, exc, OperationKind.INSPECT, operation_id=operation_id
             )
-        env = self._reader.answer(self.session_id, request)
-        return enforce_or_fixed(env, self.config.limits)
+
+    def _inspect(
+        self, request: dict[str, Any], request_id: str, operation_id: str
+    ) -> dict[str, Any]:
+        validated = validate_request(request, operations=_INSPECT_OPERATIONS)
+        source_id = validated["source_id"]
+        snapshot_id = validated["snapshot_id"]
+        selector = validated["selector"]
+        budgets = validated["budgets"]
+
+        entry = self._registry.resolve(self.session_id, source_id)
+        if entry.snapshot.snapshot_id != snapshot_id:
+            raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+
+        key = self._store.cursor_key()
+        state = (
+            decode_cursor(key, validated["cursor"], source_id, snapshot_id, selector)
+            if "cursor" in validated
+            else {}
+        )
+
+        allowance = self._store.disclosure_allowance(self._identity, source_id)
+        requested_budget = int(budgets["max_result_bytes"])
+        budget = min(requested_budget, allowance.remaining)
+        clipped_by_allowance = allowance.remaining < requested_budget
+        handles = [
+            {
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "media_type": entry.snapshot.media_type,
+                "bytes": entry.snapshot.bytes_len,
+                "expires_at": E.iso_expiry(entry.expires_at_epoch),
+            }
+        ]
+
+        if allowance.exhausted or budget <= 0:
+            return self._disclosure_exhausted(
+                request_id, operation_id, entry, selector, handles, allowance
+            )
+
+        extraction = self._inspector.extract(
+            entry.snapshot.data,
+            entry.snapshot.line_index,
+            selector,
+            max_result_bytes=budget,
+            max_scan_lines=int(budgets["max_scan_lines"]),
+            state=state,
+        )
+        if extraction.stalled:
+            # The page emitted nothing *and* the cursor did not move, so continuing would
+            # loop forever. A scan-budget stop is not this case: it emits nothing but does
+            # advance the scan position, and is reported as an honest empty page.
+            if clipped_by_allowance:
+                return self._disclosure_exhausted(
+                    request_id, operation_id, entry, selector, handles, allowance
+                )
+            raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_PAGE_BUDGET", retryable=False)
+        # Check-and-increment before a byte is returned: a concurrent inspect that
+        # consumed the allowance in the meantime causes this page to disclose nothing.
+        charge = self._store.charge_disclosure(
+            self._identity, source_id, extraction.mode, extraction.result_bytes
+        )
+        if not charge.granted:
+            return self._disclosure_exhausted(
+                request_id, operation_id, entry, selector, handles, allowance
+            )
+
+        next_cursor = (
+            encode_cursor(key, source_id, snapshot_id, selector, extraction.next_cursor_state)
+            if extraction.next_cursor_state is not None
+            else None
+        )
+        block: dict[str, Any] = {
+            "mode": extraction.mode,
+            "source_id": source_id,
+            "snapshot_id": snapshot_id,
+            "deterministic": True,
+            "segments": [segment.to_dict() for segment in extraction.segments],
+            "result_bytes": extraction.result_bytes,
+            "complete": extraction.complete,
+            "next_cursor": next_cursor,
+            "lines_scanned": extraction.lines_scanned,
+            "scan_budget_exhausted": extraction.scan_budget_exhausted,
+            "disclosed_bytes_source": charge.disclosed_bytes_source,
+            "disclosed_bytes_session": charge.disclosed_bytes_session,
+            "disclosure_limit_reached": charge.limit_reached,
+        }
+        if extraction.matches_found is not None:
+            block["matches_found"] = extraction.matches_found
+
+        coverage = E.Coverage(upstream_truncated=False, complete=extraction.complete)
+        if not extraction.complete:
+            coverage.omit(
+                source_id,
+                _omission_selector(selector),
+                "SCAN_BUDGET_EXHAUSTED"
+                if extraction.scan_budget_exhausted
+                else "UNKNOWN_REMAINDER",
+            )
+        env = E.build(
+            request_id=request_id,
+            status="ok" if extraction.complete else "partial",
+            code="EXTRACTED",
+            coverage=coverage,
+            sources=handles,
+            retryable=False,
+            result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
+            provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+            accounting_id=operation_id,
+            extraction=block,
+        )
+        published = enforce_or_fixed(env, self.config.limits)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.INSPECT,
+            envelope=published,
+            # An inspect page discloses rather than withholds, so it claims no baseline
+            # saving and its envelope shows up as pure overhead.
+            baseline=Baseline.none(),
+            baseline_credited=False,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.EXTRACTION,
+        )
+        return published
+
+    def _disclosure_exhausted(
+        self,
+        request_id: str,
+        operation_id: str,
+        entry: RegisteredSource,
+        selector: dict[str, Any],
+        handles: list[dict[str, Any]],
+        allowance,
+    ) -> dict[str, Any]:
+        coverage = E.Coverage(upstream_truncated=False)
+        coverage.omit(entry.source_id, _omission_selector(selector), "DISCLOSURE_EXHAUSTED")
+        block = {
+            "mode": selector.get("kind", "lines"),
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "deterministic": True,
+            "segments": [],
+            "result_bytes": 0,
+            "complete": False,
+            "next_cursor": None,
+            "lines_scanned": 0,
+            "scan_budget_exhausted": False,
+            "disclosed_bytes_source": (
+                self.config.limits.disclosure_max_per_source_bytes - allowance.per_source_remaining
+            ),
+            "disclosed_bytes_session": (
+                self.config.limits.disclosure_max_per_session_bytes
+                - allowance.per_session_remaining
+            ),
+            "disclosure_limit_reached": True,
+        }
+        env = E.build(
+            request_id=request_id,
+            status="partial",
+            code="DISCLOSURE_EXHAUSTED",
+            coverage=coverage,
+            sources=handles,
+            retryable=False,
+            result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
+            provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+            accounting_id=operation_id,
+            extraction=block,
+            recovery=E.recovery_for("DISCLOSURE_EXHAUSTED", handles_valid=True),
+        )
+        published = enforce_or_fixed(env, self.config.limits)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.INSPECT,
+            envelope=published,
+            baseline=Baseline.none(),
+            baseline_credited=False,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.EXTRACTION,
+        )
+        return published
+
+    # -- stats -------------------------------------------------------------
+    def stats(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Read-only session aggregate. It cannot reset, retain, widen or cross sessions."""
+        request_id = str((request or {}).get("request_id") or "req_unknown")
+        if not self.config.tools.stats_enabled:
+            exc = ShuntError("INVALID_REQUEST", "STATS_DISABLED", retryable=False)
+            return self._publish_failure(request_id, exc, OperationKind.STATS)
+        operation_id = new_operation_id()
+        try:
+            validated = validate_request(request, operations=_STATS_OPERATIONS)
+        except ShuntError as exc:
+            return self._publish_failure(
+                request_id, exc, OperationKind.STATS, operation_id=operation_id
+            )
+
+        page = int(validated.get("page", 1))
+        page_size = int(validated.get("page_size", self.config.limits.stats_max_records_per_page))
+        page_size = min(page_size, self.config.limits.stats_max_records_per_page)
+        total = self._store.operation_count(self._identity)
+        records = self._store.operation_page(self._identity, page=page, page_size=page_size)
+        consumed = (page - 1) * page_size + len(records)
+        next_page = (
+            page + 1 if consumed < total and page < self.config.limits.stats_max_pages else None
+        )
+
+        block = {
+            "scope": "session",
+            "totals": totals_to_dict(self._store.operation_totals(self._identity)),
+            "records": [record.to_dict() for record in records],
+            "page": page,
+            "page_size": page_size,
+            "total_records": total,
+            "next_page": next_page,
+        }
+        env = E.build(
+            request_id=request_id,
+            status="ok",
+            code="STATS",
+            coverage=E.Coverage(complete=True, upstream_truncated=False),
+            retryable=False,
+            result_kind=ResultKind.STATS,
+            provenance=deterministic(ProvenanceLabel.SESSION_METRICS),
+            accounting_id=operation_id,
+            stats=block,
+        )
+        published = enforce_or_fixed(env, self.config.limits)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.STATS,
+            envelope=published,
+            baseline=Baseline.none(),
+            baseline_credited=False,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.ENVELOPE,
+        )
+        return published
 
     # -- optional Suma post-tool ------------------------------------------
     def post_tool_result(
-        self, request_id: str, result: Any, *, internal_source_id: str | None = None
+        self,
+        request_id: str,
+        result: Any,
+        *,
+        internal_source_id: str | None = None,
+        upstream_truncated: bool = False,
     ):
         """Only ever consulted when the capability probe proved the host order is safe."""
         if not self.suma_enabled:
             return None
+        operation_id = new_operation_id()
         outcome = self._spill.evaluate(
             self.session_id, request_id, result, internal_source_id=internal_source_id
         )
         if outcome.envelope is not None:
+            envelope = enforce_or_fixed(outcome.envelope, self.config.limits)
             outcome = type(outcome)(
                 action=outcome.action,
-                envelope=enforce_or_fixed(outcome.envelope, self.config.limits),
+                envelope=envelope,
                 code=outcome.code,
                 bytes_measured=outcome.bytes_measured,
+                source_id=outcome.source_id,
+            )
+            baseline = (
+                # A host that already truncated the upstream result only lets us observe
+                # the truncated size; crediting the full payload there would be invented.
+                Baseline.host_truncated(outcome.bytes_measured, limits=self.config.limits)
+                if upstream_truncated
+                else Baseline.withheld_payload(outcome.bytes_measured, limits=self.config.limits)
+            )
+            credited = bool(
+                outcome.source_id and self._store.credit_baseline(self._identity, outcome.source_id)
+            )
+            self._record(
+                operation_id=operation_id,
+                kind=OperationKind.SPILL,
+                envelope=envelope,
+                baseline=baseline,
+                baseline_credited=credited,
+                reader=ReaderCost.none(),
+                boundary=(
+                    DeliveryBoundary.POINTER
+                    if outcome.action == "spill"
+                    else DeliveryBoundary.ENVELOPE
+                ),
             )
         self._metrics.count("suma_outcome", {"result": outcome.action})
         return outcome
 
+    # -- accounting --------------------------------------------------------
+    def _record(
+        self,
+        *,
+        operation_id: str,
+        kind: OperationKind,
+        envelope: dict[str, Any],
+        baseline: Baseline,
+        baseline_credited: bool,
+        reader: ReaderCost,
+        boundary: DeliveryBoundary,
+    ) -> None:
+        """Measure the exact serialized egress, then write the record.
+
+        The envelope already carries only the opaque ``accounting_id``, so measuring it
+        here cannot be self-referential: the numbers derived from the measurement live in
+        the store, never inside the thing being measured.
+        """
+        egress = Egress(boundary=boundary, byte_count=E.serialized_bytes(envelope))
+        record = compose(
+            operation_id=operation_id,
+            kind=kind,
+            status=str(envelope.get("status", "error")),
+            code=str(envelope.get("code", "LIMIT_EXCEEDED")),
+            baseline=baseline,
+            baseline_credited=baseline_credited,
+            reader=reader,
+            egress=egress,
+            limits=self.config.limits,
+        )
+        try:
+            self._store.record_operation(self._identity, record)
+        except ShuntError:
+            # Losing a metric must never fail the caller's operation, and it must never
+            # be papered over as a zero: the operation simply has no record.
+            self._metrics.count("accounting_dropped", {"stage": kind.value})
+
+    def _publish_failure(
+        self,
+        request_id: str,
+        exc: ShuntError,
+        kind: OperationKind,
+        *,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        operation_id = operation_id or new_operation_id()
+        env = E.error_envelope(request_id, exc, accounting_id=operation_id)
+        published = enforce_or_fixed(env, self.config.limits)
+        self._record(
+            operation_id=operation_id,
+            kind=kind,
+            envelope=published,
+            baseline=Baseline.none(),
+            baseline_credited=False,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.ENVELOPE,
+        )
+        return published
+
+    def safe_error(self, request_id: str, code: str = "STORE_FAILED") -> dict[str, Any]:
+        """The fixed reply for a failure the session could not classify. Carries no handle."""
+        return fixed_error(request_id, code)
+
     # -- lifecycle ---------------------------------------------------------
+    def end_turn(self) -> None:
+        """An ordinary turn boundary. Handles survive; TTL and the sweep do the work.
+
+        This is what a per-turn host event must call. Hermes fires ``on_session_end`` at
+        the end of every ``run_conversation`` call (``agent/turn_finalizer.py``), and
+        OpenClaw fires ``session_end`` with ``reason: "compaction"`` mid-conversation -
+        destroying handles at either point would delete exactly the recovery state the
+        next turn needs.
+        """
+        with contextlib.suppress(ShuntError):
+            self._store.sweep()
+
     def close(self) -> None:
-        """Session teardown removes handles and private artifacts."""
-        self._registry.expire_session(self.session_id)
-        self._spill_store.purge_session(self.session_id)
+        """A real session boundary: revoke this scope's handles and drop its artifacts."""
+        with contextlib.suppress(ShuntError):
+            self._registry.expire_session(self.session_id)
+
+    def reset(self, generation: int) -> ShuntSession:
+        """Start a new generation. Every handle from the old one stops resolving."""
+        self.close()
+        return ShuntSession(
+            self.session_id,
+            self.config,
+            self.capability,
+            provider=self._provider,
+            clock=self._clock,
+            metrics=self._metrics,
+            store=self._store,
+            identity=ScopeIdentity(
+                host=self._identity.host,
+                profile=self._identity.profile,
+                principal=self._identity.principal,
+                session=self._identity.session,
+                generation=generation,
+            ),
+        )
+
+
+def _omission_selector(selector: dict[str, Any]) -> dict[str, Any]:
+    """Map an inspect selector onto the envelope's locator union.
+
+    The envelope locator has no ``bytes`` or ``needle`` form - deliberately, because an
+    omission record is metadata and must not carry a caller's search string. A byte or
+    search selector is reported as the scope it addressed, never as its text.
+    """
+    kind = selector.get("kind")
+    if kind == "lines":
+        return {"kind": "lines", "start": int(selector["start"]), "end": int(selector["end"])}
+    return {"kind": "all"}
+
+
+def build_provider(
+    config: Config,
+    call,
+    *,
+    fallback_calls: dict[str, Any] | None = None,
+) -> ReaderProvider:
+    """Assemble the configured provider, including an availability-only fallback chain.
+
+    ``call`` is the host bridge. ``fallback_calls`` maps a ``"provider/model"`` key to a
+    bridge for that target when the host needs a different callable per target; when it is
+    absent the same bridge is reused with a different requested target, which is the
+    normal case for a host that owns its own routing.
+    """
+    primary = HostBridgeProvider(
+        call, config.limits, config.reader.model, provider=config.reader.provider
+    )
+    if not config.reader.fallback_chain:
+        return primary
+    alternatives = [
+        HostBridgeProvider(
+            (fallback_calls or {}).get(f"{ref.provider}/{ref.model}", call),
+            config.limits,
+            ref.model,
+            provider=ref.provider,
+        )
+        for ref in config.reader.fallback_chain
+    ]
+    return FallbackChainProvider(primary, alternatives)
+
+
+__all__ = [
+    "AttributionPolicy",
+    "EMITTED_SCHEMA_VERSION",
+    "Provenance",
+    "ShuntSession",
+    "TokenMethod",
+    "build_provider",
+]

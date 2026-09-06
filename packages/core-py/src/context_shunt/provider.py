@@ -1,23 +1,56 @@
-"""Luna-only provider adapters.
-
-Every model call in v1 is ``gpt-5.6-luna``. If the host cannot serve that model the
-request fails with ``MODEL_ERROR`` - it never silently downgrades to whatever model
-happens to be configured, because an answer from a different model is not the answer the
-acceptance gates measure.
+"""Reader provider adapters.
 
 The reader gets no shell, no network, no write tools and no host conversation. It sees a
 fixed instruction, the caller's question verbatim, and the authorized chunk. Provider
-error bodies are dropped at this boundary: only ``MODEL_ERROR`` crosses it.
+error bodies are dropped at this boundary: only a bounded ``MODEL_ERROR`` crosses it,
+because a provider exception text can contain the prompt or a payload echo.
+
+Provenance, not assumption
+--------------------------
+The default reader model is ``gpt-5.6-luna``, and provider/model are plugin-user
+configurable. What this module refuses to do is *assume* which model answered. A host
+bridge reports three separate things, and any of them may be absent:
+
+* what we requested,
+* what the host says it resolved, if the host exposes its selection,
+* what the provider says generated the tokens, if the provider reports it.
+
+``provider_confirms_generation`` is asserted by the adapter that read the host's source
+code, and only that adapter, because only it knows whether the value it is passing back
+came from the provider or from the host echoing the request. When it is ``False`` the
+result is ``attribution_status = unverified`` - never ``actual``. A mismatch is a hard
+``MODEL_ERROR``: an answer from a different model is not the answer the gates measure.
+
+Usage
+-----
+Absent token counts stay absent. ``usage_exact`` is the bridge's claim that the numbers
+came from the provider; without it the reader falls back to a deterministic byte-based
+estimate that is labelled as an estimate. Nothing is ever recorded as zero to stand in
+for unknown.
+
+Fallback
+--------
+:class:`FallbackChainProvider` exists for *availability* only. It advances only on a
+retryable availability failure, never on a poor-quality answer, and every attempt keeps
+its own reported provenance and usage so the envelope can say a fallback was used.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, READER_MODEL, Limits
+from .provenance import (
+    Attribution,
+    Confidence,
+    ModelIdentity,
+    TokenMethod,
+    Usage,
+    classify,
+)
 
 READER_SYSTEM_PROMPT = (
     "You answer questions about a supplied source excerpt and nothing else.\n"
@@ -36,17 +69,24 @@ READER_SYSTEM_PROMPT = (
 
 
 @dataclass(frozen=True)
-class ModelUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    estimated: bool = True
-
-
-@dataclass(frozen=True)
 class ModelResponse:
+    """One completion plus everything that can truthfully be said about its origin."""
+
     text: str
-    model: str
-    usage: ModelUsage
+    requested: ModelIdentity
+    resolved: ModelIdentity = field(default_factory=ModelIdentity)
+    reported: ModelIdentity = field(default_factory=ModelIdentity)
+    provider_confirms_generation: bool = False
+    usage: Usage = field(default_factory=Usage)
+    fallback_used: bool = False
+
+    def attribution(self) -> tuple[Attribution, Confidence]:
+        return classify(
+            requested=self.requested,
+            resolved=self.resolved,
+            reported=self.reported,
+            provider_confirms_generation=self.provider_confirms_generation,
+        )
 
 
 class TransientProviderError(ShuntError):
@@ -56,7 +96,7 @@ class TransientProviderError(ShuntError):
         super().__init__("MODEL_ERROR", detail, retryable=True)
 
 
-class LunaProvider(Protocol):
+class ReaderProvider(Protocol):
     """Implemented by each adapter over its host's model bridge."""
 
     def complete(
@@ -64,22 +104,49 @@ class LunaProvider(Protocol):
     ) -> ModelResponse: ...
 
 
-class HostBridgeProvider:
-    """Wraps a host-supplied callable and pins the model.
+#: Historical name kept so existing adapters and tests keep type-checking.
+LunaProvider = ReaderProvider
 
-    ``call`` receives ``(system, user, model, max_output_tokens, timeout_ms)`` and returns
-    ``(text, model_actually_used, input_tokens, output_tokens)``. If the host reports a
-    different model, that is a hard failure.
+
+@dataclass(frozen=True)
+class ProviderTarget:
+    """What to ask for. ``provider`` may be empty when the host picks its own."""
+
+    model: str = READER_MODEL
+    provider: str = ""
+
+    def identity(self) -> ModelIdentity:
+        return ModelIdentity(provider=self.provider or None, model=self.model or None)
+
+
+class HostBridgeProvider:
+    """Wraps a host-supplied callable and records what the host actually reported.
+
+    ``call`` receives ``(system, user, provider, model, max_output_tokens, timeout_ms)``
+    and returns a mapping. Only ``text`` is required; every provenance and usage field is
+    optional, and an absent field means "the host does not expose this" rather than a
+    default that would overstate what is known.
     """
 
-    def __init__(self, call, limits: Limits = DEFAULT_LIMITS, model: str = READER_MODEL):
+    def __init__(
+        self,
+        call,
+        limits: Limits = DEFAULT_LIMITS,
+        model: str = READER_MODEL,
+        *,
+        provider: str = "",
+    ):
         self._call = call
         self._limits = limits
-        self._model = model
+        self._target = ProviderTarget(model=model, provider=provider)
 
     @property
     def model(self) -> str:
-        return self._model
+        return self._target.model
+
+    @property
+    def target(self) -> ProviderTarget:
+        return self._target
 
     def complete(
         self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
@@ -89,7 +156,8 @@ class HostBridgeProvider:
             result = self._call(
                 system=system,
                 user=user,
-                model=self._model,
+                provider=self._target.provider,
+                model=self._target.model,
                 max_output_tokens=capped,
                 timeout_ms=timeout_ms,
             )
@@ -101,69 +169,135 @@ class HostBridgeProvider:
             # The provider's exception text may contain the prompt or a payload echo.
             # It is dropped here and never reaches a log, metric or envelope.
             raise TransientProviderError("PROVIDER_CALL_FAILED") from None
+        return self._unpack(result, capped)
 
-        text, model_used, in_tok, out_tok = _unpack(result, self._limits, capped)
-        if model_used != self._model:
-            raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
+    def _unpack(self, result: Any, output_cap: int) -> ModelResponse:
+        if not isinstance(result, dict):
+            raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
+        text = result.get("text")
+        if not isinstance(text, str):
+            raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
+        if len(text.encode("utf-8")) > self._limits.max_tool_result_bytes:
+            raise ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
+
+        exact = result.get("usage_exact") is True
+        usage = Usage(
+            input_tokens=_usage_value(
+                result.get("input_tokens"), self._limits.max_request_input_tokens
+            ),
+            output_tokens=_usage_value(result.get("output_tokens"), output_cap),
+            cache_tokens=_usage_value(
+                result.get("cache_tokens"), self._limits.max_request_input_tokens
+            ),
+            method=TokenMethod.EXACT if exact else TokenMethod.UNKNOWN,
+        )
         return ModelResponse(
             text=text,
-            model=model_used,
-            usage=ModelUsage(
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-                estimated=in_tok == 0 and out_tok == 0,
-            ),
+            requested=self._target.identity(),
+            resolved=_identity(result, "resolved"),
+            reported=_identity(result, "reported"),
+            provider_confirms_generation=result.get("provider_confirms_generation") is True,
+            usage=usage,
+            fallback_used=result.get("fallback_used") is True,
         )
 
 
-def _unpack(result: Any, limits: Limits, output_cap: int) -> tuple[str, str, int, int]:
-    if isinstance(result, dict):
-        values = (
-            result.get("text"),
-            result.get("model"),
-            result.get("input_tokens", 0),
-            result.get("output_tokens", 0),
-        )
-    elif isinstance(result, (tuple, list)) and len(result) == 4:
-        values = tuple(result)
-    else:
-        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
-
-    text, model, input_tokens, output_tokens = values
-    if not isinstance(text, str) or not isinstance(model, str):
-        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
-    if len(text.encode("utf-8")) > limits.max_tool_result_bytes:
-        raise ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
-    return (
-        text,
-        model,
-        _usage_value(input_tokens, limits.max_request_input_tokens),
-        _usage_value(output_tokens, output_cap),
+def _identity(result: dict[str, Any], prefix: str) -> ModelIdentity:
+    provider = result.get(f"{prefix}_provider")
+    model = result.get(f"{prefix}_model")
+    return ModelIdentity(
+        provider=provider if isinstance(provider, str) and provider else None,
+        model=model if isinstance(model, str) and model else None,
     )
 
 
-def _usage_value(value: Any, maximum: int) -> int:
+def _usage_value(value: Any, maximum: int) -> int | None:
+    """``None`` in, ``None`` out. Absence is never converted to zero."""
     if value is None:
-        return 0
+        return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
         raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
     return value
 
 
 class UnavailableProvider:
-    """Used when the host cannot serve Luna. Fails closed on every call."""
+    """Used when the host cannot serve the reader. Fails closed on every call.
+
+    Also the cheapest possible proof that deterministic extraction makes no model call:
+    inject this and inspect still succeeds.
+    """
 
     model = READER_MODEL
 
     def __init__(self, detail: str = "MODEL_UNAVAILABLE"):
         self._detail = detail
 
+    @property
+    def target(self) -> ProviderTarget:
+        return ProviderTarget()
+
     def complete(self, **_kwargs: Any) -> ModelResponse:
         raise ShuntError("MODEL_ERROR", self._detail, retryable=False)
 
 
+class FallbackChainProvider:
+    """Availability-only fallback across an ordered list of providers.
+
+    It advances on a retryable availability failure and on nothing else. A completed but
+    weak answer is not a fallback trigger: the honest remedy for a poor answer is a
+    refined question over the same snapshot, and selling an availability fallback as a
+    semantic-quality rescue would misrepresent both.
+    """
+
+    def __init__(self, primary: ReaderProvider, alternatives: list[ReaderProvider]):
+        self._chain = [primary, *alternatives]
+
+    @property
+    def target(self) -> ProviderTarget:
+        first = self._chain[0]
+        return getattr(first, "target", ProviderTarget())
+
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
+    ) -> ModelResponse:
+        last: ShuntError | None = None
+        for index, provider in enumerate(self._chain):
+            try:
+                response = provider.complete(
+                    system=system,
+                    user=user,
+                    max_output_tokens=max_output_tokens,
+                    timeout_ms=timeout_ms,
+                )
+            except ShuntError as exc:
+                last = exc
+                if not _is_availability_failure(exc) or index + 1 == len(self._chain):
+                    raise
+                continue
+            if index == 0:
+                return response
+            # Every attempt keeps its own reported provenance and usage; the only thing
+            # the chain adds is the fact that a fallback was needed.
+            return ModelResponse(
+                text=response.text,
+                requested=response.requested,
+                resolved=response.resolved,
+                reported=response.reported,
+                provider_confirms_generation=response.provider_confirms_generation,
+                usage=response.usage,
+                fallback_used=True,
+            )
+        raise last or ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
+
+
+def _is_availability_failure(exc: ShuntError) -> bool:
+    if exc.code == "TIMEOUT":
+        return True
+    return exc.code == "MODEL_ERROR" and exc.detail not in ("MODEL_SUBSTITUTED",)
+
+
 def build_user_message(question: str, chunk_text: str, locator: dict[str, Any]) -> str:
-    """Every call - first attempt, retry and reducer alike - carries the original question."""
+    """Every call - first attempt, retry and fallback alike - carries the original question."""
     return (
         f"SOURCE EXCERPT (locator {json.dumps(locator, sort_keys=True, separators=(',', ':'))}):\n"
         "<<<BEGIN EXCERPT\n"
@@ -171,3 +305,17 @@ def build_user_message(question: str, chunk_text: str, locator: dict[str, Any]) 
         "END EXCERPT>>>\n\n"
         f"QUESTION: {question}"
     )
+
+
+__all__ = [
+    "READER_SYSTEM_PROMPT",
+    "FallbackChainProvider",
+    "HostBridgeProvider",
+    "LunaProvider",
+    "ModelResponse",
+    "ProviderTarget",
+    "ReaderProvider",
+    "TransientProviderError",
+    "UnavailableProvider",
+    "build_user_message",
+]

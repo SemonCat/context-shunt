@@ -13,17 +13,46 @@ import context_shunt
 from context_shunt.config import load as load_config
 from context_shunt.errors import ShuntError
 from context_shunt.reader import Reader
-from context_shunt.registry import SourceRegistry
 from context_shunt.schema import request_validator, validate_request
 from context_shunt.session import ShuntSession
 from context_shunt.snapshot import snapshot_bytes
-from tests.support import FakeLuna, answer_json, make_capability, make_config
+from tests.support import FakeLuna, answer_json, make_capability, make_config, make_registry
 
 pytestmark = pytest.mark.gate_no_writes
 
 
 def test_schema_rejects_the_writer_operation():
-    assert request_validator().schema["properties"]["operation"]["enum"] == ["read"]
+    """The contract admits read, inspect and stats - all read-only - and nothing else."""
+    schema = request_validator().schema
+    operations = {
+        defs["properties"]["operation"]["const"]
+        for defs in (
+            schema["$defs"]["readRequest"],
+            schema["$defs"]["inspectRequest"],
+            schema["$defs"]["statsRequest"],
+        )
+    }
+    assert operations == {"read", "inspect", "stats"}
+    # propose_patch appears only in the prose that reserves it, never as an accepted value.
+    assert not validate_operation_accepts("propose_patch")
+
+
+def validate_operation_accepts(operation: str) -> bool:
+    document = {
+        "schema_version": "1.1",
+        "request_id": "req_w",
+        "operation": operation,
+        "question": "q?",
+        "sources": [
+            {
+                "source_id": "src_abcd",
+                "snapshot_id": "sha256:" + "0" * 64,
+                "selector": {"kind": "all"},
+            }
+        ],
+        "budgets": {"max_chunks": 1, "max_answer_bytes": 1, "deadline_ms": 1},
+    }
+    return request_validator().is_valid(document)
 
 
 def test_writer_enabled_configuration_is_refused(tmp_path):
@@ -70,8 +99,8 @@ def test_no_writer_symbol_is_exported():
     assert not hasattr(context_shunt, "Writer")
 
 
-def test_reader_has_no_shell_network_or_write_capability():
-    registry = SourceRegistry()
+def test_reader_has_no_shell_network_or_write_capability(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     luna = FakeLuna()
     reader = Reader(registry, luna)
     forbidden = ("shell", "exec", "network", "http", "write", "patch", "apply")

@@ -1,0 +1,57 @@
+{
+  "note": "1.1 deterministic extraction: exact snapshot bytes, no model, labelled not-derived, disclosure accounted",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_inspect_01",
+    "status": "ok",
+    "code": "EXTRACTED",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "media_type": "text/plain",
+        "bytes": 4096,
+        "expires_at": "2026-09-07T12:00:00Z"
+      }
+    ],
+    "retryable": false,
+    "result_kind": "deterministic_extraction",
+    "provenance": {
+      "derived": false,
+      "label": "deterministic_extraction",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 0,
+      "usage_complete": true,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_1111222233334444",
+    "extraction": {
+      "mode": "lines",
+      "source_id": "src_01ab",
+      "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "deterministic": true,
+      "segments": [
+        { "kind": "lines", "start": 40, "end": 42, "text": "counts:\n  max_citations: 16\n  max_transient_retries: 1" }
+      ],
+      "result_bytes": 52,
+      "complete": true,
+      "next_cursor": null,
+      "lines_scanned": 3,
+      "scan_budget_exhausted": false,
+      "disclosed_bytes_source": 52,
+      "disclosed_bytes_session": 52,
+      "disclosure_limit_reached": false
+    }
+  }
+}

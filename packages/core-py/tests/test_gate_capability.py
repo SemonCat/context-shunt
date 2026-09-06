@@ -84,9 +84,12 @@ class FakeCtx:
                 "post_tool_call",
                 "transform_tool_result",
                 "on_session_end",
+                "on_session_finalize",
+                "on_session_reset",
             ]
         )
         self.registered_hooks: list[str] = []
+        self.auxiliary_tasks: list[tuple[str, dict]] = []
         self.registered_tools: list[str] = []
         self.registered_toolsets: list[str] = []
         self.messages: list[str] = []
@@ -95,6 +98,20 @@ class FakeCtx:
 
     def register_hook(self, name, _handler):
         self.registered_hooks.append(name)
+
+    def register_auxiliary_task(self, key, *, display_name, description, defaults=None):
+        """Mirrors PluginContext.register_auxiliary_task's real keyword-only signature."""
+        assert key and all(c.isalnum() or c == "_" for c in key)
+        self.auxiliary_tasks.append(
+            (
+                key,
+                {
+                    "display_name": display_name,
+                    "description": description,
+                    "defaults": dict(defaults or {}),
+                },
+            )
+        )
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         """Mirrors hermes_cli.plugins.PluginContext.register_tool's real signature."""
@@ -208,8 +225,13 @@ def test_gate_hook_is_registered_and_no_writer_tool_is(tmp_path):
     ctx = FakeCtx(_config(tmp_path), llm=FakeLlm())
     module.register(ctx)
     assert "pre_tool_call" in ctx.registered_hooks
-    assert ctx.registered_tools == ["context_shunt_read"]
-    assert ctx.registered_toolsets == ["context_shunt"]
+    # Three read-only escape hatches, one toolset, no writer.
+    assert ctx.registered_tools == [
+        "context_shunt_read",
+        "context_shunt_inspect",
+        "context_shunt_stats",
+    ]
+    assert set(ctx.registered_toolsets) == {"context_shunt"}
     assert not any("writ" in t or "patch" in t for t in ctx.registered_tools)
     assert "capability report" in ctx.messages[0]
     assert "transform_tool_result" not in ctx.registered_hooks
@@ -229,11 +251,104 @@ def test_writer_enabled_configuration_refuses_to_load(tmp_path):
         module.register(ctx)
 
 
-def test_non_luna_model_configuration_refuses_to_load(tmp_path):
+def test_a_configured_reader_model_loads_and_is_reported_as_requested(tmp_path):
+    """1.1 makes the reader model configurable; the envelope keeps it honest."""
     module = _load_adapter()
     ctx = FakeCtx({**_config(tmp_path), "reader": {"model": "gpt-5.6-sol"}}, llm=FakeLlm())
-    with pytest.raises(ShuntError):
-        module.register(ctx)
+    module.register(ctx)
+    assert module._config.reader.model == "gpt-5.6-sol"
+    assert module.capability_report()["reader_model"] == "gpt-5.6-sol"
+    path = tmp_path / "ws" / "conf.txt"
+    path.write_text("max_retries = 3\n")
+    out = json.loads(
+        module.context_shunt_read(question="What is it?", paths=[str(path)], task_id="taux")
+    )
+    assert out["provenance"]["requested_model"] == "gpt-5.6-sol"
+
+
+def test_the_reader_is_registered_as_an_auxiliary_task(tmp_path):
+    """Registered so it appears in `hermes model` with its own auxiliary config block."""
+    module = _load_adapter()
+    ctx = FakeCtx(_config(tmp_path), llm=FakeLlm())
+    module.register(ctx)
+    assert ctx.auxiliary_tasks
+    key, payload = ctx.auxiliary_tasks[0]
+    assert key == module.AUX_TASK_KEY == "context_shunt_reader"
+    assert payload["display_name"] and payload["description"]
+    assert payload["defaults"]["model"] == module._config.reader.model
+    assert module._capability.enabled("reader_task_config")
+
+
+def test_user_auxiliary_config_overrides_the_plugin_default(tmp_path, monkeypatch):
+    """User config wins: the host's auxiliary.<key> block beats the plugin's own default."""
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    assert module._reader_target() == ("", module._config.reader.model)
+    monkeypatch.setattr(
+        module,
+        "_auxiliary_task_config",
+        lambda: {"provider": "openrouter", "model": "gpt-5.6-sol"},
+    )
+    assert module._reader_target() == ("openrouter", "gpt-5.6-sol")
+    # "auto" is the host's inherit sentinel, not a literal model id.
+    monkeypatch.setattr(
+        module, "_auxiliary_task_config", lambda: {"provider": "auto", "model": "auto"}
+    )
+    assert module._reader_target() == ("", module._config.reader.model)
+
+
+def test_per_turn_session_end_keeps_recovery_handles(tmp_path):
+    """Hermes fires on_session_end every turn; handles must survive it."""
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    path = tmp_path / "ws" / "conf.txt"
+    path.write_text("max_retries = 3\n")
+    first = json.loads(
+        module.context_shunt_read(question="What is it?", paths=[str(path)], task_id="tturn")
+    )
+    handle = first["sources"][0]
+    module.on_session_end(session_id="", task_id="tturn")
+    # The next turn refines the question against the same snapshot, without recapturing.
+    second = json.loads(
+        module.context_shunt_read(
+            question="And the backoff?",
+            handles=[{"source_id": handle["source_id"], "snapshot_id": handle["snapshot_id"]}],
+            task_id="tturn",
+        )
+    )
+    assert second["code"] in ("ANSWERED", "NO_MATCH")
+    assert second["sources"][0]["snapshot_id"] == handle["snapshot_id"]
+
+    # A real boundary does revoke it.
+    module.on_session_finalize(session_id="", task_id="tturn")
+    third = json.loads(
+        module.context_shunt_read(
+            question="And the backoff?",
+            handles=[{"source_id": handle["source_id"], "snapshot_id": handle["snapshot_id"]}],
+            task_id="tturn",
+        )
+    )
+    assert third["code"] == "SOURCE_EXPIRED"
+
+
+def test_session_reset_bumps_the_generation_so_old_handles_cannot_be_replayed(tmp_path):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    path = tmp_path / "ws" / "conf.txt"
+    path.write_text("max_retries = 3\n")
+    first = json.loads(
+        module.context_shunt_read(question="What is it?", paths=[str(path)], task_id="tgen")
+    )
+    handle = first["sources"][0]
+    module.on_session_reset(session_id="", task_id="tgen")
+    replayed = json.loads(
+        module.context_shunt_read(
+            question="What is it?",
+            handles=[{"source_id": handle["source_id"], "snapshot_id": handle["snapshot_id"]}],
+            task_id="tgen",
+        )
+    )
+    assert replayed["code"] == "SOURCE_EXPIRED"
 
 
 def test_pre_tool_call_blocks_a_large_read_with_a_contract_envelope(tmp_path):
@@ -330,7 +445,7 @@ def test_reader_tool_makes_zero_model_calls_without_a_question(tmp_path):
     assert out["status"] == "error"
 
 
-def test_reader_reports_model_error_rather_than_substituting(tmp_path):
+def test_reader_refuses_a_reported_model_that_contradicts_the_request(tmp_path):
     module = _load_adapter()
     module.register(FakeCtx(_config(tmp_path), llm=FakeLlm(model_override="gpt-5.6-sol")))
     path = tmp_path / "ws" / "conf.txt"
@@ -338,14 +453,51 @@ def test_reader_reports_model_error_rather_than_substituting(tmp_path):
     out = json.loads(
         module.context_shunt_read(question="What is it?", paths=[str(path)], task_id="t5")
     )
-    assert out["coverage"]["omitted"][0]["reason"] == "MODEL_ERROR"
+    assert out["status"] == "error" and out["code"] == "MODEL_ERROR"
     assert out["answer"] == ""
+    assert out["provenance"]["attribution_status"] == "mismatch"
+    # A model failure is not a handle failure.
+    assert out["recovery"]["handles_valid"] is True
 
 
-def test_reader_tool_schema_declares_no_write_surface():
+def test_hermes_attribution_is_unverified_and_never_claims_actual(tmp_path):
+    """The facade cannot separate a provider report from an echo, so we do not pretend."""
     module = _load_adapter()
-    props = module.READER_TOOL_SCHEMA["parameters"]["properties"]
-    assert sorted(props) == ["paths", "question"]
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    path = tmp_path / "ws" / "conf.txt"
+    path.write_text("max_retries = 3\n")
+    out = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?", paths=[str(path)], task_id="t6"
+        )
+    )
+    assert out["provenance"]["derived"] is True
+    assert out["provenance"]["attribution_status"] == "unverified"
+    assert out["provenance"]["resolved_model"] is None
+    reader = module._capability.mode("reader")
+    assert any("never claims actual" in line for line in reader.evidence)
+
+
+def test_tool_schemas_declare_no_write_surface_and_no_full_retrieval():
+    module = _load_adapter()
+    assert sorted(module.READER_TOOL_SCHEMA["parameters"]["properties"]) == [
+        "handles",
+        "paths",
+        "question",
+    ]
+    assert sorted(module.INSPECT_TOOL_SCHEMA["parameters"]["properties"]) == [
+        "cursor",
+        "selector",
+        "snapshot_id",
+        "source_id",
+    ]
+    assert sorted(module.STATS_TOOL_SCHEMA["parameters"]["properties"]) == ["page", "page_size"]
+    # No tool may name a mutating or full-retrieval capability in its own surface.
+    names = [schema["name"] for schema, _h, _m in module.TOOLS]
+    parameters = json.dumps([schema["parameters"] for schema, _h, _m in module.TOOLS]).lower()
+    for forbidden in ("write", "patch", "apply", "content", "full", "all", "raw", "payload"):
+        assert not any(forbidden in name for name in names)
+        assert forbidden not in parameters
 
 
 def test_suma_mode_stays_off_even_when_configuration_asks_for_it(tmp_path):

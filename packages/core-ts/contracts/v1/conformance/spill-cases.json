@@ -342,7 +342,7 @@
       },
       "expect": {
         "action": "passthrough",
-        "reason": "registry-verified internal reader envelope"
+        "reason": "store-verified internal reader envelope"
       }
     },
     {
@@ -370,10 +370,11 @@
           "bytes": 40000
         }
       },
-      "session_spill_used_bytes": 67108864,
+      "store_quota_bytes": 1024,
       "expect": {
         "action": "error",
-        "code": "SPILL_FAILED"
+        "code": "LIMIT_EXCEEDED",
+        "reason": "1.1: the store byte quota refuses the publish, so no handle exists and the raw payload still never passes through"
       }
     },
     {
@@ -385,10 +386,10 @@
           "bytes": 40000
         }
       },
-      "inject": "write_failure",
+      "inject": "publish_write_failure",
       "expect": {
         "action": "error",
-        "code": "SPILL_FAILED"
+        "code": "STORE_FAILED"
       }
     },
     {
@@ -400,10 +401,10 @@
           "bytes": 40000
         }
       },
-      "inject": "readback_mismatch",
+      "inject": "publish_content_mismatch",
       "expect": {
         "action": "error",
-        "code": "SPILL_FAILED"
+        "code": "STORE_FAILED"
       }
     },
     {

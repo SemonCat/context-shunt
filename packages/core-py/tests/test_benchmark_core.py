@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import resource
+import sys
 import time
 from pathlib import Path
 
@@ -23,10 +24,9 @@ from context_shunt.gate import PreReadGate
 from context_shunt.guard import enforce
 from context_shunt.limits import DEFAULT_LIMITS as L
 from context_shunt.probe import FileProber
-from context_shunt.registry import SourceRegistry
 from context_shunt.session import ShuntSession
 from context_shunt.snapshot import snapshot_bytes
-from context_shunt.spill import SpillStore, SumaSpillEngine
+from context_shunt.spill import SpillEngine
 from tests.support import make_capability, make_config
 
 pytestmark = pytest.mark.benchmark
@@ -58,9 +58,14 @@ def _percentile(samples: list[float], pct: float) -> float:
 
 
 def _rss_bytes() -> int:
+    """Peak RSS in bytes.
+
+    ``ru_maxrss`` is bytes on Darwin and kilobytes on Linux. The unit has to come from the
+    platform, not from the magnitude: guessing by size silently switches units partway
+    through a run and turns a real measurement into a meaningless one.
+    """
     usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # macOS reports bytes, Linux reports kilobytes.
-    return usage if usage > 1 << 32 else usage * 1024
+    return usage if sys.platform == "darwin" else usage * 1024
 
 
 @pytest.fixture(scope="module")
@@ -94,12 +99,15 @@ def test_gate_latency_p95_under_one_second(corpus):
 
 
 def test_spill_latency_p95_under_five_seconds(tmp_path):
-    store = SpillStore(tmp_path / "cache")
-    engine = SumaSpillEngine(store, SourceRegistry(), enabled=True)
-    payload = "s" * (2 * MIB)
+    """Publication cost, including fsync and the SQLite commit, stays inside the budget."""
+    from tests.support import make_registry
+
     samples: list[float] = []
     for i in range(RUNS):
-        store.seed_usage(f"sess{i}", 0)
+        registry = make_registry(tmp_path / f"run{i}", session_id=f"sess{i}")
+        engine = SpillEngine(registry, enabled=True)
+        # Distinct bytes per run: content addressing would otherwise dedupe away the write.
+        payload = f"s{i}-" + "s" * (2 * MIB)
         started = time.perf_counter()
         outcome = engine.evaluate(f"sess{i}", "req_b", payload)
         samples.append(time.perf_counter() - started)
@@ -170,30 +178,34 @@ def test_oversized_source_refusal_is_bounded_in_memory(tmp_path, size_mib):
 
 
 def test_request_stays_inside_the_per_request_caps(tmp_path):
-    from tests.support import FakeLuna, answer_json
+    from tests.support import FakeLuna, answer_json, make_registry
 
     body = "".join(f"key{i} = value{i}\n" for i in range(20000))
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="bench")
     entry = registry.register("bench", snapshot_bytes(body.encode()))
     luna = FakeLuna(default_reply=answer_json("", []))
     from context_shunt.reader import Reader
 
-    env = Reader(registry, luna).answer(
-        "bench",
-        {
-            "schema_version": "1.0",
-            "request_id": "req_bench",
-            "operation": "read",
-            "question": "Which keys are configured?",
-            "sources": [
-                {
-                    "source_id": entry.source_id,
-                    "snapshot_id": entry.snapshot.snapshot_id,
-                    "selector": {"kind": "all"},
-                }
-            ],
-            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
-        },
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "bench",
+            {
+                "schema_version": "1.0",
+                "request_id": "req_bench",
+                "operation": "read",
+                "question": "Which keys are configured?",
+                "sources": [
+                    {
+                        "source_id": entry.source_id,
+                        "snapshot_id": entry.snapshot.snapshot_id,
+                        "selector": {"kind": "all"},
+                    }
+                ],
+                "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+            },
+        )
+        .envelope
     )
     assert luna.call_count <= L.max_chunks_per_request
     assert env["coverage"]["planned_chunks"] <= L.max_chunks_per_request
@@ -206,37 +218,47 @@ def test_request_stays_inside_the_per_request_caps(tmp_path):
 
 def test_bounded_terminal_response_arrives_within_a_second_of_the_deadline(tmp_path):
     from context_shunt.clock import Deadline, FakeClock
-    from context_shunt.provider import ModelResponse, ModelUsage
+    from context_shunt.provenance import ModelIdentity, Usage
+    from context_shunt.provider import ModelResponse
     from context_shunt.reader import Reader
+    from tests.support import make_registry
 
     clock = FakeClock()
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="bench")
     entry = registry.register("bench", snapshot_bytes(b"alpha\n"))
 
     class Overrun:
         def complete(self, **_kw):
             clock.advance(L.request_deadline_ms + 500)
-            return ModelResponse(text="{}", model=L.reader_model, usage=ModelUsage())
+            return ModelResponse(
+                text="{}",
+                requested=ModelIdentity(model=L.reader_model),
+                usage=Usage(),
+            )
 
     deadline = Deadline.start(clock, L.request_deadline_ms)
     started = time.perf_counter()
-    env = Reader(registry, Overrun(), clock=clock).answer(
-        "bench",
-        {
-            "schema_version": "1.0",
-            "request_id": "req_bench",
-            "operation": "read",
-            "question": "What does it say?",
-            "sources": [
-                {
-                    "source_id": entry.source_id,
-                    "snapshot_id": entry.snapshot.snapshot_id,
-                    "selector": {"kind": "all"},
-                }
-            ],
-            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
-        },
-        deadline=deadline,
+    env = (
+        Reader(registry, Overrun(), clock=clock)
+        .answer(
+            "bench",
+            {
+                "schema_version": "1.0",
+                "request_id": "req_bench",
+                "operation": "read",
+                "question": "What does it say?",
+                "sources": [
+                    {
+                        "source_id": entry.source_id,
+                        "snapshot_id": entry.snapshot.snapshot_id,
+                        "selector": {"kind": "all"},
+                    }
+                ],
+                "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+            },
+            deadline=deadline,
+        )
+        .envelope
     )
     wall = time.perf_counter() - started
     assert wall < 1.0

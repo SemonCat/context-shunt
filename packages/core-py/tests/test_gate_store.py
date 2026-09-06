@@ -1,0 +1,549 @@
+"""unit store: authorization, atomicity, refcounts, corruption and recovery.
+
+Everything here is adversarial against the hybrid store. The store is the only thing
+standing between an expired or forged handle and a private payload, so each property is
+asserted directly rather than through the reader.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import stat
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+from context_shunt.errors import ShuntError
+from context_shunt.limits import DEFAULT_LIMITS, STORE_DDL_PATH, store_ddl
+from context_shunt.store import (
+    Capture,
+    OperationRecord,
+    ScopeIdentity,
+    SnapshotStore,
+)
+
+pytestmark = pytest.mark.gate_store
+
+L = DEFAULT_LIMITS
+BODY = b"alpha\nbeta\ngamma\n"
+
+
+def _identity(session: str = "sess", generation: int = 1) -> ScopeIdentity:
+    return ScopeIdentity(
+        host="test-host", profile="test", principal="local", session=session, generation=generation
+    )
+
+
+def _capture(data: bytes = BODY, **kw) -> Capture:
+    return Capture(
+        data=data,
+        media_type=kw.pop("media_type", "text/plain"),
+        line_count=data.count(b"\n"),
+        **kw,
+    )
+
+
+def _store(tmp_path: Path, limits=L, clock=None) -> SnapshotStore:
+    return SnapshotStore(tmp_path / "cache", limits, wall_clock_ms=clock)
+
+
+# -- DDL is normative -------------------------------------------------------
+
+
+def test_the_ddl_comes_from_the_contract_not_from_the_code():
+    """Neither core embeds its own CREATE TABLE; both execute the shared file."""
+    ddl = store_ddl()
+    assert STORE_DDL_PATH.name == "v1.sql"
+    for table in ("store_metadata", "scopes", "blobs", "handles", "disclosure_events"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in ddl
+    source = Path(__file__).resolve().parents[1] / "src" / "context_shunt" / "store.py"
+    assert "CREATE TABLE" not in source.read_text()
+
+
+#: Every column the store is allowed to have. A closed allowlist rather than a substring
+#: denylist: this way *adding* a content-bearing column fails the gate, which is the thing
+#: that actually needs preventing.
+ALLOWED_COLUMNS = {
+    "at_ms",
+    "attempts_started",
+    "attempts_usage_complete",
+    "baseline_credit_tokens",
+    "baseline_credited",
+    "baseline_kind",
+    "baseline_method",
+    "blob_hash",
+    "bytes",
+    "closed_at_ms",
+    "code",
+    "created_at_ms",
+    "delivery_boundary",
+    "disclosed_bytes",
+    "envelope_token_method",
+    "event_id",
+    "expires_at_ms",
+    "generation",
+    "handle_id",
+    "hash",
+    "host",
+    "internal",
+    "key",
+    "kind",
+    "line_count",
+    "main_context_tokens_saved",
+    "main_model_envelope_bytes",
+    "main_model_envelope_tokens",
+    "media_type",
+    "name",
+    "net_tokens_saved",
+    "operation_id",
+    "pending_delete",
+    "principal",
+    "profile",
+    "raw_input_baseline_tokens",
+    "raw_input_bytes",
+    "reader_cache_tokens",
+    "reader_input_tokens",
+    "reader_output_tokens",
+    "reader_token_method",
+    "refcount",
+    "revoked",
+    "scope_id",
+    "seq",
+    "session",
+    "status",
+    "temp_id",
+    "value",
+}
+
+
+def test_the_schema_stores_no_content_bearing_column(tmp_path):
+    """The column set is closed, so a path, question, answer or preview cannot be added."""
+    store = _store(tmp_path)
+    store.open_scope(_identity())
+    conn = sqlite3.connect(store.root / "store.sqlite3")
+    columns = set()
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+        columns |= {row[1].lower() for row in conn.execute(f"PRAGMA table_info({table})")}
+    conn.close()
+    assert columns <= ALLOWED_COLUMNS, sorted(columns - ALLOWED_COLUMNS)
+    # The scope components are digests, so no session name or profile label is retained.
+    # WAL means fresh rows may still be in the -wal file, so both are scanned.
+    store.publish(_identity("a-readable-session-name"), [_capture()])
+    for name in ("store.sqlite3", "store.sqlite3-wal"):
+        candidate = store.root / name
+        if candidate.exists():
+            assert b"a-readable-session-name" not in candidate.read_bytes()
+
+
+def test_a_store_from_a_different_ddl_revision_is_refused(tmp_path):
+    store = _store(tmp_path)
+    store.open_scope(_identity())
+    store.close()
+    conn = sqlite3.connect(store.root / "store.sqlite3")
+    conn.execute("UPDATE store_metadata SET value = '99' WHERE key = 'ddl_version'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ShuntError) as exc:
+        _store(tmp_path).ddl_version()
+    assert exc.value.code == "STORE_FAILED" and exc.value.detail == "DDL_VERSION_MISMATCH"
+
+
+# -- scoping and replay -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("host", "other-host"),
+        ("profile", "other-profile"),
+        ("principal", "someone-else"),
+        ("session", "other-session"),
+        ("generation", 2),
+    ],
+)
+def test_a_handle_does_not_replay_into_a_different_scope(tmp_path, field, value):
+    store = _store(tmp_path)
+    mine = _identity()
+    handle = store.publish(mine, [_capture()])[0]
+    theirs = ScopeIdentity(
+        **{
+            **{
+                "host": mine.host,
+                "profile": mine.profile,
+                "principal": mine.principal,
+                "session": mine.session,
+                "generation": mine.generation,
+            },
+            field: value,
+        }
+    )
+    store.open_scope(theirs)
+    with pytest.raises(ShuntError) as exc:
+        store.resolve(theirs, handle.handle_id)
+    assert exc.value.code == "SOURCE_EXPIRED"
+    # A foreign scope learns nothing beyond "unknown".
+    assert exc.value.detail == "UNKNOWN_HANDLE"
+
+
+def test_expiry_is_a_predicate_not_a_file_deletion(tmp_path):
+    """An expired handle is unreadable immediately, before any cleanup runs."""
+    clock = {"now": 1_700_000_000_000}
+    store = _store(tmp_path, clock=lambda: clock["now"])
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    clock["now"] += (L.store_handle_ttl_seconds + 1) * 1000
+    with pytest.raises(ShuntError):
+        store.resolve(identity, handle.handle_id)
+    # The physical file is still there; readability was decided in SQL.
+    assert list((store.root / "blobs").rglob("*.bin"))
+    assert store.sweep().expired_handles == 1
+    assert list((store.root / "blobs").rglob("*.bin")) == []
+
+
+def test_a_closed_scope_is_unreadable_even_before_the_sweep(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    store.close_scope(identity, revoke=False)
+    with pytest.raises(ShuntError) as exc:
+        store.resolve(identity, handle.handle_id)
+    assert exc.value.detail == "SCOPE_CLOSED"
+
+
+def test_a_forged_handle_id_resolves_to_nothing(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    store.publish(identity, [_capture()])
+    with pytest.raises(ShuntError):
+        store.resolve(identity, "src_" + "f" * 16)
+
+
+# -- atomic publication -----------------------------------------------------
+
+
+def test_a_multi_source_batch_publishes_all_or_none(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    good = [_capture(b"one\n"), _capture(b"two\n"), _capture(b"three\n")]
+    assert len(store.publish(identity, good)) == 3
+    assert store.stats().handles == 3
+
+    oversized = _capture(b"x" * (L.max_source_bytes + 1))
+    with pytest.raises(ShuntError):
+        store.publish(identity, [_capture(b"four\n"), oversized])
+    # Neither handle from the refused batch exists.
+    assert store.stats().handles == 3
+
+
+def test_a_crash_between_rename_and_commit_leaves_no_usable_handle(tmp_path):
+    """Simulated by failing the publication transaction after the files are in place."""
+    store = _store(tmp_path)
+    identity = _identity()
+    real_connect = store._connect  # noqa: SLF001
+
+    class Boom(sqlite3.Error):
+        pass
+
+    def explode():
+        conn = real_connect()
+
+        class Wrapper:
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+            def execute(self, sql, *args):
+                if sql.startswith("INSERT INTO handles"):
+                    raise Boom("simulated crash")
+                return conn.execute(sql, *args)
+
+        return Wrapper()
+
+    store._connect = explode  # noqa: SLF001
+    with pytest.raises(ShuntError):
+        store.publish(identity, [_capture(b"never published\n")])
+    store._connect = real_connect  # noqa: SLF001
+
+    assert store.stats().handles == 0
+    # The orphan content file has no row; recovery collects it.
+    assert store.recover().orphan_blob_files >= 1
+    assert list((store.root / "blobs").rglob("*.bin")) == []
+
+
+def test_recovery_clears_staged_temp_files(tmp_path):
+    store = _store(tmp_path)
+    store.open_scope(_identity())
+    stray = store.root / "tmp" / ("a" * 64 + ".deadbeef.part")
+    stray.write_bytes(b"half-written payload")
+    report = store.recover()
+    assert report.removed_temps == 1
+    assert not stray.exists()
+
+
+# -- dedupe, refcounts and deletion races -----------------------------------
+
+
+def test_identical_content_is_stored_once_and_refcounted(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    first = store.publish(identity, [_capture()])[0]
+    second = store.publish(identity, [_capture()])[0]
+    assert first.blob_hash == second.blob_hash
+    assert first.handle_id != second.handle_id
+    assert store.stats().blobs == 1
+
+    # Dropping one handle must not delete content the other still references.
+    store.revoke(identity, first.handle_id)
+    assert store.load_payload(store.resolve(identity, second.handle_id)) == BODY
+    store.revoke(identity, second.handle_id)
+    assert list((store.root / "blobs").rglob("*.bin")) == []
+
+
+def test_a_republish_during_deletion_keeps_the_content_readable(tmp_path):
+    """The deletion race: unlink happens outside the lock, so a new publish must win."""
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    store.revoke(identity, handle.handle_id)  # marks pending_delete and unlinks
+    # A later capture of the same bytes rewrites the content-addressed file.
+    republished = store.publish(identity, [_capture()])[0]
+    assert store.load_payload(store.resolve(identity, republished.handle_id)) == BODY
+
+
+def test_content_that_does_not_match_its_hash_fails_closed_without_deleting(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    blob = next((store.root / "blobs").rglob("*.bin"))
+    blob.write_bytes(b"corrupted")
+    with pytest.raises(ShuntError) as exc:
+        store.load_payload(store.resolve(identity, handle.handle_id))
+    assert exc.value.code == "STORE_FAILED"
+    # Corruption is reported, never "repaired" by deleting content other handles share.
+    assert blob.exists()
+
+
+def test_a_symlink_where_a_blob_belongs_is_refused(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    capture = _capture(b"target content\n")
+    digest = capture.hash
+    blob = store.root / "blobs" / digest[:2] / digest[2:4] / f"{digest}.bin"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"attacker controlled\n")
+    blob.symlink_to(outside)
+    with pytest.raises(ShuntError) as exc:
+        store.publish(identity, [capture])
+    assert exc.value.code == "STORE_FAILED" and exc.value.detail == "UNSAFE_BLOB_PATH"
+    assert store.stats().handles == 0
+
+
+def test_a_fifo_where_a_blob_belongs_is_refused(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    capture = _capture(b"fifo target\n")
+    digest = capture.hash
+    blob = store.root / "blobs" / digest[:2] / digest[2:4] / f"{digest}.bin"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(blob)
+    with pytest.raises(ShuntError) as exc:
+        store.publish(identity, [capture])
+    assert exc.value.code == "STORE_FAILED"
+    assert store.stats().handles == 0
+
+
+def test_directories_and_files_stay_private(tmp_path):
+    store = _store(tmp_path)
+    store.publish(_identity(), [_capture()])
+    assert stat.S_IMODE(os.stat(store.root).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(store.root / "blobs").st_mode) == 0o700
+    for blob in (store.root / "blobs").rglob("*.bin"):
+        assert stat.S_IMODE(os.stat(blob).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(blob.parent).st_mode) == 0o700
+
+
+# -- quotas -----------------------------------------------------------------
+
+
+def test_the_entry_quota_refuses_rather_than_evicting_a_live_handle(tmp_path):
+    limits = L.narrow(store_max_entries=2)
+    store = _store(tmp_path, limits)
+    identity = _identity()
+    store.publish(identity, [_capture(b"one\n"), _capture(b"two\n")])
+    with pytest.raises(ShuntError) as exc:
+        store.publish(identity, [_capture(b"three\n")])
+    assert exc.value.detail == "STORE_ENTRY_QUOTA"
+    assert store.stats().handles == 2
+
+
+def test_disclosure_is_charged_before_bytes_are_returned(tmp_path):
+    limits = L.narrow(disclosure_max_per_source_bytes=100)
+    store = _store(tmp_path, limits)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    assert store.disclosure_allowance(identity, handle.handle_id).remaining == 100
+    first = store.charge_disclosure(identity, handle.handle_id, "lines", 60)
+    assert first.granted and first.disclosed_bytes_source == 60
+    # 60 + 60 exceeds the ceiling, so nothing is charged and nothing may be disclosed.
+    second = store.charge_disclosure(identity, handle.handle_id, "lines", 60)
+    assert not second.granted and second.charged_bytes == 0
+    assert store.disclosure_allowance(identity, handle.handle_id).remaining == 40
+
+
+def test_the_session_ceiling_binds_across_separate_handles(tmp_path):
+    limits = L.narrow(disclosure_max_per_session_bytes=100)
+    store = _store(tmp_path, limits)
+    identity = _identity()
+    a, b = store.publish(identity, [_capture(b"one\n"), _capture(b"two\n")])
+    assert store.charge_disclosure(identity, a.handle_id, "lines", 80).granted
+    # Paging a *different* handle cannot escape the session budget.
+    assert not store.charge_disclosure(identity, b.handle_id, "lines", 80).granted
+
+
+def test_the_baseline_is_credited_exactly_once(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    assert store.credit_baseline(identity, handle.handle_id) is True
+    for _ in range(5):
+        assert store.credit_baseline(identity, handle.handle_id) is False
+
+
+# -- cross-process ----------------------------------------------------------
+
+
+def test_two_processes_share_one_store_without_losing_a_handle(tmp_path):
+    """Real subprocesses, real SQLite contention, WAL and busy-timeout doing their job."""
+    root = tmp_path / "cache"
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    program = (
+        "import sys, json;"
+        f"sys.path.insert(0, {src!r});"
+        "from context_shunt.store import SnapshotStore, ScopeIdentity, Capture;"
+        f"s = SnapshotStore({str(root)!r});"
+        "i = ScopeIdentity(host='test-host', profile='test', principal='local', session='shared');"
+        "ids = [s.publish(i, [Capture(data=f'{sys.argv[1]}-{n}'.encode(),"
+        " media_type='text/plain', line_count=1)])[0].handle_id for n in range(20)];"
+        "print(json.dumps(ids))"
+    )
+    procs = [
+        subprocess.Popen([sys.executable, "-c", program, tag], stdout=subprocess.PIPE, text=True)
+        for tag in ("alpha", "beta")
+    ]
+    published = []
+    for proc in procs:
+        out, _ = proc.communicate(timeout=120)
+        assert proc.returncode == 0, out
+        published.extend(json.loads(out))
+
+    assert len(published) == 40
+    assert len(set(published)) == 40
+    store = SnapshotStore(root)
+    identity = _identity("shared")
+    for handle_id in published:
+        assert store.resolve(identity, handle_id).handle_id == handle_id
+
+
+def test_concurrent_disclosure_charges_never_overshoot_the_ceiling(tmp_path):
+    limits = L.narrow(disclosure_max_per_source_bytes=1000)
+    store = _store(tmp_path, limits)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    granted: list[int] = []
+    lock = threading.Lock()
+
+    def charge() -> None:
+        for _ in range(20):
+            result = store.charge_disclosure(identity, handle.handle_id, "lines", 25)
+            if result.granted:
+                with lock:
+                    granted.append(result.charged_bytes)
+
+    threads = [threading.Thread(target=charge) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(granted) <= 1000
+    assert store.disclosure_allowance(identity, handle.handle_id).per_source_remaining >= 0
+
+
+# -- accounting persistence -------------------------------------------------
+
+
+def test_operation_records_round_trip_with_nulls_intact(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    record = OperationRecord(
+        operation_id="acc_" + "1" * 16,
+        kind="read",
+        status="ok",
+        code="ANSWERED",
+        raw_input_bytes=2048,
+        raw_input_baseline_tokens=512,
+        baseline_kind="full_payload_counterfactual",
+        baseline_method="bytes_div_4",
+        baseline_credit_tokens=512,
+        main_model_envelope_bytes=400,
+        main_model_envelope_tokens=100,
+        envelope_token_method="bytes_div_4",
+        reader_input_tokens=None,
+        reader_output_tokens=None,
+        reader_cache_tokens=None,
+        reader_token_method="unknown",
+        attempts_started=1,
+        attempts_usage_complete=0,
+        delivery_boundary="envelope",
+        main_context_tokens_saved=412,
+        net_tokens_saved=412,
+    )
+    store.record_operation(identity, record)
+    [read_back] = store.operation_page(identity, page=1, page_size=8)
+    # "Not reported" survives the round trip as null, never as zero.
+    assert read_back.reader_input_tokens is None
+    assert read_back.reader_output_tokens is None
+    assert read_back.main_context_tokens_saved == 412
+    totals = store.operation_totals(identity)
+    assert totals["reader_input_tokens"] is None
+    assert totals["baseline_credit_tokens"] == 512
+
+
+def test_stats_never_reach_another_scope(tmp_path):
+    store = _store(tmp_path)
+    mine, theirs = _identity("mine"), _identity("theirs")
+    for identity, op in ((mine, "acc_" + "a" * 16), (theirs, "acc_" + "b" * 16)):
+        store.record_operation(
+            identity,
+            OperationRecord(
+                operation_id=op,
+                kind="inspect",
+                status="ok",
+                code="EXTRACTED",
+                raw_input_bytes=0,
+                raw_input_baseline_tokens=None,
+                baseline_kind="none",
+                baseline_method="unknown",
+                baseline_credit_tokens=0,
+                main_model_envelope_bytes=100,
+                main_model_envelope_tokens=25,
+                envelope_token_method="bytes_div_4",
+                reader_input_tokens=None,
+                reader_output_tokens=None,
+                reader_cache_tokens=None,
+                reader_token_method="not_applicable",
+                attempts_started=0,
+                attempts_usage_complete=0,
+                delivery_boundary="extraction",
+                main_context_tokens_saved=-25,
+                net_tokens_saved=-25,
+            ),
+        )
+    assert store.operation_count(mine) == 1
+    assert [r.operation_id for r in store.operation_page(mine, page=1, page_size=8)] == [
+        "acc_" + "a" * 16
+    ]

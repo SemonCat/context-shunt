@@ -19,8 +19,9 @@ from context_shunt.provider import HostBridgeProvider, TransientProviderError
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-from context_shunt.spill import SpillStore, SumaSpillEngine
-from tests.support import FakeLuna, answer_json
+from context_shunt.spill import SpillEngine
+from context_shunt.store import SnapshotStore
+from tests.support import LIMITS, FakeLuna, answer_json, make_identity, make_registry
 
 pytestmark = pytest.mark.gate_no_raw_leak
 
@@ -68,9 +69,9 @@ def _request(entry, question="Summarize the configuration."):
         "provider_exception_with_payload",
     ],
 )
-def test_reader_failures_never_return_raw(failure, caplog):
+def test_reader_failures_never_return_raw(failure, caplog, tmp_path):
     caplog.set_level(logging.DEBUG)
-    registry = SourceRegistry()
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(_payload().encode()))
     metrics = InMemoryMetrics()
 
@@ -92,7 +93,7 @@ def test_reader_failures_never_return_raw(failure, caplog):
 
         provider = HostBridgeProvider(bridge)
 
-    env = Reader(registry, provider, metrics=metrics).answer("sess", _request(entry))
+    env = Reader(registry, provider, metrics=metrics).answer("sess", _request(entry)).envelope
     guarded = enforce_or_fixed(env)
     _assert_clean(json.dumps(guarded), metrics.rendered(), caplog.text)
     assert guarded["status"] in ("partial", "error", "ok")
@@ -114,23 +115,29 @@ def test_error_details_cannot_carry_free_text():
         ShuntError("MODEL_ERROR", f"failed on {HEAD}")
 
 
-@pytest.mark.parametrize("inject", ["write_failure", "readback_mismatch", "quota"])
+@pytest.mark.parametrize("inject", ["write_failure", "content_mismatch", "quota"])
 def test_spill_failures_never_return_raw(tmp_path, inject, caplog):
+    """Whatever the store does wrong, the raw payload never becomes the reply."""
     caplog.set_level(logging.DEBUG)
-    registry = SourceRegistry()
-    store = SpillStore(tmp_path / "cache")
-    if inject == "quota":
-        store.seed_usage("sess", store._limits.session_spill_quota_bytes)  # noqa: SLF001
-    else:
-        detail = "WRITE_FAILED" if inject == "write_failure" else "READBACK_MISMATCH"
+    limits = LIMITS.narrow(store_max_bytes=1024) if inject == "quota" else LIMITS
+    store = SnapshotStore(tmp_path / "cache", limits)
+    identity = make_identity("sess")
+    store.open_scope(identity)
+    registry = SourceRegistry(store, identity, limits)
+    expected = "LIMIT_EXCEEDED" if inject == "quota" else "STORE_FAILED"
+    if inject != "quota":
+        detail = "WRITE_FAILED" if inject == "write_failure" else "BLOB_CONTENT_MISMATCH"
 
         def _boom(*_a, **_kw):
-            raise ShuntError("SPILL_FAILED", detail, retryable=False)
+            raise ShuntError("STORE_FAILED", detail, retryable=False)
 
-        store.write = _boom
-    engine = SumaSpillEngine(store, registry, enabled=True)
+        store.publish = _boom
+    engine = SpillEngine(registry, limits=limits, enabled=True)
     outcome = engine.evaluate("sess", "req_leak", _payload())
-    assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
+    assert outcome.action == "error" and outcome.code == expected
+    # Storage failure never degrades to passthrough, and it publishes no handle.
+    assert outcome.envelope["status"] == "error"
+    assert "pointer" not in outcome.envelope
     _assert_clean(json.dumps(outcome.envelope), caplog.text)
 
 
@@ -139,23 +146,20 @@ def test_spill_contains_hostile_serialization_and_store_exceptions(tmp_path):
         def get(self, *_args, **_kwargs):
             raise RuntimeError(HEAD)
 
-    serialization_registry = SourceRegistry()
-    serialization_engine = SumaSpillEngine(
-        SpillStore(tmp_path / "serialization-cache"), serialization_registry, enabled=True
-    )
+    serialization_registry = make_registry(tmp_path / "serialization", session_id="sess")
+    serialization_engine = SpillEngine(serialization_registry, enabled=True)
     outcome = serialization_engine.evaluate("sess", "req_leak", HostileResult())
     assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
     _assert_clean(json.dumps(outcome.envelope))
     assert serialization_registry.count("sess") == 0
 
-    store_registry = SourceRegistry()
-    store = SpillStore(tmp_path / "store-cache")
+    store_registry = make_registry(tmp_path / "store", session_id="sess")
 
     def fail_with_payload(*_args, **_kwargs):
         raise RuntimeError(MID)
 
-    store.write = fail_with_payload
-    store_engine = SumaSpillEngine(store, store_registry, enabled=True)
+    store_registry.store.publish = fail_with_payload
+    store_engine = SpillEngine(store_registry, enabled=True)
     outcome = store_engine.evaluate("sess", "req_leak", "x" * 40_000)
     assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
     _assert_clean(json.dumps(outcome.envelope))
@@ -163,8 +167,8 @@ def test_spill_contains_hostile_serialization_and_store_exceptions(tmp_path):
 
 
 def test_successful_spill_pointer_carries_no_payload(tmp_path):
-    registry = SourceRegistry()
-    engine = SumaSpillEngine(SpillStore(tmp_path / "cache"), registry, enabled=True)
+    registry = make_registry(tmp_path, session_id="sess")
+    engine = SpillEngine(registry, enabled=True)
     outcome = engine.evaluate("sess", "req_leak", _payload())
     assert outcome.action == "spill"
     _assert_clean(json.dumps(outcome.envelope))

@@ -1,0 +1,19 @@
+{
+  "note": "1.1 deterministic line extraction by handle plus snapshot identity",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_inspect_lines",
+    "operation": "inspect",
+    "source_id": "src_01ab",
+    "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+    "selector": {
+      "kind": "lines",
+      "start": 120,
+      "end": 160
+    },
+    "budgets": {
+      "max_result_bytes": 16384,
+      "max_scan_lines": 20000
+    }
+  }
+}

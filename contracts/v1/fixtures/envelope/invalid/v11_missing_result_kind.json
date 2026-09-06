@@ -1,0 +1,31 @@
+{
+  "note": "result_kind is mandatory at 1.1 so a reader answer can never be mistaken for raw source",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_01",
+    "status": "ok",
+    "code": "NO_MATCH",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 1,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "provenance": {
+      "derived": true,
+      "label": "model_generated_answer",
+      "attribution_status": "unverified",
+      "attribution_confidence": "low",
+      "attribution_policy": "allow_unverified",
+      "attempts_started": 1,
+      "usage_complete": false,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_0123456789abcdef"
+  }
+}

@@ -12,8 +12,13 @@ import re
 from collections import Counter
 from typing import Any, Protocol
 
+#: Closed set of label keys. ``model`` and ``provider`` are deliberately absent: a model
+#: or provider name is unbounded vendor-controlled text, it changes with configuration, and
+#: as a metric dimension it is both a cost problem and a way to fingerprint a deployment.
+#: Which model was requested belongs in the envelope's provenance block, where it is
+#: bounded and attributed, not in a time series.
 ALLOWED_LABEL_KEYS = frozenset(
-    {"adapter", "mode", "reason", "status", "code", "form", "decision", "model", "result", "stage"}
+    {"adapter", "mode", "reason", "status", "code", "form", "decision", "result", "stage"}
 )
 _LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.:/-]{1,64}$")
 

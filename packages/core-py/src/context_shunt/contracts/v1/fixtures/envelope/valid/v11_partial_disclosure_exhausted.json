@@ -1,0 +1,57 @@
+{
+  "note": "1.1 the cumulative disclosure ceiling stops repeated small reads from refilling the main context; the page is partial and says so",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_inspect_02",
+    "status": "partial",
+    "code": "DISCLOSURE_EXHAUSTED",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": false,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [
+        {
+          "source_id": "src_01ab",
+          "selector": { "kind": "lines", "start": 200, "end": 400 },
+          "reason": "DISCLOSURE_EXHAUSTED"
+        }
+      ],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "result_kind": "deterministic_extraction",
+    "provenance": {
+      "derived": false,
+      "label": "deterministic_extraction",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 0,
+      "usage_complete": true,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_5555666677778888",
+    "extraction": {
+      "mode": "lines",
+      "source_id": "src_01ab",
+      "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "deterministic": true,
+      "segments": [],
+      "result_bytes": 0,
+      "complete": false,
+      "next_cursor": null,
+      "lines_scanned": 0,
+      "scan_budget_exhausted": false,
+      "disclosed_bytes_source": 262144,
+      "disclosed_bytes_session": 1048576,
+      "disclosure_limit_reached": true
+    },
+    "recovery": {
+      "handles_valid": true,
+      "actions": ["REVIEW_DISCLOSURE_BUDGET", "REFINE_QUESTION_SAME_SNAPSHOT"]
+    }
+  }
+}

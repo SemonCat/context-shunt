@@ -2,17 +2,33 @@
 
 Order of operations, and why:
 
-1. Validate against the v1 contract. A missing or blank question stops here, so the
-   model invocation count for such a request is provably zero.
-2. Resolve every source handle in this session and confirm the snapshot hash the caller
+1. Validate against the contract. A missing or blank question stops here, so the model
+   invocation count for such a request is provably zero.
+2. Resolve every source handle in this scope and confirm the snapshot hash the caller
    named still matches. One unsafe/secret/binary source rejects the whole request rather
-   than answering from the remaining ones.
+   than answering from the remaining ones. A refined question reuses that same immutable
+   snapshot - it never silently recaptures the source.
 3. Plan chunks under the token budget before any call is made.
-4. Call Luna once per chunk with the original question, at most two concurrently, with
-   at most one transient retry that spends the same shared budget.
-5. Verify every citation against the snapshot, delete assertions that lost their
-   evidence, and only then decide status/coverage.
-6. Hand the result to the output guard.
+4. Call the reader model once per chunk with the original question, at most two
+   concurrently, with at most one transient retry that spends the same shared budget.
+5. Verify every citation against the snapshot, delete assertions that lost their evidence,
+   and only then decide status/coverage.
+6. Attach truthful provenance and hand the result to the output guard.
+
+What the reader publishes about itself
+--------------------------------------
+Every answer is labelled ``model_derived`` with ``provenance.derived = true``: it is a
+model's reading of the source, not the source. The provenance block keeps requested,
+resolved and reported provider/model apart and states the strongest attribution the host
+actually supports - which on a host whose plugin LLM facade cannot distinguish a provider
+report from an echo of the request is ``unverified``, not ``actual``.
+
+Failure preserves recovery
+--------------------------
+A provider failure, a timeout, a malformed response, a citation failure or a provenance
+failure leaves every handle valid. The failure envelope says so and names deterministic
+next steps, so the caller retries or refines over the same snapshot instead of paying to
+capture the source again.
 """
 
 from __future__ import annotations
@@ -28,18 +44,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import envelope as E
+from .accounting import ReaderCost
+from .accounting import estimate_tokens as accounting_tokens
 from .chunking import Chunk, estimate_tokens, plan
 from .citations import CitationVerifier, referenced_ids, strip_unsupported_assertions
 from .clock import Clock, Deadline, MonotonicClock
 from .errors import CancelledError, DeadlineExceeded, ShuntError
-from .limits import DEFAULT_LIMITS, READER_MODEL, Limits
+from .limits import DEFAULT_LIMITS, Limits
 from .metrics import MetricsSink, NullMetrics
 from .paths import assert_no_secret
+from .provenance import (
+    Attribution,
+    AttributionPolicy,
+    Confidence,
+    ModelIdentity,
+    Provenance,
+    ProvenanceLabel,
+    ResultKind,
+    TokenMethod,
+    Usage,
+    enforce_policy,
+)
 from .provider import (
     READER_SYSTEM_PROMPT,
-    LunaProvider,
     ModelResponse,
-    ModelUsage,
+    ProviderTarget,
+    ReaderProvider,
     TransientProviderError,
     build_user_message,
 )
@@ -53,8 +83,26 @@ class ChunkOutcome:
     answer: str = ""
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
-    usage: ModelUsage = field(default_factory=ModelUsage)
+    usage: Usage = field(default_factory=Usage)
     calls: int = 0
+    usage_complete_calls: int = 0
+    prompt_bytes: int = 0
+    completion_bytes: int = 0
+    attribution: Attribution = Attribution.UNKNOWN
+    confidence: Confidence = Confidence.NONE
+    resolved: ModelIdentity = field(default_factory=ModelIdentity)
+    reported: ModelIdentity = field(default_factory=ModelIdentity)
+    fallback_used: bool = False
+
+
+@dataclass
+class ReaderResult:
+    """What the session needs to finish the operation: an envelope plus its true cost."""
+
+    envelope: dict[str, Any]
+    provenance: Provenance
+    cost: ReaderCost
+    source_ids: tuple[str, ...] = ()
 
 
 class _InputTokenBudget:
@@ -74,11 +122,12 @@ class Reader:
     def __init__(
         self,
         registry: SourceRegistry,
-        provider: LunaProvider,
+        provider: ReaderProvider,
         *,
         limits: Limits = DEFAULT_LIMITS,
         clock: Clock | None = None,
         metrics: MetricsSink | None = None,
+        attribution_policy: AttributionPolicy = AttributionPolicy.ALLOW_UNVERIFIED,
     ):
         self._registry = registry
         self._provider = provider
@@ -86,24 +135,48 @@ class Reader:
         self._clock = clock or MonotonicClock()
         self._metrics = metrics or NullMetrics()
         self._verifier = CitationVerifier(registry, limits)
+        self._policy = attribution_policy
 
     # -- public ------------------------------------------------------------
+
     def answer(
-        self, session_id: str, request: dict[str, Any], *, deadline: Deadline | None = None
-    ) -> dict[str, Any]:
+        self,
+        session_id: str,
+        request: dict[str, Any],
+        *,
+        deadline: Deadline | None = None,
+        accounting_id: str | None = None,
+    ) -> ReaderResult:
         request_id = _read_request_id(request)
         requested_deadline = _read_requested_deadline(request, self._limits.request_deadline_ms)
         deadline = deadline or Deadline.start(self._clock, requested_deadline)
         try:
-            return self._answer(session_id, request, request_id, deadline)
+            return self._answer(session_id, request, request_id, deadline, accounting_id)
         except ShuntError as exc:
             self._metrics.count("reader_error", {"code": exc.code})
-            return E.error_envelope(request_id, exc)
+            provenance = self._failure_provenance(exc)
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=provenance,
+                    handles_valid=_handles_survive(exc),
+                ),
+                provenance=provenance,
+                cost=ReaderCost.none(),
+            )
 
     # -- internals ---------------------------------------------------------
+
     def _answer(
-        self, session_id: str, request: dict[str, Any], request_id: str, deadline: Deadline
-    ) -> dict[str, Any]:
+        self,
+        session_id: str,
+        request: dict[str, Any],
+        request_id: str,
+        deadline: Deadline,
+        accounting_id: str | None,
+    ) -> ReaderResult:
         request = validate_request(request)
         question = request["question"]
         assert_no_secret(question.encode("utf-8"), "QUESTION")
@@ -111,11 +184,16 @@ class Reader:
         deadline.check("RESOLVE")
         selections: list[tuple[str, Any, dict[str, Any]]] = []
         handles: list[dict[str, Any]] = []
+        source_ids: list[str] = []
         for source in request["sources"]:
             entry = self._registry.resolve(session_id, source["source_id"])
             if entry.snapshot.snapshot_id != source["snapshot_id"]:
+                # A refined question must address the snapshot it was given. Recapturing
+                # here would answer a new question about a different file under the old
+                # hash, so it is refused instead.
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
             selections.append((entry.source_id, entry.snapshot, source["selector"]))
+            source_ids.append(entry.source_id)
             handles.append(
                 {
                     "source_id": entry.source_id,
@@ -126,8 +204,7 @@ class Reader:
                 }
             )
 
-        search_only = [s for s in selections if s[2].get("kind") == "search"]
-        if search_only:
+        if any(s[2].get("kind") == "search" for s in selections):
             selections = [
                 (sid, snap, _search_selector_to_lines(snap, sel)) for sid, snap, sel in selections
             ]
@@ -154,15 +231,28 @@ class Reader:
             coverage.omit(omission["source_id"], omission["selector"], omission["reason"])
 
         if not the_plan.chunks:
-            coverage.upstream_truncated = False
-            return E.build(
-                request_id=request_id,
-                status="ok",
-                code="NO_MATCH",
-                coverage=E.Coverage(
-                    complete=True, processed_chunks=0, planned_chunks=0, upstream_truncated=False
+            # Nothing to read means nothing was generated: the answer is empty and the
+            # provenance says no model output rather than claiming a derived answer.
+            provenance = self._no_output_provenance()
+            return ReaderResult(
+                envelope=E.build(
+                    request_id=request_id,
+                    status="ok",
+                    code="NO_MATCH",
+                    coverage=E.Coverage(
+                        complete=True,
+                        processed_chunks=0,
+                        planned_chunks=0,
+                        upstream_truncated=False,
+                    ),
+                    sources=handles,
+                    result_kind=ResultKind.MODEL_DERIVED,
+                    provenance=provenance,
+                    accounting_id=accounting_id,
                 ),
-                sources=handles,
+                provenance=provenance,
+                cost=ReaderCost.none(),
+                source_ids=tuple(source_ids),
             )
 
         outcomes = self._run_chunks(
@@ -175,12 +265,29 @@ class Reader:
         answers: list[str] = []
         raw_citations: list[dict[str, Any]] = []
         total_calls = 0
-        usage_in = usage_out = 0
+        usage_complete_calls = 0
+        usage = Usage(method=TokenMethod.NOT_APPLICABLE)
+        prompt_bytes = completion_bytes = 0
         next_citation = 1
+        attribution = Attribution.NOT_APPLICABLE
+        confidence = Confidence.NONE
+        resolved = ModelIdentity()
+        reported = ModelIdentity()
+        fallback_used = False
+
         for outcome in outcomes:
             total_calls += outcome.calls
-            usage_in += outcome.usage.input_tokens
-            usage_out += outcome.usage.output_tokens
+            usage_complete_calls += outcome.usage_complete_calls
+            usage = usage.merge(outcome.usage)
+            prompt_bytes += outcome.prompt_bytes
+            completion_bytes += outcome.completion_bytes
+            fallback_used = fallback_used or outcome.fallback_used
+            if outcome.calls:
+                attribution, confidence = _weakest(
+                    attribution, confidence, outcome.attribution, outcome.confidence
+                )
+                resolved = resolved if resolved.known else outcome.resolved
+                reported = reported if reported.known else outcome.reported
             if outcome.failed_reason:
                 coverage.omit(outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason)
                 continue
@@ -193,9 +300,18 @@ class Reader:
                 answers.append(namespaced_answer)
             raw_citations.extend(namespaced_citations)
 
-        self._metrics.observe("reader_model_calls", total_calls, {"model": READER_MODEL})
-        self._metrics.observe("reader_input_tokens", usage_in, {"model": READER_MODEL})
-        self._metrics.observe("reader_output_tokens", usage_out, {"model": READER_MODEL})
+        target = _target_of(self._provider)
+        self._metrics.observe("reader_model_calls", total_calls)
+        self._metrics.observe("reader_attempts_usage_complete", usage_complete_calls)
+
+        cost = _reader_cost(
+            usage,
+            attempts=total_calls,
+            usage_complete=usage_complete_calls,
+            prompt_bytes=prompt_bytes,
+            completion_bytes=completion_bytes,
+            limits=self._limits,
+        )
 
         verified, rejected = self._verify_all(session_id, raw_citations)
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
@@ -211,6 +327,58 @@ class Reader:
         used_ids = set(referenced_ids(answer))
         verified = [c for c in allowed if c["id"] in used_ids]
 
+        provenance = Provenance(
+            derived=True,
+            label=(
+                ProvenanceLabel.MODEL_GENERATED_ANSWER
+                if total_calls
+                else ProvenanceLabel.NO_MODEL_OUTPUT
+            ),
+            attribution_status=attribution,
+            attribution_confidence=confidence,
+            attribution_policy=(self._policy if total_calls else AttributionPolicy.NOT_APPLICABLE),
+            attempts_started=total_calls,
+            usage_complete=bool(total_calls) and usage_complete_calls == total_calls,
+            citations_mechanically_verified=True,
+            requested=target.identity(),
+            resolved=resolved,
+            reported=reported,
+            fallback_used=fallback_used if total_calls else None,
+        )
+        # Policy runs before publication so a refused attribution never ships an answer.
+        # The failure keeps the provenance it was judged on: an operator needs to see the
+        # value that contradicted the request, not a blank "unknown".
+        try:
+            enforce_policy(provenance, self._policy)
+        except ShuntError as exc:
+            self._metrics.count("reader_error", {"code": exc.code})
+            refused = Provenance(
+                derived=False,
+                label=ProvenanceLabel.NO_MODEL_OUTPUT,
+                attribution_status=provenance.attribution_status,
+                attribution_confidence=provenance.attribution_confidence,
+                attribution_policy=self._policy,
+                attempts_started=provenance.attempts_started,
+                usage_complete=provenance.usage_complete,
+                requested=provenance.requested,
+                resolved=provenance.resolved,
+                reported=provenance.reported,
+                fallback_used=provenance.fallback_used,
+            )
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=refused,
+                    sources=handles,
+                    handles_valid=True,
+                ),
+                provenance=refused,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
+
         deadline.check("PUBLISH")
         complete = (
             not coverage.omitted
@@ -223,24 +391,72 @@ class Reader:
             if rejected and not verified and raw_citations:
                 raise ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
             coverage.complete = complete
-            return E.build(
-                request_id=request_id,
-                status="ok" if complete else "partial",
-                code="NO_MATCH",
-                coverage=coverage,
-                sources=handles,
+            return ReaderResult(
+                envelope=E.build(
+                    request_id=request_id,
+                    status="ok" if complete else "partial",
+                    code="NO_MATCH",
+                    coverage=coverage,
+                    sources=handles,
+                    result_kind=ResultKind.MODEL_DERIVED,
+                    provenance=provenance,
+                    accounting_id=accounting_id,
+                ),
+                provenance=provenance,
+                cost=cost,
+                source_ids=tuple(source_ids),
             )
 
         coverage.complete = complete
-        return E.build(
-            request_id=request_id,
-            status="ok" if complete else "partial",
-            code="ANSWERED",
-            answer=answer,
-            citations=verified,
-            coverage=coverage,
-            sources=handles,
+        return ReaderResult(
+            envelope=E.build(
+                request_id=request_id,
+                status="ok" if complete else "partial",
+                code="ANSWERED",
+                answer=answer,
+                citations=verified,
+                coverage=coverage,
+                sources=handles,
+                result_kind=ResultKind.MODEL_DERIVED,
+                provenance=provenance,
+                accounting_id=accounting_id,
+            ),
+            provenance=provenance,
+            cost=cost,
+            source_ids=tuple(source_ids),
         )
+
+    # -- provenance for paths that never produced model output --------------
+
+    def _no_output_provenance(self) -> Provenance:
+        return Provenance(
+            derived=True,
+            label=ProvenanceLabel.NO_MODEL_OUTPUT,
+            attribution_status=Attribution.NOT_APPLICABLE,
+            attribution_confidence=Confidence.NONE,
+            attribution_policy=AttributionPolicy.NOT_APPLICABLE,
+            attempts_started=0,
+            usage_complete=True,
+            requested=_target_of(self._provider).identity(),
+        )
+
+    def _failure_provenance(self, exc: ShuntError) -> Provenance:
+        return Provenance(
+            derived=False,
+            label=ProvenanceLabel.NO_MODEL_OUTPUT,
+            attribution_status=(
+                Attribution.UNKNOWN
+                if exc.code in ("MODEL_ERROR", "INVALID_MODEL_OUTPUT", "PROVENANCE_UNAVAILABLE")
+                else Attribution.NOT_APPLICABLE
+            ),
+            attribution_confidence=Confidence.NONE,
+            attribution_policy=self._policy,
+            attempts_started=0,
+            usage_complete=False,
+            requested=_target_of(self._provider).identity(),
+        )
+
+    # -- chunk execution ---------------------------------------------------
 
     def _run_chunks(
         self,
@@ -279,14 +495,25 @@ class Reader:
                     + estimate_tokens(user, self._limits)
                 )
                 outcome.calls += 1
+                outcome.prompt_bytes += len(READER_SYSTEM_PROMPT.encode("utf-8")) + len(
+                    user.encode("utf-8")
+                )
                 response = self._complete_with_deadline(
-                    system=_system_prompt(),
+                    system=READER_SYSTEM_PROMPT,
                     user=user,
                     max_output_tokens=self._limits.max_output_tokens_per_call,
                     deadline=deadline,
                 )
                 _validate_model_response(response, self._limits)
-                outcome.usage = response.usage
+                outcome.completion_bytes += len(response.text.encode("utf-8"))
+                outcome.usage = outcome.usage.merge(response.usage)
+                outcome.usage_complete_calls += 1 if response.usage.complete else 0
+                outcome.attribution, outcome.confidence = response.attribution()
+                outcome.resolved = response.resolved
+                outcome.reported = response.reported
+                outcome.fallback_used = outcome.fallback_used or response.fallback_used
+                if outcome.attribution is Attribution.MISMATCH:
+                    raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
                 parsed = _parse_model_json(response.text, self._limits.max_tool_result_bytes)
                 if not isinstance(parsed.get("answer"), str) or not isinstance(
                     parsed.get("citations"), list
@@ -309,19 +536,7 @@ class Reader:
                     and not deadline.expired()
                 ):
                     continue
-                outcome.failed_reason = (
-                    "MODEL_ERROR"
-                    if exc.code == "MODEL_ERROR"
-                    else "INVALID_MODEL_OUTPUT"
-                    if exc.code == "INVALID_MODEL_OUTPUT"
-                    else "BUDGET_EXCEEDED"
-                    if exc.code == "LIMIT_EXCEEDED"
-                    else "TIMEOUT"
-                    if exc.code == "TIMEOUT"
-                    else "CANCELLED"
-                    if exc.code == "CANCELLED"
-                    else "CHUNK_FAILED"
-                )
+                outcome.failed_reason = _omission_reason(exc)
                 return outcome
         outcome.failed_reason = "CHUNK_FAILED"
         return outcome
@@ -402,10 +617,82 @@ class Reader:
         return verified, rejected
 
 
-def _system_prompt() -> str:
-    from .provider import READER_SYSTEM_PROMPT
+# -- helpers ----------------------------------------------------------------
 
-    return READER_SYSTEM_PROMPT
+
+def _target_of(provider: Any) -> ProviderTarget:
+    target = getattr(provider, "target", None)
+    if isinstance(target, ProviderTarget):
+        return target
+    model = getattr(provider, "model", None)
+    return ProviderTarget(model=model if isinstance(model, str) else DEFAULT_LIMITS.reader_model)
+
+
+def _handles_survive(exc: ShuntError) -> bool:
+    """Only a failure of the handle itself invalidates it."""
+    return exc.code not in ("SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE")
+
+
+def _weakest(
+    current: Attribution,
+    current_confidence: Confidence,
+    candidate: Attribution,
+    candidate_confidence: Confidence,
+) -> tuple[Attribution, Confidence]:
+    """A multi-chunk answer is only as well attributed as its weakest call."""
+    order = {
+        Attribution.MISMATCH: 0,
+        Attribution.UNKNOWN: 1,
+        Attribution.UNVERIFIED: 2,
+        Attribution.RESOLVED: 3,
+        Attribution.ACTUAL: 4,
+        Attribution.NOT_APPLICABLE: 5,
+    }
+    if order[candidate] < order[current]:
+        return candidate, candidate_confidence
+    return current, current_confidence
+
+
+def _reader_cost(
+    usage: Usage,
+    *,
+    attempts: int,
+    usage_complete: int,
+    prompt_bytes: int,
+    completion_bytes: int,
+    limits: Limits,
+) -> ReaderCost:
+    """Exact provider usage wins; otherwise a named deterministic estimate."""
+    if attempts == 0:
+        return ReaderCost.none()
+    if usage.complete:
+        return ReaderCost(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_tokens=usage.cache_tokens,
+            method=TokenMethod.EXACT,
+            attempts_started=attempts,
+            attempts_usage_complete=usage_complete,
+        )
+    return ReaderCost(
+        input_tokens=accounting_tokens(prompt_bytes, limits),
+        output_tokens=accounting_tokens(completion_bytes, limits),
+        cache_tokens=None,
+        method=TokenMethod.BYTES_DIV_4,
+        attempts_started=attempts,
+        attempts_usage_complete=usage_complete,
+    )
+
+
+def _omission_reason(exc: ShuntError) -> str:
+    return {
+        "MODEL_ERROR": "MODEL_ERROR",
+        "INVALID_MODEL_OUTPUT": "INVALID_MODEL_OUTPUT",
+        "LIMIT_EXCEEDED": "BUDGET_EXCEEDED",
+        "TIMEOUT": "TIMEOUT",
+        "CANCELLED": "CANCELLED",
+        "PROVENANCE_UNAVAILABLE": "PROVENANCE_UNAVAILABLE",
+    }.get(exc.code, "CHUNK_FAILED")
 
 
 def _cap_bytes(text: str, max_bytes: int) -> str:
@@ -524,22 +811,23 @@ def _locator_for(item: dict[str, Any], chunk: Chunk) -> dict[str, Any] | None:
 
 
 def _validate_model_response(response: Any, limits: Limits) -> None:
+    """Shape and bounds only. *Which* model answered is a provenance question, not a
+    validation one: it is classified truthfully and then judged by the configured policy,
+    rather than being asserted here from what we happened to request."""
     if not isinstance(response, ModelResponse) or not isinstance(response.text, str):
         raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
-    if response.model != READER_MODEL:
-        raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
     usage = response.usage
-    if (
-        not isinstance(usage, ModelUsage)
-        or type(usage.input_tokens) is not int
-        or usage.input_tokens < 0
-        or usage.input_tokens > limits.max_request_input_tokens
-        or type(usage.output_tokens) is not int
-        or usage.output_tokens < 0
-        or usage.output_tokens > limits.max_output_tokens_per_call
-        or type(usage.estimated) is not bool
-    ):
+    if not isinstance(usage, Usage):
         raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
+    for value, maximum in (
+        (usage.input_tokens, limits.max_request_input_tokens),
+        (usage.output_tokens, limits.max_output_tokens_per_call),
+        (usage.cache_tokens, limits.max_request_input_tokens),
+    ):
+        if value is None:
+            continue
+        if type(value) is not int or value < 0 or value > maximum:
+            raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
 
 
 def _namespace_outcome(

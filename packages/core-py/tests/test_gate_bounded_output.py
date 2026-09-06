@@ -11,17 +11,21 @@ from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-from context_shunt.spill import SpillStore, SumaSpillEngine
-from tests.support import FakeLuna, answer_json
+from context_shunt.spill import SpillEngine
+from context_shunt.store import SnapshotStore
+from tests.support import FakeLuna, answer_json, derived_provenance, make_identity, make_registry
 
 pytestmark = pytest.mark.gate_bounded_output
 L = DEFAULT_LIMITS
 
 
-def _engine(tmp_path, *, enabled=True, registry=None):
-    registry = registry or SourceRegistry()
-    store = SpillStore(tmp_path / "cache")
-    return SumaSpillEngine(store, registry, enabled=enabled), registry, store
+def _engine(tmp_path, *, enabled=True, limits=L):
+    """A spill engine over a real store. The engine has no provider reference at all."""
+    store = SnapshotStore(tmp_path / "cache", limits)
+    identity = make_identity("sess")
+    store.open_scope(identity)
+    registry = SourceRegistry(store, identity, limits)
+    return SpillEngine(registry, limits=limits, enabled=enabled), registry, store
 
 
 def _build_result(spec, cases_doc=None):
@@ -80,18 +84,23 @@ def _generate(spec):
 def test_every_spill_conformance_case(tmp_path, spill_cases):
     failures = []
     for case in spill_cases["cases"]:
-        engine, registry, store = _engine(tmp_path / case["id"])
-        if "session_spill_used_bytes" in case:
-            store.seed_usage("sess", case["session_spill_used_bytes"])
+        limits = (
+            L.narrow(store_max_bytes=case["store_quota_bytes"])
+            if "store_quota_bytes" in case
+            else L
+        )
+        engine, registry, store = _engine(tmp_path / case["id"], limits=limits)
         result = _build_result(case["result"])
         internal_id = None
         if case["result"]["kind"] == "internal_envelope":
             entry = registry.register("sess", snapshot_bytes(b"internal"), internal=True)
             internal_id = entry.source_id
-        if case.get("inject") == "write_failure":
-            store.write = _raise(ShuntError("SPILL_FAILED", "WRITE_FAILED", retryable=False))
-        if case.get("inject") == "readback_mismatch":
-            store.write = _raise(ShuntError("SPILL_FAILED", "READBACK_MISMATCH", retryable=False))
+        if case.get("inject") == "publish_write_failure":
+            store.publish = _raise(ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False))
+        if case.get("inject") == "publish_content_mismatch":
+            store.publish = _raise(
+                ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+            )
         outcome = engine.evaluate("sess", "req_s", result, internal_source_id=internal_id)
         want = case["expect"]
         if outcome.action != want["action"] or (want.get("code") and outcome.code != want["code"]):
@@ -141,6 +150,8 @@ def test_answer_quote_and_citation_caps_are_enforced():
         coverage=E.Coverage(
             complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False
         ),
+        provenance=derived_provenance(),
+        accounting_id="acc_" + "0" * 15 + "1",
     )
     enforce(base)
     with pytest.raises(OutputGuardError):
@@ -161,33 +172,39 @@ def test_unverified_citation_never_leaves_the_guard():
         coverage=E.Coverage(
             complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False
         ),
+        provenance=derived_provenance(),
+        accounting_id="acc_" + "0" * 15 + "2",
     )
     assert enforce_or_fixed(env)["code"] == "LIMIT_EXCEEDED"
 
 
-def test_reader_answer_is_capped_to_the_requested_budget():
-    registry = SourceRegistry()
+def test_reader_answer_is_capped_to_the_requested_budget(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"alpha value here\n"))
     long_answer = "Alpha is present [c1]. " * 2000
     reply = answer_json(
         long_answer, [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}]
     )
-    env = Reader(registry, FakeLuna(default_reply=reply)).answer(
-        "sess",
-        {
-            "schema_version": "1.0",
-            "request_id": "req_b",
-            "operation": "read",
-            "question": "Is alpha present?",
-            "sources": [
-                {
-                    "source_id": entry.source_id,
-                    "snapshot_id": entry.snapshot.snapshot_id,
-                    "selector": {"kind": "all"},
-                }
-            ],
-            "budgets": {"max_chunks": 8, "max_answer_bytes": 512, "deadline_ms": 60000},
-        },
+    env = (
+        Reader(registry, FakeLuna(default_reply=reply))
+        .answer(
+            "sess",
+            {
+                "schema_version": "1.0",
+                "request_id": "req_b",
+                "operation": "read",
+                "question": "Is alpha present?",
+                "sources": [
+                    {
+                        "source_id": entry.source_id,
+                        "snapshot_id": entry.snapshot.snapshot_id,
+                        "selector": {"kind": "all"},
+                    }
+                ],
+                "budgets": {"max_chunks": 8, "max_answer_bytes": 512, "deadline_ms": 60000},
+            },
+        )
+        .envelope
     )
     assert len(env["answer"].encode("utf-8")) <= 512
     assert enforce(env) is env

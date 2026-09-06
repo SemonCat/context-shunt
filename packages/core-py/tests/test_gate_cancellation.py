@@ -7,11 +7,11 @@ import pytest
 from context_shunt.clock import Deadline, FakeClock
 from context_shunt.errors import CancelledError, DeadlineExceeded
 from context_shunt.limits import DEFAULT_LIMITS
-from context_shunt.provider import ModelResponse, ModelUsage, TransientProviderError
+from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
+from context_shunt.provider import ModelResponse, ProviderTarget, TransientProviderError
 from context_shunt.reader import Reader
-from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
-from tests.support import answer_json
+from tests.support import answer_json, make_registry
 
 pytestmark = pytest.mark.gate_cancellation
 L = DEFAULT_LIMITS
@@ -36,7 +36,18 @@ class ClockProvider:
         reply = self.reply() if callable(self.reply) else self.reply
         if isinstance(reply, Exception):
             raise reply
-        return ModelResponse(text=reply, model=L.reader_model, usage=ModelUsage())
+        return ModelResponse(
+            text=reply,
+            requested=ModelIdentity(provider="openai", model=L.reader_model),
+            resolved=ModelIdentity(provider="openai", model=L.reader_model),
+            reported=ModelIdentity(provider="openai", model=L.reader_model),
+            provider_confirms_generation=True,
+            usage=Usage(input_tokens=1, output_tokens=1, method=TokenMethod.EXACT),
+        )
+
+    @property
+    def target(self) -> ProviderTarget:
+        return ProviderTarget(model=L.reader_model, provider="openai")
 
 
 def test_contract_deadlines():
@@ -85,18 +96,18 @@ def _request(entry, deadline_ms=60000):
     }
 
 
-def _entry(lines=6000):
-    registry = SourceRegistry()
+def _entry(tmp_path, lines=6000):
+    registry = make_registry(tmp_path, session_id="sess")
     body = "".join(f"key{i} = value{i}\n" for i in range(lines))
     return registry, registry.register("sess", snapshot_bytes(body.encode()))
 
 
-def test_request_deadline_stops_remaining_chunks_and_reports_partial():
+def test_request_deadline_stops_remaining_chunks_and_reports_partial(tmp_path):
     clock = FakeClock()
-    registry, entry = _entry()
+    registry, entry = _entry(tmp_path)
     provider = ClockProvider(clock, 25000, answer_json("", []))
     reader = Reader(registry, provider, clock=clock)
-    env = reader.answer("sess", _request(entry))
+    env = reader.answer("sess", _request(entry)).envelope
     # Two workers can both start a second round at fake time 50s, while 10s remains.
     # Their late results are discarded; no third round may start after the 60s check.
     assert provider.calls <= 2 * L.max_concurrent_model_calls
@@ -106,9 +117,9 @@ def test_request_deadline_stops_remaining_chunks_and_reports_partial():
     assert env["coverage"]["complete"] is False
 
 
-def test_cancel_before_publish_stops_new_work_and_blocks_late_results():
+def test_cancel_before_publish_stops_new_work_and_blocks_late_results(tmp_path):
     clock = FakeClock()
-    registry, entry = _entry(lines=6000)
+    registry, entry = _entry(tmp_path, lines=6000)
     state = {"n": 0}
 
     def reply():
@@ -121,41 +132,45 @@ def test_cancel_before_publish_stops_new_work_and_blocks_late_results():
     provider = ClockProvider(clock, 10, reply)
     reader = Reader(registry, provider, clock=clock)
     deadline = Deadline.start(clock, L.request_deadline_ms)
-    env = reader.answer("sess", _request(entry), deadline=deadline)
+    env = reader.answer("sess", _request(entry), deadline=deadline).envelope
     assert env["status"] == "error" and env["code"] == "CANCELLED"
     assert env["answer"] == ""
     assert provider.calls_after_cancel <= L.max_concurrent_model_calls
 
 
-def test_cancel_while_queued_makes_zero_provider_calls():
+def test_cancel_while_queued_makes_zero_provider_calls(tmp_path):
     clock = FakeClock()
-    registry, entry = _entry(lines=100)
+    registry, entry = _entry(tmp_path, lines=100)
     provider = ClockProvider(clock, 10, answer_json("", []))
     deadline = Deadline.start(clock, L.request_deadline_ms)
     deadline.cancel()
-    env = Reader(registry, provider, clock=clock).answer("sess", _request(entry), deadline=deadline)
+    env = (
+        Reader(registry, provider, clock=clock)
+        .answer("sess", _request(entry), deadline=deadline)
+        .envelope
+    )
     assert provider.calls == 0
     assert env["code"] == "CANCELLED"
 
 
-def test_retry_shares_the_same_budget_and_happens_at_most_once():
+def test_retry_shares_the_same_budget_and_happens_at_most_once(tmp_path):
     clock = FakeClock()
-    registry, entry = _entry(lines=100)
+    registry, entry = _entry(tmp_path, lines=100)
     provider = ClockProvider(clock, 21000, TransientProviderError("PROVIDER_CALL_FAILED"))
-    env = Reader(registry, provider, clock=clock).answer("sess", _request(entry))
+    env = Reader(registry, provider, clock=clock).answer("sess", _request(entry)).envelope
     # First attempt spends 21s, the retry another 21s; a third attempt never happens.
     assert provider.calls == 2
     assert env["status"] in ("partial", "error")
 
 
-def test_timeout_after_deadline_publishes_nothing_new():
+def test_timeout_after_deadline_publishes_nothing_new(tmp_path):
     clock = FakeClock()
-    registry, entry = _entry(lines=100)
+    registry, entry = _entry(tmp_path, lines=100)
     good = answer_json(
         "key0 is present [c1]", [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "key0"}]
     )
     provider = ClockProvider(clock, 61000, good)
-    env = Reader(registry, provider, clock=clock).answer("sess", _request(entry))
+    env = Reader(registry, provider, clock=clock).answer("sess", _request(entry)).envelope
     # The answer arrived after the request budget was already spent, so it is not published.
     assert env["answer"] == ""
     assert env["coverage"]["complete"] is False
