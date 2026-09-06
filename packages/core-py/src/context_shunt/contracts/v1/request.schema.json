@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/context-shunt/contracts/v1/request.schema.json",
+  "title": "context-shunt v1 reader request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "operation", "question", "sources", "budgets"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "operation": {
+      "description": "v1 accepts read only. propose_patch is reserved for a future schema version and MUST be rejected here.",
+      "enum": ["read"]
+    },
+    "question": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "\\S" },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/requestSource" }
+    },
+    "budgets": { "$ref": "#/$defs/budgets" }
+  },
+  "$defs": {
+    "requestSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "snapshot_id", "selector"],
+      "properties": {
+        "source_id": {
+          "description": "Opaque session-scoped capability handle issued by the registry. Never a filesystem path.",
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^src_[A-Za-z0-9]{4,58}$"
+        },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "selector": { "$ref": "#/$defs/selector" }
+      }
+    },
+    "snapshotId": {
+      "description": "Full SHA-256 of the immutable snapshot bytes.",
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "selector": {
+      "description": "Mutually exclusive tagged union. lines/records ordinals are 1-based inclusive.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "all" } }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "start", "end"],
+          "properties": {
+            "kind": { "const": "lines" },
+            "start": { "type": "integer", "minimum": 1, "maximum": 100000000 },
+            "end": { "type": "integer", "minimum": 1, "maximum": 100000000 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "pointer", "start", "end"],
+          "properties": {
+            "kind": { "const": "records" },
+            "pointer": { "type": "string", "maxLength": 1024, "pattern": "^(/([^/~]|~[01])*)*$" },
+            "start": { "type": "integer", "minimum": 1, "maximum": 100000000 },
+            "end": { "type": "integer", "minimum": 1, "maximum": 100000000 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["kind", "pattern", "max_matches"],
+          "properties": {
+            "kind": { "const": "search" },
+            "pattern": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 }
+          }
+        }
+      ]
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_chunks", "max_answer_bytes", "deadline_ms"],
+      "properties": {
+        "max_chunks": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "max_answer_bytes": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 60000 }
+      }
+    }
+  }
+}

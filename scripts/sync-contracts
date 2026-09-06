@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Copy contracts/v1 into each language package so installed plugins are self-contained.
+
+Usage: scripts/sync-contracts [--check]
+`--check` exits non-zero when a vendored copy has drifted, and is what CI runs.
+"""
+from __future__ import annotations
+
+import filecmp
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "contracts" / "v1"
+TARGETS = [
+    ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts" / "v1",
+    ROOT / "packages" / "core-ts" / "contracts" / "v1",
+]
+
+
+def _files(root: Path) -> list[Path]:
+    return sorted(p.relative_to(root) for p in root.rglob("*.json"))
+
+
+def main() -> int:
+    check = "--check" in sys.argv[1:]
+    drift: list[str] = []
+    for target in TARGETS:
+        if check:
+            if not target.exists():
+                drift.append(f"missing vendored contracts: {target.relative_to(ROOT)}")
+                continue
+            if _files(SRC) != _files(target):
+                drift.append(f"file set differs: {target.relative_to(ROOT)}")
+                continue
+            for rel in _files(SRC):
+                if not filecmp.cmp(SRC / rel, target / rel, shallow=False):
+                    drift.append(f"content differs: {(target / rel).relative_to(ROOT)}")
+        else:
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(SRC, target)
+            print(f"synced -> {target.relative_to(ROOT)}")
+    if drift:
+        for line in drift:
+            print(f"contract drift: {line}", file=sys.stderr)
+        print("run scripts/sync-contracts to refresh", file=sys.stderr)
+        return 1
+    if check:
+        print("vendored contracts match contracts/v1")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

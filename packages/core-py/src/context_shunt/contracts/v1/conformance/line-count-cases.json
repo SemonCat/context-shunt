@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "description": "Physical-line counting contract. LF-separated physical lines; a trailing LF adds no extra line; empty file is 0 lines; CRLF is one line. Content is a JSON string decoded to UTF-8 bytes.",
+  "cases": [
+    { "id": "empty", "content": "", "expected_lines": 0, "expected_bytes": 0 },
+    { "id": "no_newline_single", "content": "a", "expected_lines": 1, "expected_bytes": 1 },
+    { "id": "trailing_lf_single", "content": "a\n", "expected_lines": 1, "expected_bytes": 2 },
+    { "id": "two_lines_no_trailing", "content": "a\nb", "expected_lines": 2, "expected_bytes": 3 },
+    { "id": "two_lines_trailing", "content": "a\nb\n", "expected_lines": 2, "expected_bytes": 4 },
+    { "id": "blank_line_between", "content": "a\n\nb\n", "expected_lines": 3, "expected_bytes": 5 },
+    { "id": "only_newline", "content": "\n", "expected_lines": 1, "expected_bytes": 1 },
+    { "id": "two_newlines", "content": "\n\n", "expected_lines": 2, "expected_bytes": 2 },
+    { "id": "crlf_single", "content": "a\r\n", "expected_lines": 1, "expected_bytes": 3 },
+    { "id": "crlf_two", "content": "a\r\nb\r\n", "expected_lines": 2, "expected_bytes": 6 },
+    { "id": "crlf_no_trailing", "content": "a\r\nb", "expected_lines": 2, "expected_bytes": 4 },
+    { "id": "cr_only_is_one_line", "content": "a\rb", "expected_lines": 1, "expected_bytes": 3 },
+    { "id": "utf8_multibyte", "content": "héllo\n世界\n", "expected_lines": 2, "expected_bytes": 14 }
+  ]
+}

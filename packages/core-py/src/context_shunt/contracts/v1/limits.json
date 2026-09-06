@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "description": "Normative v1 caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these.",
+  "reader_model": "gpt-5.6-luna",
+  "gate": {
+    "full_read_max_lines": 350,
+    "targeted_read_max_lines": 350,
+    "targeted_search_max_matches": 200,
+    "probe_max_lines_scanned": 351,
+    "probe_timeout_ms": 1000
+  },
+  "bytes": {
+    "max_tool_result_bytes": 16384,
+    "max_envelope_bytes": 16384,
+    "max_targeted_read_bytes": 16384,
+    "max_source_bytes": 8388608,
+    "max_chunk_bytes": 32768,
+    "max_answer_bytes": 8192,
+    "max_quote_bytes": 512,
+    "max_question_bytes": 2048,
+    "session_spill_quota_bytes": 67108864
+  },
+  "counts": {
+    "max_sources_per_request": 8,
+    "min_sources_per_request": 1,
+    "max_chunks_per_request": 8,
+    "max_citations": 16,
+    "max_concurrent_model_calls": 2,
+    "max_chunk_overlap_lines": 1,
+    "max_transient_retries": 1
+  },
+  "tokens": {
+    "max_chunk_tokens": 8000,
+    "max_request_input_tokens": 64000,
+    "max_output_tokens_per_call": 2048,
+    "bytes_per_token_estimate": 4
+  },
+  "deadlines_ms": {
+    "gate_probe": 1000,
+    "spill_io": 5000,
+    "model_call": 20000,
+    "request": 60000
+  },
+  "spill": {
+    "ttl_seconds": 3600,
+    "dir_mode": "0700",
+    "file_mode": "0600"
+  },
+  "json": {
+    "max_depth": 64,
+    "max_nodes": 100000
+  }
+}

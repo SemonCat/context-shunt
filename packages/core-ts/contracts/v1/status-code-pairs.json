@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "description": "Legal status/code pairings for the v1 envelope. Any pair not listed here MUST be rejected by both cores and by envelope.schema.json.",
+  "statuses": ["ok", "partial", "blocked", "error"],
+  "codes": [
+    "ANSWERED", "NO_MATCH", "LARGE_READ", "UNCLASSIFIABLE_READ", "SPILLED",
+    "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
+    "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
+    "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
+    "HOST_UNSAFE", "UPSTREAM_TRUNCATED", "CANCELLED"
+  ],
+  "pairs": {
+    "ok": ["ANSWERED", "NO_MATCH", "SPILLED"],
+    "partial": ["ANSWERED", "NO_MATCH", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "TIMEOUT", "CANCELLED"],
+    "blocked": ["LARGE_READ", "UNCLASSIFIABLE_READ", "UNSAFE_SOURCE", "BINARY_UNSUPPORTED", "HOST_UNSAFE"],
+    "error": [
+      "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
+      "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
+      "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
+      "HOST_UNSAFE", "CANCELLED"
+    ]
+  },
+  "constraints": {
+    "coverage_complete_requires_status": ["ok"],
+    "spilled_requires_empty_answer": true,
+    "retryable_allowed_statuses": ["error", "partial"]
+  }
+}

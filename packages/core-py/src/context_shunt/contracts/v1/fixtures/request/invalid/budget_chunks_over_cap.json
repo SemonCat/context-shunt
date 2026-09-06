@@ -1,0 +1,25 @@
+{
+  "note": "budgets may only narrow deployment caps",
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "operation": "read",
+    "question": "Where is the retry policy defined? List the limits and the evidence.",
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "lines",
+          "start": 1,
+          "end": 800
+        }
+      }
+    ],
+    "budgets": {
+      "max_chunks": 9,
+      "max_answer_bytes": 8192,
+      "deadline_ms": 60000
+    }
+  }
+}

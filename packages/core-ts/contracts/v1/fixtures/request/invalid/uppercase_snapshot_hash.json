@@ -1,0 +1,22 @@
+{
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "operation": "read",
+    "question": "Where is the retry policy defined? List the limits and the evidence.",
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "selector": {
+          "kind": "all"
+        }
+      }
+    ],
+    "budgets": {
+      "max_chunks": 8,
+      "max_answer_bytes": 8192,
+      "deadline_ms": 60000
+    }
+  }
+}

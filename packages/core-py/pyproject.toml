@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=80,<81", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-shunt-core"
+version = "1.0.0"
+description = "Read-only context shunt core: pre-read gate, question-driven Luna reader, citation verification, bounded envelopes and optional Suma spill."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "context-shunt contributors" }]
+dependencies = [
+  "jsonschema>=4.25,<4.26",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<8.5",
+  "ruff>=0.14,<0.15",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+context_shunt = ["contracts/v1/*.json", "contracts/v1/**/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+  "gate_contract", "gate_pre_read", "gate_reader", "gate_citations",
+  "gate_no_raw_leak", "gate_bounded_output", "gate_cancellation",
+  "gate_permissions", "gate_no_writes", "gate_capability",
+  "integration_hermes", "eval_luna", "benchmark",
+]
+filterwarnings = ["error::DeprecationWarning:context_shunt.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
