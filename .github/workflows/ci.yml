@@ -26,7 +26,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # The snapshot store uses node:sqlite, which needs >=22.5. 22.22.3 is the floor
+          # both packages declare, and it is also OpenClaw's own floor.
+          node-version: "22.22.3"
 
       - name: Install Python core
         run: |
@@ -37,14 +39,14 @@ jobs:
       - name: Install Node workspaces
         run: npm ci
 
-      - name: Vendored contracts match contracts/v1
+      - name: Vendored contracts match contracts/ (schemas and the store DDL)
         run: ./scripts/sync-contracts --check
 
       - name: Lint (ruff)
         run: ./.venv/bin/ruff check packages/core-py adapters/hermes scripts/sync-contracts scripts/verify
 
       - name: Format check (ruff)
-        run: ./.venv/bin/ruff format --check packages/core-py
+        run: ./.venv/bin/ruff format --check packages/core-py adapters/hermes
 
       - name: Typecheck (TypeScript core)
         run: ./node_modules/.bin/tsc -p packages/core-ts/tsconfig.json --noEmit

@@ -1,5 +1,5 @@
 {
-  "_comment": "Example OpenClaw configuration for context-shunt. Merge these keys into openclaw.json; do not replace the file. There is no writer key: v1 refuses writer.enabled at load time rather than accepting it and doing nothing.",
+  "_comment": "Example OpenClaw configuration for context-shunt. Merge these keys into openclaw.json; do not replace the file. The config block below is validated by the packaging gate, so it is exactly what the plugin accepts - see README.md in this directory for what each key means. There is no writer key: writer.enabled is refused at load time rather than accepted and ignored.",
   "plugins": {
     "entries": {
       "context-shunt": {
@@ -11,16 +11,25 @@
         },
         "config": {
           "workspace_roots": ["/path/to/your/project"],
-          "spill_dir": "~/.cache/context-shunt",
+          "cache_dir": "~/.cache/context-shunt",
           "denylist": ["secrets/*", "**/*.local.yaml"],
           "gate_enabled": true,
           "reader": {
             "enabled": true,
-            "model": "gpt-5.6-luna"
+            "model": "gpt-5.6-luna",
+            "provider": "",
+            "attribution_policy": "allow_unverified"
+          },
+          "inspect": {
+            "enabled": true
+          },
+          "stats": {
+            "enabled": true
           },
           "suma_post_tool": {
             "enabled": false
-          }
+          },
+          "limits": {}
         }
       }
     }

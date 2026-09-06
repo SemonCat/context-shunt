@@ -12,13 +12,13 @@ modes each host actually supports and why the optional Suma post-tool mode is of
 | | Version |
 | --- | --- |
 | Python (Hermes adapter) | 3.11 or newer |
-| Node (OpenClaw adapter) | 20 or newer |
+| Node (OpenClaw adapter) | **22.22.3 or newer** — the store uses `node:sqlite`, and this is also OpenClaw's own floor |
 | Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled |
 | OpenClaw | compatibility verified against `openclaw` 2026.9.2, with native plugins enabled |
-| Reader model | a host bridge that serves `gpt-5.6-luna` |
+| Reader model | a host model bridge; `gpt-5.6-luna` is the default and is configurable |
 
-Without a `gpt-5.6-luna` bridge the local gate still works; the reader reports
-`MODEL_ERROR` rather than answering with another model.
+Without a model bridge the local gate, `context_shunt_inspect` and `context_shunt_stats`
+all still work — none of those calls a model. Only `context_shunt_read` needs one.
 
 Other host versions are not claimed compatible. Rerun the real local integration gate
 and review the host hook/model APIs before upgrading either host.
@@ -133,15 +133,77 @@ rm -rf ~/.cache/context-shunt          # private snapshots and spill
 
 | Path | Contents | Lifetime |
 | --- | --- | --- |
-| `spill_dir` (default `~/.cache/context-shunt`) | snapshots and spilled results, directory `0700`, files `0600` | cleared on session end; 1 hour TTL |
+| `<cache>/store.sqlite3` | authorization metadata only: opaque handle ids, digested scope, TTL, quotas, refcounts, disclosure totals, bounded metrics. **No paths, questions, answers or previews.** | rows removed by TTL, sweep, or a real session boundary |
+| `<cache>/blobs/<aa>/<bb>/<sha256>.bin` | the withheld payload bytes, content-addressed, `0600` | refcounted; deleted when no live handle references it |
+| `<cache>/tmp/` | in-flight temp files; no live handle ever points here | cleared by startup recovery |
 | `reports/` in this repo | non-sensitive verification reports | gitignored, safe to delete |
+
+`<cache>` is `cache_dir` (or the legacy `spill_dir`), defaulting to `~/.cache/context-shunt`
+or `$CONTEXT_SHUNT_CACHE`. Every directory is `0700`. The cache root is refused if it
+resolves inside a workspace root.
 
 Nothing is written inside a workspace root, and no source file is modified — `unit
 no-writes` compares the source tree's hashes, permissions and filenames before and after a
 full run and also exercises a read-only source.
 
-Deleting a spill file is deletion, not secure erasure. Treat the cache as sensitive for as
+Deleting a payload file is deletion, not secure erasure. Treat the cache as sensitive for as
 long as it exists, and put it on the same trust boundary as the sources it mirrors.
+[`security.md`](security.md) has the full retention picture.
+
+## Cleaning up
+
+The store cleans up on its own: handles expire after an hour by default, every turn takes an
+opportunistic sweep, and a real session boundary revokes the scope's handles and drops the
+content they held. Startup recovery additionally removes staged temp files and any content
+file left without a row by a crash.
+
+To clear everything by hand, stop the host and remove the cache root:
+
+```bash
+rm -rf ~/.cache/context-shunt        # or your configured cache_dir
+```
+
+That is safe at any time: a missing store is recreated on next use, and nothing in it is
+required to read a source again. There is no state to preserve.
+
+To inspect what is there without reading any content:
+
+```bash
+sqlite3 ~/.cache/context-shunt/store.sqlite3 \
+  "SELECT COUNT(*) AS handles FROM handles WHERE revoked = 0;
+   SELECT COUNT(*) AS blobs, SUM(bytes) FROM blobs;"
+```
+
+## Migrating from a pre-1.1 cache
+
+Revision 1.0 wrote loose spill files at `<cache>/<32-hex>/<sha256>.spill`. Those files are
+**never imported as authorized handles** — an unauthenticated file on disk is not a
+capability, and promoting one would create a handle nobody ever authorized.
+
+They are simply inert. Nothing reads them, and they do not count toward any quota. To remove
+them:
+
+```bash
+# Report first.
+./.venv/bin/python -c "
+from context_shunt.store import SnapshotStore
+s = SnapshotStore('$HOME/.cache/context-shunt')
+print(s.legacy_artifact_count(), 'legacy artifacts')"
+
+# Then remove.
+./.venv/bin/python -c "
+from context_shunt.store import SnapshotStore
+s = SnapshotStore('$HOME/.cache/context-shunt')
+print(s.purge_legacy_artifacts(), 'removed')"
+```
+
+Or just delete the cache root, which is equivalent and simpler.
+
+A store created by a **different DDL revision** is refused at open time with
+`STORE_FAILED / DDL_VERSION_MISMATCH` rather than migrated by guesswork. If you see that,
+the supported path is to remove the cache root and let the current revision recreate it; no
+data that matters is lost, because the store only ever holds a cache of content that can be
+re-read from its source.
 
 ## Optional gates
 
@@ -158,18 +220,36 @@ CONTEXT_SHUNT_LUNA_BRIDGE=your_module:your_callable \
 ./scripts/verify release all
 ```
 
-The bridge callable receives `system`, `user`, `model`, `max_output_tokens` and
-`timeout_ms` as keyword arguments and returns
-`{"text", "model", "input_tokens", "output_tokens"}`. If it reports a model other than
-`gpt-5.6-luna`, the call fails with `MODEL_ERROR` rather than being accepted.
+The bridge callable receives `system`, `user`, `provider`, `model`, `max_output_tokens` and
+`timeout_ms` as keyword arguments and returns a mapping. Only `text` is required; every
+provenance and usage field is optional, and an **absent field means "the host does not
+expose this"** rather than a default that would overstate what is known:
+
+| Key | Meaning |
+| --- | --- |
+| `text` | the completion. Required. |
+| `resolved_provider` / `resolved_model` | what the host says it selected. Omit if the host does not expose its selection. |
+| `reported_provider` / `reported_model` | what the **provider** says generated the tokens. Omit if it does not report one. |
+| `provider_confirms_generation` | `true` only if you can show the reported value came from the provider, not from the host echoing your request. When `false`, attribution is reported `unverified` — never `actual`. |
+| `input_tokens` / `output_tokens` / `cache_tokens` | omit when not reported. **Do not send `0` to mean unknown.** |
+| `usage_exact` | `true` only when those counts came from the provider. |
+| `fallback_used` | `true` if an availability fallback produced this result. |
+
+A reported or resolved value that contradicts the requested model fails the call with
+`MODEL_ERROR` rather than being accepted.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
 | Plugin refuses to load, log says `WRITER_UNSUPPORTED_CONFIGURATION` | `writer.enabled: true` is set. v1 has no writer and refuses the flag instead of ignoring it. |
-| Plugin refuses to load, log says `MODEL_NOT_ALLOWED` | `reader.model` is not `gpt-5.6-luna`. |
+| Plugin refuses to load, log says `BAD_ATTRIBUTION_POLICY` | `reader.attribution_policy` is not `allow_unverified` or `require_match`. |
 | Plugin refuses to load, log says `LIMIT_MAY_ONLY_NARROW` | A `limits` value is wider than the contract default. |
 | Every source is rejected with `UNSAFE_SOURCE` | `workspace_roots` does not contain the path, or the path is a symlink, a hardlink, or matches the secret policy. |
-| Reader returns `MODEL_ERROR` with an empty answer | The host cannot serve `gpt-5.6-luna`. The gate keeps working. |
+| Reader returns `MODEL_ERROR` with an empty answer | The host cannot serve the configured model, or reported one that contradicts it. The gate, `inspect` and `stats` keep working. |
+| Reader returns `PROVENANCE_UNAVAILABLE` | `reader.attribution_policy: require_match` is set and the host cannot prove which model answered. See [`capability-matrix.md`](capability-matrix.md) for the per-host ceiling. |
+| Envelope says `attribution_status: unverified` | Expected on Hermes: the plugin LLM facade cannot be distinguished from an echo of the request. This is reported, not hidden. |
+| `inspect` returns `DISCLOSURE_EXHAUSTED` | The cumulative per-source or per-session disclosure ceiling is used up. That is the ceiling working; raise it with `limits.disclosure_max_per_*_bytes` only if you mean to. |
+| Store refuses with `DDL_VERSION_MISMATCH` | The cache was created by a different revision. Remove the cache root; see "Migrating from a pre-1.1 cache" above. |
+| A handle is `SOURCE_EXPIRED` sooner than expected | The default TTL is one hour, and a real session boundary revokes early. A per-turn boundary does not. |
 | A large read is not blocked | The tool id is outside the covered list in [`capability-matrix.md`](capability-matrix.md). Disable uncontrolled read tools at the host. |

@@ -2,7 +2,9 @@
 
 這是最初的工作分解，不是目前完成狀態；保留未勾選方框供歷史對照。實際能力與最新驗證結果分別以 [capability-matrix.md](capability-matrix.md) 和 `./scripts/verify` 的 release-commit report 為準。下列驗收命令目前已存在。
 
-依 [architecture.md](architecture.md) 實作；本文不重開架構決策。v1 read-only，reader 固定 `gpt-5.6-luna`，Suma post-tool mode 預設停用，writer 不實作。
+依 [architecture.md](architecture.md) 實作；本文不重開架構決策。全域 read-only，post-tool mode 預設停用，writer 不實作。
+
+> **本文描述契約 1.0 的工作分解。** 1.1 新增的 hybrid store、決定性 `inspect`、`stats`、provenance 與 token accounting 不在此清單內；其規格見 [architecture.md](architecture.md) 的「契約版本 1.1」及其後章節，驗收見 [acceptance.md](acceptance.md) 的 `unit store` / `unit inspect` / `unit accounting`。其中「reader 固定 `gpt-5.6-luna`」在 1.1 改為可設定（預設不變），取代硬性拒絕的是 envelope 內誠實的 provenance。
 
 逐項完成後記錄變更、執行命令與結果；失敗先修復，不能標記完成。順序為 shared core → Hermes → OpenClaw → tests/evals → packaging。每項保留小幅可驗證變更，不建立遠端或 push。
 

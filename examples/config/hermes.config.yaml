@@ -6,9 +6,10 @@ plugins:
     - context-shunt
   entries:
     context-shunt:
-      # The reader needs the model override, and only this model. Hermes gates plugin
-      # model overrides per plugin, so without this the reader reports MODEL_ERROR
-      # instead of quietly answering with whatever model is configured.
+      # The reader pins a model, and Hermes gates plugin model overrides per plugin.
+      # Without this, `_check_overrides` refuses the override and the reader runs on
+      # whatever the host would have picked. That is not silently accepted: the envelope
+      # reports what was requested and how strongly the attribution can be believed.
       llm:
         allow_model_override: true
         allowed_models:
@@ -22,9 +23,10 @@ plugins:
         workspace_roots:
           - /path/to/your/project
 
-        # Private cache for snapshots and spill. Keep it outside every workspace root
-        # and outside git. Directory 0700, files 0600, cleared on session end.
-        spill_dir: ~/.cache/context-shunt
+        # Private cache: SQLite authorization metadata plus content-addressed payload
+        # files. Keep it outside every workspace root and outside git. Directories 0700,
+        # payload files 0600. Handles expire after an hour by default.
+        cache_dir: ~/.cache/context-shunt
 
         # Extra administrator denials, relative globs inside a root. The built-in secret
         # policy (.env, private keys, credential stores) applies regardless.
@@ -37,9 +39,42 @@ plugins:
 
         reader:
           enabled: true
-          model: gpt-5.6-luna # the only accepted value; anything else is refused at load
 
-        # Optional oversized-result spill. Unsupported on this host (see
+          # Configurable since contract revision 1.1; this is the default. What keeps a
+          # substitution from going unnoticed is the envelope's provenance block, not a
+          # hardcoded value here.
+          model: gpt-5.6-luna
+
+          # Optional. Empty lets the host route.
+          provider: ""
+
+          # What to do when the host cannot prove which model answered.
+          #   allow_unverified (default) - publish the answer, labelled `unverified`.
+          #   require_match             - refuse instead, with PROVENANCE_UNAVAILABLE.
+          # On Hermes the facade cannot distinguish a provider report from an echo of the
+          # request, so require_match disables the reader entirely. inspect and stats keep
+          # working either way; neither touches a model.
+          attribution_policy: allow_unverified
+
+          # Availability-only fallback. Never a remedy for a poor-quality answer: the
+          # honest remedy for that is a refined question over the same snapshot. Each
+          # attempt keeps its own reported provenance, and reaching one sets fallback_used.
+          # fallback_chain:
+          #   - model: gpt-5.6-luna
+          #     provider: openrouter
+
+        # Deterministic exact extraction: zero model calls, 16 KiB per page, and every
+        # page charged against a cumulative per-source and per-session disclosure ceiling.
+        # Set enabled: false if you would rather no source bytes reach the context at all.
+        inspect:
+          enabled: true
+
+        # Read-only session accounting. Cannot reset a counter, change retention, reach
+        # another session, or reveal content.
+        stats:
+          enabled: true
+
+        # Optional oversized post-tool spill. Unsupported on this host (see
         # docs/capability-matrix.md), so it stays off and setting it true changes nothing.
         suma_post_tool:
           enabled: false
@@ -48,6 +83,18 @@ plugins:
         # limits:
         #   full_read_max_lines: 200
         #   max_answer_bytes: 4096
+        #   store_handle_ttl_seconds: 900
+        #   disclosure_max_per_source_bytes: 65536
 
-# There is no writer key. v1 refuses `writer.enabled: true` at load time rather than
-# accepting it and doing nothing.
+# The reader is also registered as a Hermes auxiliary task, so it shows up in
+# `hermes model -> Configure auxiliary models`. Anything you set here wins over the
+# plugin's own defaults. "auto" is the host's inherit sentinel, not a literal model id.
+#
+# auxiliary:
+#   context_shunt_reader:
+#     provider: auto
+#     model: gpt-5.6-luna
+#     timeout: 20
+
+# There is no writer key. `writer.enabled: true` is refused at load time rather than
+# accepted and ignored.

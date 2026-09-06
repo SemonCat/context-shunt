@@ -532,7 +532,7 @@ def run_packaging(gate: str) -> list[GateResult]:
     lines.extend(artifact_lines)
     failures.extend(artifact_failures)
 
-    # 6. Defaults are safe: Suma off, writer unavailable, caps at the contract values.
+    # 6. Defaults are safe: post-tool off, writer unavailable, caps at contract values.
     checks += 1
     example = ROOT / "examples" / "config" / "openclaw.json"
     hermes_example = ROOT / "examples" / "config" / "hermes.config.yaml"
@@ -543,10 +543,18 @@ def run_packaging(gate: str) -> list[GateResult]:
         ok = entry["suma_post_tool"]["enabled"] is False and "writer" not in entry
         ok = ok and "propose_patch" not in example.read_text()
     lines.append(
-        f"example config defaults (suma off, no writer): {'pass' if ok else 'fail'}"
+        f"example config defaults (post-tool off, no writer): {'pass' if ok else 'fail'}"
     )
     if not ok:
         failures.append("example configuration does not carry safe defaults")
+
+    # 6b. The example actually loads. A documented configuration that the real loader
+    #     rejects is worse than no example, so this runs it through the loader itself.
+    checks += 1
+    ok, detail = _example_config_loads(example)
+    lines.append(f"example config loads through the real loader: {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append(detail)
 
     # 7. Nothing shippable contains a spill, a report, a secret or a local path.
     checks += 1
@@ -576,6 +584,32 @@ def run_packaging(gate: str) -> list[GateResult]:
             lines,
         )
     ]
+
+
+def _example_config_loads(example: Path) -> tuple[bool, str]:
+    """The documented configuration must be one the loader accepts, key for key."""
+    interpreter = _python()
+    if interpreter is None:
+        return False, "python3 not found"
+    script = (
+        "import json, pathlib, sys, tempfile;"
+        'sys.path.insert(0, "packages/core-py/src");'
+        "from context_shunt.config import load;"
+        f"raw = json.loads(pathlib.Path({str(example)!r}).read_text());"
+        'cfg = raw["plugins"]["entries"]["context-shunt"]["config"];'
+        "root = pathlib.Path(tempfile.mkdtemp());"
+        '(root / "ws").mkdir();'
+        'cfg = {**cfg, "workspace_roots": [str(root / "ws")],'
+        '       "cache_dir": str(root / "cache")};'
+        "loaded = load(cfg, default_spill_dir=root / 'cache');"
+        "assert loaded.suma_post_tool.enabled is False;"
+        "assert loaded.reader.model == 'gpt-5.6-luna';"
+        'print("OK")'
+    )
+    proc = _run([interpreter, "-c", script], ROOT)
+    if proc.returncode != 0 or "OK" not in proc.stdout:
+        return False, f"example config is not loadable: {_tail(proc.stderr or proc.stdout, 3)}"
+    return True, ""
 
 
 def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:

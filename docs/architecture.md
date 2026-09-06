@@ -1,6 +1,30 @@
-# Architecture — v1 normative specification
+# Architecture — normative specification (contract revision 1.1)
 
-本文「必須」為 release gate；所有預設上限可調低，提高須重新通過安全及 benchmark gates。v1 read-only，reader 固定 `gpt-5.6-luna`。來源基線見 [README](../README.md)，驗收見 [acceptance](acceptance.md)。
+本文「必須」為 release gate；所有預設上限可調低，提高須重新通過安全及 benchmark gates。全域 read-only。來源基線見 [README](../README.md)，驗收見 [acceptance](acceptance.md)，保存與清除見 [security](security.md)，已知界限見 [limitations](limitations.md)。
+
+## 契約版本 1.1（向後相容）
+
+1.1 是相容性修訂，不是破壞性改版。兩個方向都嚴格：
+
+* 1.0 request 仍然被接受，1.0 envelope 仍然通過驗證；
+* 宣告 1.1 的 envelope **必須**帶 `result_kind`、`provenance`、`accounting_id`；
+* 宣告 1.0 卻攜帶 1.1 欄位、或使用 1.1 operation 的 request，一律拒絕（`INVALID_REQUEST`）。未知的必要欄位絕不可被靜默忽略。
+
+兩個常數分開：`EMITTED_SCHEMA_VERSION`（本核心產生的 envelope 宣告的版本）與 `SUPPORTED_REQUEST_VERSIONS`（本核心接受的輸入版本）。任何一處硬編碼單一版本字串都會在下一次改版時默默謊報。
+
+1.1 新增：
+
+| 新增 | 內容 |
+| --- | --- |
+| operation `inspect` | 零模型呼叫的決定性精確擷取，受單頁與累計揭露上限雙重約束 |
+| operation `stats` | 唯讀的本 session 計量；不能重設、不能改保留、不能跨 session、不能揭露內容 |
+| `result_kind` | `model_derived` / `deterministic_extraction` / `gate_decision` / `pointer` / `stats` / `failure` |
+| `provenance` | requested / resolved / reported 三組供應商與模型分離，加上 attribution 狀態、政策與 usage 完整性 |
+| `accounting_id` | 指向 store 內計量紀錄的不透明 ID；envelope 本身不含計量數字，量測因此不會自我指涉 |
+| `recovery` | 失敗時的決定性後續動作，並明確標示 handle 是否仍有效 |
+| `contracts/store/v1.sql` | 規範性 SQLite DDL，兩個核心逐字執行 |
+
+Reader model 由 1.0 的單一固定模型改為**可設定**（預設仍為 `gpt-5.6-luna`）。這是刻意的行為改變而非默默放寬：取代原本硬性拒絕的，是 envelope 內誠實的 provenance —— 任何一次回答都說明請求了什麼模型、host 回報了什麼、以及該歸屬能被相信到什麼程度。
 
 ## 組件與信任邊界
 
@@ -29,9 +53,53 @@ Hermes adapter                     OpenClaw adapter
 4. 多檔、glob、pipeline、substitution、redirect、alias、動態路徑須合計預算；無法證明有界或安全的 read-like shell 指令回 `blocked/UNCLASSIFIABLE_READ`，引導受控 Read/search/reader。不得先執行再看大小。非讀取命令交由 host 原有政策；本工具不是任意 shell sandbox，不宣稱能辨識所有自訂腳本的讀取。
 5. Host 必須枚舉並驗證所有宣告支援的 read 工具路徑；未知 raw read 工具不得宣称已受保護。需要全面保證的部署必須停用未受控的讀取能力。檔案大小探測最多掃描到 351 行或 byte cap；未知規模以 blocked 處理，探測本身也有 timeout。
 
+## Hybrid snapshot store（1.1）
+
+被攔截的內容必須被保存，否則 gate 只是拒絕而不是替代方案。保存採混合式：**SQLite 只擁有授權**，**不可變 payload 存在內容定址的私有檔案**。
+
+SQLite 內容僅限：不透明 handle identity、session scope 與 generation、TTL、quota、內容 refcount、揭露累計、清理狀態與有界的操作計量。**絕不寫入**：來源路徑、question、answer、quote、payload 預覽、provider 錯誤內容，或任何檔案系統路徑。blob 位置由 SHA-256 內部推導，既不儲存也不外露。
+
+Schema 是規範性的，放在 `contracts/store/v1.sql`，兩個語言核心逐字執行該檔，不得各自內嵌等價的 `CREATE TABLE`；cross-language interoperability 測試以同一個 store 檔案由兩邊互相讀寫驗證。
+
+發佈順序（capture batch）必須依序為：
+
+1. 呼叫端先完成整個 request 的驗證與授權，並有界地取得 bytes；
+2. 每個 payload 以 `O_CREAT|O_EXCL|O_NOFOLLOW` 寫入暫存檔、`fsync`、`chmod` 0600，再原子 rename 到內容定址位置；
+3. **單一** SQLite transaction 一次發佈所有 handle 並取得所有 refcount。
+
+payload 與 metadata 都持久化之前不存在可用 handle；multi-source capture 要嘛全部發佈、要嘛一個都不發佈。(2) 與 (3) 之間崩潰只會留下沒有 row 的孤兒 blob 檔，由 sweep 回收，絕不會留下可用 handle。
+
+可讀性是 SQL 述詞而非檔案是否存在：
+
+```sql
+revoked = 0 AND expires_at_ms > :now
+AND scope.closed_at_ms IS NULL AND scope.generation = :generation
+```
+
+因此過期、撤銷、scope 已關閉或 generation 過期的 handle，在述詞不再成立的當下即不可讀，與實體清理是否執行無關。`expires_at_ms` 為 UTC 毫秒；每次讀取取 `max(wall_clock, clock_high_water_ms)`，時鐘倒轉不能復活已過期的 handle。
+
+Dedupe 依內容雜湊，refcount 只在發佈或移除 handle 的同一個 transaction 內變動。刪除採 mark-then-sweep：先在 transaction 內標記 `pending_delete`，在所有鎖之外 unlink，再由第二個 transaction 重新確認 `refcount = 0 AND pending_delete = 1` 才刪除 row。雜湊碰撞或內容不符一律 fail closed（`STORE_FAILED`），**不刪除該檔案** —— 該 blob 可能仍被其他有效 handle 參照，刪除會把一個損壞擴散成多個。
+
+Handle 綁定於受信任的 (host, profile, principal, session, generation)，五個成分都來自 host，都先摘要後儲存，因此不保留 session 名稱、帳號或 profile 標籤。**per-turn 事件不得關閉 scope**：Hermes 在每次 `run_conversation` 結束都會觸發 `on_session_end`，OpenClaw 會以 `reason: "compaction"` 在對話進行中觸發 `session_end`；在這兩處撤銷 handle，等於刪掉下一輪最需要的復原狀態。真正的界線才撤銷（Hermes 的 `on_session_finalize`/`on_session_reset`，OpenClaw 的 `new`/`reset`/`deleted`），其餘一律交給 TTL。
+
+**舊版 spill 檔案永不被匯入為授權 handle。** 磁碟上一個未經認證的檔案不是 capability。1.1 提供計數與清除，但只在呼叫端明確要求時執行。
+
+## 決定性擷取與累計揭露上限（1.1）
+
+`inspect` 是「我需要看到真正的文字」的逃生門，刻意不是檢索工具。四個性質使它可以安全交給代理：
+
+1. **精確且自我標示。** 回傳的每個 byte 都逐字複製自呼叫端指名的不可變 snapshot；envelope 標為 `deterministic_extraction` 且 `provenance.derived = false`，不可能被讀成摘要。該路徑完全沒有 provider 參照，「零 LLM 呼叫」因此是結構事實而非承諾。
+2. **單頁有界。** 一頁上限 `inspect.max_result_bytes`（16 KiB），以 segment 的 UTF-8 bytes 計。
+3. **累計有界。** 分頁是擊破單頁上限最明顯的方式，因此**每一頁在回傳任何 byte 之前**都先在同一個 transaction 內對 per-source 與 per-session 揭露上限做 check-and-increment。上限用盡後續頁回傳零內容並標 `DISCLOSURE_EXHAUSTED`。沒有任何設定可以讓重複小量讀取重組出完整 payload。
+4. **續頁是認證而非算術。** cursor 是以 store metadata 內的金鑰做 HMAC 標記的不透明 token，綁定 handle、snapshot hash 與正規化 selector；不能被編輯以跳過掃描預算，不能指向另一個 snapshot，也不能在另一個 store 重放。
+
+Selector 為嚴格 union：`lines`（1-based inclusive）、`bytes`（0-based half-open）、`search`（僅字面 needle，永不接受 regex，因此掃描時間對 snapshot 大小線性）。byte range 兩端都會拉回 UTF-8 邊界，emit 的文字必然是 snapshot 的子字串。
+
 ## 共用 JSON contract
 
 實作建立 `contracts/v1/*.schema.json`，JSON Schema 2020-12，所有 object `additionalProperties: false`，數字有上下界，字串以 UTF-8 byte guard 補充 schema 長度驗證。版本不相容必須拒絕；host metadata 放 adapter 私有區，不混入核心契約。
+
+`contracts/v1/tool-args.schema.json` 另外規範代理實際呼叫的三個工具參數，兩個核心以同一份 schema 驗證，避免兩個 host 漂移。路徑只出現在該檔：capture 當下授權後即丟棄，永不進入 `request.schema.json`、envelope、store 或 metric label。`context_shunt_read` 必須恰好一種來源形式 —— `paths`（初次擷取）或 `handles`（對已持有 snapshot 的精煉提問）—— 同時給或都不給都會被拒絕。
 
 Reader request 範例：
 
@@ -108,8 +176,8 @@ Spill 存在 workspace 之外的私有 cache，directory 0700／files 0600，ato
 
 | Adapter | Pre-tool | Reader model bridge | Post-tool release 條件 |
 | --- | --- | --- | --- |
-| Hermes | pre_tool_call 正規化並執行 gate | ctx.llm，指定 gpt-5.6-luna | transform_tool_result 有 fail-open 風險；需外層受控 producer／wrapper 保證無 raw fallback |
-| OpenClaw | before_tool_call 正規化並執行 gate | runtime llm，指定 gpt-5.6-luna | 必須用 sentinel 實測 middleware 相對於 truncation、persistence、context insertion 的順序 |
+| Hermes | pre_tool_call 正規化並執行 gate | ctx.llm；並以 `register_auxiliary_task` 註冊 `context_shunt_reader`，使用者 `auxiliary.<key>` 設定優先於 plugin 預設。歸屬上限為 `unverified` | transform_tool_result 有 fail-open 風險；需外層受控 producer／wrapper 保證無 raw fallback |
+| OpenClaw | before_tool_call 正規化並執行 gate | runtime llm 的 isolated-agent-runtime 路徑（零工具、不繼承對話）。host 回報自身選定結果，歸屬為 `resolved` | 必須用 sentinel 實測 middleware 相對於 truncation、persistence、context insertion 的順序 |
 
 兩者須在啟動時產生 capability report：host/SDK version、tool coverage、hook ordering、raw replacement guarantee、model support、tested fixture ID。模型不可用就回 MODEL_ERROR，不默默換模型。Runtime upgrades 使能力證據失效，重跑 conformance 才能啟用相關模式。
 
@@ -129,11 +197,51 @@ OpenClaw 必須針對頭、中、尾 sentinel 量測 raw capture、truncation、
 - No raw leak 適用於被攔截的大型 payload 在主代理 message、tool history、persistence、trace、log、例外、fallback、debug 及 retry 路徑；允許的短 quote 仍計入 caps。原文僅可存在授權 snapshot／私有 spill 與 reader 的最小必要輸入，不能傳給其他模型或主代理。
 - Output guard 是最後固定邊界；其失敗也必須由 adapter 生成固定小錯誤。若 host 不能保證此邊界，拒絕啟用該 interception mode，而不是依賴 fail-open。
 
-## Metrics
+## Provenance 與 reader 設定（1.1）
+
+`actual_model` **永不**由 `requested_model` 合成。三件事分開記錄，任何一項都可能缺席：
+
+| 欄位 | 意義 |
+| --- | --- |
+| `requested_*` | adapter 向 host 要求的供應商與模型。永遠已知。 |
+| `resolved_*` | host 自述其政策與路由後選定的目標。只有 host 揭露時才已知，否則為 `null`，絕不由 request 回填。 |
+| `reported_*` | **供應商**自述實際產生 tokens 的模型。只有供應商回報且 host 傳遞時才已知。 |
+
+`attribution_status` 說明能被證明的最強結論：`actual`（供應商確認且與請求一致）、`resolved`（host 回報自身路由結果，是路由事實而非供應商確認）、`unverified`（有值回來，但該 host surface 無法區分「供應商回報」與「請求的回音」）、`mismatch`（具體值與請求矛盾）、`unknown`（什麼都沒回來）、`not_applicable`（根本沒有模型呼叫）。
+
+`provider_confirms_generation` 只能由**讀過該 host 原始碼的 adapter**斷言，核心不做推論。Adapter 無法區分兩者時傳 `false`，結果即為 `unverified`。
+
+`reader.attribution_policy` 決定無法證明歸屬時的行為：`allow_unverified`（預設，發佈誠實標示的答案）或 `require_match`（改為拒絕，回 `PROVENANCE_UNAVAILABLE`）。預設選 `allow_unverified` 的理由是：在無法證明歸屬的 host 上，`require_match` 等於完全停用 reader。矛盾（`mismatch`）在兩種政策下都拒絕 —— 那是錯的答案，不是弱的答案。Envelope 一定記錄當時生效的政策。
+
+`reader.fallback_chain` **只為可用性**存在。只在可重試的可用性失敗時前進，絕不因答案品質不佳而前進；每次嘗試保留自己的 provenance 與 usage，且啟用過 fallback 會記為 `fallback_used`。答案品質不佳的誠實補救是對同一 snapshot 提出精煉問題，把可用性 fallback 當成語意品質救援是誤導。
+
+Reader 失敗（provider、timeout、格式錯誤、citation 失效、provenance 失效）**必須保留有效 handle**，並在 `recovery` 中給出決定性後續動作。只有 handle 本身失效才需要重新擷取來源。
+
+## Metrics 與 token accounting
 
 記錄 gate allow/block reason、raw/output bytes、spill bytes/count、quota failures、chunks planned/processed/omitted、verified/rejected citations、timeout/cancel/retry、status/code、LLM calls/input/output tokens、各階段 latency histogram、host mode/capability failures。主代理 context bytes/tokens saved 與 reader 成本分開報告；只在有版本化單價配置時估計費用，否則報 token usage。
 
-Metrics labels 只允許 bounded enums（adapter/mode/reason/status），不含 source path、question、answer、quote、payload、secret、完整 request/source IDs。診斷 request correlation 只存短期隨機 ID 於受限事件記錄，不作 metric label。預設停用 provider prompt logging，測試主代理和 reader tracing 的隔離；若無法關閉不安全 tracing 就阻擋功能啟用。
+每次操作記錄有界的非內容 metadata：`operation_id`、`kind`、`status`、`code`、`raw_input_bytes`、`raw_input_baseline_tokens`、`baseline_kind`/`baseline_method`、`baseline_credit_tokens`、`main_model_envelope_bytes`/`_tokens`、reader input/output/cache tokens（若有回報）、`attempts_started`、`attempts_usage_complete`、`delivery_boundary`、`main_context_tokens_saved`、`net_tokens_saved`。
+
+公式為契約：
+
+```text
+main_context_tokens_saved = baseline_credit_tokens - main_model_envelope_tokens
+net_tokens_saved          = main_context_tokens_saved
+                          - reader_input_tokens - reader_output_tokens
+```
+
+兩者皆為**有號數**。精煉提問、失敗重試與 inspect 分頁都會得到負值，這是正確答案：它們消耗 context 而沒有新增任何被withheld 的內容。
+
+三條紀律：
+
+* **零不代表未知。** 供應商未回報的 token 數存為 NULL、呈現為 `null`；仍需數字時以自行量測的 bytes 推導，並標記 `bytes_div_4` 而非冒充精確值。`unknown` 只出現在完全沒有嘗試的情況。精確的供應商 usage 永遠優先。
+* **baseline 只計一次。** `baseline_credit_tokens` 只在首次 withhold 該 snapshot 的操作上為非零；其後同一 snapshot 的操作記為零 credit，但仍記錄自身 envelope 與 reader 開銷，因此重複復原呈現為累積成本而非重複節省。
+* **反事實要標示為反事實。** `full_payload_counterfactual` 是「若整份 payload 進入對話會花掉多少」；`host_truncated_observed` 是 host 早已截斷、只能觀察到截斷後大小時適用的另一個較小 baseline。在後者情況下計入完整 payload 是捏造。
+
+Egress 在 envelope 完成後量測。Envelope 只帶不透明的 `accounting_id`，其指向的紀錄在序列化之後才寫入 store，因此量測不可能包含自身。
+
+Metrics labels 只允許 bounded enums（adapter/mode/reason/status/form/decision/result/stage），**不含 model 或 provider 名稱**、source path、question、answer、quote、payload、secret、完整 request/source IDs。模型名稱是無界的廠商文字，會隨設定改變，作為 metric 維度既是成本問題也是部署指紋；「請求了哪個模型」屬於 envelope 的 provenance，不屬於時間序列。診斷 request correlation 只存短期隨機 ID 於受限事件記錄，不作 metric label。預設停用 provider prompt logging，測試主代理和 reader tracing 的隔離；若無法關閉不安全 tracing 就阻擋功能啟用。
 
 ## Future optional code-writer contract
 

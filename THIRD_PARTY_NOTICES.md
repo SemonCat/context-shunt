@@ -56,17 +56,52 @@ Pinned or bounded, with their licences:
 | `ajv` | `8.17.1` | MIT | TypeScript core — contract validation |
 | `ajv-formats` | `3.0.1` | MIT | TypeScript core — `date-time` format |
 
+The snapshot store uses `node:sqlite` and Python's `sqlite3`, both of which are standard
+library modules of their respective runtimes. No third-party database driver is vendored or
+distributed, and no new runtime dependency was added for the store.
+
 Development-only, not distributed: `pytest`, `ruff`, `typescript`, `vitest`,
 `@types/node`. None of these ship inside either plugin package.
 
 Neither package bundles or redistributes host code. `openclaw` and `hermes-agent` are
 integration targets resolved at the user's install; their licences are their own.
 
+## Headroom (Compress-Cache-Retrieve, design inspiration)
+
+| Field | Value |
+| --- | --- |
+| Source | Headroom's Compress-Cache-Retrieve pattern for keeping oversized tool output out of an agent's context |
+| Relationship | Design inspiration only. **No code was copied, adapted, translated or read into this implementation.** |
+
+Contract revision 1.1 adopts the *shape* of that pattern: intercepted content is cached
+out of the conversation behind an opaque handle, and the agent works against the handle
+rather than the payload. The idea that a cache-and-handle indirection is the right way to
+keep large tool output out of a context window is not this project's invention, and saying
+so is more useful than pretending otherwise.
+
+What is implemented here is independently written and differs in ways that matter:
+
+- **No full-original retrieval, ever.** This is the deliberate divergence. Headroom offers
+  retrieval of the cached original back into the main model context. No tool this project
+  registers can do that. Everything reachable is either a cited model-derived answer or a
+  capped, cumulatively-limited exact extract — and the cumulative disclosure ceiling exists
+  precisely so that repeated small extracts cannot reconstitute the original either.
+- Authorization is a SQL predicate over a trusted (host, profile, principal, session,
+  generation) scope, not possession of a cache key.
+- The cache is split: SQLite holds authorization only and is forbidden by its own normative
+  DDL from holding paths, questions, answers or previews; payloads live in content-addressed
+  private files whose location is derived rather than stored.
+- Every reply is a bounded, schema-validated envelope with mechanically verified citations
+  and truthful model provenance.
+
+No Headroom licence obligations attach to this repository, because no Headroom material is
+present in it. This notice exists to attribute an idea, not to satisfy a licence.
+
 ## Host and service names
 
-Hermes, OpenClaw, Suma and `gpt-5.6-luna` appear here as integration interfaces and
-service names. This repository ships none of their SDKs, code or model weights, and makes
-no claim about their licences.
+Hermes, OpenClaw, Headroom, Suma and `gpt-5.6-luna` appear here as integration interfaces,
+project names and service names. This repository ships none of their SDKs, code or model
+weights, and makes no claim about their licences.
 
 This file does not replace any third party's own licence, nor any `NOTICE` that a third
 party requires to be preserved.

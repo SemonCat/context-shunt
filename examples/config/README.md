@@ -1,20 +1,70 @@
 # Example configuration
 
-Two files, one per host. Both carry the v1 defaults: the local gate on, the reader on and
-pinned to `gpt-5.6-luna`, the optional Suma post-tool mode off, and no writer key at all.
+Merge these into your host's config; do not replace the file.
 
-- [`hermes.config.yaml`](hermes.config.yaml) — merge into `~/.hermes/config.yaml`
-- [`openclaw.json`](openclaw.json) — merge into your `openclaw.json`
+- [`hermes.config.yaml`](hermes.config.yaml) — Hermes (`~/.hermes/config.yaml`)
+- [`openclaw.json`](openclaw.json) — OpenClaw (`openclaw.json`)
 
-Replace `/path/to/your/project` with the roots you actually want readable. Nothing outside
-a configured root can become a source.
+Both are checked by `./scripts/verify packaging all`, which loads the `config` block through
+the real loader. An example that would not actually load fails the gate — so what is here is
+exactly what the plugin accepts, with no explanatory keys smuggled in.
 
-Keep each host's adjacent per-plugin LLM policy from the example. It authorizes only the
-fixed reader model; it is deliberately outside the plugin-owned `config` object.
+## The keys
 
-Caps in `limits` may only be **narrowed**. A value wider than the contract default in
-[`contracts/v1/limits.json`](../../contracts/v1/limits.json) is refused when the plugin
-loads, so a config file cannot widen the boundary the acceptance gates measure.
+| Key | Default | What it does |
+| --- | --- | --- |
+| `workspace_roots` | *(required)* | The only roots that may become sources. Everything else is `UNSAFE_SOURCE`. |
+| `cache_dir` | `~/.cache/context-shunt` | Private cache: SQLite authorization metadata plus content-addressed payload files. Refused if it resolves inside a workspace root. `spill_dir` is accepted as a pre-1.1 alias. |
+| `denylist` | `[]` | Extra administrator denials, relative globs inside a root. The built-in secret policy applies regardless. |
+| `gate_enabled` | `true` | Block oversized and unprovable reads before they run. |
+| `reader.enabled` | `true` | The question-driven reader. The only key here that needs a model. |
+| `reader.model` | `gpt-5.6-luna` | Configurable since contract revision 1.1. What keeps a substitution from going unnoticed is the envelope's provenance block, not a hardcoded value. |
+| `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
+| `reader.attribution_policy` | `allow_unverified` | What to do when the host cannot prove which model answered. See below. |
+| `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
+| `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
+| `stats.enabled` | `true` | Read-only session accounting. |
+| `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill. Unsupported on both hosts, so setting it `true` changes nothing. |
+| `limits` | `{}` | Deployment caps. **May only be narrowed** — a wider value is refused at load. |
 
-See [`docs/install.md`](../../docs/install.md) for install and uninstall, and
-[`docs/capability-matrix.md`](../../docs/capability-matrix.md) for what each host supports.
+## `attribution_policy`
+
+Neither supported host proves which model generated the tokens
+([`capability-matrix.md`](../../docs/capability-matrix.md) has the per-host ceiling and the
+source evidence).
+
+- `allow_unverified` **(default)** — publish the answer with the truthful
+  `attribution_status`. On Hermes that is `unverified`; on OpenClaw, `resolved`.
+- `require_match` — refuse to answer unless the host reported a selection that agrees with
+  the request, returning `PROVENANCE_UNAVAILABLE` instead.
+
+`require_match` is a legitimate choice, but on a host that cannot prove attribution it
+disables the reader entirely. `inspect` and `stats` keep working either way — neither
+touches a model. A value that *contradicts* the request is refused under both policies.
+
+## Host model overrides
+
+Both hosts gate plugin model overrides. Without the `llm` block shown in each example, the
+host refuses the override and the reader runs on whatever the host would have picked. That
+is not silently accepted: the envelope reports the requested model and the attribution
+status regardless.
+
+On Hermes the reader is additionally registered as an auxiliary task, so it appears in
+`hermes model → Configure auxiliary models` under `auxiliary.context_shunt_reader`. Anything
+set there wins over the plugin's own defaults.
+
+## Narrowing caps
+
+Every cap lives in [`contracts/v1/limits.json`](../../contracts/v1/limits.json) and a
+deployment may only lower it. Some worth knowing about:
+
+```yaml
+limits:
+  full_read_max_lines: 200              # block smaller reads too
+  store_handle_ttl_seconds: 900         # shorter handle lifetime
+  disclosure_max_per_source_bytes: 65536  # tighter inspect budget
+  store_max_bytes: 33554432             # smaller cache
+```
+
+A wider value is refused at load with `LIMIT_MAY_ONLY_NARROW`, so a config file cannot widen
+the boundary the acceptance gates measure.
