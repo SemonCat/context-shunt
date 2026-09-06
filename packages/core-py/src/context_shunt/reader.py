@@ -50,7 +50,7 @@ from .chunking import Chunk, estimate_tokens, plan
 from .citations import CitationVerifier, referenced_ids, strip_unsupported_assertions
 from .clock import Clock, Deadline, MonotonicClock
 from .errors import CancelledError, DeadlineExceeded, ShuntError
-from .limits import DEFAULT_LIMITS, Limits
+from .limits import DEFAULT_LIMITS, Limits, envelope_byte_cap
 from .metrics import MetricsSink, NullMetrics
 from .paths import assert_no_secret
 from .provenance import (
@@ -483,10 +483,12 @@ class Reader:
         dropped = 0
         # One drop per pass, so this cannot run longer than there are citations.
         for _ in range(len(verified) + 1):
-            if (
-                E.serialized_bytes(build(answer, verified, False))
-                <= self._limits.max_envelope_bytes
-            ):
+            candidate = build(answer, verified, False)
+            # The same function the guard uses, not a constant: if a later revision moves
+            # model_derived to a different cap, trimming must move with it rather than
+            # quietly dropping evidence that would have fit.
+            cap = envelope_byte_cap(candidate.get("result_kind"), self._limits)
+            if E.serialized_bytes(candidate) <= cap:
                 return answer, verified, dropped
             if not verified:
                 return "", [], dropped

@@ -39,7 +39,7 @@ import {
   serializedBytes,
 } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";
-import { DEFAULT_LIMITS, Limits } from "./limits.js";
+import { DEFAULT_LIMITS, Limits, envelopeByteCap } from "./limits.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
 import {
   type Attribution,
@@ -476,7 +476,12 @@ export class Reader {
     let dropped = 0;
     // One drop per pass, so this cannot run longer than there are citations.
     for (let pass = 0; pass <= citations.length; pass += 1) {
-      if (serializedBytes(build(text, kept, false)) <= this.limits.maxEnvelopeBytes) {
+      const candidate = build(text, kept, false);
+      // The same function the guard uses, not a constant: if a later revision moves
+      // model_derived to a different cap, trimming must move with it rather than quietly
+      // dropping evidence that would have fit.
+      const cap = envelopeByteCap(candidate.result_kind, this.limits);
+      if (serializedBytes(candidate) <= cap) {
         return { answer: text, citations: kept, dropped };
       }
       if (kept.length === 0) return { answer: "", citations: [], dropped };

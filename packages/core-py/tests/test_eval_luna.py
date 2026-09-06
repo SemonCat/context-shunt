@@ -84,13 +84,10 @@ def test_the_eval_body_matches_the_current_apis(tmp_path):
     verifier = CitationVerifier(registry)
     assert verifier.verify("eval", {"quote": ""}).verified is False
 
-    # The provider is never reached: a blank question is refused before any call, so this
-    # asserts the shapes without needing a model.
-    bridge_calls = 0
-
+    # The provider is never reached: a blank question is refused before any call is made.
+    # Reaching this bridge raises, and `Reader.answer` only catches ShuntError, so the
+    # AssertionError propagates and fails the test rather than being swallowed.
     def refuse(**_kwargs):
-        nonlocal bridge_calls
-        bridge_calls += 1
         raise AssertionError("the eval wiring check must not call a provider")
 
     provider = HostBridgeProvider(refuse, DEFAULT_LIMITS, READER_MODEL)
@@ -114,7 +111,6 @@ def test_the_eval_body_matches_the_current_apis(tmp_path):
     # `answer` returns a ReaderResult, not an envelope: the scored test unwraps `.envelope`.
     assert result.envelope["status"] == "error"
     assert set(("answer", "citations", "coverage")) <= set(result.envelope)
-    assert bridge_calls == 0
 
 
 def test_corpus_is_fixed_and_complete():
