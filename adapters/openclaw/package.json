@@ -1,7 +1,7 @@
 {
   "name": "context-shunt-openclaw",
-  "version": "1.0.0",
-  "description": "Read-only context shunt for OpenClaw: blocks oversized full reads before they run and answers questions about large sources with a fixed cheap reader model.",
+  "version": "1.1.0",
+  "description": "Read-only context shunt for OpenClaw: blocks oversized full reads before they run, answers questions about large sources with a configurable reader model and truthful provenance, and offers a zero-model exact inspector under a cumulative disclosure ceiling.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./index.ts",
@@ -10,7 +10,7 @@
     "extensions": ["./index.ts"]
   },
   "dependencies": {
-    "@context-shunt/core": "1.0.0"
+    "@context-shunt/core": "1.1.0"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
@@ -21,5 +21,5 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=22.22.3" }
 }

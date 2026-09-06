@@ -470,7 +470,10 @@ def run_packaging(gate: str) -> list[GateResult]:
         "import('./packages/core-ts/dist/index.js').then(m=>{"
         "if(m.DEFAULT_LIMITS.fullReadMaxLines!==350)throw new Error('limits');"
         "if(m.READER_MODEL!=='gpt-5.6-luna')throw new Error('model');"
-        "m.requestValidator();console.log('OK')})"
+        "if(m.EMITTED_SCHEMA_VERSION!=='1.1')throw new Error('contract revision');"
+        "if(!m.storeDdl().includes('CREATE TABLE IF NOT EXISTS handles'))"
+        "throw new Error('store DDL missing from dist');"
+        "m.requestValidator();m.toolArgsValidator();console.log('OK')})"
         ".catch(e=>{console.error(e.message);process.exit(1)})"
     )
     proc = _run(["node", "-e", probe], ROOT)
@@ -498,17 +501,30 @@ def run_packaging(gate: str) -> list[GateResult]:
         if missing:
             failures.append(f"{manifest} files[] is missing {missing}")
 
-    # 4. The Python package ships the vendored contracts.
+    # 4. Both packages ship the vendored contracts *including the store DDL*, which is
+    #    executed at runtime - a package without it cannot open a store at all.
+    for label, root in (
+        ("core-py", ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts"),
+        ("core-ts", CORE_TS / "contracts"),
+    ):
+        checks += 1
+        ok = (
+            (root / "v1" / "limits.json").exists()
+            and (root / "v1" / "request.schema.json").exists()
+            and (root / "v1" / "tool-args.schema.json").exists()
+            and (root / "store" / "v1.sql").exists()
+        )
+        lines.append(f"{label} vendored contracts (incl. store DDL): {'pass' if ok else 'fail'}")
+        if not ok:
+            failures.append(f"{label} vendored contracts are missing or incomplete")
+
+    # 4b. The Python wheel's package-data globs actually cover the DDL.
     checks += 1
-    vendored = (
-        ROOT / "packages" / "core-py" / "src" / "context_shunt" / "contracts" / "v1"
-    )
-    ok = (vendored / "limits.json").exists() and (
-        vendored / "request.schema.json"
-    ).exists()
-    lines.append(f"core-py vendored contracts: {'pass' if ok else 'fail'}")
+    pyproject = (ROOT / "packages" / "core-py" / "pyproject.toml").read_text()
+    ok = "contracts/store/*.sql" in pyproject
+    lines.append(f"core-py package-data covers the store DDL: {'pass' if ok else 'fail'}")
     if not ok:
-        failures.append("core-py vendored contracts are missing")
+        failures.append("core-py package-data does not ship contracts/store/*.sql")
 
     # 5. Inspect the actual archives, then install/import/uninstall them in clean roots.
     artifact_checks, artifact_lines, artifact_failures = _artifact_install_smoke()
@@ -598,6 +614,10 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                     "package/LICENSE",
                     "package/dist/index.js",
                     "package/contracts/v1/limits.json",
+                    "package/contracts/v1/tool-args.schema.json",
+                    # The store DDL is executed at runtime, so a package without it is
+                    # unusable rather than merely incomplete.
+                    "package/contracts/store/v1.sql",
                 ),
                 "openclaw": (
                     "package/LICENSE",
@@ -644,8 +664,11 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                 [
                     "node",
                     "-e",
-                    "import('@context-shunt/core').then(m=>{if(m.READER_MODEL!=="
-                    "'gpt-5.6-luna')process.exit(1)})",
+                    "import('@context-shunt/core').then(m=>{"
+                    "if(m.READER_MODEL!=='gpt-5.6-luna')process.exit(1);"
+                    "if(m.EMITTED_SCHEMA_VERSION!=='1.1')process.exit(1);"
+                    "if(!m.storeDdl().includes('CREATE TABLE IF NOT EXISTS handles'))"
+                    "process.exit(1)}).catch(()=>process.exit(1))",
                 ],
                 js_root,
             )
@@ -703,6 +726,8 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                 wheel_ok = (
                     any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
                     and "context_shunt/contracts/v1/limits.json" in names
+                    and "context_shunt/contracts/v1/tool-args.schema.json" in names
+                    and "context_shunt/contracts/store/v1.sql" in names
                     and "context_shunt/__init__.py" in names
                 )
             except (OSError, zipfile.BadZipFile):
@@ -725,7 +750,19 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                 [
                     str(python),
                     "-c",
-                    "import context_shunt; assert context_shunt.__version__ == '1.0.0'",
+                    "import context_shunt as c; "
+                    "assert c.__version__ == '1.1.0', c.__version__; "
+                    "assert c.EMITTED_SCHEMA_VERSION == '1.1'; "
+                    # An installed wheel must be able to open a store from its own
+                    # vendored DDL, in a clean root with no repository present.
+                    "import tempfile, pathlib; "
+                    "root = pathlib.Path(tempfile.mkdtemp()) / 'cache'; "
+                    "store = c.SnapshotStore(root); "
+                    "ident = c.ScopeIdentity(host='smoke', profile='p', principal='l', "
+                    "session='s'); "
+                    "h = store.publish(ident, [c.Capture(data=b'installed\\n', "
+                    "media_type='text/plain', line_count=1)])[0]; "
+                    "assert store.load_payload(h) == b'installed\\n'",
                 ],
                 ROOT,
             )
@@ -850,7 +887,12 @@ def _release_artifact_scan() -> list[str]:
 
 
 def _uninstall_smoke() -> tuple[bool, str]:
-    """A session's handles and spill files must be gone after teardown."""
+    """Teardown must clear handles and the private payloads they pointed at.
+
+    This also pins the distinction 1.1 introduced: an ordinary per-turn boundary keeps the
+    handles (a host fires one every turn, and destroying recovery state there was the bug),
+    while a real session boundary revokes them and the content goes with them.
+    """
     interpreter = _python()
     if interpreter is None:
         return False, "python3 not found"
@@ -859,31 +901,38 @@ import sys, tempfile, pathlib
 sys.path.insert(0, "packages/core-py/src")
 from context_shunt.config import load as load_config
 from context_shunt.capability import CapabilityReport, supported
-from context_shunt.limits import READER_MODEL
+from context_shunt.limits import EMITTED_SCHEMA_VERSION, READER_MODEL
 from context_shunt.session import ShuntSession
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 (tmp / "ws").mkdir()
 (tmp / "ws" / "a.txt").write_text("alpha\\n")
 config = load_config(
-    {"workspace_roots": [str(tmp / "ws")], "spill_dir": str(tmp / "cache"),
+    {"workspace_roots": [str(tmp / "ws")], "cache_dir": str(tmp / "cache"),
      "suma_post_tool": {"enabled": True}},
     default_spill_dir=tmp / "cache",
 )
 capability = CapabilityReport(
     adapter="smoke", adapter_version="1", host_name="smoke", host_version="1",
-    contract_version="1.0", reader_model=READER_MODEL,
+    contract_version=EMITTED_SCHEMA_VERSION, reader_model=READER_MODEL,
     modes=[supported("local_gate"), supported("reader"), supported("suma_post_tool")],
 )
 session = ShuntSession("smoke", config, capability)
-session.register_path(str(tmp / "ws" / "a.txt"))
+entry = session.register_path(str(tmp / "ws" / "a.txt"))
 outcome = session.post_tool_result("req_smoke", "x" * 60000)
 assert outcome.action == "spill", outcome.action
-spills = list((tmp / "cache").rglob("*.spill"))
-assert spills, "spill was not written"
+blobs = list((tmp / "cache" / "blobs").rglob("*.bin"))
+assert blobs, "payload was not written"
+
+# An ordinary turn boundary keeps recovery state.
+session.end_turn()
+assert session.registry.resolve("smoke", entry.source_id).source_id == entry.source_id
+
+# A real session boundary revokes it, and the content goes with it.
 session.close()
-assert not list((tmp / "cache").rglob("*.spill")), "spill survived teardown"
 assert session.registry.count("smoke") == 0, "handles survived teardown"
+assert not list((tmp / "cache" / "blobs").rglob("*.bin")), "payload survived teardown"
+assert not list((tmp / "cache").rglob("*.spill")), "legacy artifact present"
 print("OK")
 """
     proc = _run([interpreter, "-c", script], ROOT)
@@ -952,11 +1001,21 @@ def _versions() -> dict[str, str]:
         except OSError:
             return "unavailable"
 
+    # Read the contract revision from the contract, not from a constant here: a hardcoded
+    # copy is exactly the sort of thing that silently reports the previous release.
+    try:
+        limits = json.loads((ROOT / "contracts" / "v1" / "limits.json").read_text())
+        contract = str(limits["contract"]["emitted_version"])
+        accepted = ",".join(limits["contract"]["supported_request_versions"])
+    except (OSError, ValueError, KeyError):
+        contract, accepted = "unknown", "unknown"
+
     return {
         "python": platform.python_version(),
         "node": probe(["node", "--version"]),
         "platform": platform.platform(),
-        "contract": "1.0",
+        "contract": contract,
+        "accepts": accepted,
     }
 
 
@@ -1044,7 +1103,8 @@ def main(argv: list[str]) -> int:
         f"failed={len(failed)} not_run={len(not_run)} duration={elapsed:.2f}s"
     )
     print(
-        f"versions: python={versions['python']} node={versions['node']} contract={versions['contract']}"
+        f"versions: python={versions['python']} node={versions['node']} "
+        f"contract={versions['contract']} accepts={versions['accepts']}"
     )
     report = _write_report(argv, results, code, elapsed)
     print(f"report: {report.relative_to(ROOT)}")

@@ -1,7 +1,7 @@
 {
   "name": "@context-shunt/core",
-  "version": "1.0.0",
-  "description": "Read-only context shunt core: pre-read gate, question-driven Luna reader, citation verification, bounded envelopes and optional Suma spill.",
+  "version": "1.1.0",
+  "description": "Read-only context shunt core: pre-read gate, question-driven reader with truthful provenance, deterministic exact extraction under a disclosure ceiling, a hybrid SQLite/content-addressed snapshot store, signed token accounting and bounded envelopes.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,5 +28,5 @@
     "typescript": "5.7.2",
     "vitest": "2.1.8"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=22.22.3" }
 }

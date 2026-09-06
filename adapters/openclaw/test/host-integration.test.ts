@@ -80,7 +80,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   it("keeps the Suma post-tool mode disabled for this host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     const report = buildCapabilityReport({
-      hooks: ["before_tool_call", "after_tool_call", "tool_result_persist"],
+      hooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
       hasModelBridge: true,
       hostVersion: String(pkg.version),
     });
@@ -88,6 +88,34 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(modeEnabled(report, "suma_post_tool")).toBe(false);
     expect(modeEnabled(report, "local_gate")).toBe(true);
     expect(modeEnabled(report, "reader")).toBe(true);
+    // The two paths that need no provider at all.
+    expect(modeEnabled(report, "deterministic_inspect")).toBe(true);
+    expect(modeEnabled(report, "session_stats")).toBe(true);
+    expect(modeEnabled(report, "session_lifecycle")).toBe(true);
+  });
+
+  it("still declares the session_end reason enum the lifecycle decision rests on", () => {
+    // The adapter keeps handles through a compaction and revokes only on an explicit
+    // clear. That decision is only sound while the host's own reason enum says so.
+    const hookTypes = hostFile("src/plugins/hook-types.ts");
+    const start = hookTypes.indexOf("export type PluginHookSessionEndReason");
+    expect(start).toBeGreaterThan(-1);
+    const block = hookTypes.slice(start, hookTypes.indexOf(";", start));
+    for (const reason of ["new", "reset", "deleted", "compaction", "idle", "shutdown"]) {
+      expect(block).toContain(`"${reason}"`);
+    }
+    // If a future host stops rotating on compaction, the lifecycle rule needs redoing.
+    expect(hookTypes).toContain("nextSessionId?: string");
+  });
+
+  it("still says absent usage must not be projected as zero", () => {
+    // The adapter passes absent token counts through as absent on the strength of this.
+    const isolated = hostFile("src/agents/isolated-completion.ts");
+    expect(isolated).toContain("absence must not be projected as zero");
+    // And the isolated runtime is still the zero-tool, no-conversation path.
+    const runtime = hostFile("src/plugins/runtime/types-core.ts");
+    expect(runtime).toContain("Fresh, literal-zero-tool completion through the configured agent runtime.");
+    expect(runtime).toContain("Isolated runtimes currently accept one fresh user prompt, not a replayed chat history.");
   });
 
   it("registers a tool name the host manifest contract declares", () => {
@@ -96,6 +124,8 @@ describe.skipIf(!available)("openclaw host integration", () => {
       readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
     );
     expect(manifest.contracts.tools).toContain("context_shunt_read");
+    expect(manifest.contracts.tools).toContain("context_shunt_inspect");
+    expect(manifest.contracts.tools).toContain("context_shunt_stats");
   });
 
   it("loads through the real host and vetoes before the wrapped tool executes", () => {
@@ -118,13 +148,14 @@ describe.skipIf(!available)("openclaw host integration", () => {
         "context-shunt": { enabled: true, llm: { allowModelOverride: true,
           allowedModels: ["openai/gpt-5.6-luna"],
           allowedCompletionModels: ["openai/gpt-5.6-luna"] },
-          config: { workspace_roots: [workspace], spill_dir: join(workspace, ".spill"),
+          config: { workspace_roots: [workspace], cache_dir: join(workspace, "..", ".cache"),
             suma_post_tool: { enabled: false } } }
       } } };
       const registry = loader.loadOpenClawPlugins({ cache: false, activate: true, workspaceDir: workspace, config });
       const record = registry.plugins.find((entry) => entry.id === "context-shunt");
       const registration = registry.tools.find((entry) => entry.names.includes("context_shunt_read"));
       const reader = registration?.factory({ sessionKey: "agent:main:shunt", sessionId: "shunt" });
+      const toolNames = registry.tools.flatMap((entry) => entry.names).sort();
       let executions = 0;
       const rawTool = { name: "read", label: "read", description: "sentinel",
         parameters: { type: "object", additionalProperties: false,
@@ -136,6 +167,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
       const result = await wrapped.execute("tc-host", { path: source });
       console.log(JSON.stringify({ status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
         hooks: registry.typedHooks.map((entry) => entry.hookName), reader: reader?.name,
+        toolNames,
         executions, blocked: result?.details?.status, envelope: JSON.parse(result.content[0].text) }));
     `;
     const stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
@@ -156,6 +188,12 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(result.hooks).toContain("before_tool_call");
     expect(result.hooks).not.toContain("tool_result_persist");
     expect(result.reader).toBe("context_shunt_read");
+    // All three read-only tools are accepted by the real host registry, and no writer is.
+    expect(result.toolNames).toEqual([
+      "context_shunt_inspect",
+      "context_shunt_read",
+      "context_shunt_stats",
+    ]);
     expect(result.executions).toBe(0);
     expect(result.blocked).toBe("blocked");
     expect(result.envelope.code).toBe("LARGE_READ");

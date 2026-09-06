@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-shunt-core"
-version = "1.0.0"
-description = "Read-only context shunt core: pre-read gate, question-driven Luna reader, citation verification, bounded envelopes and optional Suma spill."
+version = "1.1.0"
+description = "Read-only context shunt core: pre-read gate, question-driven reader with truthful provenance, deterministic exact extraction under a disclosure ceiling, a hybrid SQLite/content-addressed snapshot store, signed token accounting and bounded envelopes."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -25,7 +25,13 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-context_shunt = ["contracts/v1/*.json", "contracts/v1/**/*.json"]
+# The store DDL is normative and executed at runtime, so it has to ship alongside the
+# JSON contracts - a wheel without it cannot open a store.
+context_shunt = [
+  "contracts/v1/*.json",
+  "contracts/v1/**/*.json",
+  "contracts/store/*.sql",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

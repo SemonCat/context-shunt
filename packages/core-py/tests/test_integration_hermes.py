@@ -61,7 +61,8 @@ sys.path.insert(0, os.environ["SHUNT_CORE"])
 sys.path.insert(0, os.environ["SHUNT_ADAPTER"])
 
 out = {"host_import": False, "hook_names": [], "registered_hooks": [],
-       "registered_tools": [], "tool_invocations": 0, "errors": [], "model_calls": []}
+       "registered_tools": [], "tool_invocations": 0, "errors": [], "model_calls": [],
+       "aux_tasks": []}
 
 try:
     from hermes_cli import plugins as host_plugins
@@ -95,11 +96,15 @@ hermes_home.mkdir()
 (hermes_home / "config.yaml").write_text(json.dumps({
     "plugins": {"entries": {"context-shunt": {
         "config": {"workspace_roots": [str(workspace)],
-                   "spill_dir": str(temp / "spill"),
+                   "cache_dir": str(temp / "cache"),
                    "suma_post_tool": {"enabled": False}},
         "llm": {"allow_model_override": True,
                 "allowed_models": ["gpt-5.6-luna"]}
-    }}}
+    }}},
+    # The auxiliary block the plugin registers is where a user pins the reader. Leaving
+    # it at the host's "auto" sentinel must fall back to the plugin default, not to a
+    # literal model named "auto".
+    "auxiliary": {"context_shunt_reader": {"provider": "auto", "model": "auto"}},
 }))
 os.environ["HERMES_HOME"] = str(hermes_home)
 
@@ -140,8 +145,16 @@ try:
     out["registered_hooks"] = sorted(manager._hooks)
     out["registered_tools"] = sorted(manager._plugin_tool_names)
     out["has_hook"] = bool(host_plugins.has_hook("pre_tool_call"))
+    # The auxiliary task has to land in the host's own registry, which is what makes it
+    # appear in `hermes model` and gives it an auxiliary.<key> config block.
+    out["aux_tasks"] = [
+        {k: entry.get(k) for k in ("key", "display_name", "description", "plugin")}
+        for entry in host_plugins.get_plugin_auxiliary_tasks()
+    ]
+    out["aux_defaults"] = (manager._aux_tasks.get(adapter.AUX_TASK_KEY) or {}).get("defaults")
+    out["reader_target_auto"] = list(adapter._reader_target())
 except Exception as exc:
-    out["errors"].append(f"register failed: {type(exc).__name__}")
+    out["errors"].append(f"register failed: {type(exc).__name__}: {exc}")
     print(json.dumps(out)); sys.exit(0)
 
 # Drive Hermes' real dispatcher. The wrapper counts only actual read_file dispatches;
@@ -170,7 +183,53 @@ try:
         {"question": "What is the retry ceiling?", "paths": [str(small)]},
         task_id="task-local", session_id="session-local", tool_call_id="tc-reader"
     )
+
+    handle = json.loads(out["reader_result"])["sources"][0]
+
+    # Hermes fires on_session_end at the end of every run_conversation call. A handle has
+    # to survive that, or a multi-turn conversation can never re-read what was shunted.
+    host_plugins.invoke_hook("on_session_end", session_id="session-local",
+                             task_id="task-local", completed=True)
+
+    out["refined_result"] = model_tools.handle_function_call(
+        "context_shunt_read",
+        {"question": "Is there a backoff setting?",
+         "handles": [{"source_id": handle["source_id"],
+                      "snapshot_id": handle["snapshot_id"]}]},
+        task_id="task-local", session_id="session-local", tool_call_id="tc-refined"
+    )
+
+    out["inspect_result"] = model_tools.handle_function_call(
+        "context_shunt_inspect",
+        {"source_id": handle["source_id"], "snapshot_id": handle["snapshot_id"],
+         "selector": {"kind": "lines", "start": 1, "end": 1}},
+        task_id="task-local", session_id="session-local", tool_call_id="tc-inspect"
+    )
+    out["model_calls_after_inspect"] = len(out["model_calls"])
+
+    out["stats_result"] = model_tools.handle_function_call(
+        "context_shunt_stats", {},
+        task_id="task-local", session_id="session-local", tool_call_id="tc-stats"
+    )
+
+    # A real session boundary does revoke, and a reset bumps the generation.
+    host_plugins.invoke_hook("on_session_finalize", session_id="session-local",
+                             platform="cli", reason="session_boundary")
+    out["after_finalize"] = model_tools.handle_function_call(
+        "context_shunt_read",
+        {"question": "Still there?",
+         "handles": [{"source_id": handle["source_id"],
+                      "snapshot_id": handle["snapshot_id"]}]},
+        task_id="task-local", session_id="session-local", tool_call_id="tc-gone"
+    )
+
     out["capability"] = adapter.capability_report()
+
+    # User auxiliary config wins over the plugin's own default.
+    def _pinned():
+        return {"provider": "openrouter", "model": "gpt-5.6-sol"}
+    adapter._auxiliary_task_config = _pinned
+    out["reader_target_pinned"] = list(adapter._reader_target())
 except Exception as exc:
     out["errors"].append(f"host dispatch failed: {type(exc).__name__}")
 
@@ -206,8 +265,33 @@ def test_host_module_imports_and_exposes_pre_tool_call(host_result):
 def test_adapter_registers_the_pre_execution_gate_and_no_writer(host_result):
     assert "pre_tool_call" in host_result["registered_hooks"], host_result["errors"]
     tools = host_result["registered_tools"]
-    assert tools == ["context_shunt_read"]
+    # Three read-only escape hatches, accepted by the host's own tool registry.
+    assert tools == ["context_shunt_inspect", "context_shunt_read", "context_shunt_stats"]
     assert not any("writ" in name or "patch" in name for name in tools)
+
+
+def test_adapter_uses_the_real_session_lifecycle_hooks(host_result):
+    """on_session_end is per-turn on Hermes, so teardown must use finalize/reset."""
+    registered = host_result["registered_hooks"]
+    assert "on_session_finalize" in registered
+    assert "on_session_reset" in registered
+    assert "transform_tool_result" not in registered
+
+
+def test_the_reader_is_registered_as_a_host_auxiliary_task(host_result):
+    """Registered in Hermes' own registry, so it appears in `hermes model`."""
+    tasks = {entry["key"]: entry for entry in host_result["aux_tasks"]}
+    assert "context_shunt_reader" in tasks, host_result["errors"]
+    entry = tasks["context_shunt_reader"]
+    assert entry["plugin"] == "context-shunt"
+    assert entry["display_name"] and entry["description"]
+    assert (host_result["aux_defaults"] or {}).get("model") == "gpt-5.6-luna"
+
+
+def test_user_auxiliary_config_overrides_the_plugin_default(host_result):
+    """"auto" is the host's inherit sentinel; a real value wins over the plugin default."""
+    assert host_result["reader_target_auto"] == ["", "gpt-5.6-luna"]
+    assert host_result["reader_target_pinned"] == ["openrouter", "gpt-5.6-sol"]
 
 
 def test_real_host_dispatch_blocks_an_oversized_full_read(host_result):
@@ -228,10 +312,57 @@ def test_real_host_reader_requests_luna_and_the_original_question(host_result):
     envelope = json.loads(host_result["reader_result"])
     assert envelope["code"] == "ANSWERED"
     assert envelope["citations"][0]["verified"] is True
-    assert len(host_result["model_calls"]) == 1
+    # The initial read is one call; the refined question later adds its own.
     call = host_result["model_calls"][0]
     assert call["model"] == "gpt-5.6-luna"
     assert "What is the retry ceiling?" in call["messages"][1]["content"]
+    # Every call carries the original question and nothing from the host conversation.
+    for each in host_result["model_calls"]:
+        assert each["model"] == "gpt-5.6-luna"
+        assert each["messages"][1]["content"].count("SOURCE EXCERPT") == 1
+
+
+def test_a_handle_survives_the_per_turn_session_end(host_result):
+    """The multi-turn bug this release fixes: the next turn must still resolve the handle."""
+    refined = json.loads(host_result["refined_result"])
+    assert refined["code"] in ("ANSWERED", "NO_MATCH"), refined
+    assert refined["sources"], "the handle did not survive the per-turn boundary"
+
+
+def test_a_real_session_boundary_does_revoke(host_result):
+    gone = json.loads(host_result["after_finalize"])
+    assert gone["code"] == "SOURCE_EXPIRED"
+    assert gone["recovery"]["actions"] == ["RECAPTURE_SOURCE"]
+
+
+def test_inspect_returns_exact_bytes_through_the_host_and_calls_no_model(host_result):
+    envelope = json.loads(host_result["inspect_result"])
+    assert envelope["code"] == "EXTRACTED"
+    assert envelope["result_kind"] == "deterministic_extraction"
+    assert envelope["provenance"]["derived"] is False
+    assert envelope["extraction"]["segments"][0]["text"] == "max_retries = 3"
+    # The reader made one call earlier; inspect added none.
+    assert host_result["model_calls_after_inspect"] == len(host_result["model_calls"])
+
+
+def test_stats_reports_this_session_without_content(host_result):
+    envelope = json.loads(host_result["stats_result"])
+    assert envelope["code"] == "STATS"
+    assert envelope["stats"]["scope"] == "session"
+    assert envelope["stats"]["records"]
+    blob = json.dumps(envelope)
+    assert "max_retries" not in blob
+    assert "What is the retry ceiling?" not in blob
+
+
+def test_hermes_attribution_is_unverified_and_never_claims_actual(host_result):
+    """The facade cannot separate a provider report from an echo, so we do not pretend."""
+    envelope = json.loads(host_result["reader_result"])
+    provenance = envelope["provenance"]
+    assert provenance["derived"] is True
+    assert provenance["attribution_status"] == "unverified"
+    assert provenance["requested_model"] == "gpt-5.6-luna"
+    assert provenance["resolved_model"] is None
 
 
 def test_capability_report_names_the_real_host_version(host_result):
@@ -239,5 +370,12 @@ def test_capability_report_names_the_real_host_version(host_result):
     assert capability.get("host", {}).get("name") == "hermes-agent"
     assert capability.get("host", {}).get("version") == "0.18.2"
     assert capability.get("reader_model") == "gpt-5.6-luna"
-    suma = next(m for m in capability["modes"] if m["mode"] == "suma_post_tool")
-    assert suma["enabled"] is False
+    assert capability.get("contract_version") == "1.1"
+    modes = {m["mode"]: m for m in capability["modes"]}
+    assert modes["suma_post_tool"]["enabled"] is False
+    assert modes["deterministic_inspect"]["enabled"] is True
+    assert modes["session_stats"]["enabled"] is True
+    assert modes["reader_task_config"]["enabled"] is True
+    assert modes["session_lifecycle"]["enabled"] is True
+    # The reader's attribution ceiling is stated in the report, not just in a doc.
+    assert any("never claims actual" in line for line in modes["reader"]["evidence"])
