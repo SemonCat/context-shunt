@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/context-shunt/contracts/v1/envelope.schema.json",
+  "title": "context-shunt v1 bounded envelope",
+  "description": "The single reply shape for every gate, reader and spill path. No raw/debug field may be added.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "status", "code", "answer", "citations", "coverage", "sources", "retryable"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "status": { "enum": ["ok", "partial", "blocked", "error"] },
+    "code": {
+      "enum": ["ANSWERED", "NO_MATCH", "LARGE_READ", "UNCLASSIFIABLE_READ", "SPILLED",
+        "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
+        "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
+        "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
+        "HOST_UNSAFE", "UPSTREAM_TRUNCATED", "CANCELLED"]
+    },
+    "answer": { "type": "string", "maxLength": 8192 },
+    "citations": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/citation" } },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "sources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/sourceHandle" } },
+    "retryable": { "type": "boolean" },
+    "guidance": {
+      "description": "Optional bounded operator/agent guidance for blocked gate paths. Never contains source content.",
+      "type": "string",
+      "maxLength": 2048
+    },
+    "pointer": { "$ref": "#/$defs/spillPointer" }
+  },
+  "allOf": [
+    { "if": { "properties": { "status": { "const": "ok" } }, "required": ["status"] },
+      "then": { "properties": { "code": { "enum": ["ANSWERED", "NO_MATCH", "SPILLED"] } } } },
+    { "if": { "properties": { "status": { "const": "partial" } }, "required": ["status"] },
+      "then": { "properties": { "code": { "enum": ["ANSWERED", "NO_MATCH", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "TIMEOUT", "CANCELLED"] } } } },
+    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] },
+      "then": { "properties": { "code": { "enum": ["LARGE_READ", "UNCLASSIFIABLE_READ", "UNSAFE_SOURCE", "BINARY_UNSUPPORTED", "HOST_UNSAFE"] } } } },
+    { "if": { "properties": { "status": { "const": "error" } }, "required": ["status"] },
+      "then": { "properties": { "code": { "enum": ["INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED", "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT", "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED", "HOST_UNSAFE", "CANCELLED"] } } } },
+    { "if": { "properties": { "code": { "const": "SPILLED" } }, "required": ["code"] },
+      "then": { "properties": { "answer": { "const": "" }, "citations": { "maxItems": 0 } }, "required": ["pointer"] } },
+    { "if": { "not": { "properties": { "status": { "const": "ok" } }, "required": ["status"] } },
+      "then": { "properties": { "coverage": { "properties": { "complete": { "const": false } } } } } }
+  ],
+  "$defs": {
+    "snapshotId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sourceId": { "type": "string", "minLength": 4, "maxLength": 64, "pattern": "^src_[A-Za-z0-9]{4,58}$" },
+    "locator": {
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "all" } } },
+        { "additionalProperties": false, "required": ["kind", "start", "end"],
+          "properties": { "kind": { "const": "lines" }, "start": { "type": "integer", "minimum": 1, "maximum": 100000000 }, "end": { "type": "integer", "minimum": 1, "maximum": 100000000 } } },
+        { "additionalProperties": false, "required": ["kind", "pointer", "start", "end"],
+          "properties": { "kind": { "const": "records" }, "pointer": { "type": "string", "maxLength": 1024, "pattern": "^(/([^/~]|~[01])*)*$" }, "start": { "type": "integer", "minimum": 1, "maximum": 100000000 }, "end": { "type": "integer", "minimum": 1, "maximum": 100000000 } } },
+        { "additionalProperties": false, "required": ["kind", "pattern", "max_matches"],
+          "properties": { "kind": { "const": "search" }, "pattern": { "type": "string", "minLength": 1, "maxLength": 512 }, "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 } } }
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "snapshot_id", "locator", "quote", "verified"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 16, "pattern": "^c[0-9]{1,3}$" },
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "locator": { "$ref": "#/$defs/locator" },
+        "quote": { "type": "string", "minLength": 0, "maxLength": 512 },
+        "verified": {
+          "description": "Written by the deterministic verifier only. A model-asserted value is never trusted; published citations are always true.",
+          "const": true
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "processed_chunks", "planned_chunks", "omitted", "upstream_truncated"],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "processed_chunks": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "planned_chunks": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "omitted": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/omission" } },
+        "upstream_truncated": { "type": ["boolean", "null"] }
+      }
+    },
+    "omission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "selector", "reason"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "selector": { "$ref": "#/$defs/locator" },
+        "reason": {
+          "enum": ["BUDGET_EXCEEDED", "TIMEOUT", "CANCELLED", "CHUNK_FAILED", "MODEL_ERROR",
+            "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "UPSTREAM_TRUNCATED", "UNKNOWN_REMAINDER"]
+        }
+      }
+    },
+    "sourceHandle": {
+      "description": "Non-sensitive handle metadata only. Never an absolute path, preview or secret.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "snapshot_id", "media_type", "bytes", "expires_at"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "media_type": { "enum": ["text/plain", "application/json"] },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "expires_at": { "type": "string", "format": "date-time", "maxLength": 32 }
+      }
+    },
+    "spillPointer": {
+      "description": "Suma spill pointer. Readable only through the registered read-only reader; carries no payload.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "snapshot_id", "bytes", "expires_at", "internal"],
+      "properties": {
+        "source_id": { "$ref": "#/$defs/sourceId" },
+        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "expires_at": { "type": "string", "format": "date-time", "maxLength": 32 },
+        "internal": {
+          "description": "Recursion guard. Verified against the registry; a payload that merely claims internal:true is not trusted.",
+          "const": true
+        }
+      }
+    }
+  }
+}

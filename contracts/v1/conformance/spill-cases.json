@@ -1,0 +1,425 @@
+{
+  "schema_version": "1.0",
+  "description": "Suma oversized-result contract. The engine is pure spill/pointer: it NEVER summarizes, never calls a model, and handles string, object, array and content-block results identically. Sizing is measured on the complete deterministic serialization of the whole result, including every content block and metadata field.",
+  "invariants": {
+    "model_calls_for_spill": 0,
+    "heuristic_summary_allowed": false,
+    "pointer_published_only_after_readback_verified": true,
+    "raw_returned_on_any_failure": false
+  },
+  "cases": [
+    {
+      "id": "string_small_passthrough",
+      "result": {
+        "kind": "string",
+        "value": "ok"
+      },
+      "expect": {
+        "action": "passthrough"
+      }
+    },
+    {
+      "id": "string_at_cap_passthrough",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 16384
+        }
+      },
+      "expect": {
+        "action": "passthrough"
+      }
+    },
+    {
+      "id": "string_over_cap_spill",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 16385
+        }
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "object_small_passthrough",
+      "result": {
+        "kind": "json",
+        "value": {
+          "ok": true,
+          "rows": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "expect": {
+        "action": "passthrough"
+      }
+    },
+    {
+      "id": "object_over_cap_spill",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "object",
+          "entries": 4000
+        }
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "array_over_cap_spill",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "array",
+          "entries": 4000
+        }
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "nested_dict_list_over_cap_spill",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "nested",
+          "entries": 2000
+        }
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "content_blocks_text_over_cap_spill",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "text",
+            "repeat": {
+              "unit": "b",
+              "bytes": 9000
+            }
+          },
+          {
+            "type": "text",
+            "repeat": {
+              "unit": "c",
+              "bytes": 9000
+            }
+          }
+        ]
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "content_blocks_aggregate_just_over_cap_spill",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "text",
+            "repeat": {
+              "unit": "b",
+              "bytes": 8200
+            }
+          },
+          {
+            "type": "text",
+            "repeat": {
+              "unit": "c",
+              "bytes": 8200
+            }
+          }
+        ]
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED"
+      }
+    },
+    {
+      "id": "content_blocks_small_passthrough",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "text",
+            "value": "short"
+          },
+          {
+            "type": "text",
+            "value": "also short"
+          }
+        ]
+      },
+      "expect": {
+        "action": "passthrough"
+      }
+    },
+    {
+      "id": "image_block_rejected",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "image",
+            "media_type": "image/png",
+            "repeat": {
+              "unit": "x",
+              "bytes": 40000
+            }
+          }
+        ]
+      },
+      "expect": {
+        "action": "blocked",
+        "code": "BINARY_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "audio_block_rejected",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "audio",
+            "media_type": "audio/wav",
+            "value": "AAAA"
+          }
+        ]
+      },
+      "expect": {
+        "action": "blocked",
+        "code": "BINARY_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "resource_blob_block_rejected",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "resource",
+            "media_type": "application/octet-stream",
+            "value": "AAAA"
+          }
+        ]
+      },
+      "expect": {
+        "action": "blocked",
+        "code": "BINARY_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "mixed_blocks_with_image_rejects_whole_result",
+      "result": {
+        "kind": "blocks",
+        "blocks": [
+          {
+            "type": "text",
+            "value": "safe text"
+          },
+          {
+            "type": "image",
+            "media_type": "image/png",
+            "value": "AAAA"
+          }
+        ]
+      },
+      "expect": {
+        "action": "blocked",
+        "code": "BINARY_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "over_source_cap_rejected",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 8388609
+        }
+      },
+      "expect": {
+        "action": "error",
+        "code": "LIMIT_EXCEEDED"
+      }
+    },
+    {
+      "id": "json_too_deep_rejected",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "deep",
+          "depth": 65
+        }
+      },
+      "expect": {
+        "action": "error",
+        "code": "LIMIT_EXCEEDED"
+      }
+    },
+    {
+      "id": "json_depth_at_cap_spill_or_pass",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "deep",
+          "depth": 64
+        }
+      },
+      "expect": {
+        "action": "passthrough"
+      }
+    },
+    {
+      "id": "json_too_many_nodes_rejected",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "array",
+          "entries": 100001
+        }
+      },
+      "expect": {
+        "action": "error",
+        "code": "LIMIT_EXCEEDED"
+      }
+    },
+    {
+      "id": "json_cycle_rejected",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "cycle"
+        }
+      },
+      "expect": {
+        "action": "error",
+        "code": "LIMIT_EXCEEDED"
+      }
+    },
+    {
+      "id": "unserializable_value_rejected",
+      "result": {
+        "kind": "json",
+        "generate": {
+          "shape": "unserializable"
+        }
+      },
+      "expect": {
+        "action": "error",
+        "code": "LIMIT_EXCEEDED"
+      }
+    },
+    {
+      "id": "already_internal_envelope_not_respilled",
+      "result": {
+        "kind": "internal_envelope",
+        "repeat": {
+          "unit": "e",
+          "bytes": 40000
+        }
+      },
+      "expect": {
+        "action": "passthrough",
+        "reason": "registry-verified internal reader envelope"
+      }
+    },
+    {
+      "id": "forged_internal_marker_still_spilled",
+      "result": {
+        "kind": "json",
+        "value": {
+          "internal": true,
+          "schema_version": "1.0"
+        },
+        "pad_bytes": 40000
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED",
+        "reason": "a payload that merely claims internal:true is not trusted"
+      }
+    },
+    {
+      "id": "quota_exhausted_bounded_error",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 40000
+        }
+      },
+      "session_spill_used_bytes": 67108864,
+      "expect": {
+        "action": "error",
+        "code": "SPILL_FAILED"
+      }
+    },
+    {
+      "id": "spill_write_failure_bounded_error",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 40000
+        }
+      },
+      "inject": "write_failure",
+      "expect": {
+        "action": "error",
+        "code": "SPILL_FAILED"
+      }
+    },
+    {
+      "id": "spill_readback_failure_bounded_error",
+      "result": {
+        "kind": "string",
+        "repeat": {
+          "unit": "a",
+          "bytes": 40000
+        }
+      },
+      "inject": "readback_mismatch",
+      "expect": {
+        "action": "error",
+        "code": "SPILL_FAILED"
+      }
+    },
+    {
+      "id": "oversized_host_error_result_spilled",
+      "result": {
+        "kind": "json",
+        "value": {
+          "error": "upstream failed"
+        },
+        "pad_bytes": 40000
+      },
+      "expect": {
+        "action": "spill",
+        "code": "SPILLED",
+        "reason": "an oversized error result follows the same rule"
+      }
+    }
+  ]
+}

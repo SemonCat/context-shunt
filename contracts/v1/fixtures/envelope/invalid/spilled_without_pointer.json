@@ -1,0 +1,27 @@
+{
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "status": "ok",
+    "code": "SPILLED",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 1,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [
+      {
+        "source_id": "src_01ab",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "media_type": "text/plain",
+        "bytes": 18000,
+        "expires_at": "2026-09-07T00:00:00Z"
+      }
+    ],
+    "retryable": false
+  }
+}

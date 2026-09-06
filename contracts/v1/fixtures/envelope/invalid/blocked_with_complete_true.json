@@ -1,0 +1,19 @@
+{
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "status": "blocked",
+    "code": "LARGE_READ",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 1,
+      "planned_chunks": 1,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false
+  }
+}

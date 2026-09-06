@@ -1,0 +1,486 @@
+{
+  "schema_version": "1.0",
+  "description": "Citation verification contract. quote must be an exact substring of the addressed line (text) or of the canonical JSON of the addressed record (JSON). verified is written by the verifier only; a rejected citation is never published.",
+  "reasons": [
+    "OK",
+    "LINE_OUT_OF_RANGE",
+    "QUOTE_NOT_FOUND",
+    "POINTER_NOT_FOUND",
+    "RECORD_OUT_OF_RANGE",
+    "SNAPSHOT_MISMATCH",
+    "HANDLE_UNKNOWN",
+    "HANDLE_EXPIRED",
+    "QUOTE_OVER_CAP",
+    "LOCATOR_UNSUPPORTED"
+  ],
+  "sources": {
+    "text_lf": {
+      "media_type": "text/plain",
+      "content": "import os\nmax_retries = 3\nbackoff = \"exponential\"\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\ntail_no_newline"
+    },
+    "text_crlf": {
+      "media_type": "text/plain",
+      "content": "alpha\r\nbeta = 7\r\ngamma\r\n"
+    },
+    "text_longline": {
+      "media_type": "text/plain",
+      "content": "prefix AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA needle BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB suffix\nsecond line\n"
+    },
+    "json_doc": {
+      "media_type": "application/json",
+      "content": "{\"count\":2,\"items\":[{\"name\":\"alpha\",\"retries\":1},{\"name\":\"beta\",\"retries\":3}],\"meta\":{\"version\":\"2\"}}"
+    },
+    "json_scalar": {
+      "media_type": "application/json",
+      "content": "\"just-a-string\""
+    }
+  },
+  "cases": [
+    {
+      "id": "line_exact_quote",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 3",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "line_substring_quote",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "line_range_spanning",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 3
+      },
+      "quote": "backoff = \"exponential\"",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "line_last_no_trailing_newline",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 12,
+        "end": 12
+      },
+      "quote": "tail_no_newline",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "line_wrong_line",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "max_retries = 3",
+      "expect": {
+        "verified": false,
+        "reason": "QUOTE_NOT_FOUND"
+      }
+    },
+    {
+      "id": "line_fabricated_quote",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 99",
+      "expect": {
+        "verified": false,
+        "reason": "QUOTE_NOT_FOUND"
+      }
+    },
+    {
+      "id": "line_out_of_range_high",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 13,
+        "end": 13
+      },
+      "quote": "anything",
+      "expect": {
+        "verified": false,
+        "reason": "LINE_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "line_out_of_range_zero",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 0,
+        "end": 1
+      },
+      "quote": "import os",
+      "expect": {
+        "verified": false,
+        "reason": "LINE_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "line_inverted_range",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 3,
+        "end": 2
+      },
+      "quote": "import os",
+      "expect": {
+        "verified": false,
+        "reason": "LINE_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "crlf_line_two",
+      "source": "text_crlf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "beta = 7",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "crlf_carriage_not_a_line",
+      "source": "text_crlf",
+      "locator": {
+        "kind": "lines",
+        "start": 4,
+        "end": 4
+      },
+      "quote": "gamma",
+      "expect": {
+        "verified": false,
+        "reason": "LINE_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "longline_quote_inside",
+      "source": "text_longline",
+      "locator": {
+        "kind": "lines",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "needle",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "quote_over_cap",
+      "source": "text_longline",
+      "locator": {
+        "kind": "lines",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ",
+      "expect": {
+        "verified": false,
+        "reason": "QUOTE_OVER_CAP"
+      }
+    },
+    {
+      "id": "empty_quote_rejected",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "",
+      "expect": {
+        "verified": false,
+        "reason": "QUOTE_NOT_FOUND"
+      }
+    },
+    {
+      "id": "record_array_element",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/items",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "\"name\":\"beta\"",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "record_array_first",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/items",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "\"retries\":1",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "record_array_wrong_ordinal",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/items",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "\"name\":\"beta\"",
+      "expect": {
+        "verified": false,
+        "reason": "QUOTE_NOT_FOUND"
+      }
+    },
+    {
+      "id": "record_array_out_of_range",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/items",
+        "start": 3,
+        "end": 3
+      },
+      "quote": "x",
+      "expect": {
+        "verified": false,
+        "reason": "RECORD_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "record_object_key_ordinal",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/meta",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "\"version\":\"2\"",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "record_scalar_ordinal_one",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/count",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "2",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "record_scalar_ordinal_two_rejected",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/count",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "2",
+      "expect": {
+        "verified": false,
+        "reason": "RECORD_OUT_OF_RANGE"
+      }
+    },
+    {
+      "id": "record_root_scalar_source",
+      "source": "json_scalar",
+      "locator": {
+        "kind": "records",
+        "pointer": "",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "just-a-string",
+      "expect": {
+        "verified": true,
+        "reason": "OK"
+      }
+    },
+    {
+      "id": "record_missing_pointer",
+      "source": "json_doc",
+      "locator": {
+        "kind": "records",
+        "pointer": "/nope",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "x",
+      "expect": {
+        "verified": false,
+        "reason": "POINTER_NOT_FOUND"
+      }
+    },
+    {
+      "id": "json_line_locator_rejected",
+      "source": "json_doc",
+      "locator": {
+        "kind": "lines",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "items",
+      "expect": {
+        "verified": false,
+        "reason": "LOCATOR_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "text_record_locator_rejected",
+      "source": "text_lf",
+      "locator": {
+        "kind": "records",
+        "pointer": "/items",
+        "start": 1,
+        "end": 1
+      },
+      "quote": "x",
+      "expect": {
+        "verified": false,
+        "reason": "LOCATOR_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "search_locator_rejected",
+      "source": "text_lf",
+      "locator": {
+        "kind": "search",
+        "pattern": "max_retries",
+        "max_matches": 5
+      },
+      "quote": "max_retries = 3",
+      "expect": {
+        "verified": false,
+        "reason": "LOCATOR_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "all_locator_rejected",
+      "source": "text_lf",
+      "locator": {
+        "kind": "all"
+      },
+      "quote": "max_retries = 3",
+      "expect": {
+        "verified": false,
+        "reason": "LOCATOR_UNSUPPORTED"
+      }
+    },
+    {
+      "id": "wrong_snapshot_hash",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 3",
+      "snapshot_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "expect": {
+        "verified": false,
+        "reason": "SNAPSHOT_MISMATCH"
+      }
+    },
+    {
+      "id": "unknown_handle",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 3",
+      "source_id": "src_ffff",
+      "expect": {
+        "verified": false,
+        "reason": "HANDLE_UNKNOWN"
+      }
+    },
+    {
+      "id": "expired_handle",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 3",
+      "expired": true,
+      "expect": {
+        "verified": false,
+        "reason": "HANDLE_EXPIRED"
+      }
+    },
+    {
+      "id": "foreign_session_handle",
+      "source": "text_lf",
+      "locator": {
+        "kind": "lines",
+        "start": 2,
+        "end": 2
+      },
+      "quote": "max_retries = 3",
+      "foreign_session": true,
+      "expect": {
+        "verified": false,
+        "reason": "HANDLE_UNKNOWN"
+      }
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_01",
+    "operation": "read",
+    "question": "Where is the retry policy defined? List the limits and the evidence.",
+    "sources": [
+      {
+        "source_id": "src_0001",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0002",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0003",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0004",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0005",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0006",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0007",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0008",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      },
+      {
+        "source_id": "src_0009",
+        "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+        "selector": {
+          "kind": "all"
+        }
+      }
+    ],
+    "budgets": {
+      "max_chunks": 8,
+      "max_answer_bytes": 8192,
+      "deadline_ms": 60000
+    }
+  }
+}
