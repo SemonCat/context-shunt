@@ -89,6 +89,13 @@ const DB_NAME = "store.sqlite3";
  * short retries is enough; this is not a substitute for `busy_timeout`, which covers the
  * ordinary write contention that follows.
  */
+/**
+ * How long a staging reservation is treated as live. Staging is a rename between two
+ * points in one publish, so it is short; anything older is residue from a process that
+ * died. Recovery must not clear a reservation a *running* process still holds.
+ */
+const STAGING_GRACE_MS = 60_000;
+
 const OPEN_ATTEMPTS = 6;
 const OPEN_BACKOFF_MS = 20;
 
@@ -831,8 +838,18 @@ export class SnapshotStore {
         // without threading more state through the failure paths.
         const hashes = new Set(tempIds.map((tempId) => tempId.split(".", 1)[0] as string));
         const referenced = db.prepare("SELECT 1 FROM blobs WHERE hash = ?");
+        const placeholders = tempIds.map(() => "?").join(",");
+        // Another publisher may be staging the very same content right now, having
+        // deduped onto this file. Its reservation outlives this batch's refusal, so the
+        // file is left for it. Only reservations this batch owns are excluded from the
+        // check - they were just deleted above.
+        const reserved = db.prepare(
+          `SELECT 1 FROM orphan_temps WHERE blob_hash = ? AND temp_id NOT IN (${placeholders})`,
+        );
         for (const hash of hashes) {
-          if (referenced.get(hash) === undefined) unlinkQuiet(this.blobPath(hash));
+          if (referenced.get(hash) !== undefined) continue;
+          if (reserved.get(hash, ...tempIds) !== undefined) continue;
+          unlinkQuiet(this.blobPath(hash));
         }
       });
     } catch {
@@ -1286,14 +1303,26 @@ export class SnapshotStore {
   // -- maintenance -----------------------------------------------------------
 
   /**
-   * Startup recovery: clear staged temps, then sweep. No live handle ever references a
-   * file under `tmp/`, so every file there is by definition the residue of a transaction
-   * that did not commit and is safe to remove.
+   * Startup recovery: clear abandoned staging, then sweep.
+   *
+   * Recovery clears residue from a process that died, so it must not clear staging that
+   * is still in flight. Deleting every reservation destroyed the staging of a process
+   * that was merely *running*, and its `.part` file with it. Only entries older than the
+   * staging grace period are treated as abandoned.
    */
   recover(): SweepReport {
     let removed = 0;
     const tmp = join(this.root, TMP_DIR);
+    const db = this.connect();
+    const cutoff = this.tick() - STAGING_GRACE_MS;
+    const stale = (db.prepare("SELECT temp_id FROM orphan_temps WHERE created_at_ms <= ?")
+      .all(cutoff) as Row[]).map((row) => String(row["temp_id"]));
+    const liveNames = new Set(
+      (db.prepare("SELECT temp_id FROM orphan_temps WHERE created_at_ms > ?")
+        .all(cutoff) as Row[]).map((row) => `${String(row["temp_id"])}.part`),
+    );
     for (const name of safeReaddir(tmp)) {
+      if (liveNames.has(name)) continue;
       const child = join(tmp, name);
       const info = safeLstat(child);
       if (info?.isFile() || info?.isSymbolicLink()) {
@@ -1302,8 +1331,10 @@ export class SnapshotStore {
       }
     }
     try {
-      const db = this.connect();
-      this.writeTxn(db, () => db.exec("DELETE FROM orphan_temps"));
+      this.writeTxn(db, () => {
+        const drop = db.prepare("DELETE FROM orphan_temps WHERE temp_id = ?");
+        for (const tempId of stale) drop.run(tempId);
+      });
     } catch {
       // The next sweep tries again.
     }
@@ -1383,11 +1414,23 @@ export class SnapshotStore {
   }
 
   /** Remove content files with no row - the residue of a crash before commit. */
+  /**
+   * A file with no row is not necessarily residue. Staging renames a blob into its final
+   * path *before* the publishing transaction commits, so between those two points a
+   * perfectly live payload has no `blobs` row. `orphan_temps` is the durable record of
+   * that in-flight staging and is visible to every process over the store, so a
+   * reservation is honoured here rather than swept: without it another process deleted
+   * content a publisher had just written, and that publisher then failed with
+   * `BLOB_MISSING` on its own bytes.
+   */
   private collectOrphanBlobFiles(): number {
+    const db = this.connect();
     const known = new Set(
-      (this.connect().prepare("SELECT hash FROM blobs").all() as Row[])
-        .map((row) => String(row["hash"])),
+      (db.prepare("SELECT hash FROM blobs").all() as Row[]).map((row) => String(row["hash"])),
     );
+    for (const row of db.prepare("SELECT blob_hash FROM orphan_temps").all() as Row[]) {
+      known.add(String(row["blob_hash"]));
+    }
     let removed = 0;
     for (const path of this.blobFiles()) {
       const name = path.slice(path.lastIndexOf("/") + 1);

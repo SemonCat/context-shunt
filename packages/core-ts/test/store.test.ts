@@ -27,6 +27,7 @@ import {
   type OperationRecord,
   ScopeIdentity,
   SnapshotStore,
+  captureHash,
   snapshotIdOf,
 } from "../src/store.js";
 
@@ -632,5 +633,52 @@ describe("revocation-safe accounting", () => {
       ]),
     ).toThrow(/BLOB_METADATA_CONFLICT/);
     expect(s.stats().handles).toBe(0);
+  });
+});
+
+// -- staging is a reservation other processes must honour -------------------
+
+describe("cross-process staging reservations", () => {
+  it("spares content another instance is staging", () => {
+    const dir = tmp();
+    const s = store(dir);
+    const scope = identity();
+    s.openScope(scope);
+    const other = new SnapshotStore(join(dir, "cache"), L);
+    other.openScope(scope);
+
+    const c = capture();
+    const inner = s as unknown as {
+      stageBlob(c: Capture, h: string): string | undefined;
+      blobPath(h: string): string;
+    };
+    const otherInner = other as unknown as { collectOrphanBlobFiles(): number };
+    const hash = captureHash(c);
+    expect(inner.stageBlob(c, hash)).toBeDefined();
+    expect(existsSync(inner.blobPath(hash))).toBe(true);
+
+    expect(otherInner.collectOrphanBlobFiles()).toBe(0);
+    expect(existsSync(inner.blobPath(hash))).toBe(true);
+
+    const handle = s.publish(scope, [c])[0]!;
+    expect(s.loadPayload(s.resolve(scope, handle.handleId))).toEqual(c.data);
+  });
+
+  it("leaves a fresh reservation alone during recovery", () => {
+    const dir = tmp();
+    const s = store(dir);
+    s.openScope(identity());
+    const other = new SnapshotStore(join(dir, "cache"), L);
+
+    const c = capture();
+    const inner = s as unknown as {
+      stageBlob(c: Capture, h: string): string | undefined;
+      blobPath(h: string): string;
+    };
+    const hash = captureHash(c);
+    expect(inner.stageBlob(c, hash)).toBeDefined();
+
+    other.recover();
+    expect(existsSync(inner.blobPath(hash))).toBe(true);
   });
 });

@@ -849,3 +849,83 @@ def test_a_batch_cannot_carry_two_media_types_for_the_same_bytes(tmp_path):
     assert exc.value.detail == "BLOB_METADATA_CONFLICT"
     # Nothing partial survived the refusal.
     assert store.stats().handles == 0
+
+
+# -- staging is a reservation other processes must honour --------------------
+
+
+def _second_instance(store: SnapshotStore) -> SnapshotStore:
+    """A second store over the same root, standing in for another process."""
+    return SnapshotStore(store.root, L)
+
+
+def test_an_orphan_sweep_spares_content_another_process_is_staging(tmp_path):
+    """`orphan_temps` is a durable reservation; the sweep ignored it.
+
+    Staging renames a blob into its final path *before* the publishing transaction
+    commits, so between those two points the file has no `blobs` row. Another process
+    sweeping orphans saw a file with no row and deleted it, and the publisher then failed
+    with `BLOB_MISSING` on content it had written itself.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    store.open_scope(identity)
+    other = _second_instance(store)
+    other.open_scope(identity)
+
+    capture = _capture()
+    final = store._blob_path(capture.hash)
+    assert store._stage_blob(capture, capture.hash, final) is not None
+    assert final.exists()
+
+    assert other._collect_orphan_blob_files() == 0
+    assert final.exists(), "another process deleted a live staging reservation"
+
+    # And the publish that reservation belongs to still completes.
+    handle = store.publish(identity, [capture])[0]
+    assert store.load_payload(store.resolve(identity, handle.handle_id)) == capture.data
+
+
+def test_a_refused_publish_spares_content_another_process_still_holds(tmp_path):
+    """Discarding one batch's staging must not remove another's reservation.
+
+    Both publishers dedupe onto the same content-addressed file. When the first is
+    refused it dropped the file because no committed row referenced the digest yet - but
+    the second was still holding its own reservation for exactly those bytes.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    store.open_scope(identity)
+    other = _second_instance(store)
+    other.open_scope(identity)
+
+    capture = _capture()
+    final = store._blob_path(capture.hash)
+    mine = store._stage_blob(capture, capture.hash, final)
+    theirs = other._stage_blob(capture, capture.hash, final)
+    # The second staging deduped onto the first file, so only one write happened.
+    assert mine is not None and theirs is None
+    # Give the other process a reservation of its own for the same digest.
+    other._record_temp(f"{capture.hash}.deadbeefdeadbeef", capture.hash)
+
+    store._discard_temp_ids([mine])
+    assert final.exists(), "a refused batch removed content another process had reserved"
+
+
+def test_recovery_leaves_a_fresh_reservation_alone(tmp_path):
+    """Startup recovery cleared *every* temp, including a live one.
+
+    Recovery exists to clear residue from a process that died. Deleting reservations that
+    are seconds old destroys the staging of a process that is still running.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    store.open_scope(identity)
+    other = _second_instance(store)
+
+    capture = _capture()
+    final = store._blob_path(capture.hash)
+    assert store._stage_blob(capture, capture.hash, final) is not None
+
+    other.recover()
+    assert final.exists(), "recovery removed a reservation that was still live"

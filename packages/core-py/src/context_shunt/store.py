@@ -83,6 +83,11 @@ _DB_NAME = "store.sqlite3"
 #: a competitor with SQLITE_BUSY immediately. The transition happens once, so a handful of
 #: short retries is enough; this is not a substitute for `busy_timeout`, which covers the
 #: ordinary write contention that follows.
+#: How long a staging reservation is treated as live. Staging is a rename between two
+#: points in one publish, so it is short; anything older is residue from a process that
+#: died. Recovery must not clear a reservation a *running* process still holds.
+_STAGING_GRACE_MS = 60_000
+
 _OPEN_ATTEMPTS = 6
 _OPEN_BACKOFF_S = 0.02
 _BLOB_DIR = "blobs"
@@ -848,11 +853,23 @@ class SnapshotStore:
                 )
                 # A temp id is `<digest>.<nonce>`, so the digest this batch wrote is
                 # recoverable without threading more state through the failure paths.
+                placeholders = ",".join("?" for _ in temp_ids)
                 for digest in {temp_id.split(".", 1)[0] for temp_id in temp_ids}:
                     referenced = conn.execute(
                         "SELECT 1 FROM blobs WHERE hash = ?", (digest,)
                     ).fetchone()
-                    if referenced is None:
+                    if referenced is not None:
+                        continue
+                    # Another publisher may be staging the very same content right now,
+                    # having deduped onto this file. Its reservation outlives this batch's
+                    # refusal, so the file is left for it. Only reservations this batch
+                    # owns are excluded from the check - they were just deleted above.
+                    reserved = conn.execute(
+                        f"SELECT 1 FROM orphan_temps "
+                        f" WHERE blob_hash = ? AND temp_id NOT IN ({placeholders})",
+                        (digest, *temp_ids),
+                    ).fetchone()
+                    if reserved is None:
                         _unlink_quiet(self._blob_path(digest))
 
     def _assert_scope_open_locked(self, conn: sqlite3.Connection, identity: ScopeIdentity) -> None:
@@ -1319,18 +1336,44 @@ class SnapshotStore:
             children = list(tmp_dir.iterdir())
         except OSError:
             children = []
+        # Recovery clears residue from a process that died, so it must not clear staging
+        # that is still in flight. Deleting every reservation destroyed the staging of a
+        # process that was merely *running*, and its `.part` file with it. Only entries
+        # older than the staging grace period are treated as abandoned.
+        with self._lock:
+            conn = self._connect()
+            cutoff = self._now_locked(conn) - _STAGING_GRACE_MS
+            stale = {
+                str(row["temp_id"])
+                for row in conn.execute(
+                    "SELECT temp_id FROM orphan_temps WHERE created_at_ms <= ?", (cutoff,)
+                ).fetchall()
+            }
+            live_names = {
+                f"{row['temp_id']}.part"
+                for row in conn.execute(
+                    "SELECT temp_id FROM orphan_temps WHERE created_at_ms > ?", (cutoff,)
+                ).fetchall()
+            }
         for child in children:
             try:
                 child_stat = child.lstat()
             except OSError:
                 continue
-            if stat.S_ISREG(child_stat.st_mode) or stat.S_ISLNK(child_stat.st_mode):
-                _unlink_quiet(child)
-                removed += 1
+            if not (stat.S_ISREG(child_stat.st_mode) or stat.S_ISLNK(child_stat.st_mode)):
+                continue
+            if child.name in live_names:
+                continue
+            _unlink_quiet(child)
+            removed += 1
         with self._lock, contextlib.suppress(sqlite3.Error):
             conn = self._connect()
             with _write_txn(conn):
-                conn.execute("DELETE FROM orphan_temps")
+                if stale:
+                    conn.executemany(
+                        "DELETE FROM orphan_temps WHERE temp_id = ?",
+                        [(temp_id,) for temp_id in stale],
+                    )
         report = self.sweep()
         return SweepReport(
             expired_handles=report.expired_handles,
@@ -1420,10 +1463,23 @@ class SnapshotStore:
         return deleted
 
     def _collect_orphan_blob_files(self) -> int:
-        """Remove content files with no row - the residue of a crash before commit."""
+        """Remove content files with no row - the residue of a crash before commit.
+
+        A file with no row is not necessarily residue. Staging renames a blob into its
+        final path *before* the publishing transaction commits, so between those two
+        points a perfectly live payload has no ``blobs`` row. ``orphan_temps`` is the
+        durable record of that in-flight staging, and it is visible to every process over
+        the store, so a reservation is honoured here rather than swept: without it another
+        process deleted content a publisher had just written and that publisher then
+        failed with ``BLOB_MISSING`` on its own bytes.
+        """
         with self._lock:
             conn = self._connect()
             known = {str(row["hash"]) for row in conn.execute("SELECT hash FROM blobs").fetchall()}
+            known |= {
+                str(row["blob_hash"])
+                for row in conn.execute("SELECT blob_hash FROM orphan_temps").fetchall()
+            }
         removed = 0
         for path in self._iter_blob_files():
             digest = path.name[: -len(_BLOB_SUFFIX)]
