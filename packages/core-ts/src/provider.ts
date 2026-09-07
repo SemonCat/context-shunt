@@ -458,8 +458,16 @@ export class FallbackChainProvider implements ReaderProvider {
       // have made before it is merged with anyone else's, or an aggregate bound - which
       // must scale with the attempts it covers - can no longer establish that every part
       // of it was legal.
+      //
+      // Refusing it goes through the same builder every other chain failure uses. A bare
+      // error carried none of what the chain had already established, so a two-call
+      // schedule whose first attempt was billed 5/3 was published as one attempt, zero
+      // usage-complete attempts and zero output tokens: the winner's claim was rejected
+      // and the *earlier* attempt's real spend went with it. Only the unusable claim is
+      // excluded - `billed` is the aggregate of attempts that reported legally, and the
+      // winner was never carried into it.
       if (!usageWithinPerCallLimits(response.usage, this.limits, outputCap)) {
-        throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
+        throw chainFailure(null, () => new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false));
       }
       const winnerComplete = usageComplete(response.usage) ? 1 : 0;
       if (index === 0 && billed === undefined) return response;

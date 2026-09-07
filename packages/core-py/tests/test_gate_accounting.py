@@ -799,26 +799,84 @@ def test_a_plain_providers_billed_failure_is_capped_before_the_merge(tmp_path):
 
 
 def test_a_plain_provider_that_wins_the_fallback_is_capped(tmp_path):
-    """A winner is a constituent too, and an aggregate bound cannot vouch for it."""
+    """A winner is a constituent too, and an aggregate bound cannot vouch for it.
+
+    Refusing it must not refuse what the chain already knew. The rejection used to raise a
+    bare ``BAD_USAGE`` that carried none of the chain's state, so a two-call schedule whose
+    first attempt was billed 5/3 was published as one attempt, zero usage-complete attempts
+    and zero output tokens - the invalid claim was thrown out and the *earlier* attempt's
+    real spend went with it. Only the unusable claim may be excluded.
+    """
     from context_shunt.provider import FallbackChainProvider
 
-    class Unavailable:
+    seen = {"calls": 0}
+
+    class BilledFailure:
         target = _PLAIN
 
         def complete(self, **_kwargs):
-            raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+            seen["calls"] += 1
+            raise _billed_error(5, 3)
 
     class OverCap:
         target = _PLAIN
 
         def complete(self, **_kwargs):
+            seen["calls"] += 1
             return _plain_response(L.max_output_tokens_per_call + 1)
 
-    reader, request = _fixture(tmp_path, FallbackChainProvider(Unavailable(), [OverCap()]))
+    reader, request = _fixture(tmp_path, FallbackChainProvider(BilledFailure(), [OverCap()]))
     result = reader.answer("sess", request)
 
     assert result.envelope["code"] != "ANSWERED"
     assert result.envelope["answer"] == ""
+    # Both calls were made and both were billed, whatever became of the second's claim.
+    assert seen["calls"] == 2
+    assert result.cost.attempts_started == 2
+    # Exactly one of the two reported usage that could be believed.
+    assert result.cost.attempts_usage_complete == 1
+    # The first attempt's three billed output tokens survive the second's refusal.
+    assert result.cost.output_tokens == 3
+
+
+def test_a_host_bridge_that_wins_the_fallback_is_capped_the_same_way(tmp_path):
+    """The parity case: the same schedule where the winner is a real bridge.
+
+    A bridge rejects its own over-cap reply inside ``complete``, so the refusal reaches the
+    chain as a caught failure rather than a returned response. Both routes have to publish
+    the same accounting, or the boundary a claim happens to cross would decide what the
+    session was charged.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    seen = {"calls": 0}
+
+    def failing(**_kwargs):
+        seen["calls"] += 1
+        raise _billed_error(5, 3)
+
+    def over_cap(**_kwargs):
+        seen["calls"] += 1
+        return {
+            "text": _ANSWER_TEXT,
+            "input_tokens": 1,
+            "output_tokens": L.max_output_tokens_per_call + 1,
+            "usage_exact": True,
+        }
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(failing, L, provider="openai"),
+        [HostBridgeProvider(over_cap, L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain)
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] != "ANSWERED"
+    assert result.envelope["answer"] == ""
+    assert seen["calls"] == 2
+    assert result.cost.attempts_started == 2
+    assert result.cost.attempts_usage_complete == 1
+    assert result.cost.output_tokens == 3
 
 
 def test_a_legal_sum_above_the_single_call_ceiling_is_accepted(tmp_path):

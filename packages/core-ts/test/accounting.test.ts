@@ -1065,17 +1065,28 @@ describe("every physical attempt is accounted for once, on every path", () => {
     expect(cost.outputTokens).toBeLessThan(L.maxOutputTokensPerCall);
   });
 
-  /** A winner is a constituent too, and an aggregate bound cannot vouch for it. */
-  it("caps a plain provider that wins the fallback", async () => {
-    const unavailable = {
+  /**
+   * A winner is a constituent too, and an aggregate bound cannot vouch for it.
+   *
+   * Refusing it must not refuse what the chain already knew. The rejection used to throw a
+   * bare `BAD_USAGE` carrying none of the chain's state, so a two-call schedule whose
+   * first attempt was billed 5/3 was published as one attempt, zero usage-complete
+   * attempts and zero output tokens - the invalid claim was thrown out and the *earlier*
+   * attempt's real spend went with it. Only the unusable claim may be excluded.
+   */
+  it("caps a plain provider that wins the fallback and keeps the earlier attempt", async () => {
+    let calls = 0;
+    const billedFailure = {
       target: identity,
       async complete(): Promise<ModelResponse> {
-        throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+        calls += 1;
+        throw billedError(5, 3);
       },
     };
     const overCap = {
       target: identity,
       async complete(): Promise<ModelResponse> {
+        calls += 1;
         return {
           text: answerText,
           requested: identity,
@@ -1091,11 +1102,56 @@ describe("every physical attempt is accounted for once, on every path", () => {
         };
       },
     };
-    const { reader, request } = fixture(new FallbackChainProvider(unavailable, [overCap]));
-    const { envelope } = await reader.answerDetailed("sess", request);
+    const { reader, request } = fixture(new FallbackChainProvider(billedFailure, [overCap]));
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
 
     expect(envelope.code).not.toBe("ANSWERED");
     expect(envelope.answer).toBe("");
+    // Both calls were made and both were billed, whatever became of the second's claim.
+    expect(calls).toBe(2);
+    expect(cost.attemptsStarted).toBe(2);
+    // Exactly one of the two reported usage that could be believed.
+    expect(cost.attemptsUsageComplete).toBe(1);
+    // The first attempt's three billed output tokens survive the second's refusal.
+    expect(cost.outputTokens).toBe(3);
+  });
+
+  /**
+   * The parity case: the same schedule where the winner is a real bridge.
+   *
+   * A bridge rejects its own over-cap reply inside `complete`, so the refusal reaches the
+   * chain as a caught failure rather than a returned response. Both routes have to publish
+   * the same accounting, or the boundary a claim happens to cross would decide what the
+   * session was charged.
+   */
+  it("caps a host bridge that wins the fallback the same way", async () => {
+    let calls = 0;
+    const failing: HostBridgeCall = async () => {
+      calls += 1;
+      throw billedError(5, 3);
+    };
+    const overCap: HostBridgeCall = async () => {
+      calls += 1;
+      return {
+        text: answerText,
+        input_tokens: 1,
+        output_tokens: L.maxOutputTokensPerCall + 1,
+        usage_exact: true,
+      };
+    };
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(failing, L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(overCap, L, "fallback", "openai")],
+    );
+    const { reader, request } = fixture(chain);
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).not.toBe("ANSWERED");
+    expect(envelope.answer).toBe("");
+    expect(calls).toBe(2);
+    expect(cost.attemptsStarted).toBe(2);
+    expect(cost.attemptsUsageComplete).toBe(1);
+    expect(cost.outputTokens).toBe(3);
   });
 
   /**
