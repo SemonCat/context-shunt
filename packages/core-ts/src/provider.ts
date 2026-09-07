@@ -305,36 +305,58 @@ export class FallbackChainProvider implements ReaderProvider {
     let billed: Usage | undefined;
     let billedComplete = 0;
 
+    /**
+     * Take one physical attempt's reported usage into the aggregate.
+     *
+     * Called exactly once per call the chain actually made, from the catch clause and
+     * nowhere else. Every other exit reports the aggregate rather than re-reading it.
+     */
     const carry = (usage: unknown): void => {
       if (!usage || typeof usage !== "object") return;
       const reported = usage as Usage;
       billed = billed === undefined ? reported : mergeUsage(billed, reported);
       if (usageComplete(reported)) billedComplete += 1;
     };
-    const attach = (err: unknown): void => {
-      if (!(err instanceof ShuntError)) return;
-      carry((err as { billedUsage?: unknown }).billedUsage);
-      err.internalAttempts = attempts;
-      if (billed !== undefined) err.billedUsage = billed;
-      err.usageCompleteAttempts = billedComplete;
+
+    /**
+     * A chain-owned error carrying the aggregate, never the provider's own object.
+     *
+     * The aggregate used to be written onto the failing provider's `ShuntError` and that
+     * same field was later read back as if it were a fresh per-attempt report, so a
+     * physical call could be counted more than once. Two ways in:
+     *
+     *   - the exhausted-budget branch re-attached the error it had already attached to,
+     *     turning one billed call into two usage-complete attempts;
+     *   - a provider is allowed to rethrow one stable `ShuntError` instance, and
+     *     `HostBridgeProvider` rethrows a `ShuntError` unchanged, so across the reader's
+     *     outer retry the aggregate written in the first pass came back as input to the
+     *     second - four calls totalling 24/10 were reported as 29/13.
+     *
+     * Emitting a fresh error closes both: the chain never mutates something it does not
+     * own, and never reads back anything it wrote. Code, detail and retryability are
+     * preserved so the reader classifies the failure exactly as before.
+     */
+    const chainFailure = (source: unknown, fallback: () => ShuntError): ShuntError => {
+      const origin = source instanceof ShuntError ? source : fallback();
+      const out = new ShuntError(origin.code, origin.detail, origin.retryable);
+      out.internalAttempts = attempts;
+      if (billed !== undefined) out.billedUsage = billed;
+      out.usageCompleteAttempts = billedComplete;
+      return out;
     };
     for (let index = 0; index < this.chain.length; index += 1) {
       // Availability is the only thing this chain rescues. A caller who has cancelled is
       // not waiting for an answer from anyone, so no further attempt may start.
       if (opts.signal?.aborted) {
-        const cancelled = new ShuntError("CANCELLED", "MODEL_CALL", false);
-        attach(cancelled);
-        throw cancelled;
+        throw chainFailure(null, () => new ShuntError("CANCELLED", "MODEL_CALL", false));
       }
       const provider = this.chain[index] as ReaderProvider;
       const remainingMs = opts.timeoutMs - (Date.now() - started);
       if (remainingMs <= 0) {
-        // Out of budget. Never start another provider call the caller cannot use.
-        const exhausted = last instanceof ShuntError
-          ? last
-          : new ShuntError("TIMEOUT", "MODEL_CALL", true);
-        attach(exhausted);
-        throw exhausted;
+        // Out of budget. Never start another provider call the caller cannot use. The
+        // aggregate is already complete - no attempt happened here - so it is reported,
+        // not recollected.
+        throw chainFailure(last, () => new ShuntError("TIMEOUT", "MODEL_CALL", true));
       }
       let response: ModelResponse;
       try {
@@ -342,12 +364,13 @@ export class FallbackChainProvider implements ReaderProvider {
         response = await provider.complete({ ...opts, timeoutMs: remainingMs });
       } catch (err) {
         last = err;
-        // Every candidate reached a provider and was billed, so its count *and* whatever
-        // it reported travel on the failure exactly as they travel on a success. Keeping
-        // only the last error threw away every earlier candidate's usage.
-        attach(err);
+        // The one place a physical attempt enters the aggregate: this candidate reached a
+        // provider and was billed, so what it reported is taken once, here.
+        if (err instanceof ShuntError) carry((err as { billedUsage?: unknown }).billedUsage);
         const availability = err instanceof ShuntError && isAvailabilityFailure(err);
-        if (!availability || index + 1 === this.chain.length) throw err;
+        if (!availability || index + 1 === this.chain.length) {
+          throw chainFailure(err, () => new ShuntError("MODEL_ERROR", "NO_PROVIDER", false));
+        }
         continue;
       }
       const winnerComplete = usageComplete(response.usage) ? 1 : 0;
@@ -363,9 +386,7 @@ export class FallbackChainProvider implements ReaderProvider {
         usage: billed === undefined ? response.usage : mergeUsage(billed, response.usage),
       };
     }
-    const exhausted = last ?? new ShuntError("MODEL_ERROR", "NO_PROVIDER", false);
-    attach(exhausted);
-    throw exhausted;
+    throw chainFailure(last, () => new ShuntError("MODEL_ERROR", "NO_PROVIDER", false));
   }
 }
 

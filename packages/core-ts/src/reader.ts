@@ -756,8 +756,16 @@ export class Reader {
         // Too late to publish, but the provider was already paid. Record what the call
         // cost before refusing its answer; dropping the response wholesale made real
         // spend disappear from the session's accounting.
+        //
+        // A composite response is several physical calls, and lateness does not merge
+        // them: counting it as one attempt reported a two-call fallback as one started
+        // and one usage-complete attempt, contradicting the aggregate usage recorded
+        // beside it. The same metadata the ordinary success path consumes is consumed
+        // here.
         opts.outcome.usage = mergeUsage(opts.outcome.usage, response.usage);
-        if (usageComplete(response.usage)) opts.outcome.usageCompleteCalls += 1;
+        opts.outcome.usageCompleteCalls +=
+          response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
+        opts.outcome.calls += Math.max(0, (response.attempts ?? 1) - 1);
         opts.outcome.completionBytes += new TextEncoder().encode(response.text).length;
         throw err;
       }
@@ -912,10 +920,21 @@ function validateModelResponse(response: ModelResponse, limits: Limits): void {
   if (typeof usage !== "object" || usage === null) {
     throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
   }
+  // Ceilings are per *call*, and this usage may be the sum of several. Each physical call
+  // is already bounded where it is unpacked - `HostBridgeProvider` rejects an out-of-range
+  // count against the same limits before it ever reaches an aggregate - so applying the
+  // single-call ceiling again to the sum rejected valid work: two attempts of 1,500 output
+  // tokens each are individually legal and totalled 3,000 against a 2,048 ceiling, and the
+  // fallback winner was refused as `BAD_USAGE` with no answer returned. Aggregate
+  // bookkeeping must not change availability.
+  //
+  // The bound scales with the attempts the total covers, so it still catches a count no
+  // sequence of legal calls could have produced. Per-call validation is untouched.
+  const attempts = Math.max(1, response.attempts ?? 1);
   const bounds: Array<[number | undefined, number]> = [
-    [usage.inputTokens, limits.maxRequestInputTokens],
-    [usage.outputTokens, limits.maxOutputTokensPerCall],
-    [usage.cacheTokens, limits.maxRequestInputTokens],
+    [usage.inputTokens, limits.maxRequestInputTokens * attempts],
+    [usage.outputTokens, limits.maxOutputTokensPerCall * attempts],
+    [usage.cacheTokens, limits.maxRequestInputTokens * attempts],
   ];
   for (const [value, maximum] of bounds) {
     if (value === undefined) continue;

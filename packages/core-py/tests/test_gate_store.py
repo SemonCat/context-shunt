@@ -1123,17 +1123,22 @@ def test_a_publisher_and_a_sweeper_in_separate_processes_never_lose_a_payload(tm
     `publish`, `resolve`, `load_payload`, `sweep` and `recover`, with no private hook and
     no injected schedule - so any future change that reopens the window fails here.
 
-    The deterministic proof of the coupling itself is
-    `test_an_orphan_sweep_revalidates_before_it_unlinks`, which does fail without it.
+    Nor is `test_an_orphan_sweep_revalidates_before_it_unlinks` a proof of the *transaction
+    coupling*: it predates it and passed the earlier implementation, which re-read the
+    protected set immediately before unlinking without holding the write lock. What it
+    proves is the narrower property that the sweep re-checks at all - it fails if the
+    re-check is removed entirely.
+
+    So no test here demonstrates the coupling red-to-green. The coupling rests on code
+    inspection: `BEGIN IMMEDIATE` is the only thing that excludes another *process*
+    between the check and the unlink, and a process-local lock is not. The TypeScript twin
+    of this schedule did fail before its coupling landed, which is what motivated both.
     """
     root = str(tmp_path / "cache")
     rounds = 120
     # Two publishers against one sweeper, sustained rather than a single pass. Green-only
     # evidence, as the docstring above says: removing the write-lock coupling does *not*
-    # make this fail, because the lease is committed before the payload is written. This
-    # comment previously claimed the opposite, which contradicted the docstring it sits
-    # under - the red-to-green proof is
-    # `test_an_orphan_sweep_revalidates_before_it_unlinks`.
+    # make this fail, because the lease is committed before the payload is written.
     workers = [
         subprocess.Popen(
             [sys.executable, "-c", program.format(src=_src_root()), root, str(rounds), tag],

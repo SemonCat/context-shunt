@@ -24,6 +24,7 @@ import {
   withheldPayloadBaseline,
 } from "../src/accounting.js";
 import { Envelope } from "../src/envelope.js";
+import { FakeClock } from "../src/clock.js";
 import { ShuntError } from "../src/errors.js";
 import {
   BASELINE_ESTIMATE_METHOD,
@@ -584,158 +585,182 @@ describe("fallback usage completeness", () => {
   });
 });
 
-describe("mixed-source baseline credit", () => {
-  /**
-   * `baselineFor` summed the bytes of every selected source but folded the per-source
-   * credit results into a single OR, so a second read mixing an already-credited source
-   * with a new one credited both again.
-   */
-  it("credits only the newly withheld source", async () => {
-    const dir = tmp();
-    const s = session(dir);
-    const ws = join(dir, "ws");
-    mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, "one.txt"), Array.from({ length: 2000 }, (_, i) => `one ${i} value`).join("\n"));
-    writeFileSync(join(ws, "two.txt"), Array.from({ length: 3000 }, (_, i) => `two ${i} value`).join("\n"));
-    const first = s.registerPath(join(ws, "one.txt"));
-    const second = s.registerPath(join(ws, "two.txt"));
+describe("each physical attempt is aggregated exactly once", () => {
+  // A citation object, not a tuple: `answerJson` passes `citations` through verbatim, so a
+  // tuple is a malformed citation, gets stripped, and the envelope becomes NO_MATCH -
+  // which would quietly hollow out the availability assertion below.
+  const answerText = answerJson("mode = fast [c1]", [
+    { id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" },
+  ]);
 
-    const req = (...entries: Array<typeof first>) => {
-      const base = readRequest(first) as Record<string, unknown>;
-      base["sources"] = entries.map((e) => ({
-        source_id: e.sourceId,
-        snapshot_id: e.snapshot.snapshotId,
-        selector: { kind: "all" },
-      }));
-      return base;
+  /** A provider that rethrows one *stable* error instance, which the contract allows. */
+  function stableBilled(inputTokens: number, outputTokens: number) {
+    const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+    (err as { billedUsage?: unknown }).billedUsage = { inputTokens, outputTokens, method: "exact" };
+    return async (): Promise<Record<string, unknown>> => {
+      throw err;
     };
+  }
 
-    await s.read(req(first));
-    const afterFirst = Number(stats(s).stats!.totals.baseline_credit_tokens);
-    expect(afterFirst).toBeGreaterThan(0);
-
-    await s.read(req(first, second));
-    const afterSecond = Number(stats(s).stats!.totals.baseline_credit_tokens);
-
-    const added = afterSecond - afterFirst;
-    const onlySecond = Math.ceil(second.snapshot.bytesLen / 4);
-    expect(added).toBe(onlySecond);
-  });
-});
-
-describe("usage survives an over-cap bridge reply", () => {
-  it("reports the exact counts the call was billed", async () => {
-    const registry = makeRegistry(tmp(), { sessionId: "sess" });
-    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
-    const oversized = new HostBridgeProvider(async () => ({
-      text: "x".repeat(L.maxToolResultBytes + 10),
-      input_tokens: 23,
-      output_tokens: 11,
-      usage_exact: true,
-    }));
-    const result = await new Reader(registry, oversized).answerDetailed("sess", readRequest(entry));
-
-    expect(result.cost.attemptsStarted).toBeGreaterThanOrEqual(1);
-    expect(result.cost.method).toBe("exact");
-    expect(result.cost.inputTokens).toBe(23);
-    expect(result.cost.outputTokens).toBe(11);
-  });
-});
-
-describe("fallback usage completeness", () => {
-  /**
-   * `exact` is a claim about the whole request, not about whichever attempt won.
-   *
-   * A chain whose first candidate failed without reporting usage and whose second
-   * succeeded with exact counts merged that winner's usage into an empty accumulator, so
-   * `readerCostOf` saw a complete `Usage` and returned `exact` - while the very same
-   * record said `attemptsUsageComplete: 1` of `attemptsStarted: 2`. Python already
-   * classified this schedule `bytes_div_4`; TypeScript did not.
-   */
-  function chainOf(...bridges: Array<() => Promise<Record<string, unknown>>>) {
-    const [primary, ...rest] = bridges;
+  function chain(bridges: Array<() => Promise<Record<string, unknown>>>, counter: () => void) {
+    const wrap = (b: () => Promise<Record<string, unknown>>) => async () => {
+      counter();
+      return b();
+    };
     return new FallbackChainProvider(
-      new HostBridgeProvider(async () => (primary as () => Promise<Record<string, unknown>>)(), L, READER_MODEL, "openai"),
-      rest.map((b, i) => new HostBridgeProvider(async () => b(), L, `fallback-${i}`, "openai")),
+      new HostBridgeProvider(wrap(bridges[0]!), L, READER_MODEL, "openai"),
+      bridges.slice(1).map((b, i) => new HostBridgeProvider(wrap(b), L, `f${i}`, "openai")),
     );
   }
 
-  const answered = () =>
-    Promise.resolve({
-      text: answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
-      input_tokens: 7,
-      output_tokens: 4,
-      usage_exact: true,
-    });
-
-  it("is not exact when a successful fallback follows an unreported failure", async () => {
-    const registry = makeRegistry(tmp(), { sessionId: "sess" });
-    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+  /**
+   * The aggregate used to be written onto the failing provider's own `ShuntError`, and that
+   * same field was later read back as a fresh per-attempt report. A provider may
+   * legitimately rethrow one stable instance - `HostBridgeProvider` passes a `ShuntError`
+   * through unchanged - so across the reader's outer retry the first pass's aggregate came
+   * back as input to the second: four calls totalling 24/10 were reported as 29/13.
+   */
+  it("does not re-ingest an aggregate when a provider reuses one error instance", async () => {
     let calls = 0;
-    const chain = chainOf(
-      () => {
-        calls += 1;
-        return Promise.reject(new Error("upstream unavailable"));
-      },
-      () => {
-        calls += 1;
-        return answered();
-      },
-    );
-    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
-
-    expect(calls).toBe(2);
-    expect(result.cost.attemptsStarted).toBe(2);
-    expect(result.cost.attemptsUsageComplete).toBe(1);
-    expect(result.cost.method).toBe("bytes_div_4");
-  });
-
-  it("is exact only when every started attempt reported", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
-    const chain = chainOf(answered);
-    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+    const provider = chain([stableBilled(5, 3), stableBilled(7, 2)], () => { calls += 1; });
+    const result = await new Reader(registry, provider).answerDetailed("sess", readRequest(entry));
 
-    expect(result.cost.attemptsStarted).toBe(result.cost.attemptsUsageComplete);
+    expect(calls).toBe(4);
+    expect(result.cost.attemptsStarted).toBe(calls);
+    expect(result.cost.attemptsUsageComplete).toBe(calls);
     expect(result.cost.method).toBe("exact");
-    expect(result.cost.inputTokens).toBe(7);
+    // Two passes over both candidates, counted once each.
+    expect(result.cost.inputTokens).toBe(2 * (5 + 7));
+    expect(result.cost.outputTokens).toBe(2 * (3 + 2));
   });
 
   /**
-   * An all-failure chain still costs money, and the label has to describe the evidence
-   * rather than the outcome: when every attempt reported, the total really is exact even
-   * though nothing was answered; when none did, it is a named estimate. What must never
-   * happen is `exact` over a partial tally, which is the case above.
+   * The exhausted-budget exit re-attached the error it had already attached to, so one
+   * billed call became two usage-complete attempts carrying doubled usage.
    */
-  it("labels an all-failure chain by what its attempts reported", async () => {
-    for (const billed of [true, false]) {
-      const registry = makeRegistry(tmp(), { sessionId: "sess" });
-      const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
-      let calls = 0;
-      const dead = () => {
-        calls += 1;
-        if (!billed) return Promise.reject(new Error("upstream unavailable"));
-        // Over-cap text is rejected *after* usage is unpacked, so this failure reports.
-        return Promise.resolve({
-          text: "x".repeat(L.maxToolResultBytes + 10),
-          input_tokens: 3,
-          output_tokens: 2,
-          usage_exact: true,
-        });
+  it("counts one attempt when the budget runs out after a single billed failure", async () => {
+    let calls = 0;
+    const slowBilled = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      await new Promise((r) => setTimeout(r, 60));
+      const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      (err as { billedUsage?: unknown }).billedUsage = {
+        inputTokens: 5,
+        outputTokens: 3,
+        method: "exact",
       };
-      const chain = chainOf(dead, dead);
-      const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+      throw err;
+    };
+    const never = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+    };
+    const provider = chain([slowBilled, never], () => {});
 
-      expect(calls).toBeGreaterThan(0);
-      expect(result.cost.attemptsStarted).toBe(calls);
-      if (billed) {
-        // Every attempt reported, so the sum of what was billed is exactly known.
-        expect(result.cost.attemptsUsageComplete).toBe(result.cost.attemptsStarted);
-        expect(result.cost.method).toBe("exact");
-      } else {
-        expect(result.cost.attemptsUsageComplete).toBe(0);
-        expect(result.cost.method).toBe("bytes_div_4");
-      }
+    let raised: ShuntError | undefined;
+    try {
+      // A budget the first call alone exhausts, so the second candidate never starts.
+      await provider.complete({ system: "s", user: "u", maxOutputTokens: 100, timeoutMs: 50 });
+    } catch (err) {
+      raised = err as ShuntError;
     }
+
+    expect(calls).toBe(1);
+    expect(raised?.internalAttempts).toBe(1);
+    expect(raised?.usageCompleteAttempts).toBe(1);
+    expect(raised?.billedUsage).toEqual({ inputTokens: 5, outputTokens: 3, method: "exact" });
+  });
+
+  /**
+   * A composite response is several physical calls, and arriving late does not merge them.
+   * The late path counted it as one attempt, contradicting the aggregate usage it recorded
+   * in the same breath.
+   */
+  it("keeps composite counts when the response arrives after the deadline", async () => {
+    const clock = new FakeClock();
+    let calls = 0;
+    const failBilled = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      (err as { billedUsage?: unknown }).billedUsage = {
+        inputTokens: 5,
+        outputTokens: 3,
+        method: "exact",
+      };
+      throw err;
+    };
+    // Succeeds, but spends the whole request budget on the way.
+    const lateOk = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      clock.advance(70_000);
+      return { text: answerText, input_tokens: 7, output_tokens: 2, usage_exact: true };
+    };
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const provider = chain([failBilled, lateOk], () => {});
+    const result = await new Reader(registry, provider, undefined, clock)
+      .answerDetailed("sess", readRequest(entry));
+
+    expect(result.envelope.code).toBe("TIMEOUT");
+    expect(calls).toBe(2);
+    expect(result.cost.attemptsStarted).toBe(2);
+    expect(result.cost.attemptsUsageComplete).toBe(2);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(12);
+    expect(result.cost.outputTokens).toBe(5);
+  });
+
+  /**
+   * Ceilings are per call. Applying the single-call ceiling to a sum rejected work that was
+   * legal call by call, so aggregate bookkeeping changed *availability*, not just metrics.
+   */
+  it("accepts an aggregate over the single-call ceiling when each attempt was legal", async () => {
+    const each = L.maxOutputTokensPerCall - 548;
+    expect(each * 2).toBeGreaterThan(L.maxOutputTokensPerCall);
+
+    let calls = 0;
+    const failBig = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      (err as { billedUsage?: unknown }).billedUsage = {
+        inputTokens: 10,
+        outputTokens: each,
+        method: "exact",
+      };
+      throw err;
+    };
+    const okBig = async (): Promise<Record<string, unknown>> => {
+      calls += 1;
+      return { text: answerText, input_tokens: 10, output_tokens: each, usage_exact: true };
+    };
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const provider = chain([failBig, okBig], () => {});
+    const result = await new Reader(registry, provider).answerDetailed("sess", readRequest(entry));
+
+    expect(calls).toBe(2);
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.answer.length).toBeGreaterThan(0);
+    expect(result.cost.outputTokens).toBe(each * 2);
+  });
+
+  it("still refuses a single call that exceeds the per-call ceiling", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const overCap = new HostBridgeProvider(
+      async () => ({
+        text: answerText,
+        input_tokens: 10,
+        output_tokens: L.maxOutputTokensPerCall + 1,
+        usage_exact: true,
+      }),
+      L,
+      READER_MODEL,
+      "openai",
+    );
+    const result = await new Reader(registry, overCap).answerDetailed("sess", readRequest(entry));
+    expect(result.envelope.answer).toBe("");
   });
 });
