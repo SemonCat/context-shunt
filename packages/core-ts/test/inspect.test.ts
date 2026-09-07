@@ -472,3 +472,48 @@ describe("the wire budget", () => {
     expect(same.extraction!.result_bytes).toBeGreaterThan(0);
   });
 });
+
+// -- UTF-8 boundary handling on an exact byte page --------------------------
+
+describe("utf-8 boundaries on a byte page", () => {
+  /**
+   * A complete trailing character must survive an exact byte page.
+   *
+   * `backToBoundary` walked back over the trailing character's continuation bytes and
+   * then dropped its lead byte too, so a range covering a whole string silently lost its
+   * last character - `日本` over bytes 0..6 returned only `日`. Exact extraction that
+   * quietly drops source bytes is the one thing this mode may never do.
+   */
+  for (const text of ["aé", "日本", "aβc", "🎯", "aa🎯", "ascii-only"]) {
+    it(`keeps every character that fits: ${text}`, () => {
+      const dir = tmp();
+      const s = session(dir);
+      const entry = captured(dir, s, text);
+      const raw = enc(text);
+      const env = s.inspect(request(entry, { kind: "bytes", start: 0, end: raw.length })) as {
+        code: string;
+        extraction: { segments: { text: string }[] };
+      };
+      expect(env.code).toBe("EXTRACTED");
+      expect(env.extraction.segments.map((seg) => seg.text).join("")).toBe(text);
+    });
+  }
+
+  it("drops only the character the cut splits", () => {
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, "日本");
+    // 3 bytes = exactly `日`; 4 and 5 bytes split `本` and must still keep `日`.
+    for (const [end, expected] of [
+      [3, "日"],
+      [4, "日"],
+      [5, "日"],
+      [6, "日本"],
+    ] as const) {
+      const env = s.inspect(request(entry, { kind: "bytes", start: 0, end })) as {
+        extraction: { segments: { text: string }[] };
+      };
+      expect(env.extraction.segments.map((seg) => seg.text).join("")).toBe(expected);
+    }
+  });
+});

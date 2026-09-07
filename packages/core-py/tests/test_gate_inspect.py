@@ -472,3 +472,53 @@ def test_a_single_line_too_wide_for_the_envelope_says_so_rather_than_blaming_dis
         _request(entry, {"kind": "bytes", "start": 0, "end": 30000}, max_scan_lines=1)
     )
     assert same["code"] == "EXTRACTED" and same["extraction"]["result_bytes"] > 0
+
+
+# -- UTF-8 boundary handling on an exact byte page --------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["aé", "日本", "aβc", "🎯", "aa🎯", "ascii-only"],
+    ids=["two-byte-tail", "three-byte", "mixed", "four-byte", "four-byte-tail", "ascii"],
+)
+def test_a_byte_page_keeps_every_character_that_fits(tmp_path, text):
+    """A complete trailing character must survive an exact byte page.
+
+    `backToBoundary`/`_back_to_boundary` walked back over the trailing character's
+    continuation bytes and then dropped its lead byte too, so a range covering a whole
+    string silently lost its last character - `日本` over bytes 0..6 returned only `日`.
+    Exact extraction that quietly drops source bytes is the one thing this mode may
+    never do.
+    """
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, body=text)
+    raw = text.encode("utf-8")
+    env = session.inspect(_request(entry, {"kind": "bytes", "start": 0, "end": len(raw)}))
+    assert env["code"] == "EXTRACTED"
+    assert "".join(s["text"] for s in env["extraction"]["segments"]) == text
+
+
+def test_a_byte_page_cut_mid_character_drops_only_the_split_character(tmp_path):
+    """Cutting inside a character drops that character - and nothing before it."""
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, body="日本")
+    # 3 bytes = exactly `日`; 4 and 5 bytes split `本` and must still keep `日`.
+    for end, expected in ((3, "日"), (4, "日"), (5, "日"), (6, "日本")):
+        env = session.inspect(_request(entry, {"kind": "bytes", "start": 0, "end": end}))
+        got = "".join(s["text"] for s in env["extraction"]["segments"])
+        assert got == expected, f"end={end} gave {got!r}, expected {expected!r}"
+
+
+def test_boundary_helper_only_retreats_across_an_incomplete_character():
+    """The helper itself, pinned directly: a boundary cut must be a no-op."""
+    from context_shunt.inspect import _back_to_boundary
+
+    data = "日本".encode()
+    assert _back_to_boundary(data, 0, 6) == 6  # both characters complete
+    assert _back_to_boundary(data, 0, 3) == 3  # `日` complete
+    assert _back_to_boundary(data, 0, 5) == 3  # `本` split -> drop it, keep `日`
+    assert _back_to_boundary(data, 0, 4) == 3  # `本` split -> drop it, keep `日`
+    ascii_data = b"abc"
+    assert _back_to_boundary(ascii_data, 0, 3) == 3
+    assert _back_to_boundary(ascii_data, 0, 2) == 2

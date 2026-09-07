@@ -460,29 +460,22 @@ def _forward_to_boundary(data: bytes, offset: int) -> int:
 
 
 def _back_to_boundary(data: bytes, begin: int, offset: int) -> int:
-    """Pull back to the last UTF-8 character end at or before ``offset``."""
+    """Pull back to the last UTF-8 character end at or before ``offset``.
+
+    The snapshot is validated UTF-8 before it is ever stored (``assert_text``), so every
+    character *ending* at or before ``offset`` is complete. That makes the test cheap: a
+    cut is already on a boundary unless the byte it lands on is a continuation byte, in
+    which case ``offset`` is inside a character and only that character is dropped.
+
+    The previous version walked back over the continuation bytes and then dropped the lead
+    byte as well, which discarded a character that fitted entirely: `日本` cut at 6 came
+    back as `日`, and cut at 3 came back empty.
+    """
     offset = min(offset, len(data))
-    while offset > begin and (data[offset - 1] & 0xC0) == 0x80:
+    # `offset == len(data)` is the end of the payload, which is always a boundary.
+    while offset > begin and offset < len(data) and (data[offset] & 0xC0) == 0x80:
         offset -= 1
-    if offset > begin:
-        lead = data[offset - 1]
-        width = _sequence_width(lead)
-        if width > 1:
-            # ``offset`` sits just after a lead byte whose continuation bytes were cut.
-            offset -= 1
     return offset
-
-
-def _sequence_width(lead: int) -> int:
-    if lead < 0x80:
-        return 1
-    if lead >= 0xF0:
-        return 4
-    if lead >= 0xE0:
-        return 3
-    if lead >= 0xC0:
-        return 2
-    return 1
 
 
 __all__ = [
