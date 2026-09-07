@@ -807,6 +807,9 @@ describe("cross-process behaviour in separate node processes", () => {
     console.log(JSON.stringify(failures));
   `;
 
+  // Spawning real processes is inherently slower than the default per-test budget.
+  const SUBPROCESS_TIMEOUT_MS = 180_000;
+
   it.skipIf(!built)("keeps every published payload readable under a concurrent sweeper", async () => {
     const root = join(tmp(), "cache");
     const rounds = "120";
@@ -822,7 +825,7 @@ describe("cross-process behaviour in separate node processes", () => {
       failures.push(...(JSON.parse(r.out.trim()) as string[]));
     }
     expect(failures).toEqual([]);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   const OPENER = `
     const { SnapshotStore, ScopeIdentity } = await import(${JSON.stringify(DIST)});
@@ -868,5 +871,5 @@ describe("cross-process behaviour in separate node processes", () => {
       for (const r of results) expect(r.code, r.err).toBe(0);
       expect(results.map((r) => JSON.parse(r.out.trim()))).toEqual(Array(12).fill("ok"));
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });

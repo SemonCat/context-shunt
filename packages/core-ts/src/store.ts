@@ -1504,13 +1504,26 @@ export class SnapshotStore {
       const name = path.slice(path.lastIndexOf("/") + 1);
       const hash = name.slice(0, name.length - BLOB_SUFFIX.length);
       if (known.has(hash)) continue;
-      // The listing above is a snapshot, so a publisher can have staged this very digest
-      // since. Re-reading the protected set immediately before the unlink means the
-      // decision is made against the state that is true *now* rather than one that was
-      // true when the walk began.
-      if (protectedNow().has(hash)) continue;
-      unlinkQuiet(path);
-      removed += 1;
+      // The walk above is only a candidate list. Eligibility and the unlink have to be
+      // decided together *and* against every other process, so both happen inside one
+      // write transaction: `BEGIN IMMEDIATE` takes the database write lock, which is what
+      // a publisher's lease insert and its publishing transaction contend for. Re-reading
+      // the protected set alone was not enough - nothing stopped another process taking a
+      // lease between that read and the unlink, and a real two-process run lost a payload
+      // to exactly that window with `STORE_FAILED/BLOB_MISSING`.
+      //
+      // Serializing on the write lock leaves two orders, both safe: the publisher's lease
+      // commits first and this sees it, or this commits first and the publisher's own
+      // revalidation rewrites the content it still holds.
+      try {
+        removed += this.writeTxn(db, () => {
+          if (protectedNow().has(hash)) return 0;
+          unlinkQuiet(path);
+          return 1;
+        });
+      } catch {
+        // A concurrent writer holds the lock; the next sweep tries again.
+      }
     }
     return removed;
   }
