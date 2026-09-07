@@ -50,6 +50,7 @@ zero; ``usage_complete`` is true only when every started attempt came back with 
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -167,6 +168,11 @@ class ModelIdentity:
     def known(self) -> bool:
         return bool(self.provider) or bool(self.model)
 
+    @property
+    def identifies_model(self) -> bool:
+        """Whether this side actually names a model, rather than only a provider."""
+        return bool(self.model)
+
 
 @dataclass
 class Provenance:
@@ -241,7 +247,9 @@ def classify(
     if resolved.known and _contradicts(requested, resolved):
         return Attribution.MISMATCH, Confidence.MEDIUM
 
-    if provider_confirms_generation and reported.known:
+    # `ACTUAL` is a claim about which *model* generated the tokens, so a confirmation
+    # that names only a provider cannot earn it - `known` is true for either half alone.
+    if provider_confirms_generation and reported.identifies_model:
         return Attribution.ACTUAL, Confidence.HIGH
     if resolved.known:
         return Attribution.RESOLVED, Confidence.MEDIUM
@@ -258,17 +266,33 @@ def _contradicts(requested: ModelIdentity, observed: ModelIdentity) -> bool:
     )
 
 
+#: A trailing segment that decorates an id rather than renaming it: an ISO build date or
+#: a numeric revision. Deliberately not an arbitrary word - `gpt-4` and `gpt-4-turbo` are
+#: different models, and so are `gpt-5.6-luna` and `gpt-5.6-luna-evil`.
+_DECORATION = re.compile(r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|v?[0-9]+(?:[.\-][0-9]+)*)$")
+
+
 def _model_agrees(requested: str, observed: str) -> bool:
     """Providers often return a dated or namespaced variant of the requested id.
 
     ``gpt-5.6-luna`` vs ``openai/gpt-5.6-luna`` vs ``gpt-5.6-luna-2026-05-01`` all agree;
-    a different family does not. Agreement is deliberately generous about decoration and
-    strict about identity, because the alternative is a false ``mismatch`` on every
-    provider that stamps a build date.
+    a different family does not. Agreement is generous about *decoration* and strict about
+    identity, because the alternative is a false ``mismatch`` on every provider that
+    stamps a build date.
+
+    Decoration used to be "the requested id plus a hyphen plus anything", which let a
+    substituted model keep the prefix and pass as the requested one - ``gpt-5.6-luna-evil``
+    was classified as ``gpt-5.6-luna`` and could be published under its name. The suffix
+    must now look like a version, so a rename is a mismatch again.
     """
     left = _bare_model(requested)
     right = _bare_model(observed)
-    return left == right or right.startswith(f"{left}-") or left.startswith(f"{right}-")
+    if left == right:
+        return True
+    longer, shorter = (right, left) if len(right) > len(left) else (left, right)
+    if not longer.startswith(f"{shorter}-"):
+        return False
+    return bool(_DECORATION.match(longer[len(shorter) + 1 :]))
 
 
 def _bare_model(ref: str) -> str:

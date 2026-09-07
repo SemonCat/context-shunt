@@ -206,10 +206,28 @@ function bareModel(ref: string): string {
  * strict about identity, because the alternative is a false `mismatch` on every provider
  * that stamps a build date.
  */
+/**
+ * A trailing segment that decorates an id rather than renaming it: an ISO build date or a
+ * numeric revision. Deliberately not an arbitrary word - `gpt-4` and `gpt-4-turbo` are
+ * different models, and so are `gpt-5.6-luna` and `gpt-5.6-luna-evil`.
+ */
+const DECORATION = /^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|v?[0-9]+(?:[.\-][0-9]+)*)$/;
+
+/**
+ * Agreement is generous about *decoration* and strict about identity.
+ *
+ * Decoration used to be "the requested id plus a hyphen plus anything", which let a
+ * substituted model keep the prefix and pass as the requested one - `gpt-5.6-luna-evil`
+ * was classified as `gpt-5.6-luna` and could be published under its name. The suffix must
+ * now look like a version, so a rename is a mismatch again.
+ */
 function modelAgrees(requested: string, observed: string): boolean {
   const left = bareModel(requested);
   const right = bareModel(observed);
-  return left === right || right.startsWith(`${left}-`) || left.startsWith(`${right}-`);
+  if (left === right) return true;
+  const [longer, shorter] = right.length > left.length ? [right, left] : [left, right];
+  if (!longer.startsWith(`${shorter}-`)) return false;
+  return DECORATION.test(longer.slice(shorter.length + 1));
 }
 
 function contradicts(requested: ModelIdentity, observed: ModelIdentity): boolean {
@@ -250,7 +268,9 @@ export function classifyAttribution(
   if (resolvedKnown && contradicts(input.requested, input.resolved)) {
     return { status: "mismatch", confidence: "medium" };
   }
-  if (input.providerConfirmsGeneration && reportedKnown) {
+  // `actual` is a claim about which *model* generated the tokens, so a confirmation that
+  // names only a provider cannot earn it - `identityKnown` is true for either half alone.
+  if (input.providerConfirmsGeneration && Boolean(input.reported.model)) {
     return { status: "actual", confidence: "high" };
   }
   if (resolvedKnown) return { status: "resolved", confidence: "medium" };

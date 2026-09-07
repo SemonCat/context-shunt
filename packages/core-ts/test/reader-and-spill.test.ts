@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
+import { classifyAttribution } from "../src/provenance.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
 import { InMemoryMetrics } from "../src/metrics.js";
@@ -824,5 +825,59 @@ describe("fitting the envelope", () => {
     const second = await answerOver(tmp(), 3);
     expect(first.citations.map((c) => c.id)).toEqual(second.citations.map((c) => c.id));
     expect(first.answer).toBe(second.answer);
+  });
+});
+
+// -- attribution: what counts as the same model, and what proves ACTUAL -------
+
+describe("attribution identity", () => {
+  /**
+   * A prefix match is not an identity match.
+   *
+   * Decoration was accepted as any `requested + "-" + anything`, so `gpt-5.6-luna-evil`
+   * was classified as the requested model and could be published as such. Only a date or
+   * a numeric revision is decoration; an alphabetic suffix names a *different* model
+   * (`gpt-4` and `gpt-4-turbo` are not the same model either).
+   */
+  for (const [observed, agrees] of [
+    ["gpt-5.6-luna", true],
+    ["openai/gpt-5.6-luna", true],
+    ["GPT-5.6-Luna", true],
+    ["gpt-5.6-luna-2026-05-01", true],
+    ["gpt-5.6-luna-2", true],
+    ["gpt-5.6-luna-evil", false],
+    ["gpt-5.6-luna-uncensored", false],
+    ["gpt-5.6-lunatic", false],
+    ["gpt-5.6-sol", false],
+  ] as const) {
+    it(`${agrees ? "accepts" : "rejects"} ${observed}`, () => {
+      const { status } = classifyAttribution({
+        requested: { provider: "openai", model: "gpt-5.6-luna" },
+        resolved: {},
+        reported: { provider: "openai", model: observed },
+        providerConfirmsGeneration: true,
+      });
+      expect(status).toBe(agrees ? "actual" : "mismatch");
+    });
+  }
+
+  it("requires a reported model, not merely a reported provider, for actual", () => {
+    const requested = { provider: "openai", model: "gpt-5.6-luna" };
+    expect(
+      classifyAttribution({
+        requested,
+        resolved: {},
+        reported: { provider: "openai" },
+        providerConfirmsGeneration: true,
+      }).status,
+    ).not.toBe("actual");
+    expect(
+      classifyAttribution({
+        requested,
+        resolved: {},
+        reported: { provider: "openai", model: "gpt-5.6-luna" },
+        providerConfirmsGeneration: true,
+      }).status,
+    ).toBe("actual");
   });
 });

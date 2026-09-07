@@ -280,3 +280,90 @@ def test_json_source_answers_with_record_citations(tmp_path):
     )
     assert env["code"] == "ANSWERED"
     assert env["citations"][0]["locator"]["kind"] == "records"
+
+
+# -- attribution: what counts as the same model, and what proves ACTUAL -------
+
+
+@pytest.mark.parametrize(
+    "observed,agrees",
+    [
+        ("gpt-5.6-luna", True),
+        ("openai/gpt-5.6-luna", True),
+        ("GPT-5.6-Luna", True),
+        ("gpt-5.6-luna-2026-05-01", True),  # provider stamped a build date
+        ("gpt-5.6-luna-2", True),  # numbered revision
+        ("gpt-5.6-luna-evil", False),  # a different model wearing the prefix
+        ("gpt-5.6-luna-uncensored", False),
+        ("gpt-5.6-lunatic", False),
+        ("gpt-5.6-sol", False),
+    ],
+)
+def test_only_dated_or_numbered_decoration_counts_as_the_same_model(observed, agrees):
+    """A prefix match is not an identity match.
+
+    Decoration was accepted as any `requested + "-" + anything`, so `gpt-5.6-luna-evil`
+    was classified as the requested model and could be published as such. Only a date or
+    a numeric revision is decoration; an alphabetic suffix names a *different* model
+    (`gpt-4` and `gpt-4-turbo` are not the same model either).
+    """
+    from context_shunt.provenance import _model_agrees
+
+    assert _model_agrees("gpt-5.6-luna", observed) is agrees
+
+
+def test_a_prefix_extension_is_a_mismatch_end_to_end(tmp_path):
+    """The rename must be refused by the reader, not merely scored differently."""
+
+    def bridge(**_kw):
+        return {
+            "text": "{}",
+            "reported_provider": "openai",
+            "reported_model": "gpt-5.6-luna-evil",
+            "provider_confirms_generation": True,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "usage_exact": True,
+        }
+
+    provider = HostBridgeProvider(bridge, provider="openai")
+    status, _confidence = provider.complete(
+        system="s", user="u", max_output_tokens=10, timeout_ms=100
+    ).attribution()
+    assert status is Attribution.MISMATCH
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    env = Reader(registry, provider).answer("sess", _request(entry)).envelope
+    assert env["status"] == "error" and env["code"] == "MODEL_ERROR"
+    assert env["provenance"]["reported_model"] == "gpt-5.6-luna-evil"
+
+
+def test_actual_needs_a_reported_model_not_merely_a_reported_provider():
+    """`ACTUAL` is a claim about which *model* generated the tokens.
+
+    `known` is true when either half of the identity is set, so a bridge that confirmed
+    generation while naming only a provider was classified `actual` with no model
+    identity behind it. That is the strongest label the envelope has, so it needs the
+    model actually named.
+    """
+    from context_shunt.provenance import Attribution, Confidence, ModelIdentity, classify
+
+    requested = ModelIdentity(provider="openai", model="gpt-5.6-luna")
+
+    status, confidence = classify(
+        requested=requested,
+        resolved=ModelIdentity(),
+        reported=ModelIdentity(provider="openai"),  # provider only
+        provider_confirms_generation=True,
+    )
+    assert status is not Attribution.ACTUAL
+
+    # Naming the model is what earns the strongest label.
+    status, confidence = classify(
+        requested=requested,
+        resolved=ModelIdentity(),
+        reported=ModelIdentity(provider="openai", model="gpt-5.6-luna"),
+        provider_confirms_generation=True,
+    )
+    assert status is Attribution.ACTUAL and confidence is Confidence.HIGH
