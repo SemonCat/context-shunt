@@ -72,6 +72,7 @@ from .provider import (
     ReaderProvider,
     TransientProviderError,
     build_user_message,
+    deadline_kwarg,
 )
 from .registry import SourceRegistry
 from .schema import validate_request
@@ -751,6 +752,12 @@ class Reader:
                             user=user,
                             max_output_tokens=max_output_tokens,
                             timeout_ms=timeout_ms,
+                            # So a composite provider can stop between attempts rather
+                            # than advancing after the caller has already given up. Only
+                            # passed to a provider that accepts it: `deadline` is a
+                            # widening of a published protocol, and a provider written
+                            # against the previous signature must keep working.
+                            **deadline_kwarg(self._provider, deadline),
                         ),
                     )
                 )
@@ -904,7 +911,12 @@ def _reader_cost(
     """Exact provider usage wins; otherwise a named deterministic estimate."""
     if attempts == 0:
         return ReaderCost.none()
-    if usage.complete:
+    # `exact` is a claim about the whole request, not about whichever attempt happened to
+    # win. A chain that failed once and then succeeded merged the winner's exact usage
+    # into an empty accumulator and came back `exact` while only one of two billed
+    # attempts had reported - a partial sum wearing the strongest label. Every started
+    # attempt has to have reported for the total to be exact.
+    if usage.complete and usage_complete == attempts:
         return ReaderCost(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,

@@ -666,3 +666,52 @@ describe("availability fallback chain", () => {
     expect(out.provenance.fallback_used).toBe(false);
   });
 });
+
+describe("fallback routes to the candidate's own provider", () => {
+  /**
+   * The bridge received each candidate's provider and ignored it, building every route
+   * from `config.readerProvider`. A fallback onto a *different* provider was therefore
+   * sent to the primary's provider under the fallback's model name. The existing test
+   * used one provider for both entries, so it could not see this.
+   */
+  it("uses the fallback entry's provider, not the primary's", async () => {
+    const dir = workspace();
+    const path = join(dir, "ws", "conf.txt");
+    writeFileSync(path, "max_retries = 3\nbackoff = fixed\n");
+
+    const attempted: string[] = [];
+    const f = fakeApi();
+    f.api.pluginConfig = {
+      workspace_roots: [join(dir, "ws")],
+      spill_dir: join(dir, "cache"),
+      reader: {
+        model: READER_MODEL,
+        provider: "openai",
+        fallback_chain: [{ provider: "anthropic", model: "claude-reader" }],
+      },
+    };
+    f.api.runtime.llm.complete = async (opts: any) => {
+      attempted.push(opts.model);
+      if (opts.model.startsWith("openai/")) throw new Error("upstream unavailable");
+      return {
+        text: JSON.stringify({
+          answer: "The retry ceiling is three [c1].",
+          citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "max_retries = 3" }],
+        }),
+        provider: "anthropic",
+        model: "claude-reader",
+        usage: { inputTokens: 12, outputTokens: 8 },
+      };
+    };
+
+    const out = JSON.parse(
+      await new ContextShuntPlugin(f.api).onReaderTool(
+        { question: "What is the retry ceiling?", paths: [path] },
+        { sessionKey: "s1" },
+      ),
+    );
+
+    expect(attempted).toEqual([`openai/${READER_MODEL}`, "anthropic/claude-reader"]);
+    expect(out.provenance.fallback_used).toBe(true);
+  });
+});

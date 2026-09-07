@@ -37,9 +37,11 @@ its own reported provenance and usage so the envelope can say a fallback was use
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Protocol
 
 from .errors import ShuntError
@@ -102,10 +104,23 @@ class TransientProviderError(ShuntError):
 
 
 class ReaderProvider(Protocol):
-    """Implemented by each adapter over its host's model bridge."""
+    """Implemented by each adapter over its host's model bridge.
+
+    ``deadline`` is optional and carries the request's cancellation state. It exists so a
+    composite provider can stop between attempts: without it the Python chain had nothing
+    to consult and kept advancing after the caller had already been given up on, which
+    TypeScript's signal-carrying contract prevented. A provider that ignores it is still
+    valid - the reader enforces the same bound around every call either way.
+    """
 
     def complete(
-        self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
+        self,
+        *,
+        system: str,
+        user: str,
+        max_output_tokens: int,
+        timeout_ms: int,
+        deadline: Any | None = None,
     ) -> ModelResponse: ...
 
 
@@ -154,8 +169,17 @@ class HostBridgeProvider:
         return self._target
 
     def complete(
-        self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
+        self,
+        *,
+        system: str,
+        user: str,
+        max_output_tokens: int,
+        timeout_ms: int,
+        deadline: Any | None = None,
     ) -> ModelResponse:
+        # `deadline` is accepted for the composite contract and deliberately unused here:
+        # the reader already wraps this call in the request budget, and the host bridge
+        # has its own `timeout_ms`.
         capped = min(max_output_tokens, self._limits.max_output_tokens_per_call)
         try:
             result = self._call(
@@ -270,7 +294,13 @@ class FallbackChainProvider:
         return getattr(first, "target", ProviderTarget())
 
     def complete(
-        self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
+        self,
+        *,
+        system: str,
+        user: str,
+        max_output_tokens: int,
+        timeout_ms: int,
+        deadline: Any | None = None,
     ) -> ModelResponse:
         """Try each target in turn, inside *one* shared budget.
 
@@ -285,6 +315,11 @@ class FallbackChainProvider:
         started = time.monotonic()
         attempts = 0
         for index, provider in enumerate(self._chain):
+            # Availability is the only thing this chain rescues. A caller who has
+            # cancelled is not waiting for an answer from anyone, so no further attempt
+            # may start.
+            if deadline is not None and getattr(deadline, "cancelled", False):
+                raise ShuntError("CANCELLED", "MODEL_CALL", retryable=False)
             remaining_ms = timeout_ms - int((time.monotonic() - started) * 1000)
             if remaining_ms <= 0:
                 # Out of budget. Never start another provider call the caller cannot use.
@@ -296,6 +331,7 @@ class FallbackChainProvider:
                     user=user,
                     max_output_tokens=max_output_tokens,
                     timeout_ms=remaining_ms,
+                    **deadline_kwarg(provider, deadline),
                 )
             except ShuntError as exc:
                 last = exc
@@ -324,6 +360,29 @@ def _is_availability_failure(exc: ShuntError) -> bool:
     if exc.code == "TIMEOUT":
         return True
     return exc.code == "MODEL_ERROR" and exc.detail not in ("MODEL_SUBSTITUTED",)
+
+
+@lru_cache(maxsize=64)
+def _complete_accepts_deadline(complete: Any) -> bool:
+    try:
+        parameters = inspect.signature(complete).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return True
+    return "deadline" in parameters
+
+
+def deadline_kwarg(provider: Any, deadline: Any | None) -> dict[str, Any]:
+    """``{"deadline": ...}`` for a provider that accepts it, otherwise nothing.
+
+    ``deadline`` widens a published protocol, so a provider written against the previous
+    signature has to keep working. Callers splat this rather than passing the argument
+    unconditionally.
+    """
+    if deadline is None or not _complete_accepts_deadline(type(provider).complete):
+        return {}
+    return {"deadline": deadline}
 
 
 def build_user_message(question: str, chunk_text: str, locator: dict[str, Any]) -> str:

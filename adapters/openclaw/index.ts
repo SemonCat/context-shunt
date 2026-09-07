@@ -523,15 +523,19 @@ export class ContextShuntPlugin {
     // configured a fallback silently had none.
     return buildProvider(
       this.config,
-      async ({ system, user, model, maxOutputTokens, timeoutMs, signal }) => {
+      async ({ system, user, provider, model, maxOutputTokens, timeoutMs, signal }) => {
         // The host owns credentials and routing; provider exception text is dropped by
         // HostBridgeProvider so only MODEL_ERROR crosses back.
+        //
+        // The route comes from *this candidate's* provider. Building it from
+        // `config.readerProvider` instead sent every fallback to the primary's provider
+        // under the fallback's model name, so a chain onto a different provider silently
+        // asked the wrong one for a model it does not serve. `openai` remains the default
+        // only when nothing has been pinned at all.
         const result = await llm.complete({
           messages: [{ role: "user", content: user }],
           systemPrompt: system,
-          model: this.config.readerProvider
-            ? `${this.config.readerProvider}/${model}`
-            : `openai/${model}`,
+          model: `${provider || this.config.readerProvider || "openai"}/${model}`,
           maxTokens: maxOutputTokens,
           temperature: 0,
           signal,

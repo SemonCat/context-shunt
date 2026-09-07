@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from context_shunt.clock import Deadline, FakeClock
-from context_shunt.errors import CancelledError, DeadlineExceeded
+from context_shunt.errors import CancelledError, DeadlineExceeded, ShuntError
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
 from context_shunt.provider import (
@@ -309,3 +309,34 @@ def test_a_missed_deadline_returns_without_waiting_for_the_late_call():
     assert result.envelope["code"] == "TIMEOUT"
     # Generous, but far below the 250 ms the blocking drain added.
     assert elapsed_ms < 150, f"returned {elapsed_ms} ms after a 10 ms deadline"
+
+
+def test_the_python_chain_starts_no_attempt_after_cancellation():
+    """Parity with TypeScript: a cancelled caller gets no further attempts.
+
+    The Python provider contract carried no cancellation signal at all, so a chain had
+    nothing to consult and kept advancing through its candidates after the caller had
+    already been given up on. Availability is the only thing the chain rescues, and a
+    cancelled caller is not waiting for an answer from anyone.
+    """
+    from context_shunt.provider import FallbackChainProvider
+
+    clock = FakeClock()
+    deadline = Deadline.start(clock, 60_000)
+    attempts = {"n": 0}
+
+    class Cancelling:
+        target = ProviderTarget(model=L.reader_model, provider="openai")
+
+        def complete(self, *, system, user, max_output_tokens, timeout_ms, deadline=None):
+            attempts["n"] += 1
+            deadline.cancel()
+            deadline.check("MODEL_CALL")
+
+    chain = FallbackChainProvider(Cancelling(), [Cancelling(), Cancelling()])
+    with pytest.raises(ShuntError) as exc:
+        chain.complete(
+            system="s", user="u", max_output_tokens=10, timeout_ms=5000, deadline=deadline
+        )
+    assert exc.value.code == "CANCELLED"
+    assert attempts["n"] == 1

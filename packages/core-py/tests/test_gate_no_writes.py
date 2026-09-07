@@ -113,7 +113,18 @@ def test_reader_has_no_shell_network_or_write_capability(tmp_path):
     from context_shunt.provider import HostBridgeProvider
 
     params = set(inspect.signature(HostBridgeProvider.complete).parameters)
-    assert params == {"self", "system", "user", "max_output_tokens", "timeout_ms"}
+    # An exact set, so a capability cannot be added to the reader's provider surface
+    # without this failing. `deadline` carries the request's cancellation state and no
+    # authority: it lets a composite provider stop between attempts, and nothing in it
+    # can name a tool, a host, a path or a destination.
+    assert params == {
+        "self",
+        "system",
+        "user",
+        "max_output_tokens",
+        "timeout_ms",
+        "deadline",
+    }
     reader.answer(
         "sess",
         _request(registry.register("sess", snapshot_bytes(b"alpha\n"))),

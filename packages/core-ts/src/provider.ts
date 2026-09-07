@@ -176,6 +176,12 @@ export class HostBridgeProvider implements ReaderProvider {
       });
     } catch (err) {
       if (err instanceof ShuntError) throw err;
+      // A cancelled call is not a provider that failed. Sanitizing an abort into a
+      // *retryable* provider error handed the chain the one signal that means "advance",
+      // so cancelling the primary started the fallback instead of ending the request.
+      if (opts.signal?.aborted || isAbortError(err)) {
+        throw new ShuntError("CANCELLED", "MODEL_CALL", false);
+      }
       throw transientProviderError();
     }
     return this.unpack(result, capped);
@@ -285,6 +291,9 @@ export class FallbackChainProvider implements ReaderProvider {
     const started = Date.now();
     let attempts = 0;
     for (let index = 0; index < this.chain.length; index += 1) {
+      // Availability is the only thing this chain rescues. A caller who has cancelled is
+      // not waiting for an answer from anyone, so no further attempt may start.
+      if (opts.signal?.aborted) throw new ShuntError("CANCELLED", "MODEL_CALL", false);
       const provider = this.chain[index] as ReaderProvider;
       const remainingMs = opts.timeoutMs - (Date.now() - started);
       if (remainingMs <= 0) {
@@ -309,6 +318,12 @@ export class FallbackChainProvider implements ReaderProvider {
     }
     throw last ?? new ShuntError("MODEL_ERROR", "NO_PROVIDER", false);
   }
+}
+
+/** A DOM/Node abort, however the host surfaced it. */
+function isAbortError(err: unknown): boolean {
+  const name = (err as { name?: unknown })?.name;
+  return name === "AbortError" || name === "TimeoutError";
 }
 
 function isAvailabilityFailure(err: ShuntError): boolean {

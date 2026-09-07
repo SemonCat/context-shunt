@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { classifyAttribution } from "../src/provenance.js";
+import { FallbackChainProvider, HostBridgeProvider } from "../src/provider.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
 import { InMemoryMetrics } from "../src/metrics.js";
@@ -947,5 +948,39 @@ describe("legacy reader call compatibility", () => {
     );
     expect(result.envelope.status).toBe("error");
     expect(result.envelope.code).toBe("TIMEOUT");
+  });
+});
+
+describe("cancellation stops the fallback chain", () => {
+  /**
+   * An abort surfaced from the bridge as an ordinary exception, which
+   * `HostBridgeProvider` sanitized into a *retryable* provider error - which is precisely
+   * the chain's signal to advance. So cancelling the primary started the fallback instead
+   * of ending the request.
+   */
+  it("does not start a fallback after the caller aborts", async () => {
+    let attempts = 0;
+    const controller = new AbortController();
+    const bridge = async (opts: { signal?: AbortSignal }) => {
+      attempts += 1;
+      controller.abort();
+      opts.signal?.throwIfAborted();
+      throw new Error("aborted");
+    };
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(bridge, L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(bridge, L, "gpt-5.6-sol", "openai")],
+    );
+
+    await expect(
+      chain.complete({
+        system: "s",
+        user: "u",
+        maxOutputTokens: 10,
+        timeoutMs: 5000,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(ShuntError);
+    expect(attempts).toBe(1);
   });
 });

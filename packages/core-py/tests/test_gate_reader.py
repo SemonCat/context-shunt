@@ -8,7 +8,7 @@ import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from context_shunt.errors import ShuntError
-from context_shunt.limits import READER_MODEL
+from context_shunt.limits import DEFAULT_LIMITS, READER_MODEL
 from context_shunt.provenance import (
     Attribution,
     AttributionPolicy,
@@ -541,3 +541,38 @@ def test_a_decorated_model_id_is_not_certified_as_the_same_model():
     # A different model is still a contradiction.
     assert status("gpt-5.6-luna-evil") is Attribution.MISMATCH
     assert status("gpt-5.6-sol") is Attribution.MISMATCH
+
+
+def test_a_partial_fallback_usage_is_not_labelled_exact():
+    """Exact means every started attempt reported, not just the one that won.
+
+    A chain that failed once and then succeeded merged the winner's exact usage with an
+    empty accumulator, so the cost came back `exact` while only one of two billed attempts
+    had reported anything. A partial sum presented as exact understates real spend with
+    the strongest possible label on it.
+    """
+    from context_shunt.reader import _reader_cost
+
+    unreported = Usage(method=TokenMethod.NOT_APPLICABLE)
+    exact_one = Usage(input_tokens=4, output_tokens=3, method=TokenMethod.EXACT)
+
+    complete = _reader_cost(
+        exact_one,
+        attempts=1,
+        usage_complete=1,
+        prompt_bytes=40,
+        completion_bytes=8,
+        limits=DEFAULT_LIMITS,
+    )
+    assert complete.method is TokenMethod.EXACT
+
+    partial = _reader_cost(
+        unreported.merge(exact_one),
+        attempts=2,
+        usage_complete=1,
+        prompt_bytes=40,
+        completion_bytes=8,
+        limits=DEFAULT_LIMITS,
+    )
+    assert partial.method is not TokenMethod.EXACT
+    assert partial.attempts_started == 2 and partial.attempts_usage_complete == 1
