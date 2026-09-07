@@ -467,6 +467,44 @@ def test_two_processes_share_one_store_without_losing_a_handle(tmp_path):
         assert store.resolve(identity, handle_id).handle_id == handle_id
 
 
+def test_many_processes_can_create_the_same_store_at_once(tmp_path):
+    """The contended *first* open, which is a different race from contended writes.
+
+    The normative DDL sets `PRAGMA journal_mode = WAL`, and it runs on every connection.
+    The WAL transition needs a brief exclusive lock and SQLite answers a competitor with
+    SQLITE_BUSY immediately - `busy_timeout` does not cover it - so processes creating a
+    store together raced and the loser failed with `OPEN_FAILED`. This was the cause of an
+    intermittent failure in the two-process publish test.
+
+    Six processes rather than two, because the window is small: with the retry removed
+    this fails within a couple of rounds, and passes 40 rounds with it.
+    """
+    root = tmp_path / "cache"
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    program = (
+        "import sys;"
+        f"sys.path.insert(0, {src!r});"
+        "from context_shunt.store import SnapshotStore, ScopeIdentity;"
+        f"s = SnapshotStore({str(root)!r});"
+        "s.open_scope(ScopeIdentity(host='h', profile='p', principal='l',"
+        " session='shared', generation=1));"
+        "print('ok')"
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", program],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(6)
+    ]
+    for proc in procs:
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, err
+        assert out.strip() == "ok"
+
+
 def test_concurrent_disclosure_charges_never_overshoot_the_ceiling(tmp_path):
     limits = L.narrow(disclosure_max_per_source_bytes=1000)
     store = _store(tmp_path, limits)

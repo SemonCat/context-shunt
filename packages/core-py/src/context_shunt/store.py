@@ -78,6 +78,13 @@ from .limits import DEFAULT_LIMITS, Limits, store_ddl
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 _DB_NAME = "store.sqlite3"
+
+#: Opening a brand-new store races on the WAL transition, which is exclusive and answers
+#: a competitor with SQLITE_BUSY immediately. The transition happens once, so a handful of
+#: short retries is enough; this is not a substitute for `busy_timeout`, which covers the
+#: ordinary write contention that follows.
+_OPEN_ATTEMPTS = 6
+_OPEN_BACKOFF_S = 0.02
 _BLOB_DIR = "blobs"
 _TMP_DIR = "tmp"
 _READ_CHUNK = 256 * 1024
@@ -343,27 +350,57 @@ class SnapshotStore:
             _assert_private_directory(path)
 
     def _connect(self) -> sqlite3.Connection:
+        """Open the store, tolerating another process opening it at the same moment.
+
+        The normative DDL sets ``PRAGMA journal_mode = WAL``, and it runs on every fresh
+        connection. Switching a database into WAL needs a brief *exclusive* lock, and
+        SQLite answers a competing attempt with ``SQLITE_BUSY`` straight away -
+        ``busy_timeout`` does not cover the journal-mode transition. Two processes opening
+        a new store together therefore raced, and the loser failed the whole operation
+        with ``OPEN_FAILED``.
+
+        The transition only has to happen once: whoever wins leaves the database in WAL,
+        and every later connection finds it already there and needs no exclusive lock. So
+        the contention is genuinely transient and a bounded retry resolves it, without
+        weakening the DDL or moving the pragma out of the contract.
+        """
         if self._conn is not None:
             return self._conn
-        try:
-            conn = sqlite3.connect(
-                self._root / _DB_NAME,
-                timeout=self._limits.store_busy_timeout_ms / 1000.0,
-                isolation_level=None,  # explicit transactions only
-                check_same_thread=False,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute(f"PRAGMA busy_timeout = {int(self._limits.store_busy_timeout_ms)}")
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA synchronous = FULL")
-            conn.executescript(store_ddl())
-            with contextlib.suppress(OSError):
-                os.chmod(self._root / _DB_NAME, _FILE_MODE)
-        except (sqlite3.Error, OSError):
-            raise ShuntError("STORE_FAILED", "OPEN_FAILED", retryable=False) from None
-        self._conn = conn
-        self._bootstrap_metadata(conn)
-        return conn
+        last: Exception | None = None
+        for attempt in range(_OPEN_ATTEMPTS):
+            conn = None
+            try:
+                conn = sqlite3.connect(
+                    self._root / _DB_NAME,
+                    timeout=self._limits.store_busy_timeout_ms / 1000.0,
+                    isolation_level=None,  # explicit transactions only
+                    check_same_thread=False,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute(f"PRAGMA busy_timeout = {int(self._limits.store_busy_timeout_ms)}")
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.execute("PRAGMA synchronous = FULL")
+                conn.executescript(store_ddl())
+                with contextlib.suppress(OSError):
+                    os.chmod(self._root / _DB_NAME, _FILE_MODE)
+            except sqlite3.OperationalError as exc:
+                last = exc
+                if conn is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.close()
+                if attempt + 1 == _OPEN_ATTEMPTS:
+                    raise ShuntError("STORE_FAILED", "OPEN_FAILED", retryable=False) from None
+                time.sleep(_OPEN_BACKOFF_S * (attempt + 1))
+                continue
+            except (sqlite3.Error, OSError):
+                if conn is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.close()
+                raise ShuntError("STORE_FAILED", "OPEN_FAILED", retryable=False) from None
+            self._conn = conn
+            self._bootstrap_metadata(conn)
+            return conn
+        raise ShuntError("STORE_FAILED", "OPEN_FAILED", retryable=False) from last
 
     def _bootstrap_metadata(self, conn: sqlite3.Connection) -> None:
         """Seed the singletons and refuse a store written by an incompatible revision."""

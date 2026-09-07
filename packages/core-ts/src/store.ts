@@ -82,6 +82,23 @@ function openDatabase(path: string): DatabaseSyncType {
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 const DB_NAME = "store.sqlite3";
+
+/**
+ * Opening a brand-new store races on the WAL transition, which is exclusive and answers a
+ * competitor with SQLITE_BUSY immediately. The transition happens once, so a handful of
+ * short retries is enough; this is not a substitute for `busy_timeout`, which covers the
+ * ordinary write contention that follows.
+ */
+const OPEN_ATTEMPTS = 6;
+const OPEN_BACKOFF_MS = 20;
+
+/** A blocking pause, because this path is synchronous by construction. */
+function sleepMs(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // Busy-wait: only ever reached on a contended first open, for a few milliseconds.
+  }
+}
 const BLOB_DIR = "blobs";
 const TMP_DIR = "tmp";
 const BLOB_SUFFIX = ".bin";
@@ -307,26 +324,53 @@ export class SnapshotStore {
     }
   }
 
+  /**
+   * Open the store, tolerating another process opening it at the same moment.
+   *
+   * The normative DDL sets `PRAGMA journal_mode = WAL`, and it runs on every fresh
+   * connection. Switching a database into WAL needs a brief *exclusive* lock, and SQLite
+   * answers a competing attempt with `SQLITE_BUSY` straight away - `busy_timeout` does
+   * not cover the journal-mode transition. Two processes opening a new store together
+   * therefore raced, and the loser failed the whole operation with `OPEN_FAILED`.
+   *
+   * The transition only has to happen once: whoever wins leaves the database in WAL, and
+   * every later connection finds it already there and needs no exclusive lock. So the
+   * contention is genuinely transient and a bounded retry resolves it, without weakening
+   * the DDL or moving the pragma out of the contract.
+   */
   private connect(): DatabaseSyncType {
     if (this.db) return this.db;
-    let db: DatabaseSyncType;
-    try {
-      db = openDatabase(join(this.root, DB_NAME));
-      db.exec(`PRAGMA busy_timeout = ${Math.trunc(this.limits.storeBusyTimeoutMs)}`);
-      db.exec("PRAGMA foreign_keys = ON");
-      db.exec("PRAGMA synchronous = FULL");
-      db.exec(storeDdl());
+    for (let attempt = 0; attempt < OPEN_ATTEMPTS; attempt += 1) {
+      let db: DatabaseSyncType | undefined;
       try {
-        chmodSync(join(this.root, DB_NAME), FILE_MODE);
-      } catch {
-        // Not every filesystem honours the mode; the directory is already 0700.
+        db = openDatabase(join(this.root, DB_NAME));
+        db.exec(`PRAGMA busy_timeout = ${Math.trunc(this.limits.storeBusyTimeoutMs)}`);
+        db.exec("PRAGMA foreign_keys = ON");
+        db.exec("PRAGMA synchronous = FULL");
+        db.exec(storeDdl());
+        try {
+          chmodSync(join(this.root, DB_NAME), FILE_MODE);
+        } catch {
+          // Not every filesystem honours the mode; the directory is already 0700.
+        }
+      } catch (err) {
+        try {
+          db?.close();
+        } catch {
+          // Already unusable; nothing to release.
+        }
+        const busy = /lock|busy/i.test(String((err as Error)?.message ?? ""));
+        if (!busy || attempt + 1 === OPEN_ATTEMPTS) {
+          throw new ShuntError("STORE_FAILED", "OPEN_FAILED", false);
+        }
+        sleepMs(OPEN_BACKOFF_MS * (attempt + 1));
+        continue;
       }
-    } catch {
-      throw new ShuntError("STORE_FAILED", "OPEN_FAILED", false);
+      this.db = db;
+      this.bootstrapMetadata(db);
+      return db;
     }
-    this.db = db;
-    this.bootstrapMetadata(db);
-    return db;
+    throw new ShuntError("STORE_FAILED", "OPEN_FAILED", false);
   }
 
   /** Seed the singletons and refuse a store written by an incompatible revision. */

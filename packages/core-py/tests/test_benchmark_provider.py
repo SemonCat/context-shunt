@@ -12,6 +12,12 @@ deliberately loose: every call must finish inside the reader's own configured de
 That catches a route that is broken or hanging - the failure mode worth gating on -
 without pretending a wall-clock threshold is a property of the software.
 
+Latency is only meaningful over calls that *worked*, though. This gate used to ask only
+whether an attempt had started, so a route where every single call failed satisfied it
+completely and published healthy percentiles for a sequence of errors. Every sample is an
+answerable item on a route that is supposed to answer, so each one must come back an
+acceptable outcome, and an all-failing provider now fails.
+
 The assertion that carries real weight is the accounting one. This is the only gate where
 the token columns meet a *live* provider, so it is the only place that can prove against
 a real host - rather than a fixture - that an unreported usage is never passed off as
@@ -151,6 +157,7 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
             {
                 "category": item["category"],
                 "latency_ms": elapsed_ms,
+                "status": result.envelope["status"],
                 "code": result.envelope["code"],
                 "attempts_started": cost.attempts_started,
                 "attempts_usage_complete": cost.attempts_usage_complete,
@@ -162,6 +169,12 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         )
 
     assert samples, "the benchmark must measure something"
+
+    # An *attempt* is not a measurement. Every sample here is an answerable item on a
+    # route that is supposed to work, so a sample that came back an error describes a
+    # broken route, not a slow one - and a route where every call fails used to satisfy
+    # this gate completely, because it only ever asked whether an attempt had started.
+    acceptable = [s for s in samples if s["status"] != "error"]
     latencies = sorted(s["latency_ms"] for s in samples)
     p50 = statistics.median(latencies)
     p95 = latencies[min(len(latencies) - 1, int(round(0.95 * (len(latencies) - 1))))]
@@ -196,8 +209,17 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         "estimated_input_tokens_total": _summed(samples, "input_tokens"),
         "estimated_output_tokens_total": _summed(samples, "output_tokens"),
         "token_estimate_methods": sorted({s["token_method"] for s in samples}),
+        "acceptable_outcomes": len(acceptable),
+        "failed_outcomes": len(samples) - len(acceptable),
+        "attempts_started_total": sum(s["attempts_started"] for s in samples),
+        "attempts_usage_complete_total": sum(s["attempts_usage_complete"] for s in samples),
         "by_category": {
-            s["category"]: {"latency_ms": s["latency_ms"], "code": s["code"]} for s in samples
+            s["category"]: {
+                "latency_ms": s["latency_ms"],
+                "status": s["status"],
+                "code": s["code"],
+            }
+            for s in samples
         },
     }
     reports = REPO / "reports"
@@ -207,10 +229,19 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
     # A route that hangs is the failure worth gating on; a slow one is not a defect.
     assert latencies[-1] <= deadline_ms, report
 
+    # A benchmark of a route that cannot answer is not a benchmark. Every sample must be
+    # an acceptable outcome, so an all-failing provider fails this gate instead of
+    # reporting healthy latency percentiles for a sequence of errors.
+    assert len(acceptable) == len(samples), report
+
     # The assertion this gate exists for: against a live route, the method column must say
     # where every number came from, and an unreported usage must never be labelled exact.
     for sample in samples:
         assert sample["attempts_started"] > 0, report
+        # Accounting must cover every attempt the request actually started, retries and
+        # fallback attempts included - never more than were started, and never a partial
+        # tally silently labelled complete.
+        assert 0 <= sample["attempts_usage_complete"] <= sample["attempts_started"], report
         if sample["attempts_usage_complete"] < sample["attempts_started"]:
             # Unreported: a named estimate this core can reproduce from its own bytes,
             # never provider truth, and never a zero standing in for the unknown.
