@@ -108,6 +108,82 @@ class InputTokenBudget {
   }
 }
 
+/**
+ * Accounting for exactly one physical invocation of the provider.
+ *
+ * Ordinary, late and cancelled outcomes all report through this object, and it takes the
+ * first report and ignores every later one. Before it existed each branch did its own
+ * partial bookkeeping - or none: a late response recorded its own usage but not the
+ * repeated prompts or unseen billing behind it, and a cancellation that won the race
+ * against the provider dropped a billed call entirely. Whether a physical call was
+ * counted once, twice or not at all depended on when the deadline happened to fire.
+ *
+ * One physical invocation, one report. `record*` is safe to call from every path that
+ * might be the one to notice the call is over.
+ */
+class AttemptLedger {
+  private recorded = false;
+  /**
+   * Bytes one candidate's prompt occupies. Set once the prompt exists; a fallback re-sends
+   * the same prompt to every candidate it tries, so each extra attempt costs this again.
+   */
+  perCallPromptBytes = 0;
+
+  constructor(private readonly outcome: ChunkOutcome) {}
+
+  /** What a returned response cost, whether or not its answer can be published. */
+  recordSuccess(response: ModelResponse): void {
+    if (this.recorded) return;
+    this.recorded = true;
+    const outcome = this.outcome;
+    // An availability fallback may have taken several attempts inside this one call, and
+    // every one of them reached a provider and was billed. `calls` was already incremented
+    // once by the caller for the attempt it started.
+    const extraAttempts = Math.max(0, (response.attempts ?? 1) - 1);
+    outcome.calls += extraAttempts;
+    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    outcome.completionBytes += new TextEncoder().encode(response.text).length;
+    // Output the reader never saw: a failed candidate returned no text to measure, so its
+    // reported tokens are the only evidence of what it produced. Held apart from the
+    // winner's bytes precisely so the two are never added twice.
+    const unseen = response.billedFromFailedAttempts;
+    if (unseen) outcome.unseenUsage = mergeUsage(outcome.unseenUsage, unseen);
+    outcome.usage = mergeUsage(outcome.usage, response.usage);
+    // A composite provider reports how many of its attempts supplied complete usage; a
+    // plain one supplies one attempt, so the winner alone decides.
+    outcome.usageCompleteCalls +=
+      response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
+  }
+
+  /** What a failed call cost. A rejected reply is still a paid call. */
+  recordFailure(err: unknown): void {
+    if (this.recorded) return;
+    this.recorded = true;
+    const outcome = this.outcome;
+    const billed = (err as { billedUsage?: unknown })?.billedUsage;
+    if (billed && typeof billed === "object") {
+      outcome.usage = mergeUsage(outcome.usage, billed as Usage);
+      // Nothing came back, so every attempt here is one whose output was never seen.
+      outcome.unseenUsage = mergeUsage(outcome.unseenUsage, billed as Usage);
+    }
+    // The same aggregate as the success path: a chain that gave up still reports how many
+    // of its candidates were billed and how many of those said what they cost.
+    const reportedAttempts = (err as { usageCompleteAttempts?: number })?.usageCompleteAttempts;
+    outcome.usageCompleteCalls +=
+      reportedAttempts
+      ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
+    // A composite provider may have made several calls inside this one invocation before
+    // giving up. `calls` was incremented once by the caller for the invocation; the rest
+    // are the ones the chain made and was billed for.
+    const extraAttempts = Math.max(
+      0,
+      ((err as { internalAttempts?: number })?.internalAttempts ?? 1) - 1,
+    );
+    outcome.calls += extraAttempts;
+    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+  }
+}
+
 export class Reader {
   private readonly verifier: CitationVerifier;
 
@@ -632,6 +708,9 @@ export class Reader {
       // Hoisted so the failure path can charge the same per-call prompt for every attempt
       // a composite provider made before giving up.
       let perCallPromptBytes = 0;
+      // One ledger per physical invocation, created before anything can fail. Ordinary,
+      // late and cancelled outcomes all report through it, and it counts the first only.
+      const ledger = new AttemptLedger(outcome);
       try {
         const user = buildUserMessage(question, chunk.text, chunk.locator);
         inputBudget.spend(
@@ -646,30 +725,15 @@ export class Reader {
           new TextEncoder().encode(READER_SYSTEM_PROMPT).length
           + new TextEncoder().encode(user).length;
         outcome.promptBytes += perCallPromptBytes;
+        ledger.perCallPromptBytes = perCallPromptBytes;
         const response = await this.completeWithinDeadline({
           system: READER_SYSTEM_PROMPT,
           user,
           maxOutputTokens: this.limits.maxOutputTokensPerCall,
-          outcome,
+          ledger,
         }, deadline);
         validateModelResponse(response, this.limits);
-        // An availability fallback may have taken several attempts inside this one call,
-        // and every one of them reached a provider and was billed. `calls` was already
-        // incremented once above for the attempt we started.
-        const extraAttempts = Math.max(0, (response.attempts ?? 1) - 1);
-        outcome.calls += extraAttempts;
-        outcome.promptBytes += perCallPromptBytes * extraAttempts;
-        outcome.completionBytes += new TextEncoder().encode(response.text).length;
-        // Output the reader never saw: a failed candidate returned no text to measure, so
-        // its reported tokens are the only evidence of what it produced. Held apart from
-        // the winner's bytes precisely so the two are never added twice.
-        const unseen = response.billedFromFailedAttempts;
-        if (unseen) outcome.unseenUsage = mergeUsage(outcome.unseenUsage, unseen);
-        outcome.usage = mergeUsage(outcome.usage, response.usage);
-        // A composite provider reports how many of its attempts supplied complete usage;
-        // a plain one supplies one attempt, so the winner alone decides.
-        outcome.usageCompleteCalls +=
-          response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
+        ledger.recordSuccess(response);
         outcome.attribution = responseAttribution(response);
         outcome.resolved = response.resolved;
         outcome.reported = response.reported;
@@ -687,32 +751,10 @@ export class Reader {
         return outcome;
       } catch (err) {
         const safe = isShuntError(err) ? err : transientProviderError();
-        // A rejected reply is still a paid call. When the bridge could say what it was
-        // billed, that travels on the error and is recorded here, so an unusable answer
-        // costs the truth rather than an estimate.
-        const billed = (safe as { billedUsage?: unknown }).billedUsage;
-        if (billed && typeof billed === "object") {
-          outcome.usage = mergeUsage(outcome.usage, billed as Usage);
-        }
-        // The same aggregate as the success path: a chain that gave up still reports how
-        // many of its candidates were billed and how many of those said what they cost.
-        const reportedAttempts = (safe as { usageCompleteAttempts?: number })
-          .usageCompleteAttempts;
-        outcome.usageCompleteCalls +=
-          reportedAttempts
-          ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
-        // Nothing came back, so every attempt here is one whose output was never seen.
-        if (billed && typeof billed === "object") {
-          outcome.unseenUsage = mergeUsage(outcome.unseenUsage, billed as Usage);
-        }
-        outcome.promptBytes +=
-          perCallPromptBytes
-          * Math.max(0, ((safe as { internalAttempts?: number }).internalAttempts ?? 1) - 1);
-        // A composite provider may have made several calls inside this one invocation
-        // before giving up. `calls` was incremented once above for the invocation; the
-        // rest are the ones the chain made and was billed for.
-        const internal = (safe as { internalAttempts?: number }).internalAttempts ?? 1;
-        outcome.calls += Math.max(0, internal - 1);
+        // A rejected reply is still a paid call, and the ledger is where that is recorded.
+        // It is a no-op when the call was already accounted for on the way out - a late
+        // response, or a cancellation that won the race against the provider.
+        ledger.recordFailure(safe);
         if (
           safe.code === "MODEL_ERROR"
           && safe.retryable
@@ -739,8 +781,8 @@ export class Reader {
       system: string;
       user: string;
       maxOutputTokens: number;
-      /** Receives the cost of a call that finished too late to publish. */
-      outcome: ChunkOutcome;
+      /** Receives the cost of this physical call, whichever path notices it finished. */
+      ledger: AttemptLedger;
     },
     deadline: Deadline,
   ): Promise<ModelResponse> {
@@ -770,18 +812,34 @@ export class Reader {
       }
       deadline.signal.addEventListener("abort", onDeadlineCancelled, { once: true });
     });
+    // The call's own settlement, captured whether or not it wins the race below. A
+    // timeout or a cancellation can settle first and discard the provider's result
+    // unread - and with it the attempts, prompts and billing of everything the chain
+    // tried. The call was made and was billed either way, so its outcome is kept.
+    let settled: { ok: true; value: ModelResponse } | { ok: false; err: unknown } | undefined;
+    const call = this.provider
+      .complete({
+        system: opts.system,
+        user: opts.user,
+        maxOutputTokens: opts.maxOutputTokens,
+        timeoutMs,
+        signal: controller.signal,
+      })
+      .then(
+        (value) => {
+          settled = { ok: true, value };
+          return value;
+        },
+        (err: unknown) => {
+          settled = { ok: false, err };
+          throw err;
+        },
+      );
+    // An unobserved rejection is a process-level warning in Node; this arm exists only so
+    // the promise is always handled. The real handling is `settled` above.
+    call.catch(() => undefined);
     try {
-      const response = await Promise.race([
-        this.provider.complete({
-          system: opts.system,
-          user: opts.user,
-          maxOutputTokens: opts.maxOutputTokens,
-          timeoutMs,
-          signal: controller.signal,
-        }),
-        timeout,
-        cancelled,
-      ]);
+      const response = await Promise.race([call, timeout, cancelled]);
       try {
         deadline.check("MODEL_CALL");
       } catch (err) {
@@ -792,16 +850,22 @@ export class Reader {
         // A composite response is several physical calls, and lateness does not merge
         // them: counting it as one attempt reported a two-call fallback as one started
         // and one usage-complete attempt, contradicting the aggregate usage recorded
-        // beside it. The same metadata the ordinary success path consumes is consumed
-        // here.
-        opts.outcome.usage = mergeUsage(opts.outcome.usage, response.usage);
-        opts.outcome.usageCompleteCalls +=
-          response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
-        opts.outcome.calls += Math.max(0, (response.attempts ?? 1) - 1);
-        opts.outcome.completionBytes += new TextEncoder().encode(response.text).length;
+        // beside it. The ordinary path's accounting is the accounting used here.
+        opts.ledger.recordSuccess(response);
         throw err;
       }
       return response;
+    } catch (err) {
+      // The race was lost to a timeout or a cancellation. Give the call one macrotask to
+      // deliver a result it has already produced - enough for a settled promise, never
+      // enough to wait on one still in flight, which is the same rule Python's
+      // non-blocking queue read follows: delivered but unread is counted, in flight is
+      // not. Without it a cancellation landing between the provider failing and this
+      // frame seeing it reported zero usage-complete attempts for a call billed 5/3.
+      if (settled === undefined) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (settled?.ok === true) opts.ledger.recordSuccess(settled.value);
+      else if (settled?.ok === false) opts.ledger.recordFailure(settled.err);
+      throw err;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       deadline.signal.removeEventListener("abort", cancel);

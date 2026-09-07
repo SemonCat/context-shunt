@@ -858,7 +858,9 @@ export function buildProvider(
       ref.model,
       ref.provider,
     ));
-  return new FallbackChainProvider(primary, alternatives);
+  // The chain checks each constituent's usage against the *configured* ceilings, so it
+  // is given the same limits every candidate was built with.
+  return new FallbackChainProvider(primary, alternatives, config.limits);
 }
 
 export { EMITTED_SCHEMA_VERSION };

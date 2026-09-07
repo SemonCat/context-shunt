@@ -105,6 +105,88 @@ class ChunkOutcome:
     fallback_used: bool = False
 
 
+class _AttemptLedger:
+    """Accounting for exactly one physical invocation of the provider.
+
+    Ordinary, late and cancelled outcomes all report through this object, and it takes the
+    first report and ignores every later one. Before it existed each branch did its own
+    partial bookkeeping - or none: a late response recorded its own usage but not the
+    attempts, repeated prompts or unseen billing behind it, and a cancellation between the
+    provider returning and the reader reading dropped a billed call entirely. Whether a
+    physical call was counted once, twice or not at all depended on when the deadline
+    happened to fire.
+
+    One physical invocation, one report. ``record_*`` is safe to call from every path that
+    might be the one to notice the call is over.
+    """
+
+    __slots__ = ("_outcome", "_recorded", "per_call_prompt_bytes")
+
+    def __init__(self, outcome: ChunkOutcome):
+        self._outcome = outcome
+        self._recorded = False
+        #: Bytes one candidate's prompt occupies. Set once the prompt exists; a fallback
+        #: re-sends the same prompt to every candidate it tries, so each extra attempt
+        #: costs this again.
+        self.per_call_prompt_bytes = 0
+
+    def record_success(self, response: Any) -> None:
+        """What a returned response cost, whether or not its answer can be published."""
+        if self._recorded or not isinstance(response, ModelResponse):
+            return
+        self._recorded = True
+        outcome = self._outcome
+        # An availability fallback may have taken several attempts inside this one call,
+        # and every one of them reached a provider and was billed. `calls` was already
+        # incremented once by the caller for the attempt it started.
+        extra_attempts = max(0, response.attempts - 1)
+        outcome.calls += extra_attempts
+        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        # Output the reader never saw: a failed candidate returned no text to measure, so
+        # its reported tokens are the only evidence of what it produced. Disjoint from
+        # `completion_bytes` by construction.
+        unseen = response.billed_from_failed_attempts
+        if isinstance(unseen, Usage):
+            outcome.unseen_usage = outcome.unseen_usage.merge(unseen)
+        outcome.completion_bytes += len(response.text.encode("utf-8"))
+        outcome.usage = outcome.usage.merge(response.usage)
+        # A composite provider reports how many of its attempts supplied complete usage; a
+        # plain one supplies one attempt, so the winner alone decides.
+        outcome.usage_complete_calls += (
+            response.usage_complete_attempts
+            if response.usage_complete_attempts is not None
+            else (1 if response.usage.complete else 0)
+        )
+
+    def record_failure(self, exc: BaseException) -> None:
+        """What a failed call cost. A rejected reply is still a paid call."""
+        if self._recorded:
+            return
+        self._recorded = True
+        outcome = self._outcome
+        billed = getattr(exc, "billed_usage", None)
+        reported_complete = getattr(exc, "usage_complete_attempts", None)
+        if isinstance(billed, Usage):
+            outcome.usage = outcome.usage.merge(billed)
+            # The same aggregate as the success path: a chain that gave up still reports
+            # how many of its candidates were billed and how many of those said what they
+            # cost. Counting one aggregate error as one report made two billed candidates
+            # look like one usage-complete attempt out of two started.
+            outcome.usage_complete_calls += (
+                reported_complete
+                if reported_complete is not None
+                else (1 if billed.complete else 0)
+            )
+            # Nothing came back, so every attempt here is one whose output was never seen.
+            outcome.unseen_usage = outcome.unseen_usage.merge(billed)
+        # A composite provider may have made several calls inside this one invocation
+        # before giving up. `calls` was incremented once by the caller for the invocation;
+        # the rest are the ones the chain made and was billed for.
+        extra_attempts = max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
+        outcome.calls += extra_attempts
+        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+
+
 @dataclass
 class _CostSink:
     """Carries what an attempt actually spent out past a later failure.
@@ -656,6 +738,10 @@ class Reader:
             except (DeadlineExceeded, CancelledError) as exc:
                 outcome.failed_reason = "TIMEOUT" if exc.code == "TIMEOUT" else "CANCELLED"
                 return outcome
+            # One ledger per physical invocation, created before anything can fail.
+            # Ordinary, late and cancelled outcomes all report through it, and it counts
+            # the first report only.
+            ledger = _AttemptLedger(outcome)
             try:
                 user = build_user_message(question, chunk.text, chunk.locator)
                 input_budget.spend(
@@ -671,29 +757,16 @@ class Reader:
                     user.encode("utf-8")
                 )
                 outcome.prompt_bytes += per_call_prompt_bytes
+                ledger.per_call_prompt_bytes = per_call_prompt_bytes
                 response = self._complete_with_deadline(
                     system=READER_SYSTEM_PROMPT,
                     user=user,
                     max_output_tokens=self._limits.max_output_tokens_per_call,
                     deadline=deadline,
-                    outcome=outcome,
+                    ledger=ledger,
                 )
                 _validate_model_response(response, self._limits)
-                # An availability fallback may have taken several attempts inside this one
-                # call, and every one of them reached a provider and was billed. `calls`
-                # was already incremented once above for the attempt we started.
-                extra_attempts = max(0, response.attempts - 1)
-                outcome.calls += extra_attempts
-                outcome.prompt_bytes += per_call_prompt_bytes * extra_attempts
-                # Output the reader never saw: a failed candidate returned no text to
-                # measure, so its reported tokens are the only evidence of what it
-                # produced. Disjoint from `completion_bytes` by construction.
-                unseen = getattr(response, "billed_from_failed_attempts", None)
-                if isinstance(unseen, Usage):
-                    outcome.unseen_usage = outcome.unseen_usage.merge(unseen)
-                outcome.completion_bytes += len(response.text.encode("utf-8"))
-                outcome.usage = outcome.usage.merge(response.usage)
-                outcome.usage_complete_calls += 1 if response.usage.complete else 0
+                ledger.record_success(response)
                 outcome.attribution, outcome.confidence = response.attribution()
                 outcome.resolved = response.resolved
                 outcome.reported = response.reported
@@ -715,24 +788,11 @@ class Reader:
                     if isinstance(raw_exc, ShuntError)
                     else TransientProviderError("PROVIDER_CALL_FAILED")
                 )
-                # A rejected reply is still a paid call. When the bridge could say what it
-                # was billed, that travels on the error and is recorded here, so an
-                # unusable answer costs the truth rather than an estimate.
-                billed = getattr(exc, "billed_usage", None)
-                if isinstance(billed, Usage):
-                    outcome.usage = outcome.usage.merge(billed)
-                    if billed.complete:
-                        outcome.usage_complete_calls += 1
-                    # Nothing came back, so every attempt here is one whose output was
-                    # never seen.
-                    outcome.unseen_usage = outcome.unseen_usage.merge(billed)
-                outcome.prompt_bytes += per_call_prompt_bytes * max(
-                    0, int(getattr(exc, "internal_attempts", 1)) - 1
-                )
-                # A composite provider may have made several calls inside this one
-                # invocation before giving up. `calls` was incremented once above for the
-                # invocation; the rest are the ones the chain made and was billed for.
-                outcome.calls += max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
+                # A rejected reply is still a paid call, and the ledger is where that is
+                # recorded. It is a no-op when the call was already accounted for on the
+                # way out - a late response, or a cancellation that landed between the
+                # provider returning and this frame seeing it.
+                ledger.record_failure(exc)
                 if (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable
@@ -752,7 +812,7 @@ class Reader:
         user: str,
         max_output_tokens: int,
         deadline: Deadline,
-        outcome: ChunkOutcome,
+        ledger: _AttemptLedger,
     ) -> ModelResponse:
         """Run an untrusted host bridge behind a real hard wall-clock deadline.
 
@@ -802,11 +862,11 @@ class Reader:
             try:
                 deadline.check("MODEL_CALL")
             except (DeadlineExceeded, CancelledError):
-                self._account_for_a_late_call(outcome, result_queue)
+                self._account_for_a_late_call(ledger, result_queue)
                 raise
             remaining = wall_end - time.monotonic()
             if remaining <= 0:
-                self._account_for_a_late_call(outcome, result_queue)
+                self._account_for_a_late_call(ledger, result_queue)
                 raise DeadlineExceeded("MODEL_CALL")
             try:
                 ok, value = result_queue.get(timeout=min(0.01, remaining))
@@ -817,20 +877,30 @@ class Reader:
                     deadline.check("MODEL_CALL")
                 except (DeadlineExceeded, CancelledError):
                     # Too late to publish, but the provider was already paid. Record what
-                    # the call cost before refusing its answer.
-                    if isinstance(value, ModelResponse):
-                        outcome.usage = outcome.usage.merge(value.usage)
-                        outcome.usage_complete_calls += 1 if value.usage.complete else 0
-                        outcome.completion_bytes += len(value.text.encode("utf-8"))
+                    # the call cost - all of it, through the same ledger the ordinary path
+                    # uses - before refusing its answer. Recording only the returned
+                    # response's own usage here lost the attempts, repeated prompts and
+                    # unseen billing of a composite call: a two-candidate chain whose
+                    # winner came back late reported one attempt and 220 input tokens
+                    # where two attempts had transmitted 439.
+                    ledger.record_success(value)
                     raise
                 return value
+            # A failure this frame pulled off the queue is accounted for before the
+            # deadline is consulted, because consulting it may raise `CANCELLED` and take
+            # the provider's own error - and the usage it was billed - with it.
+            ledger.record_failure(
+                value
+                if isinstance(value, BaseException)
+                else ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED")
+            )
             deadline.check("MODEL_CALL")
             if isinstance(value, ShuntError):
                 raise value
             raise TransientProviderError("PROVIDER_CALL_FAILED")
 
     def _account_for_a_late_call(
-        self, outcome: ChunkOutcome, result_queue: queue.Queue[tuple[bool, Any]]
+        self, ledger: _AttemptLedger, result_queue: queue.Queue[tuple[bool, Any]]
     ) -> None:
         """Record the cost of a call that finished too late to publish.
 
@@ -850,11 +920,14 @@ class Reader:
             ok, value = result_queue.get_nowait()
         except queue.Empty:
             return
-        if not ok or not isinstance(value, ModelResponse):
-            return
-        outcome.usage = outcome.usage.merge(value.usage)
-        outcome.usage_complete_calls += 1 if value.usage.complete else 0
-        outcome.completion_bytes += len(value.text.encode("utf-8"))
+        if ok:
+            ledger.record_success(value)
+        elif isinstance(value, BaseException):
+            # A *failure* delivered but never read was billed too, and it carries the
+            # attempt count and billed usage of everything the chain tried. Ignoring it
+            # here dropped a cancelled-after-billing call to zero usage-complete attempts
+            # and zero output tokens.
+            ledger.record_failure(value)
 
     def _verify_all(
         self, session_id: str, citations: list[dict[str, Any]]
@@ -1108,10 +1181,22 @@ def _validate_model_response(response: Any, limits: Limits) -> None:
     usage = response.usage
     if not isinstance(usage, Usage):
         raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
+    # Ceilings are per *call*, and this usage may be the sum of several. Every physical
+    # call is already bounded where it enters an aggregate - `FallbackChainProvider`
+    # refuses a constituent claim no single call could have made, and `HostBridgeProvider`
+    # bounds what it unpacks - so applying the single-call ceiling again to the sum would
+    # reject valid work: two attempts of 1,500 output tokens each are individually legal
+    # and total 3,000 against a 2,048 ceiling. Aggregate bookkeeping must not change
+    # availability.
+    #
+    # The bound scales with the attempts the total covers, so it still catches a count no
+    # sequence of legal calls could have produced. It is a backstop; the per-constituent
+    # check is what establishes legality.
+    attempts = max(1, response.attempts)
     for value, maximum in (
-        (usage.input_tokens, limits.max_request_input_tokens),
-        (usage.output_tokens, limits.max_output_tokens_per_call),
-        (usage.cache_tokens, limits.max_request_input_tokens),
+        (usage.input_tokens, limits.max_request_input_tokens * attempts),
+        (usage.output_tokens, limits.max_output_tokens_per_call * attempts),
+        (usage.cache_tokens, limits.max_request_input_tokens * attempts),
     ):
         if value is None:
             continue

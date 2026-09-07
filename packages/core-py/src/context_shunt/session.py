@@ -810,7 +810,9 @@ def build_provider(
         )
         for ref in config.reader.fallback_chain
     ]
-    return FallbackChainProvider(primary, alternatives)
+    # The chain checks each constituent's usage against the *configured* ceilings, so it
+    # is given the same limits every candidate was built with.
+    return FallbackChainProvider(primary, alternatives, config.limits)
 
 
 __all__ = [

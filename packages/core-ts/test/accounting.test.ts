@@ -24,7 +24,7 @@ import {
   withheldPayloadBaseline,
 } from "../src/accounting.js";
 import { Envelope } from "../src/envelope.js";
-import { FakeClock } from "../src/clock.js";
+import { Deadline, FakeClock } from "../src/clock.js";
 import { ShuntError } from "../src/errors.js";
 import {
   BASELINE_ESTIMATE_METHOD,
@@ -33,7 +33,8 @@ import {
 } from "../src/limits.js";
 import { ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError } from "../src/metrics.js";
 import {
-  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, transientProviderError,
+  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, type ModelResponse,
+  transientProviderError,
 } from "../src/provider.js";
 import { READER_MODEL } from "../src/limits.js";
 import { Reader } from "../src/reader.js";
@@ -904,5 +905,225 @@ describe("estimates cover every physical attempt", () => {
     const { cost } = await measured(atCap, plainUnavailable);
     // Exactly at the ceiling is legal, and two attempts reported it.
     expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall * 2);
+  });
+});
+
+/**
+ * Every physical call is accounted for exactly once, whichever path notices it finished,
+ * and every constituent claim is one a single call could legally have made.
+ *
+ * The ordinary success and failure paths were the first half of this rule. These are the
+ * paths that bypassed them: a stable provider error re-read across the reader's outer
+ * retry, a response that arrived after the deadline, a cancellation that raced the
+ * provider, and a plain `ReaderProvider` whose usage no bridge ever bounded.
+ */
+describe("every physical attempt is accounted for once, on every path", () => {
+  const answerText = answerJson("mode = fast [c1]", [
+    { id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" },
+  ]);
+  const identity = { provider: "plain", model: READER_MODEL };
+
+  function billedError(inputTokens: number, outputTokens: number): ShuntError {
+    const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+    (err as { billedUsage?: unknown }).billedUsage = { inputTokens, outputTokens, method: "exact" };
+    return err;
+  }
+
+  function fixture(provider: ConstructorParameters<typeof Reader>[1], clock?: FakeClock) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    return {
+      reader: new Reader(registry, provider, L, clock),
+      request: readRequest(entry, "What is the mode?"),
+    };
+  }
+
+  /**
+   * A provider may throw one stable `ShuntError` instance for every call it fails. The
+   * chain used to write its aggregate onto that object and read the same field back on
+   * the reader's next outer attempt, so its own earlier total arrived as fresh evidence:
+   * four calls reporting 24/10 in total were published as 29/13.
+   */
+  it("does not re-ingest a stable provider error across the outer retry", async () => {
+    let calls = 0;
+    const raising = (err: ShuntError): HostBridgeProvider => {
+      const call: HostBridgeCall = async () => {
+        calls += 1;
+        throw err;
+      };
+      return new HostBridgeProvider(call, L, READER_MODEL, "openai");
+    };
+    const chain = new FallbackChainProvider(raising(billedError(5, 3)), [
+      raising(billedError(7, 2)),
+    ]);
+    const { reader, request } = fixture(chain);
+    const { cost } = await reader.answerDetailed("sess", request);
+
+    expect(calls).toBe(4);
+    expect(cost.attemptsStarted).toBe(4);
+    expect(cost.attemptsUsageComplete).toBe(4);
+    expect(cost.method).toBe("exact");
+    expect(cost.inputTokens).toBe(24);
+    expect(cost.outputTokens).toBe(10);
+  });
+
+  /**
+   * A response that arrives after the deadline is refused, but it was still paid for. The
+   * late branch recorded only the winner's own usage, so the prompt every earlier
+   * candidate re-sent and the output they reported disappeared.
+   */
+  it("charges a late composite response for every prompt and unseen token", async () => {
+    const clock = new FakeClock();
+    let calls = 0;
+    let promptBytes = 0;
+    const count = (body: (opts: { system: string; user: string }) => Promise<
+      Record<string, unknown>
+    >): HostBridgeCall => async (opts) => {
+      calls += 1;
+      promptBytes += enc(opts.system).length + enc(opts.user).length;
+      return body(opts);
+    };
+    const failed = new HostBridgeProvider(count(async () => {
+      throw billedError(5, 3);
+    }), L, READER_MODEL, "openai");
+    const late = new HostBridgeProvider(count(async () => {
+      clock.advance(70_000);
+      return { text: answerText };
+    }), L, "fallback", "openai");
+    const { reader, request } = fixture(new FallbackChainProvider(failed, [late]), clock);
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).toBe("TIMEOUT");
+    expect(calls).toBe(2);
+    expect(cost.attemptsStarted).toBe(2);
+    expect(cost.inputTokens).toBe(Math.ceil(promptBytes / 4));
+    expect(cost.outputTokens).toBe(Math.ceil(enc(answerText).length / 4) + 3);
+  });
+
+  /**
+   * Cancellation can win the race against the provider that is already failing. The
+   * winning arm carried none of the call's metadata, so a call billed 5/3 was reported as
+   * zero usage-complete attempts and zero output.
+   */
+  it("keeps a billed attempt that cancellation raced", async () => {
+    const clock = new FakeClock();
+    const deadline = Deadline.start(clock, 60_000);
+    let calls = 0;
+    const first = new HostBridgeProvider(async () => {
+      calls += 1;
+      deadline.cancel();
+      throw billedError(5, 3);
+    }, L, READER_MODEL, "openai");
+    const never = new HostBridgeProvider(async () => {
+      calls += 1;
+      throw billedError(7, 2);
+    }, L, "fallback", "openai");
+    const { reader, request } = fixture(new FallbackChainProvider(first, [never]), clock);
+    const { envelope, cost } = await reader.answerDetailed("sess", request, deadline);
+
+    expect(envelope.code).toBe("CANCELLED");
+    // Cancelling the primary must still not start the fallback.
+    expect(calls).toBe(1);
+    expect(cost.attemptsStarted).toBe(1);
+    expect(cost.attemptsUsageComplete).toBe(1);
+    expect(cost.outputTokens).toBe(3);
+  });
+
+  /**
+   * The chain accepts any `ReaderProvider`, so a constituent's claim may never have been
+   * bounded anywhere. A plain provider's failed attempt claiming one token over the
+   * per-call cap, plus a winner claiming one, stayed under the two-attempt aggregate
+   * ceiling and was published as `exact`.
+   */
+  it("caps a plain provider's billed failure before the merge", async () => {
+    const failing = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        throw billedError(1, L.maxOutputTokensPerCall + 1);
+      },
+    };
+    const winner = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        return {
+          text: answerText,
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          usage: { inputTokens: 1, outputTokens: 1, method: "exact" },
+          fallbackUsed: false,
+        };
+      },
+    };
+    const { reader, request } = fixture(new FallbackChainProvider(failing, [winner]));
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    // The call still failed the way it failed, so the chain still advanced and answered.
+    expect(envelope.code).toBe("ANSWERED");
+    expect(cost.method).not.toBe("exact");
+    expect(cost.outputTokens).toBeLessThan(L.maxOutputTokensPerCall);
+  });
+
+  /** A winner is a constituent too, and an aggregate bound cannot vouch for it. */
+  it("caps a plain provider that wins the fallback", async () => {
+    const unavailable = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      },
+    };
+    const overCap = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        return {
+          text: answerText,
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          usage: {
+            inputTokens: 1,
+            outputTokens: L.maxOutputTokensPerCall + 1,
+            method: "exact",
+          },
+          fallbackUsed: false,
+        };
+      },
+    };
+    const { reader, request } = fixture(new FallbackChainProvider(unavailable, [overCap]));
+    const { envelope } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).not.toBe("ANSWERED");
+    expect(envelope.answer).toBe("");
+  });
+
+  /**
+   * The other direction, and the reason the aggregate bound scales: two attempts of 1,500
+   * output tokens are each legal and total 3,000 against a 2,048 per-call ceiling.
+   * Re-applying the single-call ceiling to the sum refused a valid fallback outright.
+   */
+  it("accepts a legal sum that exceeds the single-call ceiling", async () => {
+    const half = Math.floor(L.maxOutputTokensPerCall * 0.75);
+    const failing: HostBridgeCall = async () => {
+      throw billedError(1, half);
+    };
+    const winner: HostBridgeCall = async () => ({
+      text: answerText,
+      input_tokens: 1,
+      output_tokens: half,
+      usage_exact: true,
+    });
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(failing, L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(winner, L, "fallback", "openai")],
+    );
+    const { reader, request } = fixture(chain);
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).toBe("ANSWERED");
+    expect(cost.method).toBe("exact");
+    expect(cost.outputTokens).toBe(half * 2);
+    expect(cost.outputTokens).toBeGreaterThan(L.maxOutputTokensPerCall);
   });
 });

@@ -86,6 +86,10 @@ class ModelResponse:
     #: availability fallback advanced: every attempt reached a provider and was billed,
     #: so counting just the winner understated real spend.
     attempts: int = 1
+    #: How many of those attempts reported complete usage. ``None`` means "one attempt,
+    #: ask its usage" - the ordinary single-call case. A composite provider has to say,
+    #: because the caller cannot see the constituents it merged.
+    usage_complete_attempts: int | None = None
     #: Usage the *failed* attempts behind this response reported before the chain moved
     #: on. Kept apart from :attr:`usage` - which is the winning attempt's own - because a
     #: caller estimating the winner from bytes must still charge for what the losers were
@@ -202,8 +206,11 @@ class HostBridgeProvider:
             # per-call cap on a billed failure and have the chain merge it into the
             # aggregate untouched. The claim is dropped rather than the failure escalated:
             # availability behaviour stays exactly as it was, and the fixed cap holds.
-            self._discard_unusable_billed_usage(exc, capped)
-            raise
+            # Dropping it means *replacing* the error, never editing it. The host owns
+            # that object and may raise one stable instance for every call it fails;
+            # editing it would make this bridge's verdict permanent and visible to the
+            # next caller.
+            raise without_unusable_billed_usage(exc, self._limits, capped) from None
         except TimeoutError:
             raise ShuntError("TIMEOUT", "MODEL_CALL") from None
         except Exception:
@@ -211,24 +218,6 @@ class HostBridgeProvider:
             # It is dropped here and never reaches a log, metric or envelope.
             raise TransientProviderError("PROVIDER_CALL_FAILED") from None
         return self._unpack(result, capped)
-
-    def _discard_unusable_billed_usage(self, exc: ShuntError, output_cap: int) -> None:
-        billed = getattr(exc, "billed_usage", None)
-        if not isinstance(billed, Usage):
-            return
-
-        def within(value: Any, maximum: int) -> bool:
-            if value is None:
-                return True
-            return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
-
-        usable = (
-            within(billed.input_tokens, self._limits.max_request_input_tokens)
-            and within(billed.output_tokens, output_cap)
-            and within(billed.cache_tokens, self._limits.max_request_input_tokens)
-        )
-        if not usable:
-            exc.billed_usage = None
 
     def _unpack(self, result: Any, output_cap: int) -> ModelResponse:
         if not isinstance(result, dict):
@@ -277,6 +266,43 @@ def _identity(result: dict[str, Any], prefix: str) -> ModelIdentity:
     )
 
 
+def usage_within_per_call_limits(usage: Any, limits: Limits, output_cap: int) -> bool:
+    """Could one physical call legally have reported this?
+
+    The fixed per-call ceilings, applied to one attempt's claim. A *sum* is a different
+    question and is bounded separately; this is the only check that can establish that a
+    constituent was legal, so it runs before anything is merged.
+    """
+    if not isinstance(usage, Usage):
+        return False
+
+    def within(value: Any, maximum: int) -> bool:
+        if value is None:
+            return True
+        return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
+
+    return (
+        within(usage.input_tokens, limits.max_request_input_tokens)
+        and within(usage.output_tokens, output_cap)
+        and within(usage.cache_tokens, limits.max_request_input_tokens)
+    )
+
+
+def without_unusable_billed_usage(exc: ShuntError, limits: Limits, output_cap: int) -> ShuntError:
+    """``exc`` itself when its billed claim is legal, otherwise a copy without the claim.
+
+    Never edits the argument. A provider may raise one stable error instance for every
+    call it fails, so anything written onto it outlives the call it described.
+    """
+    billed = getattr(exc, "billed_usage", None)
+    if billed is None or usage_within_per_call_limits(billed, limits, output_cap):
+        return exc
+    stripped = ShuntError(exc.code, exc.detail, exc.retryable)
+    stripped.internal_attempts = exc.internal_attempts
+    stripped.usage_complete_attempts = exc.usage_complete_attempts
+    return stripped
+
+
 def _usage_value(value: Any, maximum: int) -> int | None:
     """``None`` in, ``None`` out. Absence is never converted to zero."""
     if value is None:
@@ -315,8 +341,17 @@ class FallbackChainProvider:
     semantic-quality rescue would misrepresent both.
     """
 
-    def __init__(self, primary: ReaderProvider, alternatives: list[ReaderProvider]):
+    def __init__(
+        self,
+        primary: ReaderProvider,
+        alternatives: list[ReaderProvider],
+        limits: Limits = DEFAULT_LIMITS,
+    ):
         self._chain = [primary, *alternatives]
+        # The chain accepts *any* `ReaderProvider`, not only `HostBridgeProvider`, so it
+        # cannot assume a constituent's usage was ever bounded. It needs the limits to
+        # check that itself.
+        self._limits = limits
 
     @property
     def target(self) -> ProviderTarget:
@@ -342,23 +377,68 @@ class FallbackChainProvider:
         starting another call.
         """
         last: ShuntError | None = None
-        billed_usage: Usage | None = None
         started = time.monotonic()
         attempts = 0
+        output_cap = min(max_output_tokens, self._limits.max_output_tokens_per_call)
+        # Usage billed by candidates that did not win, and how many of them reported it.
+        # A failed candidate still reached a provider and was still charged, so its counts
+        # belong in the total whether the chain eventually succeeds or gives up.
+        billed_usage: Usage | None = None
+        billed_complete = 0
+
+        def carry(usage: Any) -> None:
+            """Take one physical attempt's reported usage into the aggregate.
+
+            Called exactly once per call the chain actually made, from the except clause
+            and nowhere else. Every other exit reports the aggregate rather than re-reading
+            it. A claim no single call could legally have produced is refused entry: the
+            chain accepts any ``ReaderProvider``, so a plain one's claim may never have
+            been bounded anywhere. Dropping the claim rather than the call keeps
+            availability exactly as it was.
+            """
+            nonlocal billed_usage, billed_complete
+            if not isinstance(usage, Usage):
+                return
+            if not usage_within_per_call_limits(usage, self._limits, output_cap):
+                return
+            billed_usage = billed_usage.merge(usage) if billed_usage else usage
+            if usage.complete:
+                billed_complete += 1
+
+        def chain_failure(source: ShuntError | None, fallback: ShuntError) -> ShuntError:
+            """A chain-owned error carrying the aggregate, never the provider's own object.
+
+            The aggregate used to be written onto the failing provider's ``ShuntError``
+            and that same field was later read back as if it were a fresh per-attempt
+            report, so a physical call could be counted more than once. A provider is
+            allowed to raise one stable ``ShuntError`` instance, and ``HostBridgeProvider``
+            re-raises a ``ShuntError`` it did not create, so across the reader's outer
+            retry the aggregate written in the first pass came back as input to the second
+            - four calls totalling 24/10 were reported as 29/13.
+
+            Emitting a fresh error closes it: the chain never edits something it does not
+            own, and never reads back anything it wrote. Code, detail and retryability are
+            preserved so the reader classifies the failure exactly as before.
+            """
+            origin = source if source is not None else fallback
+            out = ShuntError(origin.code, origin.detail, origin.retryable)
+            out.internal_attempts = attempts
+            out.billed_usage = billed_usage
+            out.usage_complete_attempts = billed_complete
+            return out
+
         for index, provider in enumerate(self._chain):
             # Availability is the only thing this chain rescues. A caller who has
             # cancelled is not waiting for an answer from anyone, so no further attempt
             # may start.
             if deadline is not None and getattr(deadline, "cancelled", False):
-                cancelled = ShuntError("CANCELLED", "MODEL_CALL", retryable=False)
-                cancelled.internal_attempts = attempts
-                raise cancelled
+                raise chain_failure(None, ShuntError("CANCELLED", "MODEL_CALL", retryable=False))
             remaining_ms = timeout_ms - int((time.monotonic() - started) * 1000)
             if remaining_ms <= 0:
                 # Out of budget. Never start another provider call the caller cannot use.
-                exhausted = last or ShuntError("TIMEOUT", "MODEL_CALL", retryable=True)
-                exhausted.internal_attempts = attempts
-                raise exhausted
+                # The aggregate is already complete - no attempt happened here - so it is
+                # reported, not recollected.
+                raise chain_failure(last, ShuntError("TIMEOUT", "MODEL_CALL", retryable=True))
             try:
                 attempts += 1
                 response = provider.complete(
@@ -370,35 +450,43 @@ class FallbackChainProvider:
                 )
             except ShuntError as exc:
                 last = exc
-                # Every candidate reached a provider and was billed, so the count travels
-                # on the failure exactly as it travels on a success. Attaching it only to
-                # a returned response meant an all-failing chain reported one attempt for
-                # however many calls it actually made.
-                exc.internal_attempts = attempts
-                if billed := getattr(exc, "billed_usage", None):
-                    billed_usage = billed_usage.merge(billed) if billed_usage else billed
+                # The one place a physical attempt enters the aggregate: this candidate
+                # reached a provider and was billed, so what it reported is taken once,
+                # here.
+                carry(getattr(exc, "billed_usage", None))
                 if not _is_availability_failure(exc) or index + 1 == len(self._chain):
-                    if billed_usage is not None:
-                        exc.billed_usage = billed_usage
-                    raise
+                    raise chain_failure(
+                        exc, ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
+                    ) from None
                 continue
-            if index == 0:
+            # A winner is a constituent too. Its own claim has to be one a single call
+            # could have made before it is merged with anyone else's, or an aggregate
+            # bound - which must scale with the attempts it covers - can no longer
+            # establish that every part of it was legal.
+            if not usage_within_per_call_limits(response.usage, self._limits, output_cap):
+                raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
+            winner_complete = 1 if response.usage.complete else 0
+            if index == 0 and billed_usage is None:
                 return response
-            # Every attempt keeps its own reported provenance and usage; what the chain
-            # adds is that a fallback was needed and how many attempts it took - each one
-            # reached a provider and was billed.
+            # Every attempt keeps its own reported provenance; what the chain adds is that
+            # a fallback was needed, how many attempts it took, and the usage those
+            # attempts were billed - the winner's plus every earlier candidate that
+            # reported.
             return ModelResponse(
                 text=response.text,
                 requested=response.requested,
                 resolved=response.resolved,
                 reported=response.reported,
                 provider_confirms_generation=response.provider_confirms_generation,
-                usage=response.usage,
-                fallback_used=True,
+                usage=(
+                    response.usage if billed_usage is None else billed_usage.merge(response.usage)
+                ),
+                fallback_used=index > 0,
                 attempts=attempts,
+                usage_complete_attempts=billed_complete + winner_complete,
                 billed_from_failed_attempts=billed_usage,
             )
-        raise last or ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
+        raise chain_failure(last, ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False))
 
 
 def _is_availability_failure(exc: ShuntError) -> bool:

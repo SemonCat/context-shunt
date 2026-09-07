@@ -204,8 +204,10 @@ export class HostBridgeProvider implements ReaderProvider {
         // the call still failed the way it failed, so availability and the chain's
         // advance are unchanged, and the attempt simply counts as one that reported
         // nothing usable.
-        this.discardUnusableBilledUsage(err, capped);
-        throw err;
+        // Dropping it means *replacing* the error, never editing it. The host owns that
+        // object and may throw one stable instance for every call it fails; editing it
+        // would make this bridge's verdict permanent and visible to the next caller.
+        throw withoutUnusableBilledUsage(err, this.limits, capped);
       }
       // A cancelled call is not a provider that failed. Sanitizing an abort into a
       // *retryable* provider error handed the chain the one signal that means "advance",
@@ -216,26 +218,6 @@ export class HostBridgeProvider implements ReaderProvider {
       throw transientProviderError();
     }
     return this.unpack(result, capped);
-  }
-
-  /**
-   * Drop a billed-usage claim that no single call could legally have produced.
-   *
-   * Uses exactly the ceilings `unpack` applies to a successful call, so a success and a
-   * billed failure are held to the same fixed per-call limits.
-   */
-  private discardUnusableBilledUsage(err: ShuntError, outputCap: number): void {
-    const billed = (err as { billedUsage?: unknown }).billedUsage;
-    if (!billed || typeof billed !== "object") return;
-    const usage = billed as Usage;
-    const withinCap = (value: number | undefined, maximum: number): boolean =>
-      value === undefined
-      || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum);
-    const usable =
-      withinCap(usage.inputTokens, this.limits.maxRequestInputTokens)
-      && withinCap(usage.outputTokens, outputCap)
-      && withinCap(usage.cacheTokens, this.limits.maxRequestInputTokens);
-    if (!usable) delete (err as { billedUsage?: unknown }).billedUsage;
   }
 
   private unpack(result: HostBridgeResult, outputCap: number): ModelResponse {
@@ -298,6 +280,46 @@ function readUsage(value: unknown, maximum: number): number | undefined {
  * cheapest possible proof that deterministic extraction makes no model call: inject this
  * and inspect still succeeds.
  */
+/**
+ * Could one physical call legally have reported this?
+ *
+ * The fixed per-call ceilings, applied to one attempt's claim. A *sum* is a different
+ * question and is bounded separately; this is the only check that can establish that a
+ * constituent was legal, so it runs before anything is merged.
+ */
+export function usageWithinPerCallLimits(
+  usage: Usage | undefined,
+  limits: Limits,
+  outputCap: number,
+): boolean {
+  if (!usage || typeof usage !== "object") return false;
+  const within = (value: number | undefined, maximum: number): boolean =>
+    value === undefined
+    || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum);
+  return (
+    within(usage.inputTokens, limits.maxRequestInputTokens)
+    && within(usage.outputTokens, outputCap)
+    && within(usage.cacheTokens, limits.maxRequestInputTokens)
+  );
+}
+
+/**
+ * `err` itself when its billed claim is legal, otherwise a copy without the claim.
+ *
+ * Never edits the argument. A provider may throw one stable error instance for every call
+ * it fails, so anything written onto it outlives the call it described.
+ */
+function withoutUnusableBilledUsage(err: ShuntError, limits: Limits, outputCap: number): ShuntError {
+  const billed = (err as { billedUsage?: unknown }).billedUsage as Usage | undefined;
+  if (billed === undefined || usageWithinPerCallLimits(billed, limits, outputCap)) return err;
+  const stripped = new ShuntError(err.code, err.detail, err.retryable);
+  if (err.internalAttempts !== undefined) stripped.internalAttempts = err.internalAttempts;
+  if (err.usageCompleteAttempts !== undefined) {
+    stripped.usageCompleteAttempts = err.usageCompleteAttempts;
+  }
+  return stripped;
+}
+
 export class UnavailableProvider implements ReaderProvider {
   readonly model = READER_MODEL;
   readonly target: ProviderTarget = { model: READER_MODEL, provider: "" };
@@ -320,7 +342,15 @@ export class UnavailableProvider implements ReaderProvider {
 export class FallbackChainProvider implements ReaderProvider {
   private readonly chain: ReaderProvider[];
 
-  constructor(primary: ReaderProvider, alternatives: readonly ReaderProvider[]) {
+  /**
+   * `limits` is needed because the chain accepts *any* `ReaderProvider`, not only
+   * `HostBridgeProvider`, so it cannot assume a constituent's usage was ever bounded.
+   */
+  constructor(
+    primary: ReaderProvider,
+    alternatives: readonly ReaderProvider[],
+    private readonly limits: Limits = DEFAULT_LIMITS,
+  ) {
     this.chain = [primary, ...alternatives];
   }
 
@@ -354,9 +384,17 @@ export class FallbackChainProvider implements ReaderProvider {
      * Called exactly once per call the chain actually made, from the catch clause and
      * nowhere else. Every other exit reports the aggregate rather than re-reading it.
      */
+    const outputCap = Math.min(opts.maxOutputTokens, this.limits.maxOutputTokensPerCall);
     const carry = (usage: unknown): void => {
       if (!usage || typeof usage !== "object") return;
       const reported = usage as Usage;
+      // A claim no single call could legally have produced is refused entry. The chain
+      // accepts any `ReaderProvider`, so a plain one's claim may never have been bounded
+      // anywhere: a failure reporting 2,049 output tokens against the fixed 2,048 cap,
+      // plus a winner reporting 1, totalled 2,050 - under the two-attempt aggregate
+      // ceiling - and was published as `exact`. Dropping the claim rather than the call
+      // keeps availability exactly as it was.
+      if (!usageWithinPerCallLimits(reported, this.limits, outputCap)) return;
       billed = billed === undefined ? reported : mergeUsage(billed, reported);
       if (usageComplete(reported)) billedComplete += 1;
     };
@@ -415,6 +453,13 @@ export class FallbackChainProvider implements ReaderProvider {
           throw chainFailure(err, () => new ShuntError("MODEL_ERROR", "NO_PROVIDER", false));
         }
         continue;
+      }
+      // A winner is a constituent too. Its own claim has to be one a single call could
+      // have made before it is merged with anyone else's, or an aggregate bound - which
+      // must scale with the attempts it covers - can no longer establish that every part
+      // of it was legal.
+      if (!usageWithinPerCallLimits(response.usage, this.limits, outputCap)) {
+        throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
       }
       const winnerComplete = usageComplete(response.usage) ? 1 : 0;
       if (index === 0 && billed === undefined) return response;

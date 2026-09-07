@@ -22,10 +22,12 @@ from context_shunt.accounting import (
     compose,
     estimate_tokens,
 )
+from context_shunt.clock import Deadline, FakeClock
 from context_shunt.errors import ShuntError
 from context_shunt.limits import BASELINE_ESTIMATE_METHOD, DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION
 from context_shunt.metrics import ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError
-from context_shunt.provenance import TokenMethod, Usage
+from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
+from context_shunt.provider import ModelResponse, ProviderTarget
 from context_shunt.reader import Reader
 from context_shunt.session import ShuntSession
 from context_shunt.snapshot import snapshot_bytes
@@ -596,16 +598,18 @@ def test_a_billed_failure_claim_that_respects_the_per_call_cap_is_still_accepted
 
 
 def test_a_billed_loser_and_an_exact_winner_are_each_counted_exactly_once(tmp_path):
-    """The other branch of the same rule, and the one cross-core difference in it.
+    """The other branch of the same rule.
 
     A billed failure's usage is recorded in *both* the outcome's usage and its unseen
     usage. Only one is ever read: the exact branch reads the usage, the estimate branch
     discards it and reads the unseen total, so the loser's output is charged once either
-    way. Python reaches the estimate branch here where TypeScript reaches the exact one -
-    Python's chain does not fold a loser's claim into the winner's usage, so a two-attempt
-    chain never reports as many usage-complete attempts as it started. That is the
-    conservative direction (an estimate rather than a claimed exact total) and it is not
-    changed here; it is recorded so the difference is not mistaken for a loss.
+    way.
+
+    Both attempts reported complete usage, so the chain says so and the total is exact -
+    the same numbers TypeScript produces for the same schedule. Python used to report an
+    estimate here because its chain kept the loser's claim out of the winner's usage and
+    could therefore never reach a full usage-complete count; folding it in closes that
+    divergence rather than justifying it.
     """
 
     def exact_winner(**_kwargs):
@@ -616,8 +620,237 @@ def test_a_billed_loser_and_an_exact_winner_are_each_counted_exactly_once(tmp_pa
     assert seen["calls"] == 2
     assert result.envelope["code"] == "ANSWERED"
     assert result.cost.attempts_started == 2
-    assert result.cost.method is TokenMethod.BYTES_DIV_4
-    # The winner's text is estimated from its bytes; the loser's seven billed output
-    # tokens are added once on top, never twice and never dropped.
-    winner_estimate = -(-len(_ANSWER_TEXT.encode("utf-8")) // 4)
-    assert result.cost.output_tokens == winner_estimate + 7
+    assert result.cost.attempts_usage_complete == 2
+    assert result.cost.method is TokenMethod.EXACT
+    # One loser at 1/7 and one winner at 9/11, each counted once.
+    assert result.cost.input_tokens == 10
+    assert result.cost.output_tokens == 18
+
+
+# --- every physical attempt is accounted for once, on every path ---------------------
+#
+# The ordinary success and failure paths were the first half of this rule. These are the
+# paths that bypassed them: a stable provider error re-read across the reader's outer
+# retry, a response that arrived after the deadline, a cancellation that raced the
+# provider, and a plain `ReaderProvider` whose usage no bridge ever bounded.
+
+_PLAIN = ProviderTarget(model=L.reader_model, provider="plain")
+
+
+def _billed_error(input_tokens: int, output_tokens: int) -> ShuntError:
+    error = ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+    error.billed_usage = Usage(
+        input_tokens=input_tokens, output_tokens=output_tokens, method=TokenMethod.EXACT
+    )
+    return error
+
+
+def _fixture(tmp_path, provider, *, clock=None):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    return Reader(registry, provider, clock=clock), _read_request(entry, "What is the mode?")
+
+
+def _plain_response(output_tokens: int) -> ModelResponse:
+    identity = ModelIdentity(provider="plain", model=L.reader_model)
+    return ModelResponse(
+        text=_ANSWER_TEXT,
+        requested=identity,
+        resolved=identity,
+        reported=identity,
+        provider_confirms_generation=True,
+        usage=Usage(input_tokens=1, output_tokens=output_tokens, method=TokenMethod.EXACT),
+    )
+
+
+def test_a_stable_provider_error_is_not_reingested_across_the_outer_retry(tmp_path):
+    """A provider may raise one stable ``ShuntError`` instance for every call it fails.
+
+    The chain used to write its aggregate onto that object and read the same field back on
+    the reader's next outer attempt, so its own earlier total arrived as fresh evidence:
+    four calls reporting 24/10 in total were published as 29/13.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    seen = {"calls": 0}
+
+    def raising(error):
+        def call(**_kwargs):
+            seen["calls"] += 1
+            raise error
+
+        return HostBridgeProvider(call, L, provider="openai")
+
+    chain = FallbackChainProvider(raising(_billed_error(5, 3)), [raising(_billed_error(7, 2))])
+    reader, request = _fixture(tmp_path, chain)
+    result = reader.answer("sess", request)
+
+    assert seen["calls"] == 4
+    assert result.cost.attempts_started == 4
+    assert result.cost.attempts_usage_complete == 4
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 24
+    assert result.cost.output_tokens == 10
+
+
+def test_a_late_composite_response_is_charged_for_every_prompt_and_unseen_token(tmp_path):
+    """A response that arrives after the deadline is refused, but it was still paid for.
+
+    The late branch recorded only the winner's own usage, so the prompt every earlier
+    candidate re-sent and the output they reported disappeared.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    clock = FakeClock()
+    seen = {"calls": 0, "prompt_bytes": 0}
+
+    def count(body):
+        def call(*, system, user, **kwargs):
+            seen["calls"] += 1
+            seen["prompt_bytes"] += len(system.encode("utf-8")) + len(user.encode("utf-8"))
+            return body()
+
+        return call
+
+    def fail():
+        raise _billed_error(5, 3)
+
+    def late():
+        clock.advance(70_000)
+        return {"text": _ANSWER_TEXT}
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(count(fail), L, provider="openai"),
+        [HostBridgeProvider(count(late), L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain, clock=clock)
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] == "TIMEOUT"
+    assert seen["calls"] == 2
+    assert result.cost.attempts_started == 2
+    assert result.cost.input_tokens == -(-seen["prompt_bytes"] // 4)
+    assert result.cost.output_tokens == -(-len(_ANSWER_TEXT.encode("utf-8")) // 4) + 3
+
+
+def test_a_billed_attempt_that_cancellation_raced_is_kept(tmp_path):
+    """Cancellation can land between the provider failing and the reader reading it.
+
+    The cancelled branch carried none of the call's metadata, so a call billed 5/3 was
+    reported as zero usage-complete attempts and zero output tokens.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    clock = FakeClock()
+    deadline = Deadline.start(clock, 60_000)
+    seen = {"calls": 0}
+
+    def first(**_kwargs):
+        seen["calls"] += 1
+        deadline.cancel()
+        raise _billed_error(5, 3)
+
+    def never(**_kwargs):
+        seen["calls"] += 1
+        raise _billed_error(7, 2)
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(first, L, provider="openai"),
+        [HostBridgeProvider(never, L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain, clock=clock)
+    result = reader.answer("sess", request, deadline=deadline)
+
+    assert result.envelope["code"] == "CANCELLED"
+    # Cancelling the primary must still not start the fallback.
+    assert seen["calls"] == 1
+    assert result.cost.attempts_started == 1
+    assert result.cost.attempts_usage_complete == 1
+    assert result.cost.output_tokens == 3
+
+
+def test_a_plain_providers_billed_failure_is_capped_before_the_merge(tmp_path):
+    """The chain accepts any ``ReaderProvider``, so a claim may never have been bounded.
+
+    A plain provider's failed attempt claiming one token over the per-call cap, plus a
+    winner claiming one, stayed under the two-attempt aggregate ceiling.
+    """
+    from context_shunt.provider import FallbackChainProvider
+
+    class Failing:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            raise _billed_error(1, L.max_output_tokens_per_call + 1)
+
+    class Winner:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            return _plain_response(1)
+
+    reader, request = _fixture(tmp_path, FallbackChainProvider(Failing(), [Winner()]))
+    result = reader.answer("sess", request)
+
+    # The call still failed the way it failed, so the chain still advanced and answered.
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.cost.method is not TokenMethod.EXACT
+    assert result.cost.output_tokens < L.max_output_tokens_per_call
+
+
+def test_a_plain_provider_that_wins_the_fallback_is_capped(tmp_path):
+    """A winner is a constituent too, and an aggregate bound cannot vouch for it."""
+    from context_shunt.provider import FallbackChainProvider
+
+    class Unavailable:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+    class OverCap:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            return _plain_response(L.max_output_tokens_per_call + 1)
+
+    reader, request = _fixture(tmp_path, FallbackChainProvider(Unavailable(), [OverCap()]))
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] != "ANSWERED"
+    assert result.envelope["answer"] == ""
+
+
+def test_a_legal_sum_above_the_single_call_ceiling_is_accepted(tmp_path):
+    """The other direction, and the reason the aggregate bound scales with attempts.
+
+    Two attempts of 1,536 output tokens are each legal and total 3,072 against a 2,048
+    per-call ceiling. Re-applying the single-call ceiling to the sum refused a valid
+    fallback outright.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    half = int(L.max_output_tokens_per_call * 0.75)
+
+    def failing(**_kwargs):
+        raise _billed_error(1, half)
+
+    def winner(**_kwargs):
+        return {
+            "text": _ANSWER_TEXT,
+            "input_tokens": 1,
+            "output_tokens": half,
+            "usage_exact": True,
+        }
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(failing, L, provider="openai"),
+        [HostBridgeProvider(winner, L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain)
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.output_tokens == half * 2
+    assert result.cost.output_tokens > L.max_output_tokens_per_call

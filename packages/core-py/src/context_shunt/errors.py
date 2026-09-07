@@ -49,11 +49,22 @@ class ShuntError(Exception):
     #: How many provider attempts the failing operation actually made, when a composite
     #: provider made more than one. A failure is as billable as a success, so the count
     #: travels with it; ``1`` is assumed when nothing set it.
-    __slots__ = ("billed_usage", "code", "detail", "internal_attempts", "retryable")
+    #: How many of those attempts reported complete usage. Without it the reader could
+    #: only guess - it counted one aggregate error as one report, so a chain of two billed
+    #: candidates looked like one usage-complete attempt out of two started.
+    __slots__ = (
+        "billed_usage",
+        "code",
+        "detail",
+        "internal_attempts",
+        "retryable",
+        "usage_complete_attempts",
+    )
 
     def __init__(self, code: str, detail: str | None = None, retryable: bool | None = None):
         self.billed_usage: Any | None = None
         self.internal_attempts: int = 1
+        self.usage_complete_attempts: int | None = None
         if code not in SAFE_MESSAGES:
             raise ValueError(f"unknown error code: {code}")
         if detail is not None and not _is_safe_detail(detail):
