@@ -225,10 +225,13 @@ export class ShuntSession {
       );
     }
     const operationId = newOperationId();
-    const result: ReaderResult = await this.reader.answer(this.sessionId, request, {
-      accountingId: operationId,
-      ...(signal ? { signal } : {}),
-    });
+    const result: ReaderResult = await this.reader.answerDetailed(
+      this.sessionId,
+      request,
+      undefined,
+      signal,
+      operationId,
+    );
     const published = enforceOrFixed(result.envelope, this.config.limits);
     const refined = Boolean(
       typeof request === "object" && request !== null

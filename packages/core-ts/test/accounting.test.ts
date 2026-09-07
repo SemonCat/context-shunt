@@ -363,7 +363,7 @@ describe("provider usage preservation", () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
     const luna = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
-    const result = await new Reader(registry, luna).answer("sess", readRequest(entry));
+    const result = await new Reader(registry, luna).answerDetailed("sess", readRequest(entry));
 
     expect(result.cost.method).toBe("exact");
     expect(result.cost.attemptsStarted).toBe(1);
@@ -377,7 +377,7 @@ describe("provider usage preservation", () => {
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
     const silent = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
     silent.usageExact = false;
-    const result = await new Reader(registry, silent).answer("sess", readRequest(entry));
+    const result = await new Reader(registry, silent).answerDetailed("sess", readRequest(entry));
 
     expect(result.cost.method).toBe("bytes_div_4");
     expect(result.cost.attemptsUsageComplete).toBe(0);
@@ -433,7 +433,7 @@ describe("usage survives an over-cap bridge reply", () => {
       output_tokens: 11,
       usage_exact: true,
     }));
-    const result = await new Reader(registry, oversized).answer("sess", readRequest(entry));
+    const result = await new Reader(registry, oversized).answerDetailed("sess", readRequest(entry));
 
     expect(result.cost.attemptsStarted).toBeGreaterThanOrEqual(1);
     expect(result.cost.method).toBe("exact");

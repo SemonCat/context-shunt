@@ -99,7 +99,7 @@ describe("the verifier is the only writer of `verified`", () => {
       answer: "It says gamma [c1].",
       citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "gamma", verified: true }],
     });
-    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry));
     expect(env.code).toBe("CITATION_INVALID");
     expect(env.citations).toEqual([]);
     expect(env.answer).toBe("");
@@ -112,7 +112,7 @@ describe("the verifier is the only writer of `verified`", () => {
       { id: "c1", line_start: 1, line_end: 1, quote: "alpha" },
       { id: "c2", line_start: 3, line_end: 3, quote: "gamma" },
     ]);
-    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, new FakeLuna([reply])).answer("sess", request(entry));
     expect(env.code).toBe("ANSWERED");
     expect(env.answer).toContain("alpha");
     expect(env.answer).not.toContain("gamma");

@@ -74,7 +74,7 @@ describe("reader gate", () => {
     const { entry, luna, reader } = fixture();
     const req = request(entry) as Record<string, unknown>;
     delete req["question"];
-    const env = await reader.answer("sess", req).then((r) => r.envelope);
+    const env = await reader.answer("sess", req);
     expect(luna.callCount).toBe(0);
     expect(env.status).toBe("error");
     expect(env.code).toBe("INVALID_REQUEST");
@@ -83,7 +83,7 @@ describe("reader gate", () => {
   for (const question of ["", "   ", "\n\t "]) {
     it(`makes zero model calls for a blank question ${JSON.stringify(question)}`, async () => {
       const { entry, luna, reader } = fixture();
-      const env = await reader.answer("sess", request(entry, { question })).then((r) => r.envelope);
+      const env = await reader.answer("sess", request(entry, { question }));
       expect(luna.callCount).toBe(0);
       expect(env.status).toBe("error");
     });
@@ -94,7 +94,7 @@ describe("reader gate", () => {
       { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
     ]);
     const { entry, luna, reader } = fixture(reply);
-    const env = await reader.answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await reader.answer("sess", request(entry));
     expect(env.code).toBe("ANSWERED");
     expect(luna.callCount).toBe(1);
     expect(luna.calls[0]!.model).toBe(READER_MODEL);
@@ -109,7 +109,7 @@ describe("reader gate", () => {
       { id: "c1", line_start: 2, line_end: 2, quote: "max_retries" },
     ]);
     const luna = new FakeLuna([new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true), good]);
-    const env = await new Reader(registry, luna).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
     expect(luna.callCount).toBe(2);
     expect(luna.calls.every((c) => c.user.includes(QUESTION))).toBe(true);
     expect(env.code).toBe("ANSWERED");
@@ -123,7 +123,7 @@ describe("reader gate", () => {
       new ShuntError("MODEL_ERROR", "X", true),
       "never used",
     ]);
-    const env = await new Reader(registry, luna).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
     expect(luna.callCount).toBe(2);
     expect(env.status).toBe("partial");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
@@ -131,7 +131,7 @@ describe("reader gate", () => {
 
   it("passes no host conversation and no tool surface", async () => {
     const { entry, luna, reader } = fixture(answerJson("", []));
-    await reader.answer("sess", request(entry)).then((r) => r.envelope);
+    await reader.answer("sess", request(entry));
     const call = luna.calls[0]!;
     expect(call.user.toLowerCase()).not.toContain("conversation");
     expect(call.user.split("SOURCE EXCERPT").length - 1).toBe(1);
@@ -141,7 +141,7 @@ describe("reader gate", () => {
   it("reports MODEL_ERROR rather than substituting a model", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
-    const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry));
     expect(env.status).toBe("partial");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
     expect(env.answer).toBe("");
@@ -166,7 +166,7 @@ describe("reader gate", () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const env = await new Reader(registry, provider)
-      .answer("sess", request(entry)).then((r) => r.envelope);
+      .answer("sess", request(entry));
     // Refused outright rather than published under the requested model's name.
     expect(env.status).toBe("error");
     expect(env.code).toBe("MODEL_ERROR");
@@ -191,7 +191,7 @@ describe("reader gate", () => {
     }), undefined, READER_MODEL, "openai");
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
-    const result = await new Reader(registry, provider).answer("sess", request(entry));
+    const result = await new Reader(registry, provider).answerDetailed("sess", request(entry));
     expect(result.envelope.code).toBe("ANSWERED");
     expect(result.envelope.provenance!.attribution_status).toBe("unverified");
     expect(result.envelope.provenance!.usage_complete).toBe(false);
@@ -208,7 +208,7 @@ describe("reader gate", () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const env = await new Reader(registry, provider, undefined, undefined, undefined, "require_match")
-      .answer("sess", request(entry)).then((r) => r.envelope);
+      .answer("sess", request(entry));
     expect(env.code).toBe("PROVENANCE_UNAVAILABLE");
     // A provenance failure is not a handle failure: recovery keeps the snapshot.
     expect(env.recovery!.handles_valid).toBe(true);
@@ -228,7 +228,7 @@ describe("reader gate", () => {
           },
         ],
       }),
-    ).then((r) => r.envelope);
+    );
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("NO_MATCH");
     expect(env.status).toBe("ok");
@@ -242,7 +242,7 @@ describe("reader gate", () => {
     const env = await new Reader(registry, luna).answer(
       "sess",
       request(entry, { budgets: { max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000 } }),
-    ).then((r) => r.envelope);
+    );
     expect(env.status).toBe("partial");
     expect(env.coverage.complete).toBe(false);
     expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
@@ -250,7 +250,7 @@ describe("reader gate", () => {
 
   it("does not retry invalid model output and leaks none of it", async () => {
     const { entry, luna, reader } = fixture("this is not json at all");
-    const env = await reader.answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await reader.answer("sess", request(entry));
     expect(luna.callCount).toBe(1);
     expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
     expect(JSON.stringify(env)).not.toContain("not json");
@@ -260,7 +260,7 @@ describe("reader gate", () => {
     const { entry, luna, reader } = fixture();
     const req = request(entry) as any;
     req.sources[0].snapshot_id = "sha256:" + "0".repeat(64);
-    const env = await reader.answer("sess", req).then((r) => r.envelope);
+    const env = await reader.answer("sess", req);
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("SOURCE_CHANGED");
   });
@@ -283,7 +283,7 @@ describe("reader gate", () => {
           },
         ],
       }),
-    ).then((r) => r.envelope);
+    );
     expect(env.code).toBe("ANSWERED");
     expect(env.citations[0]!.locator["kind"]).toBe("records");
   });
@@ -517,7 +517,7 @@ describe("output guard", () => {
     const env = await new Reader(registry, new FakeLuna([], reply)).answer(
       "sess",
       request(entry, { budgets: { max_chunks: 8, max_answer_bytes: 512, deadline_ms: 60000 } }),
-    ).then((r) => r.envelope);
+    );
     expect(new TextEncoder().encode(env.answer).length).toBeLessThanOrEqual(512);
     expect(() => enforce(env)).not.toThrow();
   });
@@ -579,7 +579,7 @@ describe("cancellation and deadlines", () => {
     const luna = new FakeLuna([], answerJson("", []));
     const deadline = Deadline.start(clock, L.requestDeadlineMs);
     deadline.cancel();
-    const env = await new Reader(registry, luna, undefined, clock).answer("sess", request(entry), deadline).then((r) => r.envelope);
+    const env = await new Reader(registry, luna, undefined, clock).answer("sess", request(entry), deadline);
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("CANCELLED");
   });
@@ -600,7 +600,7 @@ describe("cancellation and deadlines", () => {
         };
       },
     };
-    const env = await new Reader(registry, slow, undefined, clock).answer("sess", request(entry)).then((r) => r.envelope);
+    const env = await new Reader(registry, slow, undefined, clock).answer("sess", request(entry));
     expect(env.answer).toBe("");
     expect(env.coverage.complete).toBe(false);
   });
@@ -625,7 +625,7 @@ describe("no raw leak and no writes", () => {
     const env = await new Reader(registry, bridge, undefined, undefined, metrics).answer(
       "sess",
       request(entry),
-    ).then((r) => r.envelope);
+    );
     for (const blob of [JSON.stringify(env), metrics.rendered()]) {
       expect(blob).not.toContain(HEAD);
       expect(blob).not.toContain(MID);
@@ -734,7 +734,7 @@ async function answerOver(dir: string, fillerRepeats: number, count = 16) {
     { length: count },
     (_, i) => `Entry ${String(i).padStart(2, "0")} uses ${filler}[c${i}].`,
   ).join(" ");
-  const result = await new Reader(
+  const envelope = await new Reader(
     registry,
     new FakeLuna([answerJson(answer, citations)]),
   ).answer("sess", {
@@ -751,7 +751,7 @@ async function answerOver(dir: string, fillerRepeats: number, count = 16) {
     ],
     budgets: { max_chunks: 8, max_answer_bytes: L.maxAnswerBytes, deadline_ms: 60000 },
   });
-  return result.envelope;
+  return envelope;
 }
 
 describe("fitting the envelope", () => {
@@ -887,69 +887,9 @@ describe("attribution identity", () => {
 
 // -- the exported Reader API stayed usable across the 1.1 revision -----------
 
-describe("reader api compatibility", () => {
-  /**
-   * `answer` used to resolve to the envelope; 1.1 changed it without an overload. A typed
-   * caller gets a compile error, but an untyped one silently read `undefined` - which is
-   * indistinguishable from a successful empty answer.
-   */
-  it("fails loudly on a pre-1.1 envelope field, and offers the overload", async () => {
-    const { entry, reader } = fixture();
-    const result = await reader.answer("sess", request(entry));
-
-    for (const key of ["status", "code", "answer", "citations"]) {
-      expect(() => (result as unknown as Record<string, unknown>)[key]).toThrow(/\.envelope\./);
-    }
-    // The record's own fields are untouched.
-    expect(result.envelope.status).toBeTypeOf("string");
-    expect(result.sourceIds).toBeInstanceOf(Array);
-
-    // The compat getters are non-enumerable, so the record still behaves as a plain object.
-    expect(Object.keys(result).sort()).toEqual(["cost", "envelope", "provenance", "sourceIds"]);
-    expect(() => JSON.stringify(result)).not.toThrow();
-
-    // And the explicit overload returns exactly the envelope.
-    const envelope = await reader.answerEnvelope("sess", request(entry));
-    expect(envelope.status).toBe(result.envelope.status);
-  });
-});
 
 // -- legacy call shapes must still enforce the budget they carry --------------
 
-describe("legacy reader call compatibility", () => {
-  /**
-   * The pre-1.1 entry point took a `Deadline` in the third position. It is still
-   * *structurally* accepted, because a `Deadline` has a `signal` and the options bag
-   * treats a stray object as "no deadline given" - so its remaining-time budget was
-   * silently ignored and the request ran to the request-level default instead.
-   */
-  it("honours a Deadline passed in the legacy third position", async () => {
-    const clock = new FakeClock();
-    const registry = makeRegistry(tmp(), { sessionId: "sess" });
-    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
-    const slow: any = {
-      async complete() {
-        clock.advance(200);
-        return {
-          text: answerJson("max_retries is three [c1]", [
-            { id: "c1", line_start: 2, line_end: 2, quote: "max_retries" },
-          ]),
-          model: READER_MODEL,
-          usage: { inputTokens: 1, outputTokens: 1 },
-        };
-      },
-    };
-    // A 100 ms budget against a provider that consumes 200 ms.
-    const budget = Deadline.start(clock, 100);
-    const result = await new Reader(registry, slow, undefined, clock).answer(
-      "sess",
-      request(entry),
-      budget as unknown as { deadline?: Deadline },
-    );
-    expect(result.envelope.status).toBe("error");
-    expect(result.envelope.code).toBe("TIMEOUT");
-  });
-});
 
 describe("cancellation stops the fallback chain", () => {
   /**
@@ -982,5 +922,61 @@ describe("cancellation stops the fallback chain", () => {
       }),
     ).rejects.toThrow(ShuntError);
     expect(attempts).toBe(1);
+  });
+});
+
+// -- the pre-1.1 public signature, restored --------------------------------
+
+describe("legacy Reader.answer contract", () => {
+  /**
+   * At the public baseline `389a01d`, `answer(sessionId, request, deadline?, signal?)`
+   * resolved to an `Envelope`. 1.1 changed the arity *and* the return type, so a compiled
+   * caller reading `result.status` got a thrown getter and a caller passing a signal in
+   * the fourth position had it silently ignored. The rich record moved to `answerDetailed`.
+   */
+  it("resolves to the envelope itself", async () => {
+    const { entry, reader } = fixture();
+    const envelope = await reader.answer("sess", request(entry));
+    expect(envelope.status).toBeTypeOf("string");
+    expect(envelope.code).toBeTypeOf("string");
+    expect(Object.keys(envelope)).toContain("citations");
+    // The serialized shape is the envelope, not a nested record.
+    expect(Object.keys(JSON.parse(JSON.stringify(envelope)))).not.toContain("envelope");
+  });
+
+  it("honours a Deadline in the third position", async () => {
+    const clock = new FakeClock();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const slow: any = {
+      async complete() {
+        clock.advance(200);
+        return { text: answerJson("x [c1]", [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries" }]), model: READER_MODEL, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const envelope = await new Reader(registry, slow, undefined, clock)
+      .answer("sess", request(entry), Deadline.start(clock, 100));
+    expect(envelope.status).toBe("error");
+    expect(envelope.code).toBe("TIMEOUT");
+  });
+
+  it("honours an already-aborted signal in the fourth position", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const luna = new FakeLuna([], answerJson("", []));
+    const controller = new AbortController();
+    controller.abort();
+
+    const envelope = await new Reader(registry, luna)
+      .answer("sess", request(entry), undefined, controller.signal);
+    expect(luna.callCount).toBe(0);
+    expect(envelope.code).toBe("CANCELLED");
+  });
+
+  it("still offers the rich record under its own name", async () => {
+    const { entry, reader } = fixture();
+    const detailed = await reader.answerDetailed("sess", request(entry));
+    expect(Object.keys(detailed).sort()).toEqual(["cost", "envelope", "provenance", "sourceIds"]);
+    expect(detailed.envelope.status).toBeTypeOf("string");
   });
 });
