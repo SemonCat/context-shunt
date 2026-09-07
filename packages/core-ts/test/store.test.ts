@@ -535,3 +535,53 @@ describe("store integrity under concurrent publish and sweep", () => {
     expect(s.loadPayload(s.resolve(scope, first.handleId))).toEqual(body);
   });
 });
+
+// -- disclosure and baseline follow the content, not the handle --------------
+
+describe("recapture accounting", () => {
+  it("does not reset the per-source disclosure ceiling", () => {
+    const cap = 100;
+    const s = store(tmp(), narrowLimits(L, { disclosureMaxPerSourceBytes: cap }));
+    const scope = identity();
+    const first = s.publish(scope, [capture()])[0]!;
+    expect(s.chargeDisclosure(scope, first.handleId, "bytes", cap).granted).toBe(true);
+
+    const second = s.publish(scope, [capture()])[0]!;
+    expect(second.handleId).not.toBe(first.handleId);
+    expect(second.blobHash).toBe(first.blobHash);
+
+    expect(s.disclosureAllowance(scope, second.handleId).perSourceRemaining).toBe(0);
+    const refused = s.chargeDisclosure(scope, second.handleId, "bytes", 1);
+    expect(refused.granted).toBe(false);
+    expect(refused.limitReached).toBe(true);
+  });
+
+  it("claims the baseline once per source, not once per handle", () => {
+    const s = store();
+    const scope = identity();
+    const first = s.publish(scope, [capture()])[0]!;
+    expect(s.creditBaseline(scope, first.handleId)).toBe(true);
+    expect(s.creditBaseline(scope, first.handleId)).toBe(false);
+
+    const second = s.publish(scope, [capture()])[0]!;
+    expect(s.creditBaseline(scope, second.handleId)).toBe(false);
+
+    const other = s.publish(scope, [capture(enc("different bytes\n"))])[0]!;
+    expect(s.creditBaseline(scope, other.handleId)).toBe(true);
+  });
+
+  it("keeps disclosure and baseline separate per scope", () => {
+    const cap = 100;
+    const dir = tmp();
+    const s = store(dir, narrowLimits(L, { disclosureMaxPerSourceBytes: cap }));
+    const one = identity("a");
+    const two = identity("b");
+    const first = s.publish(one, [capture()])[0]!;
+    s.chargeDisclosure(one, first.handleId, "bytes", cap);
+    expect(s.creditBaseline(one, first.handleId)).toBe(true);
+
+    const second = s.publish(two, [capture()])[0]!;
+    expect(s.disclosureAllowance(two, second.handleId).perSourceRemaining).toBe(cap);
+    expect(s.creditBaseline(two, second.handleId)).toBe(true);
+  });
+});

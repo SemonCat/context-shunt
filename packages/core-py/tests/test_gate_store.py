@@ -666,3 +666,70 @@ def test_identical_bytes_with_a_different_media_type_are_not_silently_relabelled
 
     # The original handle is untouched by the refusal.
     assert store.load_payload(store.resolve(identity, first.handle_id)) == body
+
+
+# -- disclosure and baseline follow the content, not the handle --------------
+
+
+def test_recapturing_a_source_does_not_reset_its_disclosure_ceiling(tmp_path):
+    """The per-source ceiling exists to stop paging reassembling a whole payload.
+
+    It was read from `handles.disclosed_bytes` for one handle, but re-registering the
+    same file mints a *new* handle with the counter at zero. A caller could therefore
+    disclose the cap, recapture, and disclose the cap again, as many times as it liked.
+    The session ceiling was never affected because it sums `disclosure_events` across the
+    scope; only the per-source one reset.
+    """
+    cap = 100
+    store = _store(tmp_path, limits=L.narrow(disclosure_max_per_source_bytes=cap))
+    identity = _identity()
+
+    first = store.publish(identity, [_capture()])[0]
+    charge = store.charge_disclosure(identity, first.handle_id, "bytes", cap)
+    assert charge.granted is True and charge.charged_bytes == cap
+
+    # Same bytes, captured again: a new handle for content already disclosed to its cap.
+    second = store.publish(identity, [_capture()])[0]
+    assert second.handle_id != first.handle_id
+    assert second.blob_hash == first.blob_hash
+
+    allowance = store.disclosure_allowance(identity, second.handle_id)
+    assert allowance.per_source_remaining == 0
+
+    refused = store.charge_disclosure(identity, second.handle_id, "bytes", 1)
+    assert refused.granted is False and refused.limit_reached is True
+
+
+def test_the_baseline_credit_is_claimed_once_per_source_not_once_per_handle(tmp_path):
+    """The withheld-source saving is a property of the content, claimable once.
+
+    Keyed by handle, a recapture of the same content claimed the saving again, so a
+    caller could inflate "tokens saved" without withholding anything new.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    first = store.publish(identity, [_capture()])[0]
+    assert store.credit_baseline(identity, first.handle_id) is True
+    assert store.credit_baseline(identity, first.handle_id) is False
+
+    second = store.publish(identity, [_capture()])[0]
+    assert store.credit_baseline(identity, second.handle_id) is False
+
+    # Genuinely different content still earns its own credit.
+    other = store.publish(identity, [_capture(data=b"different bytes\n")])[0]
+    assert store.credit_baseline(identity, other.handle_id) is True
+
+
+def test_a_separate_scope_keeps_its_own_disclosure_and_baseline(tmp_path):
+    """Sharing is per scope: another session must not inherit spent allowance."""
+    cap = 100
+    store = _store(tmp_path, limits=L.narrow(disclosure_max_per_source_bytes=cap))
+    one, two = _identity(session="a"), _identity(session="b")
+
+    first = store.publish(one, [_capture()])[0]
+    store.charge_disclosure(one, first.handle_id, "bytes", cap)
+    assert store.credit_baseline(one, first.handle_id) is True
+
+    second = store.publish(two, [_capture()])[0]
+    assert store.disclosure_allowance(two, second.handle_id).per_source_remaining == cap
+    assert store.credit_baseline(two, second.handle_id) is True

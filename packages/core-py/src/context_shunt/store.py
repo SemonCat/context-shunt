@@ -911,10 +911,14 @@ class SnapshotStore:
     # -- baseline credit ---------------------------------------------------
 
     def credit_baseline(self, identity: ScopeIdentity, handle_id: str) -> bool:
-        """Claim the one-time withheld-source baseline for this snapshot.
+        """Claim the one-time withheld-source baseline for this content.
 
-        Returns ``True`` exactly once per handle. Refined questions, failed retries and
-        inspect pages therefore add their own overhead without re-claiming the saving.
+        Returns ``True`` exactly once per (scope, content). Refined questions, failed
+        retries and inspect pages therefore add their own overhead without re-claiming the
+        saving - and neither does a *recapture*: the saving is a property of the content
+        that was withheld, not of the handle that happens to address it. Keyed by handle,
+        re-registering the same file claimed the saving again and inflated "tokens saved"
+        without withholding anything new.
         """
         with self._lock:
             conn = self._connect()
@@ -925,7 +929,14 @@ class SnapshotStore:
                     cursor = conn.execute(
                         "UPDATE handles SET baseline_credited = 1 "
                         " WHERE handle_id = ? AND scope_id = ? AND baseline_credited = 0 "
-                        "   AND revoked = 0 AND expires_at_ms > ?",
+                        "   AND revoked = 0 AND expires_at_ms > ? "
+                        # Not already claimed by any handle for the same content in this
+                        # scope. Another scope is a different session and keeps its own.
+                        "   AND NOT EXISTS ("
+                        "     SELECT 1 FROM handles peer"
+                        "      WHERE peer.scope_id = handles.scope_id"
+                        "        AND peer.blob_hash = handles.blob_hash"
+                        "        AND peer.baseline_credited = 1)",
                         (handle_id, identity.scope_id, now),
                     )
                     return bool(cursor.rowcount)
@@ -943,6 +954,21 @@ class SnapshotStore:
                 " WHERE handle_id = ? AND scope_id = ? AND revoked = 0 AND expires_at_ms > ?",
                 (handle_id, identity.scope_id, now),
             ).fetchone()
+            if source is not None:
+                # The ceiling is per *source*, and a recapture of the same bytes is the
+                # same source. Summing this scope's disclosure events for every handle
+                # that addresses this content stops a caller resetting the ceiling by
+                # re-registering the file. See `charge_disclosure`.
+                spent = conn.execute(
+                    "SELECT COALESCE(SUM(event.bytes), 0) AS total "
+                    "  FROM disclosure_events event "
+                    "  JOIN handles peer ON peer.handle_id = event.handle_id "
+                    " WHERE event.scope_id = ? "
+                    "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
+                    "                          WHERE handle_id = ? AND scope_id = ?)",
+                    (identity.scope_id, handle_id, identity.scope_id),
+                ).fetchone()
+                source = {"disclosed_bytes": int(spent["total"])}
             if source is None:
                 raise ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE")
             session = conn.execute(
@@ -987,7 +1013,20 @@ class SnapshotStore:
                     ).fetchone()
                     if source is None:
                         raise ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE")
-                    used_source = int(source["disclosed_bytes"])
+                    # Per *source*, not per handle: a recapture of the same bytes is the
+                    # same source, and reading one handle's column let a caller disclose
+                    # the cap, re-register, and disclose it again without limit. The
+                    # session total was never affected - it already sums scope-wide.
+                    spent = conn.execute(
+                        "SELECT COALESCE(SUM(event.bytes), 0) AS total "
+                        "  FROM disclosure_events event "
+                        "  JOIN handles peer ON peer.handle_id = event.handle_id "
+                        " WHERE event.scope_id = ? "
+                        "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
+                        "                          WHERE handle_id = ? AND scope_id = ?)",
+                        (identity.scope_id, handle_id, identity.scope_id),
+                    ).fetchone()
+                    used_source = int(spent["total"])
                     session_row = conn.execute(
                         "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events "
                         " WHERE scope_id = ?",

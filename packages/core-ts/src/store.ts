@@ -888,9 +888,12 @@ export class SnapshotStore {
   // -- baseline credit -------------------------------------------------------
 
   /**
-   * Claim the one-time withheld-source baseline for this snapshot. Returns `true` exactly
-   * once per handle, so refined questions, failed retries and inspect pages add their own
-   * overhead without re-claiming the saving.
+   * Claim the one-time withheld-source baseline for this content. Returns `true` exactly
+   * once per (scope, content), so refined questions, failed retries and inspect pages add
+   * their own overhead without re-claiming the saving - and neither does a *recapture*:
+   * the saving belongs to the content that was withheld, not to the handle addressing it.
+   * Keyed by handle, re-registering the same file claimed it again and inflated
+   * "tokens saved" without withholding anything new.
    */
   creditBaseline(identity: ScopeIdentity, handleId: string): boolean {
     const db = this.connect();
@@ -901,7 +904,14 @@ export class SnapshotStore {
         const result = db.prepare(
           "UPDATE handles SET baseline_credited = 1 "
             + " WHERE handle_id = ? AND scope_id = ? AND baseline_credited = 0 "
-            + "   AND revoked = 0 AND expires_at_ms > ?",
+            + "   AND revoked = 0 AND expires_at_ms > ? "
+            // Not already claimed by any handle for the same content in this scope.
+            // Another scope is a different session and keeps its own credit.
+            + "   AND NOT EXISTS ("
+            + "     SELECT 1 FROM handles peer"
+            + "      WHERE peer.scope_id = handles.scope_id"
+            + "        AND peer.blob_hash = handles.blob_hash"
+            + "        AND peer.baseline_credited = 1)",
         ).run(handleId, identity.scopeId, now);
         return Number(result.changes ?? 0) > 0;
       });
@@ -921,13 +931,24 @@ export class SnapshotStore {
         + " WHERE handle_id = ? AND scope_id = ? AND revoked = 0 AND expires_at_ms > ?",
     ).get(handleId, identity.scopeId, now) as Row | undefined;
     if (source === undefined) throw new ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE");
+    // The ceiling is per *source*, and a recapture of the same bytes is the same source.
+    // Summing this scope's disclosure events across every handle addressing this content
+    // stops a caller resetting the ceiling by re-registering the file.
+    const spent = db.prepare(
+      "SELECT COALESCE(SUM(event.bytes), 0) AS total "
+    + "  FROM disclosure_events event "
+    + "  JOIN handles peer ON peer.handle_id = event.handle_id "
+    + " WHERE event.scope_id = ? "
+    + "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
+    + "                          WHERE handle_id = ? AND scope_id = ?)",
+    ).get(identity.scopeId, handleId, identity.scopeId) as Row;
     const session = db.prepare(
       "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events WHERE scope_id = ?",
     ).get(identity.scopeId) as Row;
     return {
       perSourceRemaining: Math.max(
         0,
-        this.limits.disclosureMaxPerSourceBytes - Number(source["disclosed_bytes"]),
+        this.limits.disclosureMaxPerSourceBytes - Number(spent["total"]),
       ),
       perSessionRemaining: Math.max(
         0,
@@ -963,7 +984,18 @@ export class SnapshotStore {
             + " WHERE handle_id = ? AND scope_id = ? AND revoked = 0 AND expires_at_ms > ?",
         ).get(handleId, identity.scopeId, now) as Row | undefined;
         if (source === undefined) throw new ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE");
-        const usedSource = Number(source["disclosed_bytes"]);
+        // Per *source*, not per handle: reading one handle's column let a caller disclose
+        // the cap, re-register the same file, and disclose it again without limit. The
+        // session total was never affected - it already sums scope-wide.
+        const spent = db.prepare(
+          "SELECT COALESCE(SUM(event.bytes), 0) AS total "
+    + "  FROM disclosure_events event "
+    + "  JOIN handles peer ON peer.handle_id = event.handle_id "
+    + " WHERE event.scope_id = ? "
+    + "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
+    + "                          WHERE handle_id = ? AND scope_id = ?)",
+        ).get(identity.scopeId, handleId, identity.scopeId) as Row;
+        const usedSource = Number(spent["total"]);
         const sessionRow = db.prepare(
           "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events WHERE scope_id = ?",
         ).get(identity.scopeId) as Row;
