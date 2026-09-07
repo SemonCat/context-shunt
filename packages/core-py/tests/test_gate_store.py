@@ -887,11 +887,16 @@ def test_an_orphan_sweep_spares_content_another_process_is_staging(tmp_path):
 
 
 def test_a_refused_publish_spares_content_another_process_still_holds(tmp_path):
-    """Discarding one batch's staging must not remove another's reservation.
+    """Discarding one batch's staging must not remove another publisher's content.
 
-    Both publishers dedupe onto the same content-addressed file. When the first is
-    refused it dropped the file because no committed row referenced the digest yet - but
-    the second was still holding its own reservation for exactly those bytes.
+    Both publishers address the same content-addressed file. When the first is refused it
+    dropped the file because no committed row referenced the digest yet - and the second
+    was mid-publish against exactly those bytes.
+
+    This drives the production path only. It used to call `_record_temp` by hand to give
+    the second publisher the reservation that deduping did not create, which manufactured
+    the protection it was meant to be testing; `_stage_blob` now takes that lease itself,
+    so the test no longer has to.
     """
     store = _store(tmp_path)
     identity = _identity()
@@ -903,13 +908,10 @@ def test_a_refused_publish_spares_content_another_process_still_holds(tmp_path):
     final = store._blob_path(capture.hash)
     mine = store._stage_blob(capture, capture.hash, final)
     theirs = other._stage_blob(capture, capture.hash, final)
-    # The second staging deduped onto the first file, so only one write happened.
-    assert mine is not None and theirs is None
-    # Give the other process a reservation of its own for the same digest.
-    other._record_temp(f"{capture.hash}.deadbeefdeadbeef", capture.hash)
+    assert mine is not None and theirs is not None
 
     store._discard_temp_ids([mine])
-    assert final.exists(), "a refused batch removed content another process had reserved"
+    assert final.exists(), "a refused batch removed content another process was publishing"
 
 
 def test_recovery_leaves_a_fresh_reservation_alone(tmp_path):
@@ -929,3 +931,127 @@ def test_recovery_leaves_a_fresh_reservation_alone(tmp_path):
 
     other.recover()
     assert final.exists(), "recovery removed a reservation that was still live"
+
+
+# -- a publisher must not commit a handle whose payload is gone --------------
+
+
+def _stage_then(store: SnapshotStore, hook):
+    """Wrap `_stage_blob` so another process can act between staging and the commit."""
+    real = store._stage_blob
+
+    def wrapped(capture, digest, final):
+        staged = real(capture, digest, final)
+        hook(capture, digest, final)
+        return staged
+
+    store._stage_blob = wrapped
+
+
+def test_publish_revalidates_its_content_before_committing(tmp_path):
+    """The losing schedule: stage, lose the file, commit anyway.
+
+    Staging happens before the publishing transaction opens, and a deduping publisher
+    writes nothing and held no reservation, so another process could remove the shared
+    file in between. The transaction then committed a handle addressing a payload that no
+    longer existed, and resolving it failed with `STORE_FAILED/BLOB_MISSING` - the store
+    handing back an unreadable capability for content it had accepted.
+    """
+    store = _store(tmp_path)
+    other = _second_instance(store)
+    identity = _identity()
+    store.open_scope(identity)
+    other.open_scope(identity)
+
+    capture = _capture()
+    final = other._blob_path(capture.hash)
+    other._stage_blob(capture, capture.hash, final)
+    assert final.exists()
+
+    _stage_then(store, lambda _c, _d, f: f.unlink(missing_ok=True))
+    handle = store.publish(identity, [capture])[0]
+
+    # The publisher still holds the bytes, so the handle it returns must be readable.
+    assert store.load_payload(store.resolve(identity, handle.handle_id)) == capture.data
+
+
+def test_a_deduping_publisher_holds_a_reservation_of_its_own(tmp_path):
+    """Dedupe wrote nothing and reserved nothing, so nothing protected the shared file.
+
+    The previous regression manufactured the missing protection by calling `_record_temp`
+    itself. This one drives the production path only: the second publisher dedupes, and
+    the first one's refusal must still leave the content it is relying on.
+    """
+    store = _store(tmp_path)
+    other = _second_instance(store)
+    identity = _identity()
+    store.open_scope(identity)
+    other.open_scope(identity)
+
+    capture = _capture()
+    final = store._blob_path(capture.hash)
+    mine = store._stage_blob(capture, capture.hash, final)
+    theirs = other._stage_blob(capture, capture.hash, final)
+    assert mine is not None
+    assert theirs is not None, "a deduping publisher must still take a reservation"
+
+    store._discard_temp_ids([mine])
+    assert final.exists(), "a refusal removed content another publisher had reserved"
+
+
+def test_an_orphan_sweep_revalidates_before_it_unlinks(tmp_path):
+    """The sweep listed files, released its lock, then unlinked against a stale list.
+
+    A publisher that staged after the snapshot was taken had its content removed by a
+    decision made before that content existed.
+    """
+    store = _store(tmp_path)
+    other = _second_instance(store)
+    identity = _identity()
+    store.open_scope(identity)
+    other.open_scope(identity)
+
+    capture = _capture(data=b"staged after the snapshot\n")
+    final = store._blob_path(capture.hash)
+    real_iter = type(other)._iter_blob_files
+
+    def stage_during_scan(self):
+        files = list(real_iter(self))
+        if not final.exists():
+            store._stage_blob(capture, capture.hash, final)
+            files = list(real_iter(self))
+        return files
+
+    type(other)._iter_blob_files = stage_during_scan
+    try:
+        other._collect_orphan_blob_files()
+    finally:
+        type(other)._iter_blob_files = real_iter
+
+    assert final.exists(), "the sweep unlinked content staged after its snapshot"
+    handle = store.publish(identity, [capture])[0]
+    assert store.load_payload(store.resolve(identity, handle.handle_id)) == capture.data
+
+
+def test_pending_collection_spares_content_a_publisher_has_deduped_onto(tmp_path):
+    """A blob marked for deletion can be adopted by a new publisher before the sweep."""
+    store = _store(tmp_path)
+    other = _second_instance(store)
+    identity = _identity()
+    store.open_scope(identity)
+    other.open_scope(identity)
+
+    capture = _capture(data=b"adopted while pending\n")
+    first = store.publish(identity, [capture])[0]
+    store.revoke(identity, first.handle_id)
+
+    final = store._blob_path(capture.hash)
+    if not final.exists():
+        store._stage_blob(capture, capture.hash, final)
+    _force_pending_delete(store, capture.hash)
+
+    assert other._stage_blob(capture, capture.hash, final) is not None
+    store._collect_pending_blobs()
+
+    handle = other.publish(identity, [capture])[0]
+    assert other.load_payload(other.resolve(identity, handle.handle_id)) == capture.data

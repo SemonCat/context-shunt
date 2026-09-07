@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -679,6 +679,66 @@ describe("cross-process staging reservations", () => {
     expect(inner.stageBlob(c, hash)).toBeDefined();
 
     other.recover();
+    expect(existsSync(inner.blobPath(hash))).toBe(true);
+  });
+});
+
+// -- a publisher must not commit a handle whose payload is gone -------------
+
+describe("cross-process publication safety", () => {
+  it("revalidates its content before committing", () => {
+    const dir = tmp();
+    const s = store(dir);
+    const scope = identity();
+    s.openScope(scope);
+    const other = new SnapshotStore(join(dir, "cache"), L);
+    other.openScope(scope);
+
+    const c = capture();
+    const hash = captureHash(c);
+    const inner = s as unknown as {
+      stageBlob(c: Capture, h: string): string | undefined;
+      blobPath(h: string): string;
+    };
+    const otherInner = other as unknown as { stageBlob(c: Capture, h: string): string | undefined };
+    otherInner.stageBlob(c, hash);
+    expect(existsSync(inner.blobPath(hash))).toBe(true);
+
+    // Another process removes the shared file between staging and the commit.
+    const realStage = inner.stageBlob.bind(inner);
+    inner.stageBlob = (cap: Capture, h: string) => {
+      const staged = realStage(cap, h);
+      rmSync(inner.blobPath(h), { force: true });
+      return staged;
+    };
+
+    const handle = s.publish(scope, [c])[0]!;
+    expect(s.loadPayload(s.resolve(scope, handle.handleId))).toEqual(c.data);
+  });
+
+  it("gives a deduping publisher a lease of its own", () => {
+    const dir = tmp();
+    const s = store(dir);
+    const scope = identity();
+    s.openScope(scope);
+    const other = new SnapshotStore(join(dir, "cache"), L);
+    other.openScope(scope);
+
+    const c = capture();
+    const hash = captureHash(c);
+    const inner = s as unknown as {
+      stageBlob(c: Capture, h: string): string | undefined;
+      blobPath(h: string): string;
+      discardTempIds(ids: readonly string[]): void;
+    };
+    const otherInner = other as unknown as { stageBlob(c: Capture, h: string): string | undefined };
+
+    const mine = inner.stageBlob(c, hash);
+    const theirs = otherInner.stageBlob(c, hash);
+    expect(mine).toBeDefined();
+    expect(theirs).toBeDefined();
+
+    inner.discardTempIds([mine as string]);
     expect(existsSync(inner.blobPath(hash))).toBe(true);
   });
 });

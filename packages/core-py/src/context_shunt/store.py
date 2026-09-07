@@ -676,6 +676,13 @@ class SnapshotStore:
                     self._assert_scope_open_locked(conn, identity)
                     self._assert_capacity_locked(conn, staged)
                     self._assert_blob_metadata_agrees_locked(conn, staged)
+                    # The last thing before the rows are written: the bytes are still on
+                    # disk. Staging happens before this transaction opens, so however the
+                    # schedule interleaved - a refusal, a sweep, a pending-delete collection
+                    # - the file may be gone by now, and committing here would hand back a
+                    # handle whose payload does not exist. The publisher is still holding
+                    # the content, so it simply writes it again rather than failing.
+                    self._revalidate_staged_locked(staged)
                     expires = now + self._limits.store_handle_ttl_seconds * 1000
                     published: list[PublishedHandle] = []
                     for capture, _final, digest in staged:
@@ -780,6 +787,45 @@ class SnapshotStore:
             ):
                 raise ShuntError("STORE_FAILED", "BLOB_METADATA_CONFLICT", retryable=False)
 
+    def _revalidate_staged_locked(self, staged: list[tuple[Capture, Path, str]]) -> None:
+        """Re-materialize any staged payload that vanished between staging and commit.
+
+        Content is addressed by its own hash, so rewriting it is always safe: the bytes
+        that belong at this path are exactly the bytes in hand.
+        """
+        for capture, final, digest in staged:
+            if _hash_file(final) == digest:
+                continue
+            try:
+                self._write_blob(capture, final)
+            except OSError:
+                raise ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False) from None
+
+    def _write_blob(self, capture: Capture, final: Path) -> None:
+        """Write one payload to its content-addressed path, atomically."""
+        final.parent.mkdir(parents=True, exist_ok=True)
+        _assert_private_directory(final.parent)
+        temp = self._root / _TMP_DIR / f"{final.name}.{secrets.token_hex(8)}.part"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        fd = os.open(temp, flags, _FILE_MODE)
+        try:
+            written = 0
+            view = memoryview(capture.data)
+            while written < len(view):
+                written += os.write(fd, view[written : written + _READ_CHUNK])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(temp, _FILE_MODE)
+        os.replace(temp, final)
+        _fsync_dir(final.parent)
+
     def _stage_blob(self, capture: Capture, digest: str, final: Path) -> str | None:
         """Write and rename one payload. Returns the temp id, or ``None`` when deduped."""
         existing = _hash_file(final)
@@ -789,7 +835,14 @@ class SnapshotStore:
                 # not. Fail closed and leave it alone: other live handles may reference
                 # it, and deleting it would widen the damage.
                 raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
-            return None
+            # Deduping still needs a lease. This publisher writes nothing, but it is just
+            # as dependent on the file surviving until it commits - and with no reservation
+            # of its own, another process's refusal or sweep was free to remove content
+            # this publish was relying on. The lease names no `.part` file because there is
+            # none; it exists purely so every in-flight publisher is visible to cleanup.
+            lease = f"{digest}.{secrets.token_hex(8)}"
+            self._record_temp(lease, digest)
+            return lease
 
         final.parent.mkdir(parents=True, exist_ok=True)
         _assert_private_directory(final.parent)
@@ -1447,6 +1500,15 @@ class SnapshotStore:
             for digest in candidates:
                 try:
                     with _write_txn(conn):
+                        # A blob marked for deletion can be adopted by a publisher that
+                        # deduped onto it and has not committed yet. Its lease is the
+                        # signal, and it is checked inside the same transaction as the
+                        # delete so the decision cannot go stale between the two.
+                        reserved = conn.execute(
+                            "SELECT 1 FROM orphan_temps WHERE blob_hash = ?", (digest,)
+                        ).fetchone()
+                        if reserved is not None:
+                            continue
                         cursor = conn.execute(
                             "DELETE FROM blobs WHERE hash = ? AND refcount = 0 "
                             "  AND pending_delete = 1",
@@ -1473,17 +1535,28 @@ class SnapshotStore:
         process deleted content a publisher had just written and that publisher then
         failed with ``BLOB_MISSING`` on its own bytes.
         """
+
+        def protected(conn: sqlite3.Connection) -> set[str]:
+            rows = conn.execute("SELECT hash FROM blobs").fetchall()
+            reserved = conn.execute("SELECT blob_hash FROM orphan_temps").fetchall()
+            return {str(r["hash"]) for r in rows} | {str(r["blob_hash"]) for r in reserved}
+
         with self._lock:
             conn = self._connect()
-            known = {str(row["hash"]) for row in conn.execute("SELECT hash FROM blobs").fetchall()}
-            known |= {
-                str(row["blob_hash"])
-                for row in conn.execute("SELECT blob_hash FROM orphan_temps").fetchall()
-            }
+            known = protected(conn)
         removed = 0
         for path in self._iter_blob_files():
             digest = path.name[: -len(_BLOB_SUFFIX)]
-            if digest not in known:
+            if digest in known:
+                continue
+            # The listing above is a snapshot taken without the lock held for the walk, so
+            # a publisher can have staged this very digest since. Re-reading the protected
+            # set under the lock, immediately before the unlink, means the decision is
+            # made against the state that is true *now* rather than one that was true when
+            # the walk began.
+            with self._lock:
+                if digest in protected(self._connect()):
+                    continue
                 _unlink_quiet(path)
                 removed += 1
         return removed

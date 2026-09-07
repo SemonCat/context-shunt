@@ -407,8 +407,17 @@ export class SnapshotStore {
       if (String(this.limits.storeDdlVersion) !== "2") return;
       const columns = (db.prepare("PRAGMA table_info(disclosure_events)").all() as Row[])
         .map((row) => String(row["name"]));
-      if (columns.length > 0 && !columns.includes("blob_hash")) {
+      if (columns.length === 0 || columns.includes("blob_hash")) return;
+      try {
+        // Every process opening this store observes the same missing column and races to
+        // add it. `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so the losers used to
+        // fail with `duplicate column name: blob_hash` - which the connection retry did
+        // not recognise, because it only matched lock/busy text. Eight simultaneous opens
+        // on a revision-1 store produced one success and seven `OPEN_FAILED`. Losing that
+        // race is a successful outcome: the column the loser wanted now exists.
         db.exec("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT");
+      } catch (err) {
+        if (!/duplicate column name/i.test(String((err as Error)?.message ?? ""))) throw err;
       }
     } catch {
       throw new ShuntError("STORE_FAILED", "MIGRATION_FAILED", false);
@@ -657,6 +666,13 @@ export class SnapshotStore {
         this.assertScopeOpen(db, identity);
         this.assertCapacity(db, staged);
         this.assertBlobMetadataAgrees(db, staged);
+        // The last thing before the rows are written: the bytes are still on disk.
+        // Staging happens before this transaction opens, so however the schedule
+        // interleaved - a refusal, a sweep, a pending-delete collection - the file may be
+        // gone by now, and committing here would hand back a handle whose payload does not
+        // exist. The publisher is still holding the content, so it writes it again rather
+        // than failing.
+        this.revalidateStaged(staged);
         const expires = now + this.limits.storeHandleTtlSeconds * 1000;
         const published: PublishedHandle[] = [];
         const insertBlob = db.prepare(
@@ -760,6 +776,42 @@ export class SnapshotStore {
   }
 
   /** Write and rename one payload. Returns the temp id, or `undefined` when deduped. */
+  /**
+   * Re-materialize any staged payload that vanished between staging and commit.
+   *
+   * Content is addressed by its own hash, so rewriting it is always safe: the bytes that
+   * belong at this path are exactly the bytes in hand.
+   */
+  private revalidateStaged(staged: ReadonlyArray<{ capture: Capture; hash: string }>): void {
+    for (const { capture, hash } of staged) {
+      const final = this.blobPath(hash);
+      if (hashFile(final) === hash) continue;
+      const parent = final.slice(0, final.lastIndexOf("/"));
+      mkdirSync(parent, { recursive: true, mode: DIR_MODE });
+      assertPrivateDirectory(parent);
+      const temp = join(this.root, TMP_DIR, `${hash}.${randomBytes(8).toString("hex")}.part`);
+      const flags =
+        fsConstants.O_WRONLY
+        | fsConstants.O_CREAT
+        | fsConstants.O_EXCL
+        | (fsConstants.O_NOFOLLOW ?? 0);
+      const fd = openSync(temp, flags, FILE_MODE);
+      try {
+        let written = 0;
+        while (written < capture.data.length) {
+          const end = Math.min(capture.data.length, written + READ_CHUNK);
+          written += writeSync(fd, capture.data, written, end - written);
+        }
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      chmodSync(temp, FILE_MODE);
+      renameSync(temp, final);
+      fsyncDir(parent);
+    }
+  }
+
   private stageBlob(capture: Capture, hash: string): string | undefined {
     const final = this.blobPath(hash);
     const existing = hashFile(final);
@@ -770,7 +822,14 @@ export class SnapshotStore {
         // would widen the damage.
         throw new ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", false);
       }
-      return undefined;
+      // Deduping still needs a lease. This publisher writes nothing, but it is just as
+      // dependent on the file surviving until it commits - and with no reservation of its
+      // own, another process's refusal or sweep was free to remove content this publish
+      // was relying on. The lease names no `.part` file because there is none; it exists
+      // purely so every in-flight publisher is visible to cleanup.
+      const lease = `${hash}.${randomBytes(8).toString("hex")}`;
+      this.recordTemp(lease, hash);
+      return lease;
     }
 
     const parent = final.slice(0, final.lastIndexOf("/"));
@@ -1397,6 +1456,11 @@ export class SnapshotStore {
     for (const hash of candidates) {
       try {
         deleted += this.writeTxn(db, () => {
+          // A blob marked for deletion can be adopted by a publisher that deduped onto it
+          // and has not committed yet. Its lease is the signal, checked inside the same
+          // transaction as the delete so the decision cannot go stale between the two.
+          const reserved = db.prepare("SELECT 1 FROM orphan_temps WHERE blob_hash = ?").get(hash);
+          if (reserved !== undefined) return 0;
           const result = db.prepare(
             "DELETE FROM blobs WHERE hash = ? AND refcount = 0 AND pending_delete = 1",
           ).run(hash);
@@ -1425,20 +1489,28 @@ export class SnapshotStore {
    */
   private collectOrphanBlobFiles(): number {
     const db = this.connect();
-    const known = new Set(
-      (db.prepare("SELECT hash FROM blobs").all() as Row[]).map((row) => String(row["hash"])),
-    );
-    for (const row of db.prepare("SELECT blob_hash FROM orphan_temps").all() as Row[]) {
-      known.add(String(row["blob_hash"]));
-    }
+    const protectedNow = (): Set<string> => {
+      const set = new Set(
+        (db.prepare("SELECT hash FROM blobs").all() as Row[]).map((row) => String(row["hash"])),
+      );
+      for (const row of db.prepare("SELECT blob_hash FROM orphan_temps").all() as Row[]) {
+        set.add(String(row["blob_hash"]));
+      }
+      return set;
+    };
+    const known = protectedNow();
     let removed = 0;
     for (const path of this.blobFiles()) {
       const name = path.slice(path.lastIndexOf("/") + 1);
       const hash = name.slice(0, name.length - BLOB_SUFFIX.length);
-      if (!known.has(hash)) {
-        unlinkQuiet(path);
-        removed += 1;
-      }
+      if (known.has(hash)) continue;
+      // The listing above is a snapshot, so a publisher can have staged this very digest
+      // since. Re-reading the protected set immediately before the unlink means the
+      // decision is made against the state that is true *now* rather than one that was
+      // true when the walk began.
+      if (protectedNow().has(hash)) continue;
+      unlinkQuiet(path);
+      removed += 1;
     }
     return removed;
   }
