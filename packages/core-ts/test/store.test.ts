@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
@@ -740,5 +741,132 @@ describe("cross-process publication safety", () => {
 
     inner.discardTempIds([mine as string]);
     expect(existsSync(inner.blobPath(hash))).toBe(true);
+  });
+});
+
+// -- real two-process proofs, through the public API only -------------------
+
+describe("cross-process behaviour in separate node processes", () => {
+  /**
+   * Real child processes over one store root, driven only through the public API.
+   *
+   * Deliberately not a worker/ESM harness: the final review's TypeScript attempt failed
+   * inside its harness before store code ran, which proves nothing either way. These spawn
+   * `node` against the built package, so what runs is the code that ships.
+   */
+  const DIST = resolve(here, "..", "dist", "index.js");
+  const built = existsSync(DIST);
+
+  /**
+   * Launch a child and resolve when it exits. Asynchronous on purpose: `spawnSync` would
+   * run each child to completion before starting the next, which is a sequence, not the
+   * concurrency these tests exist to exercise.
+   */
+  function run(source: string, args: string[]): Promise<{ code: number; out: string; err: string }> {
+    return new Promise((resolveRun) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", source, ...args], {
+        timeout: 300_000,
+      });
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (chunk) => { out += String(chunk); });
+      child.stderr.on("data", (chunk) => { err += String(chunk); });
+      child.on("close", (code) => resolveRun({ code: code ?? -1, out, err }));
+    });
+  }
+
+  const PUBLISHER = `
+    const { SnapshotStore, ScopeIdentity } = await import(${JSON.stringify(DIST)});
+    const [root, rounds, tag] = process.argv.slice(1);
+    const store = new SnapshotStore(root);
+    const identity = new ScopeIdentity({
+      host: "test-host", profile: "test", principal: "local", session: "shared", generation: 1,
+    });
+    const failures = [];
+    for (let i = 0; i < Number(rounds); i += 1) {
+      const data = new TextEncoder().encode(\`publisher-\${tag}-\${i}\\n\`);
+      try {
+        const handle = store.publish(identity, [{ data, mediaType: "text/plain", lineCount: 1 }])[0];
+        const got = store.loadPayload(store.resolve(identity, handle.handleId));
+        if (Buffer.compare(Buffer.from(got), Buffer.from(data)) !== 0) failures.push(\`round \${i}: mismatch\`);
+        store.revoke(identity, handle.handleId);
+      } catch (e) { failures.push(\`round \${i}: \${e.code ?? e.name}/\${e.detail ?? e.message}\`); }
+    }
+    console.log(JSON.stringify(failures));
+  `;
+
+  const SWEEPER = `
+    const { SnapshotStore } = await import(${JSON.stringify(DIST)});
+    const [root, rounds] = process.argv.slice(1);
+    const store = new SnapshotStore(root);
+    const failures = [];
+    for (let i = 0; i < Number(rounds); i += 1) {
+      try { store.sweep(); store.recover(); }
+      catch (e) { failures.push(\`\${e.code ?? e.name}/\${e.detail ?? e.message}\`); }
+    }
+    console.log(JSON.stringify(failures));
+  `;
+
+  it.skipIf(!built)("keeps every published payload readable under a concurrent sweeper", async () => {
+    const root = join(tmp(), "cache");
+    const rounds = "120";
+    // Started together, so they genuinely overlap.
+    const results = await Promise.all([
+      run(PUBLISHER, [root, rounds, "a"]),
+      run(PUBLISHER, [root, rounds, "b"]),
+      run(SWEEPER, [root, rounds]),
+    ]);
+    const failures: string[] = [];
+    for (const r of results) {
+      expect(r.code, r.err).toBe(0);
+      failures.push(...(JSON.parse(r.out.trim()) as string[]));
+    }
+    expect(failures).toEqual([]);
+  });
+
+  const OPENER = `
+    const { SnapshotStore, ScopeIdentity } = await import(${JSON.stringify(DIST)});
+    const [root] = process.argv.slice(1);
+    try {
+      const store = new SnapshotStore(root);
+      store.openScope(new ScopeIdentity({
+        host: "h", profile: "p", principal: "l", session: "s", generation: 1,
+      }));
+      console.log(JSON.stringify("ok"));
+    } catch (e) { console.log(JSON.stringify(\`\${e.code ?? e.name}/\${e.detail ?? e.message}\`)); }
+  `;
+
+  it.skipIf(!built)("migrates a revision-1 store under simultaneous opens", async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const root = join(tmp(), "cache");
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+
+      let ddl = readFileSync(join(REPO, "contracts", "store", "v1.sql"), "utf8");
+      ddl = ddl.split("CREATE TABLE IF NOT EXISTS source_credits")[0]!;
+      ddl = ddl.replace("    blob_hash TEXT,\n", "");
+      ddl = ddl.replace(
+        "    CHECK (bytes >= 0),\n    CHECK (blob_hash IS NULL OR length(blob_hash) = 64)\n",
+        "    CHECK (bytes >= 0)\n",
+      );
+      ddl = ddl.replace(
+        "CREATE INDEX IF NOT EXISTS disclosure_by_source ON disclosure_events (scope_id, blob_hash);\n",
+        "",
+      );
+      const db = new DatabaseSync(join(root, "store.sqlite3"));
+      db.exec(ddl);
+      for (const [k, v] of [
+        ["ddl_version", "1"],
+        ["store_id", "ab".repeat(16)],
+        ["clock_high_water_ms", "0"],
+        ["cursor_key", "cd".repeat(32)],
+      ] as const) {
+        db.prepare("INSERT INTO store_metadata (key,value) VALUES (?,?)").run(k, v);
+      }
+      db.close();
+
+      const results = await Promise.all(Array.from({ length: 12 }, () => run(OPENER, [root])));
+      for (const r of results) expect(r.code, r.err).toBe(0);
+      expect(results.map((r) => JSON.parse(r.out.trim()))).toEqual(Array(12).fill("ok"));
+    }
   });
 });

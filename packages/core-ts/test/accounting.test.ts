@@ -30,7 +30,8 @@ import {
   EMITTED_SCHEMA_VERSION,
 } from "../src/limits.js";
 import { ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError } from "../src/metrics.js";
-import { HostBridgeProvider, transientProviderError } from "../src/provider.js";
+import { FallbackChainProvider, HostBridgeProvider, transientProviderError } from "../src/provider.js";
+import { READER_MODEL } from "../src/limits.js";
 import { Reader } from "../src/reader.js";
 import { makeRegistry } from "./support.js";
 import { snapshotBytes } from "../src/snapshot.js";
@@ -439,5 +440,103 @@ describe("usage survives an over-cap bridge reply", () => {
     expect(result.cost.method).toBe("exact");
     expect(result.cost.inputTokens).toBe(23);
     expect(result.cost.outputTokens).toBe(11);
+  });
+});
+
+describe("fallback usage completeness", () => {
+  /**
+   * `exact` is a claim about the whole request, not about whichever attempt won.
+   *
+   * A chain whose first candidate failed without reporting usage and whose second
+   * succeeded with exact counts merged that winner's usage into an empty accumulator, so
+   * `readerCostOf` saw a complete `Usage` and returned `exact` - while the very same
+   * record said `attemptsUsageComplete: 1` of `attemptsStarted: 2`. Python already
+   * classified this schedule `bytes_div_4`; TypeScript did not.
+   */
+  function chainOf(...bridges: Array<() => Promise<Record<string, unknown>>>) {
+    const [primary, ...rest] = bridges;
+    return new FallbackChainProvider(
+      new HostBridgeProvider(async () => (primary as () => Promise<Record<string, unknown>>)(), L, READER_MODEL, "openai"),
+      rest.map((b, i) => new HostBridgeProvider(async () => b(), L, `fallback-${i}`, "openai")),
+    );
+  }
+
+  const answered = () =>
+    Promise.resolve({
+      text: answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
+      input_tokens: 7,
+      output_tokens: 4,
+      usage_exact: true,
+    });
+
+  it("is not exact when a successful fallback follows an unreported failure", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    let calls = 0;
+    const chain = chainOf(
+      () => {
+        calls += 1;
+        return Promise.reject(new Error("upstream unavailable"));
+      },
+      () => {
+        calls += 1;
+        return answered();
+      },
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+
+    expect(calls).toBe(2);
+    expect(result.cost.attemptsStarted).toBe(2);
+    expect(result.cost.attemptsUsageComplete).toBe(1);
+    expect(result.cost.method).toBe("bytes_div_4");
+  });
+
+  it("is exact only when every started attempt reported", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const chain = chainOf(answered);
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+
+    expect(result.cost.attemptsStarted).toBe(result.cost.attemptsUsageComplete);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(7);
+  });
+
+  /**
+   * An all-failure chain still costs money, and the label has to describe the evidence
+   * rather than the outcome: when every attempt reported, the total really is exact even
+   * though nothing was answered; when none did, it is a named estimate. What must never
+   * happen is `exact` over a partial tally, which is the case above.
+   */
+  it("labels an all-failure chain by what its attempts reported", async () => {
+    for (const billed of [true, false]) {
+      const registry = makeRegistry(tmp(), { sessionId: "sess" });
+      const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+      let calls = 0;
+      const dead = () => {
+        calls += 1;
+        if (!billed) return Promise.reject(new Error("upstream unavailable"));
+        // Over-cap text is rejected *after* usage is unpacked, so this failure reports.
+        return Promise.resolve({
+          text: "x".repeat(L.maxToolResultBytes + 10),
+          input_tokens: 3,
+          output_tokens: 2,
+          usage_exact: true,
+        });
+      };
+      const chain = chainOf(dead, dead);
+      const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+
+      expect(calls).toBeGreaterThan(0);
+      expect(result.cost.attemptsStarted).toBe(calls);
+      if (billed) {
+        // Every attempt reported, so the sum of what was billed is exactly known.
+        expect(result.cost.attemptsUsageComplete).toBe(result.cost.attemptsStarted);
+        expect(result.cost.method).toBe("exact");
+      } else {
+        expect(result.cost.attemptsUsageComplete).toBe(0);
+        expect(result.cost.method).toBe("bytes_div_4");
+      }
+    }
   });
 });

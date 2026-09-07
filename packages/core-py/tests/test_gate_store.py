@@ -1055,3 +1055,183 @@ def test_pending_collection_spares_content_a_publisher_has_deduped_onto(tmp_path
 
     handle = other.publish(identity, [capture])[0]
     assert other.load_payload(other.resolve(identity, handle.handle_id)) == capture.data
+
+
+# -- real two-process proofs, through the public API only --------------------
+
+
+_PUBLISHER_PROGRAM = """
+import sys, json
+sys.path.insert(0, {src!r})
+from context_shunt.store import SnapshotStore, ScopeIdentity, Capture
+
+root, rounds, tag = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+store = SnapshotStore(root)
+identity = ScopeIdentity(
+    host="test-host", profile="test", principal="local", session="shared", generation=1
+)
+failures = []
+for index in range(rounds):
+    payload = ("publisher-%s-%d\\n" % (tag, index)).encode()
+    capture = Capture(data=payload, media_type="text/plain", line_count=1)
+    try:
+        handle = store.publish(identity, [capture])[0]
+        got = store.load_payload(store.resolve(identity, handle.handle_id))
+        if got != payload:
+            failures.append("round %d: payload mismatch" % index)
+        # Release it again, so a long run exercises the race rather than the entry quota.
+        store.revoke(identity, handle.handle_id)
+    except Exception as exc:
+        failures.append("round %d: %s" % (index, type(exc).__name__ + "/" + str(exc)))
+print(json.dumps(failures))
+"""
+
+_SWEEPER_PROGRAM = """
+import sys, json
+sys.path.insert(0, {src!r})
+from context_shunt.store import SnapshotStore
+
+root, rounds = sys.argv[1], int(sys.argv[2])
+store = SnapshotStore(root)
+failures = []
+for _ in range(rounds):
+    try:
+        store.sweep()
+        store.recover()
+    except Exception as exc:
+        failures.append(type(exc).__name__ + "/" + str(exc))
+print(json.dumps(failures))
+"""
+
+
+def _src_root() -> str:
+    return str(Path(__file__).resolve().parents[1] / "src")
+
+
+def test_a_publisher_and_a_sweeper_in_separate_processes_never_lose_a_payload(tmp_path):
+    """Two real processes over one store, driven only through the public API.
+
+    Cleanup decides a file is an orphan and then unlinks it, and those two steps are now
+    coupled inside one write transaction so the decision cannot go stale across processes.
+
+    Honest about what this proves: it is a *regression*, not a red-green demonstration.
+    Removing the coupling does not make it fail, because `_stage_blob` commits its lease
+    **before** the payload is written, so a sweeper can never observe a blob file that has
+    neither a row nor a lease. The schedule the final review forced needs that observation
+    and cannot be reached from the public surface at this ordering. What this does hold is
+    the outcome under sustained real contention - two publishers against a sweeper, over
+    `publish`, `resolve`, `load_payload`, `sweep` and `recover`, with no private hook and
+    no injected schedule - so any future change that reopens the window fails here.
+
+    The deterministic proof of the coupling itself is
+    `test_an_orphan_sweep_revalidates_before_it_unlinks`, which does fail without it.
+    """
+    root = str(tmp_path / "cache")
+    rounds = 120
+    # Two publishers against one sweeper. The window is narrow, so the proof comes from
+    # sustained contention rather than a single pass: with the write-lock coupling removed
+    # this loses a payload, and with it in place it does not.
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", program.format(src=_src_root()), root, str(rounds), tag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for program, tag in (
+            (_PUBLISHER_PROGRAM, "a"),
+            (_PUBLISHER_PROGRAM, "b"),
+            (_SWEEPER_PROGRAM, "sweep"),
+        )
+    ]
+    failures: list[str] = []
+    for worker in workers:
+        out, err = worker.communicate(timeout=300)
+        assert worker.returncode == 0, err
+        failures.extend(json.loads(out))
+    assert failures == [], f"cleanup and publication raced: {failures[:5]}"
+
+
+_OPENER_PROGRAM = """
+import sys, json
+sys.path.insert(0, {src!r})
+from context_shunt.store import SnapshotStore, ScopeIdentity
+
+root = sys.argv[1]
+try:
+    store = SnapshotStore(root)
+    store.open_scope(ScopeIdentity(
+        host="h", profile="p", principal="l", session="s", generation=1
+    ))
+    print(json.dumps("ok"))
+except Exception as exc:
+    print(json.dumps(getattr(exc, "code", type(exc).__name__) + "/" + str(getattr(exc, "detail", ""))))
+"""
+
+
+def _revision_one_store(root: Path) -> None:
+    """Synthesize a revision-1 store: the current DDL without the revision-2 additions."""
+    root.mkdir(parents=True, exist_ok=True)
+    ddl = (Path(__file__).resolve().parents[3] / "contracts" / "store" / "v1.sql").read_text()
+    ddl = ddl.split("CREATE TABLE IF NOT EXISTS source_credits")[0]
+    ddl = ddl.replace("    blob_hash TEXT,\n", "")
+    ddl = ddl.replace(
+        "    CHECK (bytes >= 0),\n    CHECK (blob_hash IS NULL OR length(blob_hash) = 64)\n",
+        "    CHECK (bytes >= 0)\n",
+    )
+    ddl = ddl.replace(
+        "CREATE INDEX IF NOT EXISTS disclosure_by_source"
+        " ON disclosure_events (scope_id, blob_hash);\n",
+        "",
+    )
+    conn = sqlite3.connect(root / "store.sqlite3")
+    try:
+        conn.executescript(ddl)
+        for key, value in (
+            ("ddl_version", "1"),
+            ("store_id", "ab" * 16),
+            ("clock_high_water_ms", "0"),
+            ("cursor_key", "cd" * 32),
+        ):
+            conn.execute("INSERT INTO store_metadata (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_simultaneous_opens_all_migrate_a_revision_one_store(tmp_path):
+    """The revision-1 to 2 step is a check followed by an `ALTER TABLE`.
+
+    Every process opening the store sees the same missing column and races to add it.
+    `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so a loser failed with "duplicate
+    column name" and the whole open became `STORE_FAILED/MIGRATION_FAILED` - the store
+    refusing its first operation after a supported upgrade. Losing that race is a
+    successful migration: the column the loser wanted now exists.
+    """
+    # Rounds, because the window is a real race: a single round caught the defect only
+    # about one time in three, which is not a proof of anything. Each round is a fresh
+    # revision-1 store raced by twelve processes.
+    for attempt in range(6):
+        root = tmp_path / f"cache-{attempt}"
+        _revision_one_store(root)
+
+        openers = [
+            subprocess.Popen(
+                [sys.executable, "-c", _OPENER_PROGRAM.format(src=_src_root()), str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(12)
+        ]
+        results = []
+        for opener in openers:
+            out, err = opener.communicate(timeout=180)
+            assert opener.returncode == 0, err
+            results.append(json.loads(out))
+
+        assert results == ["ok"] * 12, (
+            f"round {attempt}: simultaneous opens did not all migrate: {results}"
+        )
+        # And the store really is at revision 2 afterwards.
+        assert SnapshotStore(root).ddl_version() == 2

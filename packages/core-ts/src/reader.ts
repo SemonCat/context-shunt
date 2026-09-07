@@ -931,7 +931,13 @@ function readerCostOf(input: {
   limits: Limits;
 }): ReaderCost {
   if (input.attempts === 0) return noReaderCost();
-  if (usageComplete(input.usage)) {
+  // `exact` is a claim about the whole request, not about whichever attempt won. A chain
+  // whose first candidate failed without reporting and whose second succeeded with exact
+  // counts merged that winner's usage into an empty accumulator, so the total looked
+  // complete and came back `exact` - while the same record said one of two attempts had
+  // reported. Every started attempt has to have reported for the total to be exact, which
+  // is the rule the Python core already applied to the same schedule.
+  if (usageComplete(input.usage) && input.usageCompleteCalls === input.attempts) {
     return {
       inputTokens: input.usage.inputTokens,
       outputTokens: input.usage.outputTokens,

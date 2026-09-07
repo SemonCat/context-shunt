@@ -476,9 +476,19 @@ class SnapshotStore:
             columns = {
                 str(row["name"]) for row in conn.execute("PRAGMA table_info(disclosure_events)")
             }
-            if columns and "blob_hash" not in columns:
+            if not columns or "blob_hash" in columns:
+                return
+            try:
                 with _write_txn(conn):
                     conn.execute("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT")
+            except sqlite3.OperationalError as exc:
+                # Every process opening this store observes the same missing column and
+                # races to add it. `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so the
+                # losers fail with "duplicate column name". Losing that race is a
+                # successful migration: the column the loser wanted now exists. Only a
+                # genuinely different failure is worth reporting.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         except sqlite3.Error:
             raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
 
@@ -1549,16 +1559,28 @@ class SnapshotStore:
             digest = path.name[: -len(_BLOB_SUFFIX)]
             if digest in known:
                 continue
-            # The listing above is a snapshot taken without the lock held for the walk, so
-            # a publisher can have staged this very digest since. Re-reading the protected
-            # set under the lock, immediately before the unlink, means the decision is
-            # made against the state that is true *now* rather than one that was true when
-            # the walk began.
+            # The walk above is only a candidate list. Eligibility and the unlink have to
+            # be decided together *and* against every other process, so both happen inside
+            # one write transaction: `BEGIN IMMEDIATE` takes the database write lock, which
+            # is what a publisher's lease insert and its publishing transaction contend
+            # for. Under `self._lock` alone this was still racy - that lock is
+            # process-local, so another process could take a lease between the re-read and
+            # the unlink, and cleanup could remove content after that publisher's final
+            # revalidation had already accepted it.
+            #
+            # Serializing on the write lock leaves only two orders, both safe: the
+            # publisher's lease commits first and this sees it, or this commits first and
+            # the publisher's own revalidation rewrites the content it still holds.
             with self._lock:
-                if digest in protected(self._connect()):
+                conn = self._connect()
+                try:
+                    with _write_txn(conn):
+                        if digest in protected(conn):
+                            continue
+                        _unlink_quiet(path)
+                        removed += 1
+                except sqlite3.Error:
                     continue
-                _unlink_quiet(path)
-                removed += 1
         return removed
 
     def _iter_blob_files(self) -> Iterator[Path]:
