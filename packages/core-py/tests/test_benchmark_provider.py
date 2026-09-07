@@ -13,11 +13,23 @@ That catches a route that is broken or hanging - the failure mode worth gating o
 without pretending a wall-clock threshold is a property of the software.
 
 The assertion that carries real weight is the accounting one. This is the only gate where
-the token columns meet a *live* provider, so it is the only place that can prove the
-claim "null is not zero" against a real host rather than a fixture. A route that reports
-no usage must produce null token counts and ``usage_complete: false``; if a zero ever
-appears here, the accounting layer is laundering absence into a measurement and every
-savings figure downstream is suspect.
+the token columns meet a *live* provider, so it is the only place that can prove against
+a real host - rather than a fixture - that an unreported usage is never passed off as
+provider truth.
+
+What that means concretely is set by :class:`ReaderCost` and gated by
+``test_gate_accounting``: a route that reports no usage yields a *named deterministic
+estimate* (``bytes_div_4``) computed from the bytes this core itself sent and received,
+never ``exact``, and ``cache_tokens`` - which nothing estimated - stays null. ``None`` is
+reserved for the different fact "no attempt was made". This module previously asserted
+``input_tokens is None`` for an unreported route, which contradicts that design; the
+assertion had never executed, because the gate was hardcoded to NOT_RUN until the
+prerequisite was actually consulted, so the contradiction went unnoticed.
+
+The invariant worth gating on is therefore: the method column must tell the truth about
+where the number came from. A zero, or an ``exact`` label over an estimate, means the
+accounting layer is laundering absence into a measurement and every savings figure
+downstream is suspect.
 
 Cost is reported, never asserted: what a call costs is a property of the host's routing
 and pricing, not of this project.
@@ -82,6 +94,14 @@ def _sample_items(corpus: dict) -> list[dict]:
     return chosen
 
 
+def _summed(samples: list[dict], field: str) -> int | None:
+    """Sum a token column, or null if any sample is missing it. Never a partial total."""
+    values = [s[field] for s in samples]
+    if any(value is None for value in values):
+        return None
+    return sum(values)
+
+
 def _registry(root: Path) -> SourceRegistry:
     identity = ScopeIdentity(
         host="bench", profile="luna", principal="local", session="bench", generation=1
@@ -136,6 +156,7 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
                 "attempts_usage_complete": cost.attempts_usage_complete,
                 "input_tokens": cost.input_tokens,
                 "output_tokens": cost.output_tokens,
+                "cache_tokens": cost.cache_tokens,
                 "token_method": cost.method.value,
             }
         )
@@ -169,6 +190,12 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         "token_cost_unmeasured_reason": (
             None if usage_exposed else "host route reports no usage; absence is not zero"
         ),
+        # The host-reported totals above stay null. These are this core's own byte-based
+        # estimate, carried separately and with its method attached, so a reader of the
+        # report can never mistake the two for each other.
+        "estimated_input_tokens_total": _summed(samples, "input_tokens"),
+        "estimated_output_tokens_total": _summed(samples, "output_tokens"),
+        "token_estimate_methods": sorted({s["token_method"] for s in samples}),
         "by_category": {
             s["category"]: {"latency_ms": s["latency_ms"], "code": s["code"]} for s in samples
         },
@@ -180,14 +207,18 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
     # A route that hangs is the failure worth gating on; a slow one is not a defect.
     assert latencies[-1] <= deadline_ms, report
 
-    # The assertion this gate exists for: a live route that reports no usage must yield
-    # null, never zero, and must say its usage is incomplete.
+    # The assertion this gate exists for: against a live route, the method column must say
+    # where every number came from, and an unreported usage must never be labelled exact.
     for sample in samples:
         assert sample["attempts_started"] > 0, report
         if sample["attempts_usage_complete"] < sample["attempts_started"]:
-            assert sample["input_tokens"] is None, report
-            assert sample["output_tokens"] is None, report
-            assert sample["token_method"] != TokenMethod.EXACT.value, report
+            # Unreported: a named estimate this core can reproduce from its own bytes,
+            # never provider truth, and never a zero standing in for the unknown.
+            assert sample["token_method"] == TokenMethod.BYTES_DIV_4.value, report
+            assert isinstance(sample["input_tokens"], int) and sample["input_tokens"] > 0, report
+            assert isinstance(sample["output_tokens"], int), report
+            # Nothing estimates a cache hit, so this one really does stay null.
+            assert sample["cache_tokens"] is None, report
         else:
             assert isinstance(sample["input_tokens"], int), report
             assert sample["token_method"] == TokenMethod.EXACT.value, report

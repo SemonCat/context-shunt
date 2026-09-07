@@ -67,6 +67,12 @@ level a real deployment would pin for a bounded reader call. ``off`` is slower a
 the marker, which the reader then strips as an unsupported assertion - an answer deleted
 for a formatting reason looks identical to "the source did not say", so it matters.
 
+The table is a single measurement per level, and the marker result for ``low`` did not
+hold up: a full 40x3 eval run shows ``low`` omitting the marker intermittently on items
+the model otherwise answers correctly. Read the table as "``off`` is not usable", not as
+"``low`` always emits the marker". ``eval luna`` therefore counts the omissions directly
+(``of_which_missing_citation_marker``) rather than assuming the level prevents them.
+
 Environment:
     CONTEXT_SHUNT_OPENCLAW_BIN       path to the CLI (default: "openclaw")
     CONTEXT_SHUNT_OPENCLAW_ROUTE     "<provider>/<model>" (default: the Luna route below)
