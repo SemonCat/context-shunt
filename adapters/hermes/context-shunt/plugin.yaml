@@ -5,7 +5,9 @@ description: >-
   questions about large sources with a configurable reader model, returning a bounded,
   citation-verified envelope instead of the file. Adds a zero-model exact inspector under
   a cumulative disclosure ceiling and a read-only session accounting view. Registers no
-  writer tool, and no tool can retrieve a full payload.
+  writer tool. Every disclosure is capped per page and counted against cumulative
+  per-source and per-session budgets, so a large payload cannot be reassembled; a source
+  small enough to fit those budgets can still be returned in full by the inspector.
 author: context-shunt contributors
 kind: standalone
 # Every tool the adapter registers, so an operator can audit the surface from the

@@ -5,9 +5,13 @@ the conversation, context-shunt stops it *before the tool runs* and offers a dif
 deal: ask a question about the file instead, and get back a short answer whose every
 citation has been checked against the bytes it claims to quote.
 
-It is read-only. It never modifies a source, and **no tool it registers can retrieve a
-full payload** — everything the agent can reach is either a cited model-derived answer or
-a capped, cumulatively-limited exact extract.
+It is read-only. It never modifies a source, and everything the agent can reach is either
+a cited model-derived answer or a capped, cumulatively-limited exact extract. **The limit
+is a byte budget, not a promise that a source can never come back whole**: a source small
+enough to fit the per-page, per-source and per-session caps can be returned in full
+through `inspect`, and the 350-line pre-read gate is a context-cost control rather than a
+confidentiality boundary. What the caps do guarantee is that a large payload cannot be
+reassembled, and that every disclosure is counted.
 
 ```text
         read a 20k-line file                    ask a question about it

@@ -73,9 +73,12 @@ paired with a real quote that does not actually support it can pass mechanical v
 
 `context_shunt_inspect` is the deliberate hole in "the payload never enters the context": it
 exists because sometimes you genuinely need the exact text. It is bounded per page (16 KiB)
-*and* cumulatively (256 KiB per source, 1 MiB per session by default), so it cannot be paged
-into a full copy. But within those budgets it does disclose source content into the main
-model context, and the accounting records that as negative savings rather than hiding it.
+*and* cumulatively (256 KiB per source, 1 MiB per session by default), so a *large* payload
+cannot be paged into a full copy. A source that fits inside those budgets can be returned in
+full, and often in a single page — the pre-read gate blocks a 351-line file on context cost,
+not on confidentiality, and `inspect` will hand that same file back. Within those budgets it
+discloses source content into the main model context, and the accounting records that as
+negative savings rather than hiding it.
 
 If that trade is wrong for your deployment, set `inspect.enabled: false`. The reader and the
 gate keep working.

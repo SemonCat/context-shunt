@@ -159,6 +159,10 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
                 "latency_ms": elapsed_ms,
                 "status": result.envelope["status"],
                 "code": result.envelope["code"],
+                # Every chunk the request gave up on, and why. A total provider outage
+                # surfaces here as omissions, not as a failed status.
+                "omitted": [o.get("reason") for o in result.envelope["coverage"]["omitted"]],
+                "complete": bool(result.envelope["coverage"]["complete"]),
                 "attempts_started": cost.attempts_started,
                 "attempts_usage_complete": cost.attempts_usage_complete,
                 "input_tokens": cost.input_tokens,
@@ -174,7 +178,18 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
     # route that is supposed to work, so a sample that came back an error describes a
     # broken route, not a slow one - and a route where every call fails used to satisfy
     # this gate completely, because it only ever asked whether an attempt had started.
-    acceptable = [s for s in samples if s["status"] != "error"]
+    # A status is not an outcome. The reader turns exhausted provider errors into a
+    # `partial/NO_MATCH` envelope, which is the honest answer to "did the source say
+    # this?" but says nothing about whether the *provider* worked - so a total outage
+    # scored as acceptable and published healthy percentiles for a run in which no call
+    # ever succeeded. A sample counts only when the request completed its coverage and
+    # gave up on nothing for a provider-side reason.
+    provider_side = {"MODEL_ERROR", "TIMEOUT", "INVALID_MODEL_OUTPUT", "PROVENANCE_UNAVAILABLE"}
+    acceptable = [
+        s
+        for s in samples
+        if s["status"] != "error" and s["complete"] and not (provider_side & set(s["omitted"]))
+    ]
     latencies = sorted(s["latency_ms"] for s in samples)
     p50 = statistics.median(latencies)
     p95 = latencies[min(len(latencies) - 1, int(round(0.95 * (len(latencies) - 1))))]
@@ -211,6 +226,7 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         "token_estimate_methods": sorted({s["token_method"] for s in samples}),
         "acceptable_outcomes": len(acceptable),
         "failed_outcomes": len(samples) - len(acceptable),
+        "omission_reasons": sorted({r for s in samples for r in s["omitted"] if r}),
         "attempts_started_total": sum(s["attempts_started"] for s in samples),
         "attempts_usage_complete_total": sum(s["attempts_usage_complete"] for s in samples),
         "by_category": {
@@ -231,8 +247,14 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
 
     # A benchmark of a route that cannot answer is not a benchmark. Every sample must be
     # an acceptable outcome, so an all-failing provider fails this gate instead of
-    # reporting healthy latency percentiles for a sequence of errors.
+    # reporting healthy latency percentiles for a sequence of errors - including the
+    # outage that hides behind a `partial/NO_MATCH` envelope.
     assert len(acceptable) == len(samples), report
+
+    # Every internal attempt is audited, not just the one the envelope reports. A chain
+    # that burned three provider calls to answer once has spent three calls.
+    assert report["attempts_started_total"] >= len(samples), report
+    assert report["attempts_usage_complete_total"] <= report["attempts_started_total"], report
 
     # The assertion this gate exists for: against a live route, the method column must say
     # where every number came from, and an unreported usage must never be labelled exact.

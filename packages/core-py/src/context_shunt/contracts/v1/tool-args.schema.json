@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/context-shunt/contracts/v1/tool-args.schema.json",
   "title": "context-shunt v1.1 escape-hatch tool arguments",
-  "description": "The three read-only tools an agent may call, validated identically by both cores so the two hosts cannot drift. Paths appear here and nowhere else: they are authorized and discarded at capture time, and never enter request.schema.json, the envelope, the store or a metric label. No tool in this contract can retrieve a full payload.",
+  "description": "The three read-only tools an agent may call, validated identically by both cores so the two hosts cannot drift. Paths appear here and nowhere else: they are authorized and discarded at capture time, and never enter request.schema.json, the envelope, the store or a metric label. Every disclosure is capped per page and charged against cumulative per-source and per-session budgets, so a large payload cannot be reassembled through these tools; a source small enough to fit those budgets can still be returned in full by the inspector.",
   "oneOf": [
     { "$ref": "#/$defs/readArgs" },
     { "$ref": "#/$defs/inspectArgs" },

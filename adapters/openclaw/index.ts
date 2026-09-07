@@ -174,7 +174,8 @@ export const INSPECT_TOOL_DESCRIPTION =
   "Return exact text from a snapshot you already hold: a line range, a byte range, or "
   + "literal-search hits. Deterministic - no model is involved, so the result is source bytes "
   + "rather than a summary. Each page is capped at 16 KiB and counts against a cumulative "
-  + "disclosure budget, so this cannot be paged into a full copy of the file.";
+  + "disclosure budget, so a large file cannot be paged into a full copy; a file small "
+  + "enough to fit that budget can be returned in full.";
 
 export const INSPECT_TOOL_PARAMETERS = {
   type: "object",

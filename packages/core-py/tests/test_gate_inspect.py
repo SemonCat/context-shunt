@@ -522,3 +522,52 @@ def test_boundary_helper_only_retreats_across_an_incomplete_character():
     ascii_data = b"abc"
     assert _back_to_boundary(ascii_data, 0, 3) == 3
     assert _back_to_boundary(ascii_data, 0, 2) == 2
+
+
+# -- the public claims must match what the inspector actually does -----------
+
+
+def test_a_gate_blocked_source_can_still_be_returned_in_full(tmp_path):
+    """Pinned because the manifests used to claim the opposite.
+
+    The pre-read gate blocks a 351-line read on *context cost*, not on confidentiality,
+    and `inspect` will hand that same file back - here in a single page, byte for byte.
+    The caps are a byte budget, so what they guarantee is that a *large* payload cannot be
+    reassembled, not that a source can never come back whole. Public wording that promised
+    "no tool can retrieve a full payload" was therefore untrue, and this test exists so the
+    two cannot drift apart again.
+    """
+    session = _session(tmp_path)
+    body = "".join(f"line {i:04d}\n" for i in range(1, 352))
+    entry = _captured(tmp_path, session, body=body)
+    assert body.count("\n") > L.full_read_max_lines  # the gate would block this read
+
+    env = session.inspect(_request(entry, {"kind": "lines", "start": 1, "end": 351}))
+    assert env["status"] == "ok"
+    returned = "".join(seg["text"] for seg in env["extraction"]["segments"])
+    assert returned.strip("\n") == body.strip("\n")
+
+
+def test_a_source_beyond_the_cumulative_budget_cannot_be_reassembled(tmp_path):
+    """The guarantee that *is* real: a large payload runs out of disclosure budget."""
+    cap = 4096
+    session = _session(tmp_path, limits={"disclosure_max_per_source_bytes": cap})
+    body = "".join(f"line {i:05d} value-{i}\n" for i in range(1, 4001))
+    entry = _captured(tmp_path, session, body=body)
+    assert len(body.encode("utf-8")) > cap * 4
+
+    collected = ""
+    cursor = None
+    for _page in range(64):
+        request = _request(entry, {"kind": "lines", "start": 1, "end": 4000})
+        if cursor:
+            request["cursor"] = cursor
+        env = session.inspect(request)
+        if env["status"] != "ok":
+            break
+        collected += "".join(seg["text"] for seg in env["extraction"]["segments"])
+        cursor = env["extraction"].get("next_cursor")
+        if not cursor:
+            break
+    assert collected != body
+    assert len(collected.encode("utf-8")) <= cap
