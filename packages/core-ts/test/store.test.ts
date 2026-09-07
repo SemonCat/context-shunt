@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -33,6 +34,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(here, "..", "..", "..");
 const enc = (s: string) => new TextEncoder().encode(s);
 const BODY = enc("alpha\nbeta\ngamma\n");
+
+// The store loads node:sqlite through createRequire for bundler independence; these
+// tests reach the same database the same way.
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: new (path: string) => {
+    prepare(sql: string): { run(...a: unknown[]): unknown; get(...a: unknown[]): unknown };
+    close(): void;
+  };
+};
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "shunt-store-"));
@@ -457,5 +467,71 @@ describe("cross-language interoperability", () => {
     ) as { snapshot: string; text: string };
     expect(echoed.snapshot).toBe(snapshotIdOf(mine));
     expect(echoed.text).toBe("written by typescript\n");
+  });
+});
+
+// -- the deletion race, at the interleaving that actually loses data ----------
+
+describe("store integrity under concurrent publish and sweep", () => {
+  /**
+   * `stageBlob` skips writing when the content file is present, and the sweeper used to
+   * unlink outside its transaction. So a publisher could dedupe onto a file the sweeper
+   * then removed, and commit a handle whose payload does not exist.
+   */
+  it("never lands a deduped publish on a swept file", () => {
+    const dir = tmp();
+    const s = store(dir);
+    const scope = identity();
+    const first = s.publish(scope, [capture()])[0]!;
+
+    const db = new DatabaseSync(join(dir, "cache", "store.sqlite3"));
+    db.prepare("UPDATE blobs SET refcount = 0, pending_delete = 1 WHERE hash = ?")
+      .run(first.blobHash);
+    db.close();
+
+    // Force the interleaving: the sweeper runs between the dedupe decision and the commit.
+    const inner = s as unknown as {
+      stageBlob(c: Capture, h: string): string | undefined;
+      collectPendingBlobs(): number;
+    };
+    const realStage = inner.stageBlob.bind(inner);
+    inner.stageBlob = (c: Capture, h: string) => {
+      const staged = realStage(c, h);
+      inner.collectPendingBlobs();
+      return staged;
+    };
+
+    const republished = s.publish(scope, [capture()])[0]!;
+    expect(s.loadPayload(s.resolve(scope, republished.handleId))).toEqual(BODY);
+  });
+
+  it("leaves no orphan file or row when a publish is refused", () => {
+    const dir = tmp();
+    const s = store(dir, narrowLimits(L, { storeMaxBytes: BODY.length * 2 }));
+    const scope = identity();
+    s.publish(scope, [capture()]);
+    const before = blobFiles(join(dir, "cache")).sort();
+
+    expect(() => s.publish(scope, [capture(enc("x".repeat(4096)))])).toThrow(ShuntError);
+
+    expect(blobFiles(join(dir, "cache")).sort()).toEqual(before);
+    const db = new DatabaseSync(join(dir, "cache", "store.sqlite3"));
+    const temps = db.prepare("SELECT COUNT(*) AS n FROM orphan_temps").get() as { n: number };
+    db.close();
+    expect(Number(temps.n)).toBe(0);
+  });
+
+  it("refuses identical bytes carrying different media metadata", () => {
+    const dir = tmp();
+    const s = store(dir);
+    const scope = identity();
+    const body = enc('{"a":1}\n');
+    const first = s.publish(scope, [capture(body, { mediaType: "text/plain" })])[0]!;
+    expect(first.mediaType).toBe("text/plain");
+
+    expect(() => s.publish(scope, [capture(body, { mediaType: "application/json" })]))
+      .toThrow(/BLOB_METADATA_CONFLICT/);
+    // The original handle is untouched by the refusal.
+    expect(s.loadPayload(s.resolve(scope, first.handleId))).toEqual(body);
   });
 });

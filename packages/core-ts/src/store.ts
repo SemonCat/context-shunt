@@ -559,6 +559,7 @@ export class SnapshotStore {
         this.bumpHighWater(db, now);
         this.assertScopeOpen(db, identity);
         this.assertCapacity(db, staged);
+        this.assertBlobMetadataAgrees(db, staged);
         const expires = now + this.limits.storeHandleTtlSeconds * 1000;
         const published: PublishedHandle[] = [];
         const insertBlob = db.prepare(
@@ -612,10 +613,41 @@ export class SnapshotStore {
         return published;
       });
     } catch (err) {
+      // A refused publish - capacity, a closed scope, conflicting metadata - must not
+      // leave the content it staged behind. The rows roll back with the transaction, but
+      // the blobs were renamed into place before it opened, so they are discarded here.
+      this.discardTempIds(tempIds);
       if (err instanceof ShuntError) throw err;
-      // Nothing committed, so no handle exists. The renamed blob files carry no row and
-      // the sweep collects them; a partially published batch is impossible by construction.
+      // Nothing committed, so no handle exists; a partially published batch is impossible
+      // by construction.
       throw new ShuntError("STORE_FAILED", "PUBLISH_FAILED", false);
+    }
+  }
+
+  /**
+   * Dedupe shares a row; the metadata on it must describe the capture too.
+   *
+   * Blobs are keyed by content hash, but `mediaType` and `lineCount` are not part of the
+   * content. `INSERT ... ON CONFLICT(hash) DO NOTHING` therefore kept the first
+   * publisher's metadata, so identical bytes published as JSON after being published as
+   * text came back labelled `text/plain` - and a records selector over that handle is then
+   * refused as "not JSON". Serving the wrong media type silently is worse than refusing,
+   * and the store already fails closed on a content mismatch, so this does the same.
+   */
+  private assertBlobMetadataAgrees(
+    db: DatabaseSyncType,
+    staged: ReadonlyArray<{ capture: Capture; hash: string }>,
+  ): void {
+    const lookup = db.prepare("SELECT media_type, line_count FROM blobs WHERE hash = ?");
+    for (const { capture, hash } of staged) {
+      const row = lookup.get(hash) as Row | undefined;
+      if (row === undefined) continue;
+      if (
+        String(row["media_type"]) !== capture.mediaType
+        || Number(row["line_count"]) !== capture.lineCount
+      ) {
+        throw new ShuntError("STORE_FAILED", "BLOB_METADATA_CONFLICT", false);
+      }
     }
   }
 
@@ -677,14 +709,30 @@ export class SnapshotStore {
     }
   }
 
+  /**
+   * Undo staging for a batch that will not be published.
+   *
+   * Staging renames the payload to its final content-addressed path *before* the publish
+   * transaction opens, so unlinking only the `.part` file - which no longer exists by then
+   * - left the content behind on every refused publish. The final file is dropped too, but
+   * only when no row references the digest: a concurrent publisher may legitimately have
+   * taken a reference to the very same content, and its payload must survive.
+   */
   private discardTempIds(tempIds: readonly string[]): void {
-    for (const tempId of tempIds) unlinkQuiet(join(this.root, TMP_DIR, `${tempId}.part`));
     if (tempIds.length === 0) return;
+    for (const tempId of tempIds) unlinkQuiet(join(this.root, TMP_DIR, `${tempId}.part`));
     try {
       const db = this.connect();
       this.writeTxn(db, () => {
         const remove = db.prepare("DELETE FROM orphan_temps WHERE temp_id = ?");
         for (const tempId of tempIds) remove.run(tempId);
+        // A temp id is `<hash>.<nonce>`, so the digest this batch wrote is recoverable
+        // without threading more state through the failure paths.
+        const hashes = new Set(tempIds.map((tempId) => tempId.split(".", 1)[0] as string));
+        const referenced = db.prepare("SELECT 1 FROM blobs WHERE hash = ?");
+        for (const hash of hashes) {
+          if (referenced.get(hash) === undefined) unlinkQuiet(this.blobPath(hash));
+        }
       });
     } catch {
       // The startup sweep clears anything left behind.
@@ -1152,11 +1200,20 @@ export class SnapshotStore {
   }
 
   /**
-   * Mark-then-sweep deletion: unlink outside the transaction, then re-verify and delete.
-   * The second transaction re-checks `refcount = 0 AND pending_delete = 1`, so a publisher
-   * that took a reference while the file was being unlinked keeps its row - and its
-   * `stageBlob` rewrites the content, which is safe precisely because the content is
-   * addressed by its own hash.
+   * Delete the row and unlink its file in one transaction, never separately.
+   *
+   * This used to unlink first and then re-verify `refcount = 0 AND pending_delete = 1`
+   * before deleting the row, on the reasoning that a publisher which took a reference
+   * meanwhile would keep its row "and its `stageBlob` rewrites the content". It does not:
+   * `stageBlob` *skips* writing whenever the file is already present, so the losing
+   * interleaving is
+   *
+   *   1. publisher sees the file and dedupes, writing nothing;
+   *   2. sweeper unlinks the file and deletes the row, refcount still 0;
+   *   3. publisher commits, re-inserting the row and minting a handle.
+   *
+   * which leaves a handle whose payload does not exist. Unlinking inside the same
+   * transaction as the delete removes the window.
    */
   private collectPendingBlobs(): number {
     const db = this.connect();
@@ -1165,13 +1222,16 @@ export class SnapshotStore {
     ).all() as Row[]).map((row) => String(row["hash"]));
     let deleted = 0;
     for (const hash of candidates) {
-      unlinkQuiet(this.blobPath(hash));
       try {
         deleted += this.writeTxn(db, () => {
           const result = db.prepare(
             "DELETE FROM blobs WHERE hash = ? AND refcount = 0 AND pending_delete = 1",
           ).run(hash);
-          return Number(result.changes ?? 0);
+          const removed = Number(result.changes ?? 0);
+          // Inside the transaction: if it rolls back, the file is still referenced by the
+          // row that survived and must stay.
+          if (removed > 0) unlinkQuiet(this.blobPath(hash));
+          return removed;
         });
       } catch {
         // A concurrent publisher took a reference; the row stays and so does the content.

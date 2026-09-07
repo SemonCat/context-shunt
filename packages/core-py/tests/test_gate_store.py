@@ -269,9 +269,27 @@ def test_a_crash_between_rename_and_commit_leaves_no_usable_handle(tmp_path):
     store._connect = real_connect  # noqa: SLF001
 
     assert store.stats().handles == 0
-    # The orphan content file has no row; recovery collects it.
-    assert store.recover().orphan_blob_files >= 1
+    # The failed publish now discards what it staged at the point of failure, rather than
+    # leaving it for recovery, so there is nothing left to collect by the time it runs.
     assert list((store.root / "blobs").rglob("*.bin")) == []
+    assert store.recover().orphan_blob_files == 0
+
+
+def test_recovery_still_collects_a_blob_no_handler_could_clean_up(tmp_path):
+    """A real crash runs no `except` block, so recovery stays the safety net.
+
+    In-process failure paths clean up after themselves, which is why the crash test above
+    finds nothing to recover. A process killed between the rename and the commit leaves a
+    content file with no row and no chance to run a handler; that is this.
+    """
+    store = _store(tmp_path)
+    store.open_scope(_identity())
+    blobs = store.root / "blobs" / "ab"
+    blobs.mkdir(parents=True, exist_ok=True)
+    stray = blobs / ("ab" + "c" * 62 + ".bin")
+    stray.write_bytes(b"orphaned by a kill -9\n")
+    assert store.recover().orphan_blob_files >= 1
+    assert not stray.exists()
 
 
 def test_recovery_clears_staged_temp_files(tmp_path):
@@ -547,3 +565,104 @@ def test_stats_never_reach_another_scope(tmp_path):
     assert [r.operation_id for r in store.operation_page(mine, page=1, page_size=8)] == [
         "acc_" + "a" * 16
     ]
+
+
+# -- the deletion race, at the interleaving that actually loses data ----------
+
+
+def _force_pending_delete(store: SnapshotStore, digest: str) -> None:
+    """Put a blob into "sweepable" state while its file is still on disk."""
+    conn = sqlite3.connect(store.root / "store.sqlite3")
+    try:
+        conn.execute("UPDATE blobs SET refcount = 0, pending_delete = 1 WHERE hash = ?", (digest,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_publish_that_dedupes_never_lands_on_a_swept_file(tmp_path, monkeypatch):
+    """The real deletion race, forced to the interleaving that loses the payload.
+
+    `_stage_blob` skips writing when the content file is already present, and the sweeper
+    unlinks outside the lock. So:
+
+      1. publisher sees the file, dedupes, writes nothing;
+      2. sweeper unlinks the file and deletes the row (refcount is still 0);
+      3. publisher commits, re-inserting the row at refcount 1 and minting a handle.
+
+    The handle and its row exist; the payload does not. The existing republish test does
+    not reach this because `revoke` sweeps synchronously, so the publisher finds no file
+    and rewrites it. This one pins the interleaving directly.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    first = store.publish(identity, [_capture()])[0]
+    _force_pending_delete(store, first.blob_hash)
+    assert store._blob_path(first.blob_hash).exists()
+
+    real_stage = store._stage_blob
+
+    def stage_then_sweep(capture, digest, final):
+        staged = real_stage(capture, digest, final)
+        # The sweeper runs in the window between the dedupe decision and the commit.
+        store._collect_pending_blobs()
+        return staged
+
+    monkeypatch.setattr(store, "_stage_blob", stage_then_sweep)
+    republished = store.publish(identity, [_capture()])[0]
+
+    # The published handle must address a payload that is actually there.
+    assert store.load_payload(store.resolve(identity, republished.handle_id)) == BODY
+
+
+def test_a_quota_rejection_leaves_no_orphan_file_or_row(tmp_path):
+    """A refused publish must not leave its staged content behind.
+
+    Blobs are staged to their final path *before* the capacity check, which runs inside
+    the publish transaction. The transaction rolls the rows back, but the renamed files
+    and their `orphan_temps` rows are only cleaned up on the `sqlite3.Error` path - a
+    capacity `ShuntError` re-raised straight past them.
+    """
+    store = _store(tmp_path, limits=L.narrow(store_max_bytes=len(BODY) * 2))
+    identity = _identity()
+    store.publish(identity, [_capture()])
+
+    before_files = sorted(p.name for p in (store.root / "blobs").rglob("*.bin"))
+    with pytest.raises(ShuntError) as exc:
+        store.publish(identity, [_capture(data=b"x" * 4096)])
+    assert exc.value.code in ("LIMIT_EXCEEDED", "STORE_FAILED")
+
+    after_files = sorted(p.name for p in (store.root / "blobs").rglob("*.bin"))
+    assert after_files == before_files, "the refused publish left its content on disk"
+
+    conn = sqlite3.connect(store.root / "store.sqlite3")
+    try:
+        temps = conn.execute("SELECT COUNT(*) FROM orphan_temps").fetchone()[0]
+        blobs = conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
+    finally:
+        conn.close()
+    assert temps == 0, "the refused publish left an orphan_temps row"
+    assert blobs == 1
+
+
+def test_identical_bytes_with_a_different_media_type_are_not_silently_relabelled(tmp_path):
+    """Dedupe is keyed by content hash, but the metadata is not part of the content.
+
+    `INSERT ... ON CONFLICT(hash) DO NOTHING` keeps the first publisher's `media_type`,
+    so identical bytes published as JSON after being published as text came back
+    labelled `text/plain` - and a records selector over them is then refused. Silently
+    serving the wrong media type is worse than refusing, so this fails closed.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    body = b'{"a":1}\n'
+    first = store.publish(identity, [_capture(data=body, media_type="text/plain")])[0]
+    assert first.media_type == "text/plain"
+
+    with pytest.raises(ShuntError) as exc:
+        store.publish(identity, [_capture(data=body, media_type="application/json")])
+    assert exc.value.code == "STORE_FAILED"
+    assert "METADATA" in (exc.value.detail or "")
+
+    # The original handle is untouched by the refusal.
+    assert store.load_payload(store.resolve(identity, first.handle_id)) == body

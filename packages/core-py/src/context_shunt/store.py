@@ -588,6 +588,7 @@ class SnapshotStore:
                     self._bump_high_water(conn, now)
                     self._assert_scope_open_locked(conn, identity)
                     self._assert_capacity_locked(conn, staged)
+                    self._assert_blob_metadata_agrees_locked(conn, staged)
                     expires = now + self._limits.store_handle_ttl_seconds * 1000
                     published: list[PublishedHandle] = []
                     for capture, _final, digest in staged:
@@ -643,13 +644,45 @@ class SnapshotStore:
                     for temp_id in temp_ids:
                         conn.execute("DELETE FROM orphan_temps WHERE temp_id = ?", (temp_id,))
             except ShuntError:
+                # A refused publish - capacity, a closed scope, conflicting metadata -
+                # must not leave the content it staged behind. The rows roll back with the
+                # transaction, but the blobs were renamed into place before it opened, so
+                # they are discarded explicitly. Only this batch's own temps are dropped:
+                # a digest another handle already references is left alone.
+                self._discard_temp_ids(temp_ids)
                 raise
             except sqlite3.Error:
                 # Nothing committed, so no handle exists. The renamed blob files carry no
                 # row and the sweep collects them; a partially published batch is
                 # impossible by construction.
+                self._discard_temp_ids(temp_ids)
                 raise ShuntError("STORE_FAILED", "PUBLISH_FAILED", retryable=False) from None
         return published
+
+    def _assert_blob_metadata_agrees_locked(
+        self, conn: sqlite3.Connection, staged: list[tuple[Capture, Path, str]]
+    ) -> None:
+        """Dedupe shares a row; the metadata on it must describe the capture too.
+
+        Blobs are keyed by content hash, but ``media_type`` and ``line_count`` are not part
+        of the content. ``INSERT ... ON CONFLICT(hash) DO NOTHING`` therefore kept the
+        first publisher's metadata, so identical bytes published as JSON after being
+        published as text came back labelled ``text/plain`` - and a records selector over
+        that handle is then refused as "not JSON". Serving the wrong media type silently is
+        worse than refusing, and the store already fails closed on a content mismatch, so
+        this does the same for a metadata mismatch.
+        """
+        for capture, _final, digest in staged:
+            row = conn.execute(
+                "SELECT media_type, line_count FROM blobs WHERE hash = ?", (digest,)
+            ).fetchone()
+            if row is None:
+                continue
+            if (
+                str(row["media_type"]) != capture.media_type
+                or int(row["line_count"]) != capture.line_count
+            ):
+                raise ShuntError("STORE_FAILED", "BLOB_METADATA_CONFLICT", retryable=False)
 
     def _stage_blob(self, capture: Capture, digest: str, final: Path) -> str | None:
         """Write and rename one payload. Returns the temp id, or ``None`` when deduped."""
@@ -703,16 +736,33 @@ class SnapshotStore:
                 raise ShuntError("STORE_FAILED", "TEMP_RECORD_FAILED", retryable=False) from None
 
     def _discard_temp_ids(self, temp_ids: Sequence[str]) -> None:
-        for temp_id in temp_ids:
-            _unlink_quiet(self._root / _TMP_DIR / f"{temp_id}.part")
+        """Undo staging for a batch that will not be published.
+
+        Staging renames the payload to its final content-addressed path *before* the
+        publish transaction opens, so unlinking only the ``.part`` file - which no longer
+        exists by then - left the content behind on every refused publish. The final file
+        is dropped too, but only when no row references the digest: a concurrent publisher
+        may legitimately have taken a reference to the very same content while this batch
+        was being refused, and its payload must survive.
+        """
         if not temp_ids:
             return
+        for temp_id in temp_ids:
+            _unlink_quiet(self._root / _TMP_DIR / f"{temp_id}.part")
         with self._lock, contextlib.suppress(sqlite3.Error):
             conn = self._connect()
             with _write_txn(conn):
                 conn.executemany(
                     "DELETE FROM orphan_temps WHERE temp_id = ?", [(t,) for t in temp_ids]
                 )
+                # A temp id is `<digest>.<nonce>`, so the digest this batch wrote is
+                # recoverable without threading more state through the failure paths.
+                for digest in {temp_id.split(".", 1)[0] for temp_id in temp_ids}:
+                    referenced = conn.execute(
+                        "SELECT 1 FROM blobs WHERE hash = ?", (digest,)
+                    ).fetchone()
+                    if referenced is None:
+                        _unlink_quiet(self._blob_path(digest))
 
     def _assert_scope_open_locked(self, conn: sqlite3.Connection, identity: ScopeIdentity) -> None:
         row = conn.execute(
@@ -1171,13 +1221,24 @@ class SnapshotStore:
         )
 
     def _collect_pending_blobs(self) -> int:
-        """Mark-then-sweep deletion: unlink outside the lock, then re-verify and delete.
+        """Delete the row and unlink its file under one lock, never separately.
 
-        The second transaction re-checks ``refcount = 0 AND pending_delete = 1``, so a
-        publisher that took a reference while the file was being unlinked keeps its row -
-        and its ``_stage_blob`` re-writes the content, which is safe precisely because the
-        content is addressed by its own hash.
+        This used to unlink outside every lock and then re-verify
+        ``refcount = 0 AND pending_delete = 1`` before deleting the row, on the reasoning
+        that a publisher which took a reference meanwhile would keep its row "and its
+        ``_stage_blob`` re-writes the content". It does not: ``_stage_blob`` *skips*
+        writing whenever the file is already present, so the losing interleaving is
+
+          1. publisher sees the file and dedupes, writing nothing;
+          2. sweeper unlinks the file and deletes the row, refcount still 0;
+          3. publisher commits, re-inserting the row and minting a handle.
+
+        which leaves a handle whose payload does not exist. Holding the lock across the
+        check, the unlink and the delete removes the window: a publisher either commits
+        its refcount before the sweep starts - and the ``refcount = 0`` guard then spares
+        the blob - or it runs after the row is gone and re-stages the content itself.
         """
+        deleted = 0
         with self._lock:
             conn = self._connect()
             candidates = [
@@ -1186,11 +1247,7 @@ class SnapshotStore:
                     "SELECT hash FROM blobs WHERE pending_delete = 1 AND refcount = 0"
                 ).fetchall()
             ]
-        deleted = 0
-        for digest in candidates:
-            _unlink_quiet(self._blob_path(digest))
-            with self._lock:
-                conn = self._connect()
+            for digest in candidates:
                 try:
                     with _write_txn(conn):
                         cursor = conn.execute(
@@ -1198,7 +1255,12 @@ class SnapshotStore:
                             "  AND pending_delete = 1",
                             (digest,),
                         )
-                        deleted += cursor.rowcount or 0
+                        removed = cursor.rowcount or 0
+                        # Inside the transaction: if it rolls back, the file is still
+                        # referenced by the row that survived and must stay.
+                        if removed:
+                            _unlink_quiet(self._blob_path(digest))
+                        deleted += removed
                 except sqlite3.Error:
                     continue
         return deleted
