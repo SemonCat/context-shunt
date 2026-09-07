@@ -1,10 +1,16 @@
 name: context-shunt
-version: "1.0.0"
+version: "1.1.0"
 description: >-
   Read-only context shunt. Blocks oversized full reads before they run and answers
-  questions about large sources with a fixed cheap reader model, returning a bounded,
-  citation-verified envelope instead of the file. Registers no writer tool.
+  questions about large sources with a configurable reader model, returning a bounded,
+  citation-verified envelope instead of the file. Adds a zero-model exact inspector under
+  a cumulative disclosure ceiling and a read-only session accounting view. Registers no
+  writer tool, and no tool can retrieve a full payload.
 author: context-shunt contributors
 kind: standalone
+# Every tool the adapter registers, so an operator can audit the surface from the
+# manifest alone. Read-only by construction: no writer tool is registered or declared.
 provides_tools:
   - context_shunt_read
+  - context_shunt_inspect
+  - context_shunt_stats

@@ -8,7 +8,7 @@ import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from context_shunt.limits import READER_MODEL
-from context_shunt.provenance import Attribution, AttributionPolicy, TokenMethod
+from context_shunt.provenance import Attribution, AttributionPolicy, Provenance, TokenMethod
 from context_shunt.provider import HostBridgeProvider, UnavailableProvider
 from context_shunt.reader import Reader
 from context_shunt.snapshot import snapshot_bytes
@@ -367,3 +367,35 @@ def test_actual_needs_a_reported_model_not_merely_a_reported_provider():
         provider_confirms_generation=True,
     )
     assert status is Attribution.ACTUAL and confidence is Confidence.HIGH
+
+
+# -- the exported Reader API stayed usable across the 1.1 revision -----------
+
+
+def test_the_pre_1_1_reader_api_still_works(tmp_path):
+    """`answer` used to return the envelope dict; 1.1 changed it without an overload.
+
+    Every `answer(...)["status"]` call site broke on the revision - the eval gate's own
+    body was one of them. `ReaderResult` subscripts like the envelope again, and
+    `answer_envelope` is the explicit form for callers that only wanted the envelope.
+    """
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    luna = FakeLuna(default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]))
+    result = Reader(registry, luna).answer("sess", _request(entry))
+
+    # The pre-1.1 shape: subscript straight into the envelope.
+    assert result["status"] == result.envelope["status"]
+    assert result["code"] == result.envelope["code"]
+    assert "citations" in result
+    assert set(result.keys()) == set(result.envelope)
+    assert dict(result) == result.envelope
+
+    # Bracket means envelope, attribute means record - they never collide.
+    assert result["provenance"] == result.envelope["provenance"]
+    assert result.provenance is not result.envelope["provenance"]
+    assert isinstance(result.provenance, Provenance)
+
+    # And the explicit overload returns exactly the envelope.
+    envelope = Reader(registry, luna).answer_envelope("sess", _request(entry))
+    assert isinstance(envelope, dict) and envelope["status"] == result["status"]

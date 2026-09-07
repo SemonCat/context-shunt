@@ -194,3 +194,48 @@ def test_timeout_after_deadline_publishes_nothing_new(tmp_path):
     # The answer arrived after the request budget was already spent, so it is not published.
     assert env["answer"] == ""
     assert env["coverage"]["complete"] is False
+
+
+# -- the deadline itself is the bound; it must not be movable -----------------
+
+
+def test_a_deadline_cannot_be_widened_after_it_starts():
+    """The request budget is what stops a late answer being published.
+
+    ``Deadline`` was a plain mutable dataclass, so a caller holding one could reassign
+    ``started_ms`` or ``budget_ms`` and grant itself an effectively unbounded budget -
+    setting ``started_ms`` far in the past yielded ~10^12 ms remaining. The TypeScript
+    twin has always been ``readonly`` behind a private constructor, so this is also a
+    parity gap.
+    """
+    clock = FakeClock()
+    deadline = Deadline.start(clock, 60_000)
+    assert deadline.remaining_ms() == 60_000
+
+    for field_name, value in (("budget_ms", 10**12), ("started_ms", -(10**12))):
+        with pytest.raises(Exception) as exc:
+            setattr(deadline, field_name, value)
+        assert "frozen" in str(exc.value).lower() or isinstance(exc.value, AttributeError)
+
+    # The budget is exactly what it was started with, and it only ever shrinks.
+    assert deadline.remaining_ms() == 60_000
+    clock.advance(25_000)
+    assert deadline.remaining_ms() == 35_000
+
+
+def test_positional_construction_keeps_remaining_time_semantics():
+    """`Deadline(clock, started_ms, budget_ms)` stays the documented positional order."""
+    clock = FakeClock()
+    clock.advance(5_000)
+    deadline = Deadline(clock, clock.now_ms(), 60_000)
+    assert deadline.remaining_ms() == 60_000
+    assert deadline.elapsed_ms() == 0
+    clock.advance(20_000)
+    assert deadline.elapsed_ms() == 20_000
+    assert deadline.remaining_ms() == 40_000
+    # A stage never outlives the request budget, whichever is smaller.
+    assert deadline.sub_budget(45_000) == 40_000
+    assert deadline.sub_budget(10_000) == 10_000
+    # Remaining time is floored at zero rather than going negative.
+    clock.advance(100_000)
+    assert deadline.remaining_ms() == 0 and deadline.expired() is True

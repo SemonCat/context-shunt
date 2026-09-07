@@ -34,12 +34,21 @@ class FakeClock(Clock):
         self._now += ms
 
 
-@dataclass
+@dataclass(frozen=True)
 class Deadline:
     """A budget shared by every stage of one request.
 
     ``check`` is called before starting new work and before publishing anything, so a
     late provider response can never be published after the budget is spent.
+
+    Frozen, because the deadline *is* the bound. While it was a plain mutable dataclass a
+    caller holding one could reassign ``started_ms`` or ``budget_ms`` and grant itself an
+    effectively unbounded budget, which is the one thing this type exists to prevent. The
+    TypeScript twin has always been ``readonly`` behind a private constructor; this closes
+    the parity gap. Cancellation still works: the ``Event`` is mutated, never replaced.
+
+    The positional order stays ``(clock, started_ms, budget_ms)`` so existing construction
+    keeps its documented remaining-time semantics.
     """
 
     clock: Clock

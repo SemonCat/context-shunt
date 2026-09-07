@@ -881,3 +881,32 @@ describe("attribution identity", () => {
     ).toBe("actual");
   });
 });
+
+// -- the exported Reader API stayed usable across the 1.1 revision -----------
+
+describe("reader api compatibility", () => {
+  /**
+   * `answer` used to resolve to the envelope; 1.1 changed it without an overload. A typed
+   * caller gets a compile error, but an untyped one silently read `undefined` - which is
+   * indistinguishable from a successful empty answer.
+   */
+  it("fails loudly on a pre-1.1 envelope field, and offers the overload", async () => {
+    const { entry, reader } = fixture();
+    const result = await reader.answer("sess", request(entry));
+
+    for (const key of ["status", "code", "answer", "citations"]) {
+      expect(() => (result as unknown as Record<string, unknown>)[key]).toThrow(/\.envelope\./);
+    }
+    // The record's own fields are untouched.
+    expect(result.envelope.status).toBeTypeOf("string");
+    expect(result.sourceIds).toBeInstanceOf(Array);
+
+    // The compat getters are non-enumerable, so the record still behaves as a plain object.
+    expect(Object.keys(result).sort()).toEqual(["cost", "envelope", "provenance", "sourceIds"]);
+    expect(() => JSON.stringify(result)).not.toThrow();
+
+    // And the explicit overload returns exactly the envelope.
+    const envelope = await reader.answerEnvelope("sess", request(entry));
+    expect(envelope.status).toBe(result.envelope.status);
+  });
+});

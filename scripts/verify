@@ -828,13 +828,28 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
             shutil.copytree(
                 ROOT / "adapters" / "hermes" / "context-shunt", hermes_install
             )
+            # The manifest is the only thing an operator can audit before loading the
+            # plugin, so the installed copy must agree with the code it ships beside:
+            # the same three tools the adapter registers, and the version of the core it
+            # was built against. Checking only the plugin name let a manifest that
+            # declared one of three tools, at the wrong version, install cleanly.
             probe_script = (
                 "import importlib.util, pathlib; "
                 f"p=pathlib.Path({str(hermes_install / '__init__.py')!r}); "
                 "s=importlib.util.spec_from_file_location('context_shunt_hermes_adapter', p); "
                 "assert s and s.loader; m=importlib.util.module_from_spec(s); "
                 "s.loader.exec_module(m); assert m.PLUGIN_ID == 'context-shunt'; "
-                "assert 'name: context-shunt' in p.with_name('plugin.yaml').read_text()"
+                "manifest=p.with_name('plugin.yaml').read_text(); "
+                "assert 'name: context-shunt' in manifest; "
+                "import context_shunt; "
+                "assert 'version: \"%s\"' % context_shunt.__version__ in manifest, "
+                "  'plugin.yaml version does not match the installed core'; "
+                "registered=sorted(sc['name'] for sc, _h, _mode in m.TOOLS); "
+                "declared=sorted(l.strip()[2:].strip() for l in manifest.splitlines() "
+                "  if l.startswith('  - ')); "
+                "assert declared == registered, (declared, registered); "
+                "assert len(registered) == 3; "
+                "assert not any('write' in n or 'patch' in n for n in registered)"
             )
             probe = _run([str(python), "-c", probe_script], ROOT)
             hermes_install_ok = probe.returncode == 0

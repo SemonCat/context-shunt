@@ -89,6 +89,48 @@ export interface ReaderResult {
   sourceIds: string[];
 }
 
+/**
+ * Envelope fields a pre-1.1 caller would have reached for directly.
+ *
+ * `Reader.answer` used to resolve to the envelope itself. The 1.1 revision changed it to
+ * `ReaderResult` with no overload, which TypeScript catches at compile time - but an
+ * untyped JavaScript caller just reads `result.status` and silently gets `undefined`,
+ * which looks exactly like a successful empty answer. Each of these keys therefore gets a
+ * getter that says what to do instead, turning a silent wrong value into a loud one.
+ */
+const MOVED_TO_ENVELOPE = [
+  "status",
+  "code",
+  "answer",
+  "citations",
+  "coverage",
+  "sources",
+  "retryable",
+  "request_id",
+  "schema_version",
+] as const;
+
+/**
+ * Attach the loud-failure getters. Non-enumerable, so the object still serialises,
+ * spreads and deep-equals exactly as the plain record it was before.
+ */
+function withEnvelopeCompat(result: ReaderResult): ReaderResult {
+  for (const key of MOVED_TO_ENVELOPE) {
+    if (key in result) continue;
+    Object.defineProperty(result, key, {
+      enumerable: false,
+      configurable: true,
+      get(): never {
+        throw new TypeError(
+          `Reader.answer resolves to a ReaderResult, not an envelope: read .envelope.${key}, `
+            + "or call answerEnvelope() for the pre-1.1 shape.",
+        );
+      },
+    });
+  }
+  return result;
+}
+
 class InputTokenBudget {
   private spent = 0;
 
@@ -116,7 +158,29 @@ export class Reader {
     this.verifier = new CitationVerifier(registry, limits);
   }
 
+  /**
+   * {@link answer}, resolving to only the envelope.
+   *
+   * The explicit form of the pre-1.1 contract, for callers that never wanted the cost and
+   * provenance record.
+   */
+  async answerEnvelope(
+    sessionId: string,
+    request: unknown,
+    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
+  ): Promise<Envelope> {
+    return (await this.answer(sessionId, request, opts)).envelope;
+  }
+
   async answer(
+    sessionId: string,
+    request: unknown,
+    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
+  ): Promise<ReaderResult> {
+    return withEnvelopeCompat(await this.answerInner(sessionId, request, opts));
+  }
+
+  private async answerInner(
     sessionId: string,
     request: unknown,
     opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},

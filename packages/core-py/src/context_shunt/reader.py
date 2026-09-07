@@ -38,6 +38,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -96,13 +97,38 @@ class ChunkOutcome:
 
 
 @dataclass
-class ReaderResult:
-    """What the session needs to finish the operation: an envelope plus its true cost."""
+class ReaderResult(Mapping[str, Any]):
+    """What the session needs to finish the operation: an envelope plus its true cost.
+
+    Also a read-only :class:`Mapping` over ``envelope``. ``Reader.answer`` used to return
+    the envelope dict itself, and the 1.1 revision changed it to this record without an
+    overload, so every ``answer(...)["status"]`` call site broke. Subscripting is
+    therefore delegated to the envelope, which keeps the published API working:
+
+        result["status"]      -> the envelope's status  (the pre-1.1 shape)
+        result.envelope       -> the same dict, explicitly
+        result.provenance     -> the rich Provenance object, not the envelope's dict
+
+    Bracket access always means "the envelope"; attribute access means "the record". The
+    two never collide even though both carry a ``provenance``, because they are reached
+    by different syntax. :meth:`Reader.answer_envelope` is the explicit alternative for
+    callers that only ever wanted the envelope.
+    """
 
     envelope: dict[str, Any]
     provenance: Provenance
     cost: ReaderCost
     source_ids: tuple[str, ...] = ()
+
+    # -- Mapping over the envelope, for pre-1.1 callers ---------------------
+    def __getitem__(self, key: str) -> Any:
+        return self.envelope[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.envelope)
+
+    def __len__(self) -> int:
+        return len(self.envelope)
 
 
 class _InputTokenBudget:
@@ -138,6 +164,24 @@ class Reader:
         self._policy = attribution_policy
 
     # -- public ------------------------------------------------------------
+
+    def answer_envelope(
+        self,
+        session_id: str,
+        request: dict[str, Any],
+        *,
+        deadline: Deadline | None = None,
+        accounting_id: str | None = None,
+    ) -> dict[str, Any]:
+        """:meth:`answer`, returning only the envelope.
+
+        The explicit form of the pre-1.1 contract, for callers that never wanted the cost
+        and provenance record. :class:`ReaderResult` also subscripts like the envelope, so
+        existing call sites keep working either way.
+        """
+        return self.answer(
+            session_id, request, deadline=deadline, accounting_id=accounting_id
+        ).envelope
 
     def answer(
         self,

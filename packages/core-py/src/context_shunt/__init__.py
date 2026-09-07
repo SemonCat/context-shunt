@@ -48,7 +48,7 @@ from .provenance import (
     Usage,
 )
 from .provider import FallbackChainProvider, HostBridgeProvider, UnavailableProvider
-from .reader import Reader
+from .reader import Reader, ReaderResult
 from .registry import RegisteredSource, SourceRegistry
 from .session import ShuntSession, build_provider
 from .spill import SpillEngine, SumaSpillEngine
@@ -88,6 +88,7 @@ __all__ = [
     "PublishedHandle",
     "READER_MODEL",
     "Reader",
+    "ReaderResult",
     "ReaderConfig",
     "ReaderCost",
     "RegisteredSource",

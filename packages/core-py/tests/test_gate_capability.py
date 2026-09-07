@@ -528,3 +528,57 @@ def _planted(tmp_path, lines: int):
     path = tmp_path / "ws" / f"f{lines}.txt"
     path.write_text("".join(f"line {i}\n" for i in range(lines)))
     return path
+
+
+# -- the manifest must describe what the adapter actually registers -----------
+
+
+def _manifest_text() -> str:
+    return (ADAPTER_PATH.parent / "plugin.yaml").read_text(encoding="utf-8")
+
+
+def _declared_tools() -> list[str]:
+    """The `provides_tools:` list, read without a YAML dependency."""
+    tools: list[str] = []
+    in_block = False
+    for line in _manifest_text().splitlines():
+        if line.startswith("provides_tools:"):
+            in_block = True
+            continue
+        if in_block:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                tools.append(stripped[2:].strip())
+            elif stripped and not line.startswith((" ", "\t")):
+                break
+    return tools
+
+
+def test_the_manifest_declares_every_tool_the_adapter_registers():
+    """A tool the host cannot see declared is a tool an operator cannot audit.
+
+    The manifest listed only `context_shunt_read` while the adapter registers three
+    tools. The OpenClaw manifest already declares all three in `contracts.tools`, so this
+    was also a cross-adapter inconsistency.
+    """
+    module = _load_adapter()
+    registered = [schema["name"] for schema, _handler, _mode in module.TOOLS]
+    assert sorted(_declared_tools()) == sorted(registered)
+    assert len(registered) == 3
+    # Read-only: nothing that writes is registered or declared.
+    assert not any("write" in name or "patch" in name for name in registered)
+
+
+def test_the_manifest_version_tracks_the_core_it_ships_with():
+    """A manifest pinned at 1.0.0 while shipping the 1.1 core misreports the contract."""
+    from context_shunt import __version__ as core_version
+
+    assert f'version: "{core_version}"' in _manifest_text()
+
+
+def test_the_manifest_and_the_openclaw_plugin_declare_the_same_tools():
+    """Both adapters expose the same three read-only tools, by name."""
+    openclaw = json.loads(
+        (REPO / "adapters" / "openclaw" / "openclaw.plugin.json").read_text(encoding="utf-8")
+    )
+    assert sorted(openclaw["contracts"]["tools"]) == sorted(_declared_tools())
