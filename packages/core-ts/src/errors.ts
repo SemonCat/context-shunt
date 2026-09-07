@@ -39,6 +39,13 @@ export class ShuntError extends Error {
   readonly code: string;
   readonly detail: string | undefined;
   readonly retryable: boolean;
+  /**
+   * Usage the provider already billed for the call that produced this failure, when there
+   * was one. A rejected *reply* is still a paid *call*, so the counts travel with the
+   * error rather than being discarded with the text. Never carries prompt or reply
+   * content - only token counts - so it cannot widen what an error may reveal.
+   */
+  billedUsage?: unknown;
 
   constructor(code: string, detail?: string, retryable?: boolean) {
     if (!(code in SAFE_MESSAGES)) throw new Error(`unknown error code: ${code}`);

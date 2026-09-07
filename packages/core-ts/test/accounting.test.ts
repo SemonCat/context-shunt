@@ -30,7 +30,7 @@ import {
   EMITTED_SCHEMA_VERSION,
 } from "../src/limits.js";
 import { ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError } from "../src/metrics.js";
-import { transientProviderError } from "../src/provider.js";
+import { HostBridgeProvider, transientProviderError } from "../src/provider.js";
 import { Reader } from "../src/reader.js";
 import { makeRegistry } from "./support.js";
 import { snapshotBytes } from "../src/snapshot.js";
@@ -420,5 +420,24 @@ describe("mixed-source baseline credit", () => {
     const added = afterSecond - afterFirst;
     const onlySecond = Math.ceil(second.snapshot.bytesLen / 4);
     expect(added).toBe(onlySecond);
+  });
+});
+
+describe("usage survives an over-cap bridge reply", () => {
+  it("reports the exact counts the call was billed", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const oversized = new HostBridgeProvider(async () => ({
+      text: "x".repeat(L.maxToolResultBytes + 10),
+      input_tokens: 23,
+      output_tokens: 11,
+      usage_exact: true,
+    }));
+    const result = await new Reader(registry, oversized).answer("sess", readRequest(entry));
+
+    expect(result.cost.attemptsStarted).toBeGreaterThanOrEqual(1);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(23);
+    expect(result.cost.outputTokens).toBe(11);
   });
 });

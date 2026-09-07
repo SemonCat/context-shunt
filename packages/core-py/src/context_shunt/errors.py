@@ -8,6 +8,8 @@ is the single invariant the ``no-raw-leak`` gate measures.
 
 from __future__ import annotations
 
+from typing import Any
+
 # Short, fixed operator-facing text per code. Nothing here is derived from input.
 SAFE_MESSAGES: dict[str, str] = {
     "INVALID_REQUEST": "request rejected by the v1 contract",
@@ -40,9 +42,14 @@ RETRYABLE_CODES = frozenset({"MODEL_ERROR", "TIMEOUT"})
 class ShuntError(Exception):
     """A failure that is safe to surface. ``detail`` is a fixed enum-like token only."""
 
-    __slots__ = ("code", "detail", "retryable")
+    #: Usage the provider already billed for the call that produced this failure, when
+    #: there was one. A rejected *reply* is still a paid *call*, so the counts travel with
+    #: the error rather than being discarded with the text. Never carries prompt or reply
+    #: content - only token counts - so it cannot widen what an error may reveal.
+    __slots__ = ("billed_usage", "code", "detail", "retryable")
 
     def __init__(self, code: str, detail: str | None = None, retryable: bool | None = None):
+        self.billed_usage: Any | None = None
         if code not in SAFE_MESSAGES:
             raise ValueError(f"unknown error code: {code}")
         if detail is not None and not _is_safe_detail(detail):

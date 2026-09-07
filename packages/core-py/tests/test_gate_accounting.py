@@ -446,3 +446,33 @@ def test_a_mixed_source_read_credits_only_the_newly_withheld_source(tmp_path):
     assert added == only_second, (
         f"credited {added} tokens for the second read, but only {only_second} were newly withheld"
     )
+
+
+def test_an_over_cap_bridge_reply_still_reports_the_usage_it_was_billed(tmp_path):
+    """Rejecting the text must not discard the token counts that came with it.
+
+    The bridge validates the returned text against the output cap *before* it unpacks
+    usage, so an over-cap reply raised a sanitized validation error and the exact counts
+    the provider reported went with it. The call happened and was billed either way; only
+    the text is unusable.
+    """
+    from context_shunt.limits import DEFAULT_LIMITS
+    from context_shunt.provider import HostBridgeProvider
+
+    def oversized(**_kwargs):
+        return {
+            "text": "x" * (DEFAULT_LIMITS.max_tool_result_bytes + 10),
+            "input_tokens": 23,
+            "output_tokens": 11,
+            "usage_exact": True,
+        }
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    result = Reader(registry, HostBridgeProvider(oversized)).answer("sess", _read_request(entry))
+
+    assert result.envelope["code"] in ("NO_MATCH", "INVALID_MODEL_OUTPUT")
+    assert result.cost.attempts_started >= 1
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 23
+    assert result.cost.output_tokens == 11

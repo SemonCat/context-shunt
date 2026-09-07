@@ -182,9 +182,12 @@ class HostBridgeProvider:
         text = result.get("text")
         if not isinstance(text, str):
             raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
-        if len(text.encode("utf-8")) > self._limits.max_tool_result_bytes:
-            raise ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
 
+        # Usage is unpacked *before* the text is judged. The call reached the provider and
+        # was billed whatever the reply turned out to be, so rejecting an over-cap reply
+        # must not take its token counts with it - that reported one attempt with no exact
+        # usage and silently fell back to a byte estimate for tokens the host had already
+        # counted exactly.
         exact = result.get("usage_exact") is True
         usage = Usage(
             input_tokens=_usage_value(
@@ -196,6 +199,10 @@ class HostBridgeProvider:
             ),
             method=TokenMethod.EXACT if exact else TokenMethod.UNKNOWN,
         )
+        if len(text.encode("utf-8")) > self._limits.max_tool_result_bytes:
+            rejected = ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
+            rejected.billed_usage = usage
+            raise rejected
         return ModelResponse(
             text=text,
             requested=self._target.identity(),

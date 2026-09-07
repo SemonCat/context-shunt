@@ -100,11 +100,6 @@ class ChunkOutcome:
     fallback_used: bool = False
 
 
-#: Bounded wait used only when a request has already missed its deadline, to collect the
-#: cost of a call the bridge had in fact completed. Never used on a publishing path.
-_LATE_CALL_ACCOUNTING_WAIT_S = 0.25
-
-
 @dataclass
 class _CostSink:
     """Carries what an attempt actually spent out past a later failure.
@@ -699,6 +694,14 @@ class Reader:
                     if isinstance(raw_exc, ShuntError)
                     else TransientProviderError("PROVIDER_CALL_FAILED")
                 )
+                # A rejected reply is still a paid call. When the bridge could say what it
+                # was billed, that travels on the error and is recorded here, so an
+                # unusable answer costs the truth rather than an estimate.
+                billed = getattr(exc, "billed_usage", None)
+                if isinstance(billed, Usage):
+                    outcome.usage = outcome.usage.merge(billed)
+                    if billed.complete:
+                        outcome.usage_complete_calls += 1
                 if (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable
@@ -799,11 +802,15 @@ class Reader:
         never read. Dropping it wholesale made real spend disappear from the session's
         accounting; the answer still never reaches the envelope.
 
-        The short wait is bounded and happens only on this failure path, so that a call
-        which completed at essentially the same moment as the deadline is still counted.
+        The read is non-blocking. Recovering this cost must not extend the wall clock it
+        is accounting for: waiting even briefly here made a 10 ms request against a slow
+        bridge return after ~263 ms, which breaks the hard deadline the cancellation
+        contract rests on. A response already delivered is counted; one still in flight is
+        not, and the attempt stands as started with usage unknown - which is exactly what
+        the accounting columns are for.
         """
         try:
-            ok, value = result_queue.get(timeout=_LATE_CALL_ACCOUNTING_WAIT_S)
+            ok, value = result_queue.get_nowait()
         except queue.Empty:
             return
         if not ok or not isinstance(value, ModelResponse):

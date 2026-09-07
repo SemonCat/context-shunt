@@ -699,6 +699,14 @@ export class Reader {
         return outcome;
       } catch (err) {
         const safe = isShuntError(err) ? err : transientProviderError();
+        // A rejected reply is still a paid call. When the bridge could say what it was
+        // billed, that travels on the error and is recorded here, so an unusable answer
+        // costs the truth rather than an estimate.
+        const billed = (safe as { billedUsage?: unknown }).billedUsage;
+        if (billed && typeof billed === "object") {
+          outcome.usage = mergeUsage(outcome.usage, billed as Usage);
+          if (usageComplete(billed as Usage)) outcome.usageCompleteCalls += 1;
+        }
         if (
           safe.code === "MODEL_ERROR"
           && safe.retryable

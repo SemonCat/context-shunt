@@ -8,7 +8,12 @@ from context_shunt.clock import Deadline, FakeClock
 from context_shunt.errors import CancelledError, DeadlineExceeded
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
-from context_shunt.provider import ModelResponse, ProviderTarget, TransientProviderError
+from context_shunt.provider import (
+    HostBridgeProvider,
+    ModelResponse,
+    ProviderTarget,
+    TransientProviderError,
+)
 from context_shunt.reader import Reader
 from context_shunt.snapshot import snapshot_bytes
 from tests.support import answer_json, make_registry
@@ -277,3 +282,30 @@ def test_a_deadline_after_the_call_still_accounts_for_what_the_provider_was_paid
     assert result.cost.output_tokens == 1
     assert result.cost.method is TokenMethod.EXACT
     assert result.provenance.attempts_started == 1
+
+
+def test_a_missed_deadline_returns_without_waiting_for_the_late_call():
+    """Late-call accounting must not extend the wall clock it is accounting for.
+
+    Recovering the cost of a call that finished too late is right, but it was done by
+    *blocking* for up to 250 ms after the deadline had already passed. A 10 ms request
+    against a one-second bridge returned after ~263 ms, which breaks the hard wall-clock
+    deadline the whole cancellation contract rests on.
+    """
+    import time as _time
+
+    def slow(**_kwargs):
+        _time.sleep(1.0)
+        return {"text": '{"answer":"","citations":[]}'}
+
+    registry = make_registry_at(None)
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    provider = HostBridgeProvider(slow)
+
+    started = _time.monotonic()
+    result = Reader(registry, provider).answer("sess", _request(entry, deadline_ms=10))
+    elapsed_ms = int((_time.monotonic() - started) * 1000)
+
+    assert result.envelope["code"] == "TIMEOUT"
+    # Generous, but far below the 250 ms the blocking drain added.
+    assert elapsed_ms < 150, f"returned {elapsed_ms} ms after a 10 ms deadline"

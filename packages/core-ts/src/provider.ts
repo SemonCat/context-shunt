@@ -189,9 +189,10 @@ export class HostBridgeProvider implements ReaderProvider {
     if (typeof text !== "string") {
       throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", false);
     }
-    if (new TextEncoder().encode(text).length > this.limits.maxToolResultBytes) {
-      throw new ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", false);
-    }
+    // Usage is unpacked *before* the text is judged. The call reached the provider and
+    // was billed whatever the reply turned out to be, so rejecting an over-cap reply must
+    // not take its token counts with it - that reported one attempt with no exact usage
+    // and silently fell back to a byte estimate for tokens the host had counted exactly.
     const exact = result.usage_exact === true;
     const usage: { -readonly [K in keyof Usage]: Usage[K] } = {
       method: exact ? "exact" : "unknown",
@@ -202,6 +203,11 @@ export class HostBridgeProvider implements ReaderProvider {
     if (input !== undefined) usage.inputTokens = input;
     if (output !== undefined) usage.outputTokens = output;
     if (cache !== undefined) usage.cacheTokens = cache;
+    if (new TextEncoder().encode(text).length > this.limits.maxToolResultBytes) {
+      const rejected = new ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", false);
+      rejected.billedUsage = usage as Usage;
+      throw rejected;
+    }
     return {
       text,
       requested: targetIdentity(this.target),
