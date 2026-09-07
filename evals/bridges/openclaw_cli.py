@@ -31,9 +31,14 @@ Two consequences, both recorded rather than papered over
    provider benchmark stays unmeasured even on a live run.
 2. **No system role.** The CLI takes a single ``--prompt``. The reader's system prompt and
    user message are therefore concatenated under an explicit header. Production adapters
-   pass them as separate roles, so a live score obtained here is a *lower* bound on a
-   host that preserves roles - the deviation can only cost instruction adherence, never
-   flatter it.
+   pass them as separate roles, so a score obtained here does not describe production.
+
+   It is *not* a lower bound. Removing the role boundary changes the prompt a model sees,
+   and a changed prompt can move a result in either direction - a concatenated instruction
+   can be followed more closely as easily as less. Treating this as "at worst pessimistic"
+   would let a passing score here be read as evidence about production, which it is not.
+   The only sound reading is that this configuration is non-representative: it can neither
+   condemn nor exonerate the product.
 
 Attribution
 -----------

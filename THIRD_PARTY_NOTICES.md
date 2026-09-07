@@ -81,11 +81,14 @@ so is more useful than pretending otherwise.
 
 What is implemented here is independently written and differs in ways that matter:
 
-- **No full-original retrieval, ever.** This is the deliberate divergence. Headroom offers
-  retrieval of the cached original back into the main model context. No tool this project
-  registers can do that. Everything reachable is either a cited model-derived answer or a
-  capped, cumulatively-limited exact extract — and the cumulative disclosure ceiling exists
-  precisely so that repeated small extracts cannot reconstitute the original either.
+- **No cached-original retrieval tool.** This is the deliberate divergence. Headroom offers
+  retrieval of the cached original back into the main model context; this project registers
+  no such tool. Everything reachable is either a cited model-derived answer or a capped,
+  cumulatively-limited exact extract, and the cumulative ceiling exists precisely so that
+  repeated small extracts cannot reconstitute a *large* original. It is a byte budget, not a
+  promise that a source can never come back whole: one small enough to fit the ceilings can
+  be returned in full by `inspect`, and the pre-read gate is a context-cost control rather
+  than a confidentiality boundary.
 - Authorization is a SQL predicate over a trusted (host, profile, principal, session,
   generation) scope, not possession of a cache key.
 - The cache is split: SQLite holds authorization only and is forbidden by its own normative

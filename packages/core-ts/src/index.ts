@@ -14,9 +14,16 @@
  * every envelope.
  *
  * The design is inspired by the Compress-Cache-Retrieve pattern popularized by Headroom.
- * No Headroom code is used, and one difference is deliberate: **no tool here ever retrieves
- * the full original payload into the main model context.** Everything the agent can reach
- * is either a cited model-derived answer or a capped, cumulatively-limited exact extract.
+ * No Headroom code is used, and one difference is deliberate: **no tool here offers
+ * retrieval of a cached original back into the main model context.** Everything the agent
+ * can reach is either a cited model-derived answer or a capped, cumulatively-limited exact
+ * extract.
+ *
+ * The bound is a byte budget, not a promise that a source can never come back whole. A
+ * source small enough to fit the per-page, per-source and per-session ceilings can be
+ * returned in full by `inspect` - the 350-line pre-read gate is a context-cost control, not
+ * a confidentiality boundary. What the ceilings do guarantee is that a *large* payload
+ * cannot be reassembled, and that every disclosed byte is counted.
  */
 export const VERSION = "1.1.0";
 

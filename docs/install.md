@@ -201,7 +201,15 @@ print(s.purge_legacy_artifacts(), 'removed')"
 
 Or just delete the cache root, which is equivalent and simpler.
 
-A store created by a **different DDL revision** is refused at open time with
+A store created by **DDL revision 1** is migrated forward on open. The step is additive -
+it adds `disclosure_events.blob_hash` and the `source_credits` table, both of which a new
+store already has - and it runs before the DDL script, because revision 2 indexes a column
+revision 1 does not have. Rows written by revision 1 keep a null content hash: what they
+disclosed is genuinely unattributable now, so those bytes still count toward the *session*
+ceiling, where they always counted, and are never credited to a particular source's
+ceiling, which would mean inventing an identity they do not carry.
+
+A store from **any other revision** is refused at open time with
 `STORE_FAILED / DDL_VERSION_MISMATCH` rather than migrated by guesswork. If you see that,
 the supported path is to remove the cache root and let the current revision recreate it; no
 data that matters is lost, because the store only ever holds a cache of content that can be

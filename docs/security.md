@@ -82,7 +82,9 @@ read, before a byte is returned**. Two concurrent inspects cannot overshoot betw
 
 Once the ceiling is reached, further pages return no content and say
 `DISCLOSURE_EXHAUSTED`. There is no configuration in which repeated small reads reassemble a
-whole payload into the main model context.
+*large* payload into the main model context. 上限是位元組預算，而非「來源永不會被完整取回」的
+承諾：小到能放進 per-page／per-source／per-session 上限的來源，`inspect` 可以完整回傳；350 行
+的 pre-read gate 是 context 成本控制，不是機密性邊界。
 
 Continuation cursors are HMAC-tagged with a per-store key held in `store_metadata` and bound
 to the handle, the snapshot hash and the canonical selector. A cursor cannot be edited to

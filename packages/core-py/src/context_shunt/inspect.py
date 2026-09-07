@@ -25,7 +25,10 @@ here rather than delegated to the platform serializer.
 every page is charged against a per-source and a per-session disclosure ceiling before a
 byte is returned. Once the ceiling is reached, further pages return no content and say
 ``DISCLOSURE_EXHAUSTED``. There is no configuration in which repeated small reads can
-reassemble a whole payload into the main context.
+reassemble a *large* payload into the main context. A source small enough to fit the
+per-page, per-source and per-session ceilings can be returned in full - the pre-read gate
+blocks a read on context cost, not on confidentiality - so the guarantee here is the byte
+budget and the accounting of it, not that a source can never come back whole.
 
 **Continuation is authenticated, not arithmetic.** A cursor is an opaque HMAC-tagged token
 bound to the handle, the snapshot hash and the canonical selector. It cannot be edited to

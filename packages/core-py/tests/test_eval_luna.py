@@ -174,6 +174,38 @@ def _leaked_source_regions(source: str, answer: str, citations: list[dict]) -> i
     return leaks
 
 
+def _prompt_construction_hash() -> str:
+    """Hash the fixed instruction *and* the user-message template together.
+
+    `build_user_message` is called with a canary excerpt, locator and question, so the
+    framing around them is hashed too. A template change therefore changes this digest,
+    which hashing `READER_SYSTEM_PROMPT` alone did not.
+    """
+    from context_shunt.provider import build_user_message
+
+    canary = build_user_message("<question>", "<chunk>", {"kind": "lines", "start": 1, "end": 1})
+    material = f"{READER_SYSTEM_PROMPT}\u241f{canary}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _reviewed_commit() -> str:
+    """The commit the score was produced at, or ``unknown`` outside a checkout."""
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(REPO), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    revision = done.stdout.strip()
+    return revision if done.returncode == 0 and revision else "unknown"
+
+
 def _observed_model(envelope: dict) -> str | None:
     """What the host said actually answered, or ``None`` when it said nothing.
 
@@ -501,7 +533,14 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         "refused_items": dict(refused_items),
         # The configuration and prompt this score describes, so it can be reproduced and
         # a score from different caps or a different prompt cannot be mistaken for it.
-        "prompt_sha256": hashlib.sha256(READER_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+        # Covers the *whole* prompt construction, not just the fixed instruction: the
+        # locator framing, excerpt delimiters and question wrapper come from
+        # `build_user_message`, and a change to any of them changes what the model was
+        # asked without touching the system prompt or the corpus. Named for what it
+        # hashes, with the commit the score was produced at, so a report identifies the
+        # prompt the way `docs/acceptance.md` says it does.
+        "prompt_construction_sha256": _prompt_construction_hash(),
+        "reviewed_commit": _reviewed_commit(),
         "configuration": {
             "requested_model": READER_MODEL,
             "max_chunks": 8,
@@ -588,3 +627,25 @@ def test_the_observed_model_is_never_substituted_by_the_requested_one():
     assert _observed_model({"provenance": {"requested_model": "gpt-5.6-luna"}}) is None
     assert _observed_model({"provenance": {}}) is None
     assert _observed_model({}) is None
+
+
+def test_the_prompt_hash_covers_the_whole_construction():
+    """Hashing only the system prompt left the framing unpinned.
+
+    A change to `build_user_message` - the locator line, the excerpt delimiters, where the
+    question goes - changes what the model was actually asked while leaving both the system
+    prompt and the corpus hash untouched. The report claimed to identify the prompt; it
+    identified half of it.
+    """
+    import context_shunt.provider as provider_module
+
+    baseline = _prompt_construction_hash()
+    assert baseline == _prompt_construction_hash()
+
+    original = provider_module.build_user_message
+    try:
+        provider_module.build_user_message = lambda q, c, loc: f"REFRAMED {q} {c} {loc}"
+        assert _prompt_construction_hash() != baseline
+    finally:
+        provider_module.build_user_message = original
+    assert _prompt_construction_hash() == baseline

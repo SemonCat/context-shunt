@@ -90,7 +90,8 @@ Handle 綁定於受信任的 (host, profile, principal, session, generation)，�
 
 1. **精確且自我標示。** 回傳的每個 byte 都逐字複製自呼叫端指名的不可變 snapshot；envelope 標為 `deterministic_extraction` 且 `provenance.derived = false`，不可能被讀成摘要。該路徑完全沒有 provider 參照，「零 LLM 呼叫」因此是結構事實而非承諾。
 2. **單頁有界。** 一頁上限 `inspect.max_result_bytes`（16 KiB），以 segment 的 UTF-8 bytes 計。
-3. **累計有界。** 分頁是擊破單頁上限最明顯的方式，因此**每一頁在回傳任何 byte 之前**都先在同一個 transaction 內對 per-source 與 per-session 揭露上限做 check-and-increment。上限用盡後續頁回傳零內容並標 `DISCLOSURE_EXHAUSTED`。沒有任何設定可以讓重複小量讀取重組出完整 payload。
+3. **累計有界。** 分頁是擊破單頁上限最明顯的方式，因此**每一頁在回傳任何 byte 之前**都先在同一個 transaction 內對 per-source 與 per-session 揭露上限做 check-and-increment。上限用盡後續頁回傳零內容並標 `DISCLOSURE_EXHAUSTED`。沒有任何設定可以讓重複小量讀取重組出**大型** payload。上限是位元組預算：小到能放進上限的來源，
+`inspect` 可以完整回傳（350 行的 pre-read gate 是 context 成本控制，不是機密性邊界）。
 4. **續頁是認證而非算術。** cursor 是以 store metadata 內的金鑰做 HMAC 標記的不透明 token，綁定 handle、snapshot hash 與正規化 selector；不能被編輯以跳過掃描預算，不能指向另一個 snapshot，也不能在另一個 store 重放。
 
 Selector 為嚴格 union：`lines`（1-based inclusive）、`bytes`（0-based half-open）、`search`（僅字面 needle，永不接受 regex，因此掃描時間對 snapshot 大小線性）。byte range 兩端都會拉回 UTF-8 邊界，emit 的文字必然是 snapshot 的子字串。

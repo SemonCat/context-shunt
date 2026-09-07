@@ -9,6 +9,7 @@ payload in the main context.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,7 @@ from tests.support import FakeLuna, make_capability, make_config
 
 pytestmark = pytest.mark.gate_inspect
 
+REPO = Path(__file__).resolve().parents[3]
 L = DEFAULT_LIMITS
 CANARY_HEAD = "CANARY-HEAD-1a2b3c"
 CANARY_MID = "CANARY-MID-4d5e6f"
@@ -571,3 +573,70 @@ def test_a_source_beyond_the_cumulative_budget_cannot_be_reassembled(tmp_path):
             break
     assert collected != body
     assert len(collected.encode("utf-8")) <= cap
+
+
+#: Wording that asserts a source can never be returned whole. The 351-line proof above
+#: shows that is false: the caps are a byte budget, and a source small enough to fit them
+#: comes back byte for byte. Anything matching these is a security claim the product does
+#: not honour, wherever it appears - shipped package, host-registered tool description,
+#: manifest or normative document.
+_FALSE_FULL_PAYLOAD_CLAIMS = (
+    "no tool can retrieve a full payload",
+    "no tool in this contract can retrieve a full payload",
+    "never retrieves the full original payload",
+    "ever retrieves the full original payload",
+    "no full-original retrieval, ever",
+    "cannot be paged into a full copy of the file",
+    "reassemble a whole payload",
+    "reconstitute the original",
+    "重組出完整 payload",
+)
+
+#: Text scanned for the claim. Deliberately includes documentation and notices as well as
+#: shipped code: the package entry points and the OpenClaw manifest are release artifacts,
+#: the Hermes description is registered with the host, and `docs/architecture.md` calls
+#: itself normative.
+_CLAIM_BEARING_SUFFIXES = (".py", ".ts", ".md", ".json", ".yaml", ".yml")
+_CLAIM_SCAN_SKIP = (
+    "node_modules",
+    ".venv",
+    "dist",
+    "build",
+    ".git",
+    "reports",
+    "__pycache__",
+)
+
+
+def test_no_shippable_surface_claims_a_source_can_never_be_returned_whole():
+    """A repository-wide check, because the claim kept reappearing in new places.
+
+    Four surfaces were corrected once and nine others kept the wording - two of them
+    shipped in the published packages, one registered with the host, one a normative
+    document. A single measured behaviour cannot have nine descriptions, so the wording is
+    pinned everywhere rather than per file.
+
+    Tied deliberately to `test_a_gate_blocked_source_can_still_be_returned_in_full`: if
+    that proof ever stops holding, the claim becomes true again and this can be relaxed on
+    the evidence rather than by assertion.
+    """
+    offenders: list[str] = []
+    here = Path(__file__).resolve()
+    for path in REPO.rglob("*"):
+        if not path.is_file() or path.suffix not in _CLAIM_BEARING_SUFFIXES:
+            continue
+        # This file quotes the claims in order to forbid them.
+        if path.resolve() == here:
+            continue
+        if any(part in _CLAIM_SCAN_SKIP for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8").lower()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for claim in _FALSE_FULL_PAYLOAD_CLAIMS:
+            if claim.lower() in text:
+                offenders.append(f"{path.relative_to(REPO)}: {claim!r}")
+    assert not offenders, (
+        "surfaces still claim a source can never be returned whole:\n" + "\n".join(offenders)
+    )

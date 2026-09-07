@@ -1,5 +1,10 @@
 /**
- * In-host reader bridge server: production-equivalent model access for the Luna gates.
+ * In-host reader bridge server: role-preserving model access for the Luna gates.
+ *
+ * NOT production-equivalent, and not wired into any gate. It reaches the model through the
+ * simple-completion transport, while the production adapter uses the isolated agent
+ * runtime (see "Not matched" below). No score from this file may be reported as a
+ * production-equivalent result.
  *
  * Why this exists
  * ---------------
@@ -10,8 +15,10 @@
  * host's own isolated-runtime policy *requires* that shape - `runtime-llm-isolated.ts`
  * rejects anything else with "pass system instructions through systemPrompt".
  *
- * A role-less prompt can only cost instruction adherence, so the CLI bridge cannot be
- * used to claim a release-representative score. This server restores the separation.
+ * A role-less prompt is a different prompt, and a different prompt can move a result in
+ * either direction - so the CLI bridge cannot be used to claim a release-representative
+ * score, and equally cannot be read as a pessimistic one. This server restores the role
+ * separation; it does not by itself make a score representative.
  *
  * What it matches, and what it does not
  * -------------------------------------
