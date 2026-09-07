@@ -86,6 +86,11 @@ class ModelResponse:
     #: availability fallback advanced: every attempt reached a provider and was billed,
     #: so counting just the winner understated real spend.
     attempts: int = 1
+    #: Usage the *failed* attempts behind this response reported before the chain moved
+    #: on. Kept apart from :attr:`usage` - which is the winning attempt's own - because a
+    #: caller estimating the winner from bytes must still charge for what the losers were
+    #: billed, and merging the two would make the winner's own numbers unrecoverable.
+    billed_from_failed_attempts: Usage | None = None
 
     def attribution(self) -> tuple[Attribution, Confidence]:
         return classify(
@@ -190,7 +195,14 @@ class HostBridgeProvider:
                 max_output_tokens=capped,
                 timeout_ms=timeout_ms,
             )
-        except ShuntError:
+        except ShuntError as exc:
+            # A `ShuntError` the host raised itself travels straight through, so any
+            # `billed_usage` riding on it never passed `_unpack`'s caps - the only place
+            # usage is checked. A host could therefore claim an output count above the
+            # per-call cap on a billed failure and have the chain merge it into the
+            # aggregate untouched. The claim is dropped rather than the failure escalated:
+            # availability behaviour stays exactly as it was, and the fixed cap holds.
+            self._discard_unusable_billed_usage(exc, capped)
             raise
         except TimeoutError:
             raise ShuntError("TIMEOUT", "MODEL_CALL") from None
@@ -199,6 +211,24 @@ class HostBridgeProvider:
             # It is dropped here and never reaches a log, metric or envelope.
             raise TransientProviderError("PROVIDER_CALL_FAILED") from None
         return self._unpack(result, capped)
+
+    def _discard_unusable_billed_usage(self, exc: ShuntError, output_cap: int) -> None:
+        billed = getattr(exc, "billed_usage", None)
+        if not isinstance(billed, Usage):
+            return
+
+        def within(value: Any, maximum: int) -> bool:
+            if value is None:
+                return True
+            return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
+
+        usable = (
+            within(billed.input_tokens, self._limits.max_request_input_tokens)
+            and within(billed.output_tokens, output_cap)
+            and within(billed.cache_tokens, self._limits.max_request_input_tokens)
+        )
+        if not usable:
+            exc.billed_usage = None
 
     def _unpack(self, result: Any, output_cap: int) -> ModelResponse:
         if not isinstance(result, dict):
@@ -366,6 +396,7 @@ class FallbackChainProvider:
                 usage=response.usage,
                 fallback_used=True,
                 attempts=attempts,
+                billed_from_failed_attempts=billed_usage,
             )
         raise last or ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
 

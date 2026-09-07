@@ -32,7 +32,9 @@ import {
   EMITTED_SCHEMA_VERSION,
 } from "../src/limits.js";
 import { ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError } from "../src/metrics.js";
-import { FallbackChainProvider, HostBridgeProvider, transientProviderError } from "../src/provider.js";
+import {
+  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, transientProviderError,
+} from "../src/provider.js";
 import { READER_MODEL } from "../src/limits.js";
 import { Reader } from "../src/reader.js";
 import { makeRegistry } from "./support.js";
@@ -378,8 +380,15 @@ describe("provider usage preservation", () => {
   it("still reports a named estimate when the bridge reports nothing", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
-    const silent = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
-    silent.usageExact = false;
+    // `usageExact` is a constructor option, not a mutable field: assigning to it after
+    // construction reached through `private readonly` and only compiled because the
+    // declared typecheck was not being run.
+    const silent = new FakeLuna(
+      [],
+      answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
+      READER_MODEL,
+      { usageExact: false },
+    );
     const result = await new Reader(registry, silent).answerDetailed("sess", readRequest(entry));
 
     expect(result.cost.method).toBe("bytes_div_4");
@@ -762,5 +771,138 @@ describe("each physical attempt is aggregated exactly once", () => {
     );
     const result = await new Reader(registry, overCap).answerDetailed("sess", readRequest(entry));
     expect(result.envelope.answer).toBe("");
+  });
+});
+
+describe("estimates cover every physical attempt", () => {
+  const answerText = answerJson("mode = fast [c1]", [
+    { id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" },
+  ]);
+  const plainUnavailable = async (): Promise<Record<string, unknown>> => {
+    throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+  };
+  function billedUnavailable(inputTokens: number, outputTokens: number) {
+    return async (): Promise<Record<string, unknown>> => {
+      const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      (err as { billedUsage?: unknown }).billedUsage = { inputTokens, outputTokens, method: "exact" };
+      throw err;
+    };
+  }
+
+  /** Runs a two-candidate chain and reports the prompt bytes actually transmitted. */
+  async function measured(
+    first: () => Promise<Record<string, unknown>>,
+    second: () => Promise<Record<string, unknown>>,
+  ) {
+    let calls = 0;
+    let promptBytes = 0;
+    const count = (b: () => Promise<Record<string, unknown>>): HostBridgeCall => async (opts) => {
+      calls += 1;
+      promptBytes += enc(opts.system).length + enc(opts.user).length;
+      return b();
+    };
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(count(first), L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(count(second), L, "f0", "openai")],
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+    return { calls, promptBytes, cost: result.cost, envelope: result.envelope };
+  }
+
+  /**
+   * The prompt is re-sent by every candidate a fallback tries, but was charged once per
+   * outer invocation - so a two-candidate chain estimated four calls' input from one
+   * call's bytes and halved the reported cost.
+   */
+  it("estimates input from every attempt's prompt on an unreported failure", async () => {
+    const { calls, promptBytes, cost } = await measured(plainUnavailable, plainUnavailable);
+
+    expect(calls).toBe(4);
+    expect(cost.attemptsStarted).toBe(calls);
+    expect(cost.method).toBe("bytes_div_4");
+    // The value, not just the method: what was transmitted is what is estimated from.
+    expect(cost.inputTokens).toBe(Math.ceil(promptBytes / 4));
+  });
+
+  it("estimates input from every attempt's prompt on an eventual success", async () => {
+    const winner = async (): Promise<Record<string, unknown>> => ({ text: answerText });
+    const { calls, promptBytes, cost, envelope } = await measured(plainUnavailable, winner);
+
+    expect(calls).toBe(2);
+    expect(envelope.code).toBe("ANSWERED");
+    expect(cost.attemptsStarted).toBe(calls);
+    expect(cost.inputTokens).toBe(Math.ceil(promptBytes / 4));
+  });
+
+  /**
+   * Output the reader never saw is still output that was billed. Reporting zero for an
+   * all-failure chain whose attempts reported what they produced understated real spend.
+   */
+  it("includes billed output from attempts whose text was never seen", async () => {
+    const { calls, cost } = await measured(billedUnavailable(5, 3), plainUnavailable);
+
+    expect(calls).toBe(4);
+    expect(cost.method).toBe("bytes_div_4");
+    // Two of the four attempts reported three output tokens each.
+    expect(cost.outputTokens).toBe(6);
+  });
+
+  /**
+   * Bounding only the sum cannot prove every constituent respected the per-call cap: a
+   * failure reporting one token over it, plus a winner reporting one, stayed under the
+   * two-attempt ceiling and was published as `exact`.
+   */
+  it("refuses a billed-failure claim no single call could have produced", async () => {
+    const overCap = billedUnavailable(1, L.maxOutputTokensPerCall + 1);
+    const tinyWinner = async (): Promise<Record<string, unknown>> => ({
+      text: answerText,
+      input_tokens: 1,
+      output_tokens: 1,
+      usage_exact: true,
+    });
+    const { calls, cost, envelope } = await measured(overCap, tinyWinner);
+
+    expect(calls).toBe(2);
+    // The call still failed the way it failed, so the chain still advanced and answered.
+    expect(envelope.code).toBe("ANSWERED");
+    // But the impossible claim is not evidence, so the total is not exact and never
+    // carries the over-cap number.
+    expect(cost.method).not.toBe("exact");
+    expect(cost.outputTokens).toBeLessThan(L.maxOutputTokensPerCall);
+  });
+
+  /**
+   * The other branch: when every attempt reports usage the total is `exact`, and the
+   * loser's billed output has to survive there too. It does because the chain folds the
+   * loser's claim into the winner's reported usage, so `exact` reads it from there while
+   * the estimate branch reads it from `billedFromFailedAttempts` - one path each, never
+   * both.
+   */
+  it("counts a billed loser and an exact winner exactly once on the exact branch", async () => {
+    const billedLoser = billedUnavailable(1, 7);
+    const exactWinner = async (): Promise<Record<string, unknown>> => ({
+      text: answerText,
+      input_tokens: 9,
+      output_tokens: 11,
+      usage_exact: true,
+    });
+    const { calls, cost, envelope } = await measured(billedLoser, exactWinner);
+
+    expect(calls).toBe(2);
+    expect(envelope.code).toBe("ANSWERED");
+    expect(cost.attemptsStarted).toBe(2);
+    expect(cost.attemptsUsageComplete).toBe(2);
+    expect(cost.method).toBe("exact");
+    expect(cost.inputTokens).toBe(10);
+    expect(cost.outputTokens).toBe(18);
+  });
+
+  it("still accepts a billed-failure claim that respects the per-call cap", async () => {
+    const atCap = billedUnavailable(1, L.maxOutputTokensPerCall);
+    const { cost } = await measured(atCap, plainUnavailable);
+    // Exactly at the ceiling is legal, and two attempts reported it.
+    expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall * 2);
   });
 });

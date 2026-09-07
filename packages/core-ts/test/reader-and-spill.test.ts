@@ -12,14 +12,14 @@ import { describe, expect, it } from "vitest";
 import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { classifyAttribution } from "../src/provenance.js";
-import { FallbackChainProvider, HostBridgeProvider } from "../src/provider.js";
+import {
+  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, UnavailableProvider,
+  responseAttribution,
+} from "../src/provider.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
 import { InMemoryMetrics } from "../src/metrics.js";
 import { Deadline, FakeClock } from "../src/clock.js";
-import {
-  HostBridgeProvider, UnavailableProvider, responseAttribution,
-} from "../src/provider.js";
 import { referencedIds } from "../src/citations.js";
 import { Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
@@ -901,7 +901,10 @@ describe("cancellation stops the fallback chain", () => {
   it("does not start a fallback after the caller aborts", async () => {
     let attempts = 0;
     const controller = new AbortController();
-    const bridge = async (opts: { signal?: AbortSignal }) => {
+    // Typed as the real bridge contract: under `exactOptionalPropertyTypes` a narrowed
+    // `{ signal?: AbortSignal }` is not assignable to `HostBridgeCall`, whose `signal` is
+    // `AbortSignal | undefined`.
+    const bridge: HostBridgeCall = async (opts) => {
       attempts += 1;
       controller.abort();
       opts.signal?.throwIfAborted();

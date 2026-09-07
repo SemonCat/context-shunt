@@ -22,9 +22,10 @@ from context_shunt.accounting import (
     compose,
     estimate_tokens,
 )
+from context_shunt.errors import ShuntError
 from context_shunt.limits import BASELINE_ESTIMATE_METHOD, DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION
 from context_shunt.metrics import ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError
-from context_shunt.provenance import TokenMethod
+from context_shunt.provenance import TokenMethod, Usage
 from context_shunt.reader import Reader
 from context_shunt.session import ShuntSession
 from context_shunt.snapshot import snapshot_bytes
@@ -476,3 +477,147 @@ def test_an_over_cap_bridge_reply_still_reports_the_usage_it_was_billed(tmp_path
     assert result.cost.method is TokenMethod.EXACT
     assert result.cost.input_tokens == 23
     assert result.cost.output_tokens == 11
+
+
+# --- estimates cover every physical attempt -----------------------------------------
+#
+# Parity with the TypeScript `estimates cover every physical attempt` suite: a fallback
+# chain re-sends the prompt to every candidate and each candidate is billed, so the
+# estimate has to charge for every physical call exactly once - and no constituent
+# claim may exceed the fixed per-call cap.
+
+_ANSWER_TEXT = answer_json(
+    "mode = fast [c1]",
+    [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "mode = fast"}],
+)
+
+
+def _plain_unavailable(**_kwargs):
+    raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+
+def _billed_unavailable(input_tokens: int, output_tokens: int):
+    def call(**_kwargs):
+        exc = ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+        exc.billed_usage = Usage(
+            input_tokens=input_tokens, output_tokens=output_tokens, method=TokenMethod.EXACT
+        )
+        raise exc
+
+    return call
+
+
+def _measured(tmp_path, first, second):
+    """Run a two-candidate chain and report the prompt bytes actually transmitted."""
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    seen = {"calls": 0, "prompt_bytes": 0}
+
+    def count(bridge):
+        def call(*, system, user, **kwargs):
+            seen["calls"] += 1
+            seen["prompt_bytes"] += len(system.encode("utf-8")) + len(user.encode("utf-8"))
+            return bridge(system=system, user=user, **kwargs)
+
+        return call
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    chain = FallbackChainProvider(
+        HostBridgeProvider(count(first), L, provider="openai"),
+        [HostBridgeProvider(count(second), L, "f0", provider="openai")],
+    )
+    result = Reader(registry, chain).answer("sess", _read_request(entry))
+    return seen, result
+
+
+def test_the_estimate_charges_for_every_attempt_prompt_on_an_unreported_failure(tmp_path):
+    """The prompt is re-sent by every candidate, but was charged once per invocation.
+
+    A two-candidate chain therefore estimated four physical calls' input from one call's
+    bytes and reported roughly half of what was really transmitted.
+    """
+    seen, result = _measured(tmp_path, _plain_unavailable, _plain_unavailable)
+
+    assert seen["calls"] == 4
+    assert result.cost.attempts_started == seen["calls"]
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.input_tokens == -(-seen["prompt_bytes"] // 4)
+
+
+def test_the_estimate_charges_for_every_attempt_prompt_on_an_eventual_success(tmp_path):
+    seen, result = _measured(tmp_path, _plain_unavailable, lambda **_k: {"text": _ANSWER_TEXT})
+
+    assert seen["calls"] == 2
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.cost.attempts_started == seen["calls"]
+    assert result.cost.input_tokens == -(-seen["prompt_bytes"] // 4)
+
+
+def test_the_estimate_includes_billed_output_from_attempts_never_seen(tmp_path):
+    """Output the reader never read is still output that was billed."""
+    seen, result = _measured(tmp_path, _billed_unavailable(5, 3), _plain_unavailable)
+
+    assert seen["calls"] == 4
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    # Two of the four attempts reported three output tokens each.
+    assert result.cost.output_tokens == 6
+
+
+def test_a_billed_failure_claim_no_single_call_could_have_produced_is_refused(tmp_path):
+    """Bounding the sum cannot prove each constituent respected the per-call cap.
+
+    A `ShuntError` the host raises itself never passes the bridge's usage validation, so a
+    failure reporting one token over the cap plus a winner reporting one stayed under the
+    two-attempt ceiling and was published as exact.
+    """
+    over_cap = _billed_unavailable(1, L.max_output_tokens_per_call + 1)
+
+    def tiny_winner(**_kwargs):
+        return {"text": _ANSWER_TEXT, "input_tokens": 1, "output_tokens": 1, "usage_exact": True}
+
+    seen, result = _measured(tmp_path, over_cap, tiny_winner)
+
+    assert seen["calls"] == 2
+    # The call still failed the way it failed, so the chain still advanced and answered.
+    assert result.envelope["code"] == "ANSWERED"
+    # But the impossible claim is not evidence, so the total is not exact and never
+    # carries the over-cap number.
+    assert result.cost.method is not TokenMethod.EXACT
+    assert result.cost.output_tokens < L.max_output_tokens_per_call
+
+
+def test_a_billed_failure_claim_that_respects_the_per_call_cap_is_still_accepted(tmp_path):
+    at_cap = _billed_unavailable(1, L.max_output_tokens_per_call)
+    _seen, result = _measured(tmp_path, at_cap, _plain_unavailable)
+
+    # Exactly at the ceiling is legal, and two attempts reported it.
+    assert result.cost.output_tokens == L.max_output_tokens_per_call * 2
+
+
+def test_a_billed_loser_and_an_exact_winner_are_each_counted_exactly_once(tmp_path):
+    """The other branch of the same rule, and the one cross-core difference in it.
+
+    A billed failure's usage is recorded in *both* the outcome's usage and its unseen
+    usage. Only one is ever read: the exact branch reads the usage, the estimate branch
+    discards it and reads the unseen total, so the loser's output is charged once either
+    way. Python reaches the estimate branch here where TypeScript reaches the exact one -
+    Python's chain does not fold a loser's claim into the winner's usage, so a two-attempt
+    chain never reports as many usage-complete attempts as it started. That is the
+    conservative direction (an estimate rather than a claimed exact total) and it is not
+    changed here; it is recorded so the difference is not mistaken for a loss.
+    """
+
+    def exact_winner(**_kwargs):
+        return {"text": _ANSWER_TEXT, "input_tokens": 9, "output_tokens": 11, "usage_exact": True}
+
+    seen, result = _measured(tmp_path, _billed_unavailable(1, 7), exact_winner)
+
+    assert seen["calls"] == 2
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.cost.attempts_started == 2
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    # The winner's text is estimated from its bytes; the loser's seven billed output
+    # tokens are added once on top, never twice and never dropped.
+    winner_estimate = -(-len(_ANSWER_TEXT.encode("utf-8")) // 4)
+    assert result.cost.output_tokens == winner_estimate + 7

@@ -90,6 +90,10 @@ class ChunkOutcome:
     # provider usage was downgraded to a byte estimate on *every* request, and the
     # `usage_exact` distinction the accounting layer exists to make never survived.
     usage: Usage = field(default_factory=lambda: Usage(method=TokenMethod.NOT_APPLICABLE))
+    #: Usage reported by attempts whose output was never seen. Held apart from ``usage`` so
+    #: a byte estimate can be topped up with it without double counting the winner, whose
+    #: output *can* be measured from the text it returned.
+    unseen_usage: Usage = field(default_factory=lambda: Usage(method=TokenMethod.NOT_APPLICABLE))
     calls: int = 0
     usage_complete_calls: int = 0
     prompt_bytes: int = 0
@@ -341,6 +345,7 @@ class Reader:
         total_calls = 0
         usage_complete_calls = 0
         usage = Usage(method=TokenMethod.NOT_APPLICABLE)
+        unseen_usage = Usage(method=TokenMethod.NOT_APPLICABLE)
         prompt_bytes = completion_bytes = 0
         next_citation = 1
         attribution = Attribution.NOT_APPLICABLE
@@ -353,6 +358,7 @@ class Reader:
             total_calls += outcome.calls
             usage_complete_calls += outcome.usage_complete_calls
             usage = usage.merge(outcome.usage)
+            unseen_usage = unseen_usage.merge(outcome.unseen_usage)
             prompt_bytes += outcome.prompt_bytes
             completion_bytes += outcome.completion_bytes
             fallback_used = fallback_used or outcome.fallback_used
@@ -386,6 +392,7 @@ class Reader:
                 prompt_bytes=prompt_bytes,
                 completion_bytes=completion_bytes,
                 limits=self._limits,
+                unseen_usage=unseen_usage,
             )
         )
 
@@ -656,9 +663,14 @@ class Reader:
                     + estimate_tokens(user, self._limits)
                 )
                 outcome.calls += 1
-                outcome.prompt_bytes += len(READER_SYSTEM_PROMPT.encode("utf-8")) + len(
+                # The same prompt is sent again by every candidate a fallback tries, so
+                # this is per physical call, not per invocation. Charging it once per
+                # invocation halved the input estimate of any two-candidate chain: four
+                # calls transmitting 3,448 bytes were estimated from 1,724.
+                per_call_prompt_bytes = len(READER_SYSTEM_PROMPT.encode("utf-8")) + len(
                     user.encode("utf-8")
                 )
+                outcome.prompt_bytes += per_call_prompt_bytes
                 response = self._complete_with_deadline(
                     system=READER_SYSTEM_PROMPT,
                     user=user,
@@ -670,7 +682,15 @@ class Reader:
                 # An availability fallback may have taken several attempts inside this one
                 # call, and every one of them reached a provider and was billed. `calls`
                 # was already incremented once above for the attempt we started.
-                outcome.calls += max(0, response.attempts - 1)
+                extra_attempts = max(0, response.attempts - 1)
+                outcome.calls += extra_attempts
+                outcome.prompt_bytes += per_call_prompt_bytes * extra_attempts
+                # Output the reader never saw: a failed candidate returned no text to
+                # measure, so its reported tokens are the only evidence of what it
+                # produced. Disjoint from `completion_bytes` by construction.
+                unseen = getattr(response, "billed_from_failed_attempts", None)
+                if isinstance(unseen, Usage):
+                    outcome.unseen_usage = outcome.unseen_usage.merge(unseen)
                 outcome.completion_bytes += len(response.text.encode("utf-8"))
                 outcome.usage = outcome.usage.merge(response.usage)
                 outcome.usage_complete_calls += 1 if response.usage.complete else 0
@@ -703,6 +723,12 @@ class Reader:
                     outcome.usage = outcome.usage.merge(billed)
                     if billed.complete:
                         outcome.usage_complete_calls += 1
+                    # Nothing came back, so every attempt here is one whose output was
+                    # never seen.
+                    outcome.unseen_usage = outcome.unseen_usage.merge(billed)
+                outcome.prompt_bytes += per_call_prompt_bytes * max(
+                    0, int(getattr(exc, "internal_attempts", 1)) - 1
+                )
                 # A composite provider may have made several calls inside this one
                 # invocation before giving up. `calls` was incremented once above for the
                 # invocation; the rest are the ones the chain made and was billed for.
@@ -911,6 +937,7 @@ def _reader_cost(
     prompt_bytes: int,
     completion_bytes: int,
     limits: Limits,
+    unseen_usage: Usage | None = None,
 ) -> ReaderCost:
     """Exact provider usage wins; otherwise a named deterministic estimate."""
     if attempts == 0:
@@ -929,9 +956,16 @@ def _reader_cost(
             attempts_started=attempts,
             attempts_usage_complete=usage_complete,
         )
+    # The estimate covers every physical call: `prompt_bytes` already includes each
+    # fallback attempt's prompt, and the output side adds what attempts the reader never
+    # saw reported they produced. Reporting zero output for an all-failure chain that was
+    # billed for it understated real spend, which is the direction this must never err in.
+    # The two populations are disjoint by construction - `completion_bytes` is text the
+    # reader received, `unseen_usage` is attempts it did not - so nothing is counted twice.
+    unseen_output = (unseen_usage.output_tokens or 0) if unseen_usage is not None else 0
     return ReaderCost(
         input_tokens=accounting_tokens(prompt_bytes, limits),
-        output_tokens=accounting_tokens(completion_bytes, limits),
+        output_tokens=accounting_tokens(completion_bytes, limits) + unseen_output,
         cache_tokens=None,
         method=TokenMethod.BYTES_DIV_4,
         attempts_started=attempts,

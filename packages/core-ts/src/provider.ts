@@ -71,6 +71,14 @@ export interface ModelResponse {
    * not, and that difference is exactly what decides whether a total may be called exact.
    */
   readonly usageCompleteAttempts?: number;
+  /**
+   * Usage reported by attempts that failed before returning any text, kept separate from
+   * the winner's own. The reader can measure the winner's output from the bytes it
+   * received; for a failed attempt there is no text to measure, so its reported tokens are
+   * the only signal there is - and adding them to a byte estimate is only safe if the two
+   * populations are known not to overlap.
+   */
+  readonly billedFromFailedAttempts?: Usage;
 }
 
 export function responseAttribution(
@@ -183,7 +191,22 @@ export class HostBridgeProvider implements ReaderProvider {
         signal: opts.signal,
       });
     } catch (err) {
-      if (err instanceof ShuntError) throw err;
+      if (err instanceof ShuntError) {
+        // This is the boundary a single physical call's report crosses, and the only
+        // place that knows the per-call caps apply to *it* rather than to a sum. A failed
+        // attempt may report what it was billed, and that claim was previously merged
+        // into the aggregate unchecked: a failure reporting 2,049 output tokens against
+        // the fixed 2,048 cap, plus a winner reporting 1, totalled 2,050 - under the
+        // two-attempt aggregate ceiling - and was published as `exact`. Bounding only the
+        // sum cannot prove every constituent respected the cap.
+        //
+        // An out-of-range claim is refused as evidence, not escalated into a hard error:
+        // the call still failed the way it failed, so availability and the chain's
+        // advance are unchanged, and the attempt simply counts as one that reported
+        // nothing usable.
+        this.discardUnusableBilledUsage(err, capped);
+        throw err;
+      }
       // A cancelled call is not a provider that failed. Sanitizing an abort into a
       // *retryable* provider error handed the chain the one signal that means "advance",
       // so cancelling the primary started the fallback instead of ending the request.
@@ -193,6 +216,26 @@ export class HostBridgeProvider implements ReaderProvider {
       throw transientProviderError();
     }
     return this.unpack(result, capped);
+  }
+
+  /**
+   * Drop a billed-usage claim that no single call could legally have produced.
+   *
+   * Uses exactly the ceilings `unpack` applies to a successful call, so a success and a
+   * billed failure are held to the same fixed per-call limits.
+   */
+  private discardUnusableBilledUsage(err: ShuntError, outputCap: number): void {
+    const billed = (err as { billedUsage?: unknown }).billedUsage;
+    if (!billed || typeof billed !== "object") return;
+    const usage = billed as Usage;
+    const withinCap = (value: number | undefined, maximum: number): boolean =>
+      value === undefined
+      || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum);
+    const usable =
+      withinCap(usage.inputTokens, this.limits.maxRequestInputTokens)
+      && withinCap(usage.outputTokens, outputCap)
+      && withinCap(usage.cacheTokens, this.limits.maxRequestInputTokens);
+    if (!usable) delete (err as { billedUsage?: unknown }).billedUsage;
   }
 
   private unpack(result: HostBridgeResult, outputCap: number): ModelResponse {
@@ -384,6 +427,7 @@ export class FallbackChainProvider implements ReaderProvider {
         attempts,
         usageCompleteAttempts: billedComplete + winnerComplete,
         usage: billed === undefined ? response.usage : mergeUsage(billed, response.usage),
+        ...(billed === undefined ? {} : { billedFromFailedAttempts: billed }),
       };
     }
     throw chainFailure(last, () => new ShuntError("MODEL_ERROR", "NO_PROVIDER", false));

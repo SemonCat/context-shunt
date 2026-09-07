@@ -41,7 +41,12 @@ const BODY = enc("alpha\nbeta\ngamma\n");
 // tests reach the same database the same way.
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: new (path: string) => {
-    prepare(sql: string): { run(...a: unknown[]): unknown; get(...a: unknown[]): unknown };
+    prepare(sql: string): {
+      run(...a: unknown[]): unknown;
+      get(...a: unknown[]): unknown;
+      all(...a: unknown[]): unknown[];
+    };
+    exec(sql: string): void;
     close(): void;
   };
 };

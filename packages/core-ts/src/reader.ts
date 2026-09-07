@@ -73,6 +73,12 @@ interface ChunkOutcome {
   calls: number;
   usageCompleteCalls: number;
   usage: Usage;
+  /**
+   * Usage reported by attempts whose output the reader never saw. Kept apart from
+   * `usage` so a byte estimate can be topped up with it without ever double counting the
+   * winner, whose output the reader *can* measure.
+   */
+  unseenUsage: Usage;
   promptBytes: number;
   completionBytes: number;
   attribution: { status: Attribution; confidence: Confidence };
@@ -329,10 +335,12 @@ export class Reader {
     let resolved: ModelIdentity = UNKNOWN_IDENTITY;
     let reported: ModelIdentity = UNKNOWN_IDENTITY;
     let fallbackUsed = false;
+    let unseenUsage: Usage = { method: "not_applicable" };
     for (const outcome of outcomes) {
       totalCalls += outcome.calls;
       usageCompleteCalls += outcome.usageCompleteCalls;
       usage = mergeUsage(usage, outcome.usage);
+      unseenUsage = mergeUsage(unseenUsage, outcome.unseenUsage);
       promptBytes += outcome.promptBytes;
       completionBytes += outcome.completionBytes;
       fallbackUsed = fallbackUsed || outcome.fallbackUsed;
@@ -356,6 +364,7 @@ export class Reader {
 
     const cost = readerCostOf({
       usage,
+      unseenUsage,
       attempts: totalCalls,
       usageCompleteCalls,
       promptBytes,
@@ -604,6 +613,7 @@ export class Reader {
       // provider usage was downgraded to a byte estimate on *every* request, and the
       // `usageExact` distinction the accounting layer exists to make never survived.
       usage: { method: "not_applicable" },
+      unseenUsage: { method: "not_applicable" },
       promptBytes: 0,
       completionBytes: 0,
       attribution: { status: "unknown", confidence: "none" },
@@ -619,15 +629,23 @@ export class Reader {
         outcome.failedReason = isShuntError(err) && err.code === "TIMEOUT" ? "TIMEOUT" : "CANCELLED";
         return outcome;
       }
+      // Hoisted so the failure path can charge the same per-call prompt for every attempt
+      // a composite provider made before giving up.
+      let perCallPromptBytes = 0;
       try {
         const user = buildUserMessage(question, chunk.text, chunk.locator);
         inputBudget.spend(
           estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits),
         );
         outcome.calls += 1;
-        outcome.promptBytes +=
+        // The same prompt is sent again by every candidate a fallback tries, so this is
+        // per physical call, not per invocation. Counting it once per invocation halved
+        // the input estimate of any two-candidate chain: four calls transmitting 3,448
+        // bytes were estimated from 1,724.
+        perCallPromptBytes =
           new TextEncoder().encode(READER_SYSTEM_PROMPT).length
           + new TextEncoder().encode(user).length;
+        outcome.promptBytes += perCallPromptBytes;
         const response = await this.completeWithinDeadline({
           system: READER_SYSTEM_PROMPT,
           user,
@@ -638,8 +656,15 @@ export class Reader {
         // An availability fallback may have taken several attempts inside this one call,
         // and every one of them reached a provider and was billed. `calls` was already
         // incremented once above for the attempt we started.
-        outcome.calls += Math.max(0, (response.attempts ?? 1) - 1);
+        const extraAttempts = Math.max(0, (response.attempts ?? 1) - 1);
+        outcome.calls += extraAttempts;
+        outcome.promptBytes += perCallPromptBytes * extraAttempts;
         outcome.completionBytes += new TextEncoder().encode(response.text).length;
+        // Output the reader never saw: a failed candidate returned no text to measure, so
+        // its reported tokens are the only evidence of what it produced. Held apart from
+        // the winner's bytes precisely so the two are never added twice.
+        const unseen = response.billedFromFailedAttempts;
+        if (unseen) outcome.unseenUsage = mergeUsage(outcome.unseenUsage, unseen);
         outcome.usage = mergeUsage(outcome.usage, response.usage);
         // A composite provider reports how many of its attempts supplied complete usage;
         // a plain one supplies one attempt, so the winner alone decides.
@@ -676,6 +701,13 @@ export class Reader {
         outcome.usageCompleteCalls +=
           reportedAttempts
           ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
+        // Nothing came back, so every attempt here is one whose output was never seen.
+        if (billed && typeof billed === "object") {
+          outcome.unseenUsage = mergeUsage(outcome.unseenUsage, billed as Usage);
+        }
+        outcome.promptBytes +=
+          perCallPromptBytes
+          * Math.max(0, ((safe as { internalAttempts?: number }).internalAttempts ?? 1) - 1);
         // A composite provider may have made several calls inside this one invocation
         // before giving up. `calls` was incremented once above for the invocation; the
         // rest are the ones the chain made and was billed for.
@@ -952,6 +984,8 @@ function handlesSurvive(err: ShuntError): boolean {
 /** Exact provider usage wins; otherwise a named deterministic estimate. */
 function readerCostOf(input: {
   usage: Usage;
+  /** Usage reported by attempts whose output was never seen; see {@link ChunkOutcome}. */
+  unseenUsage?: Usage;
   attempts: number;
   usageCompleteCalls: number;
   promptBytes: number;
@@ -975,9 +1009,16 @@ function readerCostOf(input: {
       attemptsUsageComplete: input.usageCompleteCalls,
     };
   }
+  // The estimate covers every physical call: `promptBytes` already includes each fallback
+  // attempt's prompt, and the output side adds what attempts the reader never saw reported
+  // they produced. Reporting zero output for an all-failure chain that was billed for it
+  // understated real spend, which is the direction this accounting must never err in.
+  // The two populations are disjoint by construction - `completionBytes` is text the
+  // reader received, `unseenUsage` is attempts it did not - so nothing is counted twice.
+  const unseenOutput = input.unseenUsage?.outputTokens ?? 0;
   return {
     inputTokens: accountingTokens(input.promptBytes, input.limits),
-    outputTokens: accountingTokens(input.completionBytes, input.limits),
+    outputTokens: accountingTokens(input.completionBytes, input.limits) + unseenOutput,
     cacheTokens: undefined,
     method: "bytes_div_4",
     attemptsStarted: input.attempts,
