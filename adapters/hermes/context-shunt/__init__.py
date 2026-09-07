@@ -83,7 +83,8 @@ from context_shunt.limits import (  # noqa: E402
     EMITTED_SCHEMA_VERSION,
     READER_MODEL,
 )
-from context_shunt.provider import HostBridgeProvider, UnavailableProvider  # noqa: E402
+from context_shunt.provider import UnavailableProvider  # noqa: E402
+from context_shunt.session import build_provider  # noqa: E402
 from context_shunt.schema import validate_tool_args  # noqa: E402
 from context_shunt.session import ShuntSession  # noqa: E402
 from context_shunt.store import ScopeIdentity, SnapshotStore  # noqa: E402
@@ -334,12 +335,16 @@ def _session(task_id: str = "", session_id: str = "") -> ShuntSession:
     key = session_id or task_id or "unbound"
     session = _sessions.get(key)
     if session is None:
+        # `build_provider` assembles the primary *and* the configured availability
+        # fallback chain. Constructing `HostBridgeProvider` directly here meant
+        # `reader.fallback_chain` parsed, validated and documented - and then did
+        # nothing at all, so a deployment that configured a fallback silently had none.
         provider = (
-            HostBridgeProvider(
+            build_provider(
+                _config,
                 _bridge_call,
-                _config.limits,
-                _reader_target()[1],
                 provider=_reader_target()[0],
+                model=_reader_target()[1],
             )
             if _llm is not None
             else UnavailableProvider("HOST_LLM_UNAVAILABLE")

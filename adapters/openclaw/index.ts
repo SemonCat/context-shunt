@@ -52,7 +52,7 @@ import {
   EMITTED_SCHEMA_VERSION,
   type Envelope,
   type GateDecision,
-  HostBridgeProvider,
+  buildProvider,
   type ReaderProvider,
   ScopeIdentity,
   ShuntError,
@@ -517,7 +517,12 @@ export class ContextShuntPlugin {
     if (!llm || typeof llm.complete !== "function") {
       return new UnavailableProvider("HOST_LLM_UNAVAILABLE");
     }
-    return new HostBridgeProvider(
+    // `buildProvider` assembles the primary *and* the configured availability fallback
+    // chain. Constructing `HostBridgeProvider` directly here meant `reader.fallback_chain`
+    // parsed, validated and documented - and then did nothing at all, so a deployment that
+    // configured a fallback silently had none.
+    return buildProvider(
+      this.config,
       async ({ system, user, model, maxOutputTokens, timeoutMs, signal }) => {
         // The host owns credentials and routing; provider exception text is dropped by
         // HostBridgeProvider so only MODEL_ERROR crosses back.
@@ -549,9 +554,6 @@ export class ContextShuntPlugin {
           usage_exact: usage?.inputTokens !== undefined && usage?.outputTokens !== undefined,
         };
       },
-      this.config.limits,
-      this.config.readerModel,
-      this.config.readerProvider,
     );
   }
 }

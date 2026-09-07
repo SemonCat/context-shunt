@@ -673,6 +673,10 @@ class Reader:
                     outcome=outcome,
                 )
                 _validate_model_response(response, self._limits)
+                # An availability fallback may have taken several attempts inside this one
+                # call, and every one of them reached a provider and was billed. `calls`
+                # was already incremented once above for the attempt we started.
+                outcome.calls += max(0, response.attempts - 1)
                 outcome.completion_bytes += len(response.text.encode("utf-8"))
                 outcome.usage = outcome.usage.merge(response.usage)
                 outcome.usage_complete_calls += 1 if response.usage.complete else 0

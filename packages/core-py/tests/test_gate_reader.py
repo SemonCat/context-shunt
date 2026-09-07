@@ -7,9 +7,23 @@ import json
 import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
+from context_shunt.errors import ShuntError
 from context_shunt.limits import READER_MODEL
-from context_shunt.provenance import Attribution, AttributionPolicy, Provenance, TokenMethod
-from context_shunt.provider import HostBridgeProvider, UnavailableProvider
+from context_shunt.provenance import (
+    Attribution,
+    AttributionPolicy,
+    ModelIdentity,
+    Provenance,
+    TokenMethod,
+    Usage,
+)
+from context_shunt.provider import (
+    FallbackChainProvider,
+    HostBridgeProvider,
+    ModelResponse,
+    ProviderTarget,
+    UnavailableProvider,
+)
 from context_shunt.reader import Reader
 from context_shunt.snapshot import snapshot_bytes
 from tests.support import FakeLuna, answer_json, make_registry
@@ -399,3 +413,74 @@ def test_the_pre_1_1_reader_api_still_works(tmp_path):
     # And the explicit overload returns exactly the envelope.
     envelope = Reader(registry, luna).answer_envelope("sess", _request(entry))
     assert isinstance(envelope, dict) and envelope["status"] == result["status"]
+
+
+# -- the availability fallback chain, actually wired and actually bounded -----
+
+
+class _Recording:
+    """A provider that fails or answers on demand and records its own budget."""
+
+    def __init__(self, model: str, outcome, cost_ms: int = 0, clock=None):
+        self.model = model
+        self.outcome = outcome
+        self.cost_ms = cost_ms
+        self.clock = clock
+        self.timeouts: list[int] = []
+        self.calls = 0
+
+    @property
+    def target(self) -> ProviderTarget:
+        return ProviderTarget(model=self.model, provider="openai")
+
+    def complete(self, *, system, user, max_output_tokens, timeout_ms):
+        self.calls += 1
+        self.timeouts.append(timeout_ms)
+        if self.clock is not None and self.cost_ms:
+            self.clock.advance(self.cost_ms)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return ModelResponse(
+            text=self.outcome,
+            requested=ProviderTarget(model=self.model, provider="openai").identity(),
+            resolved=ModelIdentity(provider="openai", model=self.model),
+            usage=Usage(input_tokens=3, output_tokens=2, method=TokenMethod.EXACT),
+        )
+
+
+def test_no_fallback_attempt_starts_once_the_budget_is_gone():
+    """Each attempt got the *whole* per-call budget, so a chain could run N times over.
+
+    The chain only sees `timeout_ms`, not the request deadline, so it has to police the
+    budget itself. Without that, three providers each got the full allowance and a single
+    reader call could outlive the request deadline several times over - and a fallback
+    could still be *started* after the caller had already been handed TIMEOUT.
+    """
+    unavailable = ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+    first = _Recording("m1", unavailable)
+    second = _Recording("m2", unavailable)
+    third = _Recording("m3", "{}")
+    chain = FallbackChainProvider(first, [second, third])
+
+    with pytest.raises(ShuntError):
+        chain.complete(system="s", user="u", max_output_tokens=10, timeout_ms=0)
+    assert first.calls == 0, "a chain with no budget must not call anyone"
+
+    # With a budget, each attempt gets what is *left*, never the full allowance again.
+    first = _Recording("m1", unavailable)
+    second = _Recording("m2", "{}")
+    chain = FallbackChainProvider(first, [second])
+    chain.complete(system="s", user="u", max_output_tokens=10, timeout_ms=1000)
+    assert first.timeouts[0] <= 1000
+    assert second.timeouts[0] <= first.timeouts[0]
+
+
+def test_the_chain_reports_every_attempt_it_started():
+    """A fallback that took three tries billed three calls; the envelope said one."""
+    unavailable = ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+    chain = FallbackChainProvider(
+        _Recording("m1", unavailable), [_Recording("m2", unavailable), _Recording("m3", "{}")]
+    )
+    response = chain.complete(system="s", user="u", max_output_tokens=10, timeout_ms=5000)
+    assert response.fallback_used is True
+    assert response.attempts == 3

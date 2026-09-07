@@ -815,13 +815,24 @@ function omissionSelector(selector: Record<string, unknown>): Record<string, unk
  * same bridge is reused with a different requested target, which is the normal case for a
  * host that owns its own routing.
  */
+/**
+ * Assemble the configured provider, including the availability-only fallback chain.
+ *
+ * `overrides` replaces the *primary* target only, for a host whose own configuration
+ * takes precedence over the plugin's. The fallback chain is not overridable that way,
+ * because a host with such a block has no equivalent for the chain.
+ */
 export function buildProvider(
   config: Config,
   call: HostBridgeCall,
   fallbackCalls: Record<string, HostBridgeCall> = {},
+  overrides: { model?: string; provider?: string } = {},
 ): ReaderProvider {
   const primary = new HostBridgeProvider(
-    call, config.limits, config.readerModel, config.readerProvider,
+    call,
+    config.limits,
+    overrides.model ?? config.readerModel,
+    overrides.provider ?? config.readerProvider,
   );
   if (config.readerFallbackChain.length === 0) return primary;
   const alternatives = config.readerFallbackChain.map((ref: ProviderRef) =>

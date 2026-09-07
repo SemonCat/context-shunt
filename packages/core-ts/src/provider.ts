@@ -57,6 +57,12 @@ export interface ModelResponse {
   readonly providerConfirmsGeneration: boolean;
   readonly usage: Usage;
   readonly fallbackUsed: boolean;
+  /**
+   * How many provider attempts this response cost. More than one only when an
+   * availability fallback advanced: every attempt reached a provider and was billed, so
+   * counting just the winner understated real spend.
+   */
+  readonly attempts?: number;
 }
 
 export function responseAttribution(
@@ -259,13 +265,30 @@ export class FallbackChainProvider implements ReaderProvider {
     return providerTargetOf(this.chain[0] as ReaderProvider);
   }
 
+  /**
+   * Try each target in turn, inside *one* shared budget.
+   *
+   * The chain sees `timeoutMs`, not the request deadline, so it has to police the budget
+   * itself. It used to hand the *whole* allowance to every attempt, so a chain of three
+   * could run three times over the caller's budget - and could still start a fallback
+   * after the caller had already been handed `TIMEOUT`. Each attempt now gets only what
+   * is left, and an exhausted budget stops the chain rather than starting another call.
+   */
   async complete(opts: CompleteOptions): Promise<ModelResponse> {
     let last: unknown;
+    const started = Date.now();
+    let attempts = 0;
     for (let index = 0; index < this.chain.length; index += 1) {
       const provider = this.chain[index] as ReaderProvider;
+      const remainingMs = opts.timeoutMs - (Date.now() - started);
+      if (remainingMs <= 0) {
+        // Out of budget. Never start another provider call the caller cannot use.
+        throw last ?? new ShuntError("TIMEOUT", "MODEL_CALL", true);
+      }
       let response: ModelResponse;
       try {
-        response = await provider.complete(opts);
+        attempts += 1;
+        response = await provider.complete({ ...opts, timeoutMs: remainingMs });
       } catch (err) {
         last = err;
         const availability = err instanceof ShuntError && isAvailabilityFailure(err);
@@ -273,9 +296,10 @@ export class FallbackChainProvider implements ReaderProvider {
         continue;
       }
       if (index === 0) return response;
-      // Every attempt keeps its own reported provenance and usage; the only thing the
-      // chain adds is the fact that a fallback was needed.
-      return { ...response, fallbackUsed: true };
+      // Every attempt keeps its own reported provenance and usage; what the chain adds is
+      // that a fallback was needed and how many attempts it took - each one reached a
+      // provider and was billed.
+      return { ...response, fallbackUsed: true, attempts };
     }
     throw last ?? new ShuntError("MODEL_ERROR", "NO_PROVIDER", false);
   }

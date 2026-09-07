@@ -595,3 +595,74 @@ describe("Suma post-tool mode is fail-closed on this host", () => {
     expect(outcome?.envelope?.answer).toBe("");
   });
 });
+
+// -- the documented fallback chain is actually wired ------------------------
+
+describe("availability fallback chain", () => {
+  /**
+   * `reader.fallback_chain` parsed, validated and documented - and did nothing. Both
+   * adapters built a bare `HostBridgeProvider`, so a deployment that configured an
+   * availability fallback silently had none: the first unavailable provider ended the
+   * request.
+   */
+  it("advances to the configured fallback when the primary is unavailable", async () => {
+    const dir = workspace();
+    const path = join(dir, "ws", "conf.txt");
+    writeFileSync(path, "max_retries = 3\nbackoff = fixed\n");
+
+    const attempted: string[] = [];
+    const f = fakeApi();
+    f.api.pluginConfig = {
+      workspace_roots: [join(dir, "ws")],
+      spill_dir: join(dir, "cache"),
+      reader: { model: READER_MODEL, fallback_chain: [{ provider: "openai", model: "gpt-5.6-sol" }] },
+    };
+    f.api.runtime.llm.complete = async (opts: any) => {
+      attempted.push(opts.model);
+      if (opts.model.endsWith(READER_MODEL)) {
+        // A retryable availability failure, which is the only fallback trigger.
+        throw new Error("upstream unavailable");
+      }
+      return {
+        text: JSON.stringify({
+          answer: "The retry ceiling is three [c1].",
+          citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "max_retries = 3" }],
+        }),
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        usage: { inputTokens: 12, outputTokens: 8 },
+      };
+    };
+
+    const out = JSON.parse(
+      await new ContextShuntPlugin(f.api).onReaderTool(
+        { question: "What is the retry ceiling?", paths: [path] },
+        { sessionKey: "s1" },
+      ),
+    );
+
+    expect(attempted).toHaveLength(2);
+    expect(attempted[0]).toContain(READER_MODEL);
+    expect(attempted[1]).toContain("gpt-5.6-sol");
+    expect(out.code).toBe("ANSWERED");
+    expect(out.provenance.fallback_used).toBe(true);
+    // Both attempts reached a provider and were billed, so both are accounted for.
+    expect(out.provenance.attempts_started).toBe(2);
+  });
+
+  it("uses no chain when none is configured", async () => {
+    const dir = workspace();
+    const path = join(dir, "ws", "conf.txt");
+    writeFileSync(path, "max_retries = 3\nbackoff = fixed\n");
+    const { api, modelCalls } = configured(dir);
+    const out = JSON.parse(
+      await new ContextShuntPlugin(api).onReaderTool(
+        { question: "What is the retry ceiling?", paths: [path] },
+        { sessionKey: "s1" },
+      ),
+    );
+    expect(out.code).toBe("ANSWERED");
+    expect(modelCalls).toHaveLength(1);
+    expect(out.provenance.fallback_used).toBe(false);
+  });
+});

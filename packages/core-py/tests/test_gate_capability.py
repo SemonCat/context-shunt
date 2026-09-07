@@ -582,3 +582,41 @@ def test_the_manifest_and_the_openclaw_plugin_declare_the_same_tools():
         (REPO / "adapters" / "openclaw" / "openclaw.plugin.json").read_text(encoding="utf-8")
     )
     assert sorted(openclaw["contracts"]["tools"]) == sorted(_declared_tools())
+
+
+# -- the documented fallback chain is actually wired ------------------------
+
+
+def test_the_hermes_adapter_wires_the_configured_fallback_chain(tmp_path):
+    """`reader.fallback_chain` parsed, validated and documented - and did nothing.
+
+    Both adapters built a bare `HostBridgeProvider`, so a deployment that configured an
+    availability fallback silently had none: the first unavailable provider ended the
+    request. The core's `build_provider` has always assembled the chain; nothing called
+    it.
+    """
+    from context_shunt.provider import FallbackChainProvider
+
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["reader"] = {
+        "model": "gpt-5.6-luna",
+        "fallback_chain": [{"provider": "openai", "model": "gpt-5.6-sol"}],
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    session = module._session(session_id="s1")
+    assert isinstance(session._provider, FallbackChainProvider)
+
+
+def test_the_hermes_adapter_keeps_the_host_auxiliary_target_as_the_primary(tmp_path):
+    """The host's `auxiliary.context_shunt_reader` still wins over the plugin default.
+
+    Routing the adapter through `build_provider` must not quietly drop that precedence,
+    which is why the primary target is passed explicitly rather than taken from config.
+    """
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    provider, model = module._reader_target()
+    session = module._session(session_id="s2")
+    assert session._provider.target.model == model
+    assert session._provider.target.provider == provider

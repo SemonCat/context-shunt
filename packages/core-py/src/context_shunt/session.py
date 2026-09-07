@@ -765,6 +765,8 @@ def build_provider(
     call,
     *,
     fallback_calls: dict[str, Any] | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> ReaderProvider:
     """Assemble the configured provider, including an availability-only fallback chain.
 
@@ -772,9 +774,17 @@ def build_provider(
     bridge for that target when the host needs a different callable per target; when it is
     absent the same bridge is reused with a different requested target, which is the
     normal case for a host that owns its own routing.
+
+    ``model`` and ``provider`` override the *primary* target only. Hermes needs this: its
+    canonical reader configuration lives in the host's ``auxiliary.context_shunt_reader``
+    block, which takes precedence over the plugin's own. The fallback chain is not
+    overridable that way, because the host has no equivalent block for it.
     """
     primary = HostBridgeProvider(
-        call, config.limits, config.reader.model, provider=config.reader.provider
+        call,
+        config.limits,
+        config.reader.model if model is None else model,
+        provider=config.reader.provider if provider is None else provider,
     )
     if not config.reader.fallback_chain:
         return primary

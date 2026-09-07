@@ -38,6 +38,7 @@ its own reported provenance and usage so the envelope can say a fallback was use
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -79,6 +80,10 @@ class ModelResponse:
     provider_confirms_generation: bool = False
     usage: Usage = field(default_factory=Usage)
     fallback_used: bool = False
+    #: How many provider attempts this response cost. More than one only when an
+    #: availability fallback advanced: every attempt reached a provider and was billed,
+    #: so counting just the winner understated real spend.
+    attempts: int = 1
 
     def attribution(self) -> tuple[Attribution, Confidence]:
         return classify(
@@ -260,14 +265,30 @@ class FallbackChainProvider:
     def complete(
         self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
     ) -> ModelResponse:
+        """Try each target in turn, inside *one* shared budget.
+
+        The chain sees ``timeout_ms``, not the request deadline, so it has to police the
+        budget itself. It used to hand the *whole* allowance to every attempt, so a chain
+        of three could run three times over the caller's budget - and could still start a
+        fallback after the caller had already been handed ``TIMEOUT``. Each attempt now
+        gets only what is left, and an exhausted budget stops the chain rather than
+        starting another call.
+        """
         last: ShuntError | None = None
+        started = time.monotonic()
+        attempts = 0
         for index, provider in enumerate(self._chain):
+            remaining_ms = timeout_ms - int((time.monotonic() - started) * 1000)
+            if remaining_ms <= 0:
+                # Out of budget. Never start another provider call the caller cannot use.
+                raise last or ShuntError("TIMEOUT", "MODEL_CALL", retryable=True)
             try:
+                attempts += 1
                 response = provider.complete(
                     system=system,
                     user=user,
                     max_output_tokens=max_output_tokens,
-                    timeout_ms=timeout_ms,
+                    timeout_ms=remaining_ms,
                 )
             except ShuntError as exc:
                 last = exc
@@ -276,8 +297,9 @@ class FallbackChainProvider:
                 continue
             if index == 0:
                 return response
-            # Every attempt keeps its own reported provenance and usage; the only thing
-            # the chain adds is the fact that a fallback was needed.
+            # Every attempt keeps its own reported provenance and usage; what the chain
+            # adds is that a fallback was needed and how many attempts it took - each one
+            # reached a provider and was billed.
             return ModelResponse(
                 text=response.text,
                 requested=response.requested,
@@ -286,6 +308,7 @@ class FallbackChainProvider:
                 provider_confirms_generation=response.provider_confirms_generation,
                 usage=response.usage,
                 fallback_used=True,
+                attempts=attempts,
             )
         raise last or ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
 

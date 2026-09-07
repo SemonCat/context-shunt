@@ -660,6 +660,10 @@ export class Reader {
           outcome,
         }, deadline);
         validateModelResponse(response, this.limits);
+        // An availability fallback may have taken several attempts inside this one call,
+        // and every one of them reached a provider and was billed. `calls` was already
+        // incremented once above for the attempt we started.
+        outcome.calls += Math.max(0, (response.attempts ?? 1) - 1);
         outcome.completionBytes += new TextEncoder().encode(response.text).length;
         outcome.usage = mergeUsage(outcome.usage, response.usage);
         if (usageComplete(response.usage)) outcome.usageCompleteCalls += 1;
