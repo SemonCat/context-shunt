@@ -35,6 +35,8 @@ import {
   NO_USAGE,
   type Usage,
   classifyAttribution,
+  mergeUsage,
+  usageComplete,
 } from "./provenance.js";
 
 export const READER_SYSTEM_PROMPT = [
@@ -63,6 +65,12 @@ export interface ModelResponse {
    * counting just the winner understated real spend.
    */
   readonly attempts?: number;
+  /**
+   * How many of those attempts reported complete usage. Carried separately from
+   * `attempts` because the two differ whenever some candidates reported and others did
+   * not, and that difference is exactly what decides whether a total may be called exact.
+   */
+  readonly usageCompleteAttempts?: number;
 }
 
 export function responseAttribution(
@@ -290,12 +298,32 @@ export class FallbackChainProvider implements ReaderProvider {
     let last: unknown;
     const started = Date.now();
     let attempts = 0;
+    // Usage billed by candidates that did not win, and how many of them reported it. A
+    // failed candidate still reached a provider and was still charged, so its counts
+    // belong in the total whether the chain eventually succeeds or eventually gives up.
+    // Keeping only the last error discarded every earlier candidate's evidence.
+    let billed: Usage | undefined;
+    let billedComplete = 0;
+
+    const carry = (usage: unknown): void => {
+      if (!usage || typeof usage !== "object") return;
+      const reported = usage as Usage;
+      billed = billed === undefined ? reported : mergeUsage(billed, reported);
+      if (usageComplete(reported)) billedComplete += 1;
+    };
+    const attach = (err: unknown): void => {
+      if (!(err instanceof ShuntError)) return;
+      carry((err as { billedUsage?: unknown }).billedUsage);
+      err.internalAttempts = attempts;
+      if (billed !== undefined) err.billedUsage = billed;
+      err.usageCompleteAttempts = billedComplete;
+    };
     for (let index = 0; index < this.chain.length; index += 1) {
       // Availability is the only thing this chain rescues. A caller who has cancelled is
       // not waiting for an answer from anyone, so no further attempt may start.
       if (opts.signal?.aborted) {
         const cancelled = new ShuntError("CANCELLED", "MODEL_CALL", false);
-        cancelled.internalAttempts = attempts;
+        attach(cancelled);
         throw cancelled;
       }
       const provider = this.chain[index] as ReaderProvider;
@@ -305,7 +333,7 @@ export class FallbackChainProvider implements ReaderProvider {
         const exhausted = last instanceof ShuntError
           ? last
           : new ShuntError("TIMEOUT", "MODEL_CALL", true);
-        exhausted.internalAttempts = attempts;
+        attach(exhausted);
         throw exhausted;
       }
       let response: ModelResponse;
@@ -314,22 +342,30 @@ export class FallbackChainProvider implements ReaderProvider {
         response = await provider.complete({ ...opts, timeoutMs: remainingMs });
       } catch (err) {
         last = err;
-        // Every candidate reached a provider and was billed, so the count travels on the
-        // failure exactly as it travels on a success. Attaching it only to a returned
-        // response meant an all-failing chain reported one attempt for however many calls
-        // it actually made.
-        if (err instanceof ShuntError) err.internalAttempts = attempts;
+        // Every candidate reached a provider and was billed, so its count *and* whatever
+        // it reported travel on the failure exactly as they travel on a success. Keeping
+        // only the last error threw away every earlier candidate's usage.
+        attach(err);
         const availability = err instanceof ShuntError && isAvailabilityFailure(err);
         if (!availability || index + 1 === this.chain.length) throw err;
         continue;
       }
-      if (index === 0) return response;
-      // Every attempt keeps its own reported provenance and usage; what the chain adds is
-      // that a fallback was needed and how many attempts it took - each one reached a
-      // provider and was billed.
-      return { ...response, fallbackUsed: true, attempts };
+      const winnerComplete = usageComplete(response.usage) ? 1 : 0;
+      if (index === 0 && billed === undefined) return response;
+      // Every attempt keeps its own reported provenance; what the chain adds is that a
+      // fallback was needed, how many attempts it took, and the usage those attempts were
+      // billed - the winner's plus every earlier candidate that reported.
+      return {
+        ...response,
+        fallbackUsed: index > 0,
+        attempts,
+        usageCompleteAttempts: billedComplete + winnerComplete,
+        usage: billed === undefined ? response.usage : mergeUsage(billed, response.usage),
+      };
     }
-    throw last ?? new ShuntError("MODEL_ERROR", "NO_PROVIDER", false);
+    const exhausted = last ?? new ShuntError("MODEL_ERROR", "NO_PROVIDER", false);
+    attach(exhausted);
+    throw exhausted;
   }
 }
 

@@ -1128,9 +1128,12 @@ def test_a_publisher_and_a_sweeper_in_separate_processes_never_lose_a_payload(tm
     """
     root = str(tmp_path / "cache")
     rounds = 120
-    # Two publishers against one sweeper. The window is narrow, so the proof comes from
-    # sustained contention rather than a single pass: with the write-lock coupling removed
-    # this loses a payload, and with it in place it does not.
+    # Two publishers against one sweeper, sustained rather than a single pass. Green-only
+    # evidence, as the docstring above says: removing the write-lock coupling does *not*
+    # make this fail, because the lease is committed before the payload is written. This
+    # comment previously claimed the opposite, which contradicted the docstring it sits
+    # under - the red-to-green proof is
+    # `test_an_orphan_sweep_revalidates_before_it_unlinks`.
     workers = [
         subprocess.Popen(
             [sys.executable, "-c", program.format(src=_src_root()), root, str(rounds), tag],

@@ -24,6 +24,7 @@ import {
   withheldPayloadBaseline,
 } from "../src/accounting.js";
 import { Envelope } from "../src/envelope.js";
+import { ShuntError } from "../src/errors.js";
 import {
   BASELINE_ESTIMATE_METHOD,
   DEFAULT_LIMITS as L,
@@ -382,6 +383,204 @@ describe("provider usage preservation", () => {
 
     expect(result.cost.method).toBe("bytes_div_4");
     expect(result.cost.attemptsUsageComplete).toBe(0);
+  });
+});
+
+describe("mixed-source baseline credit", () => {
+  /**
+   * `baselineFor` summed the bytes of every selected source but folded the per-source
+   * credit results into a single OR, so a second read mixing an already-credited source
+   * with a new one credited both again.
+   */
+  it("credits only the newly withheld source", async () => {
+    const dir = tmp();
+    const s = session(dir);
+    const ws = join(dir, "ws");
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, "one.txt"), Array.from({ length: 2000 }, (_, i) => `one ${i} value`).join("\n"));
+    writeFileSync(join(ws, "two.txt"), Array.from({ length: 3000 }, (_, i) => `two ${i} value`).join("\n"));
+    const first = s.registerPath(join(ws, "one.txt"));
+    const second = s.registerPath(join(ws, "two.txt"));
+
+    const req = (...entries: Array<typeof first>) => {
+      const base = readRequest(first) as Record<string, unknown>;
+      base["sources"] = entries.map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      }));
+      return base;
+    };
+
+    await s.read(req(first));
+    const afterFirst = Number(stats(s).stats!.totals.baseline_credit_tokens);
+    expect(afterFirst).toBeGreaterThan(0);
+
+    await s.read(req(first, second));
+    const afterSecond = Number(stats(s).stats!.totals.baseline_credit_tokens);
+
+    const added = afterSecond - afterFirst;
+    const onlySecond = Math.ceil(second.snapshot.bytesLen / 4);
+    expect(added).toBe(onlySecond);
+  });
+});
+
+describe("usage survives an over-cap bridge reply", () => {
+  it("reports the exact counts the call was billed", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const oversized = new HostBridgeProvider(async () => ({
+      text: "x".repeat(L.maxToolResultBytes + 10),
+      input_tokens: 23,
+      output_tokens: 11,
+      usage_exact: true,
+    }));
+    const result = await new Reader(registry, oversized).answerDetailed("sess", readRequest(entry));
+
+    expect(result.cost.attemptsStarted).toBeGreaterThanOrEqual(1);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(23);
+    expect(result.cost.outputTokens).toBe(11);
+  });
+});
+
+describe("fallback usage completeness", () => {
+  /**
+   * `exact` is a claim about the whole request, not about whichever attempt won.
+   *
+   * A chain whose first candidate failed without reporting usage and whose second
+   * succeeded with exact counts merged that winner's usage into an empty accumulator, so
+   * `readerCostOf` saw a complete `Usage` and returned `exact` - while the very same
+   * record said `attemptsUsageComplete: 1` of `attemptsStarted: 2`. Python already
+   * classified this schedule `bytes_div_4`; TypeScript did not.
+   */
+  function chainOf(...bridges: Array<() => Promise<Record<string, unknown>>>) {
+    const [primary, ...rest] = bridges;
+    return new FallbackChainProvider(
+      new HostBridgeProvider(async () => (primary as () => Promise<Record<string, unknown>>)(), L, READER_MODEL, "openai"),
+      rest.map((b, i) => new HostBridgeProvider(async () => b(), L, `fallback-${i}`, "openai")),
+    );
+  }
+
+  const answered = () =>
+    Promise.resolve({
+      text: answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
+      input_tokens: 7,
+      output_tokens: 4,
+      usage_exact: true,
+    });
+
+  it("is not exact when a successful fallback follows an unreported failure", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    let calls = 0;
+    const chain = chainOf(
+      () => {
+        calls += 1;
+        return Promise.reject(new Error("upstream unavailable"));
+      },
+      () => {
+        calls += 1;
+        return answered();
+      },
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+
+    expect(calls).toBe(2);
+    expect(result.cost.attemptsStarted).toBe(2);
+    expect(result.cost.attemptsUsageComplete).toBe(1);
+    expect(result.cost.method).toBe("bytes_div_4");
+  });
+
+  it("is exact only when every started attempt reported", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const chain = chainOf(answered);
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+
+    expect(result.cost.attemptsStarted).toBe(result.cost.attemptsUsageComplete);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(7);
+  });
+
+  /**
+   * A retryable availability failure that still reports what the call was billed.
+   *
+   * This is what makes the chain *advance*: the previous version of this test used an
+   * over-cap reply, which is `INVALID_MODEL_OUTPUT` - not an availability failure - so the
+   * chain stopped at its first candidate and the case never exercised the fallback path it
+   * claimed to cover. `HostBridgeProvider` rethrows a `ShuntError` unchanged, so a bridge
+   * can report "unavailable, and here is what you were charged", which a metered gateway
+   * genuinely can.
+   */
+  function billedUnavailable(inputTokens: number, outputTokens: number) {
+    return async (): Promise<Record<string, unknown>> => {
+      const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+      (err as { billedUsage?: unknown }).billedUsage = {
+        inputTokens,
+        outputTokens,
+        method: "exact",
+      };
+      throw err;
+    };
+  }
+
+  const plainUnavailable = async (): Promise<Record<string, unknown>> => {
+    throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+  };
+
+  /** Drives the public Reader and reports what the providers were actually asked to do. */
+  async function chainRun(
+    first: () => Promise<Record<string, unknown>>,
+    second: () => Promise<Record<string, unknown>>,
+  ) {
+    let calls = 0;
+    const count = (bridge: () => Promise<Record<string, unknown>>) => async () => {
+      calls += 1;
+      return bridge();
+    };
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(count(first), L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(count(second), L, "gpt-5.6-sol", "openai")],
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", readRequest(entry));
+    return { calls, cost: result.cost };
+  }
+
+  it("keeps the exact total when every failed candidate reported its usage", async () => {
+    const { calls, cost } = await chainRun(billedUnavailable(5, 3), billedUnavailable(7, 2));
+
+    // Two candidates, and the reader's one retry: four real provider calls.
+    expect(calls).toBe(4);
+    expect(cost.attemptsStarted).toBe(calls);
+    expect(cost.attemptsUsageComplete).toBe(calls);
+    // Every attempt reported, so the sum of what was billed is exactly known - even though
+    // the request answered nothing.
+    expect(cost.method).toBe("exact");
+    expect(cost.inputTokens).toBe(2 * (5 + 7));
+    expect(cost.outputTokens).toBe(2 * (3 + 2));
+  });
+
+  it("counts the attempts that did report when only some of them did", async () => {
+    const { calls, cost } = await chainRun(billedUnavailable(5, 3), plainUnavailable);
+
+    expect(calls).toBe(4);
+    expect(cost.attemptsStarted).toBe(calls);
+    // One of the two candidates reports, on each of the two outer invocations.
+    expect(cost.attemptsUsageComplete).toBe(2);
+    // A partial tally is never presented as provider truth.
+    expect(cost.method).toBe("bytes_div_4");
+  });
+
+  it("reports a named estimate when no candidate reported anything", async () => {
+    const { calls, cost } = await chainRun(plainUnavailable, plainUnavailable);
+
+    expect(calls).toBe(4);
+    expect(cost.attemptsStarted).toBe(calls);
+    expect(cost.attemptsUsageComplete).toBe(0);
+    expect(cost.method).toBe("bytes_div_4");
   });
 });
 

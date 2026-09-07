@@ -641,7 +641,10 @@ export class Reader {
         outcome.calls += Math.max(0, (response.attempts ?? 1) - 1);
         outcome.completionBytes += new TextEncoder().encode(response.text).length;
         outcome.usage = mergeUsage(outcome.usage, response.usage);
-        if (usageComplete(response.usage)) outcome.usageCompleteCalls += 1;
+        // A composite provider reports how many of its attempts supplied complete usage;
+        // a plain one supplies one attempt, so the winner alone decides.
+        outcome.usageCompleteCalls +=
+          response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
         outcome.attribution = responseAttribution(response);
         outcome.resolved = response.resolved;
         outcome.reported = response.reported;
@@ -665,8 +668,14 @@ export class Reader {
         const billed = (safe as { billedUsage?: unknown }).billedUsage;
         if (billed && typeof billed === "object") {
           outcome.usage = mergeUsage(outcome.usage, billed as Usage);
-          if (usageComplete(billed as Usage)) outcome.usageCompleteCalls += 1;
         }
+        // The same aggregate as the success path: a chain that gave up still reports how
+        // many of its candidates were billed and how many of those said what they cost.
+        const reportedAttempts = (safe as { usageCompleteAttempts?: number })
+          .usageCompleteAttempts;
+        outcome.usageCompleteCalls +=
+          reportedAttempts
+          ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
         // A composite provider may have made several calls inside this one invocation
         // before giving up. `calls` was incremented once above for the invocation; the
         // rest are the ones the chain made and was billed for.

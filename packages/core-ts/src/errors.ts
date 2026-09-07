@@ -52,6 +52,12 @@ export class ShuntError extends Error {
    * travels with it; `1` is assumed when nothing set it.
    */
   internalAttempts?: number;
+  /**
+   * How many of those attempts reported complete usage. Separate from `internalAttempts`
+   * because the two differ whenever some candidates reported and others did not, and that
+   * difference is what decides whether a total may be called exact.
+   */
+  usageCompleteAttempts?: number;
 
   constructor(code: string, detail?: string, retryable?: boolean) {
     if (!(code in SAFE_MESSAGES)) throw new Error(`unknown error code: ${code}`);
