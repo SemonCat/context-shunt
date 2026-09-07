@@ -249,7 +249,17 @@ def classify(
 
     # `ACTUAL` is a claim about which *model* generated the tokens, so a confirmation
     # that names only a provider cannot earn it - `known` is true for either half alone.
-    if provider_confirms_generation and reported.identifies_model:
+    # It also requires the reported id to *be* the requested one. A decorated variant
+    # (`luna-2`, `luna-2026-05-01`) is not a contradiction - a build stamp really is the
+    # same model - but nothing establishes that it is either: no provider-authoritative
+    # alias contract says `name` and `name-2` name one model, and a provider may use
+    # numeric names for genuinely different ones. Certifying that as `actual` would
+    # falsely prove model-specific routing, so it falls to the weaker truthful label.
+    if (
+        provider_confirms_generation
+        and reported.identifies_model
+        and _model_is_the_same(requested.model, reported.model)
+    ):
         return Attribution.ACTUAL, Confidence.HIGH
     if resolved.known:
         return Attribution.RESOLVED, Confidence.MEDIUM
@@ -293,6 +303,18 @@ def _model_agrees(requested: str, observed: str) -> bool:
     if not longer.startswith(f"{shorter}-"):
         return False
     return bool(_DECORATION.match(longer[len(shorter) + 1 :]))
+
+
+def _model_is_the_same(requested: str | None, observed: str | None) -> bool:
+    """Identity, not resemblance: the same id once a namespace and case are normalized.
+
+    ``_model_agrees`` is deliberately broader, because its job is to decide what counts as
+    a *contradiction*. This one decides what counts as proof, which is a higher bar.
+    """
+    if not requested or not observed:
+        # Nothing specific was asked for, so a reported model cannot disagree with it.
+        return True
+    return _bare_model(requested) == _bare_model(observed)
 
 
 def _bare_model(ref: str) -> str:

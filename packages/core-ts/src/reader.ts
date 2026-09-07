@@ -111,6 +111,21 @@ const MOVED_TO_ENVELOPE = [
 ] as const;
 
 /**
+ * Accept the pre-1.1 third argument as well as the options bag.
+ *
+ * The old entry point took a `Deadline` positionally. A `Deadline` has a `signal`, so the
+ * options bag silently accepted one as "no deadline given, but here is a signal" - the
+ * cancellation propagated while the *budget* was dropped, and the request quietly ran to
+ * the request-level default instead of the caller's. Recognising a `Deadline` here keeps
+ * the legacy call shape working with the budget it actually carries.
+ */
+function answerOptions(
+  opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } | Deadline,
+): { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } {
+  return opts instanceof Deadline ? { deadline: opts } : opts;
+}
+
+/**
  * Attach the loud-failure getters. Non-enumerable, so the object still serialises,
  * spreads and deep-equals exactly as the plain record it was before.
  */
@@ -167,7 +182,7 @@ export class Reader {
   async answerEnvelope(
     sessionId: string,
     request: unknown,
-    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
+    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } | Deadline = {},
   ): Promise<Envelope> {
     return (await this.answer(sessionId, request, opts)).envelope;
   }
@@ -175,9 +190,9 @@ export class Reader {
   async answer(
     sessionId: string,
     request: unknown,
-    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
+    opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } | Deadline = {},
   ): Promise<ReaderResult> {
-    return withEnvelopeCompat(await this.answerInner(sessionId, request, opts));
+    return withEnvelopeCompat(await this.answerInner(sessionId, request, answerOptions(opts)));
   }
 
   private async answerInner(

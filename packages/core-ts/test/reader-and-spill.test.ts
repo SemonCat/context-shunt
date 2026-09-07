@@ -839,25 +839,27 @@ describe("attribution identity", () => {
    * a numeric revision is decoration; an alphabetic suffix names a *different* model
    * (`gpt-4` and `gpt-4-turbo` are not the same model either).
    */
-  for (const [observed, agrees] of [
-    ["gpt-5.6-luna", true],
-    ["openai/gpt-5.6-luna", true],
-    ["GPT-5.6-Luna", true],
-    ["gpt-5.6-luna-2026-05-01", true],
-    ["gpt-5.6-luna-2", true],
-    ["gpt-5.6-luna-evil", false],
-    ["gpt-5.6-luna-uncensored", false],
-    ["gpt-5.6-lunatic", false],
-    ["gpt-5.6-sol", false],
+  // `actual` needs the requested id itself; a decorated variant is neither certified nor
+  // contradicted, because nothing establishes that `luna` and `luna-2` are one model.
+  for (const [observed, expected] of [
+    ["gpt-5.6-luna", "actual"],
+    ["openai/gpt-5.6-luna", "actual"],
+    ["GPT-5.6-Luna", "actual"],
+    ["gpt-5.6-luna-2026-05-01", "unverified"],
+    ["gpt-5.6-luna-2", "unverified"],
+    ["gpt-5.6-luna-evil", "mismatch"],
+    ["gpt-5.6-luna-uncensored", "mismatch"],
+    ["gpt-5.6-lunatic", "mismatch"],
+    ["gpt-5.6-sol", "mismatch"],
   ] as const) {
-    it(`${agrees ? "accepts" : "rejects"} ${observed}`, () => {
+    it(`classifies ${observed} as ${expected}`, () => {
       const { status } = classifyAttribution({
         requested: { provider: "openai", model: "gpt-5.6-luna" },
         resolved: {},
         reported: { provider: "openai", model: observed },
         providerConfirmsGeneration: true,
       });
-      expect(status).toBe(agrees ? "actual" : "mismatch");
+      expect(status).toBe(expected);
     });
   }
 
@@ -908,5 +910,42 @@ describe("reader api compatibility", () => {
     // And the explicit overload returns exactly the envelope.
     const envelope = await reader.answerEnvelope("sess", request(entry));
     expect(envelope.status).toBe(result.envelope.status);
+  });
+});
+
+// -- legacy call shapes must still enforce the budget they carry --------------
+
+describe("legacy reader call compatibility", () => {
+  /**
+   * The pre-1.1 entry point took a `Deadline` in the third position. It is still
+   * *structurally* accepted, because a `Deadline` has a `signal` and the options bag
+   * treats a stray object as "no deadline given" - so its remaining-time budget was
+   * silently ignored and the request ran to the request-level default instead.
+   */
+  it("honours a Deadline passed in the legacy third position", async () => {
+    const clock = new FakeClock();
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const slow: any = {
+      async complete() {
+        clock.advance(200);
+        return {
+          text: answerJson("max_retries is three [c1]", [
+            { id: "c1", line_start: 2, line_end: 2, quote: "max_retries" },
+          ]),
+          model: READER_MODEL,
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    };
+    // A 100 ms budget against a provider that consumes 200 ms.
+    const budget = Deadline.start(clock, 100);
+    const result = await new Reader(registry, slow, undefined, clock).answer(
+      "sess",
+      request(entry),
+      budget as unknown as { deadline?: Deadline },
+    );
+    expect(result.envelope.status).toBe("error");
+    expect(result.envelope.code).toBe("TIMEOUT");
   });
 });

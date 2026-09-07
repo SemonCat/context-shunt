@@ -484,3 +484,60 @@ def test_the_chain_reports_every_attempt_it_started():
     response = chain.complete(system="s", user="u", max_output_tokens=10, timeout_ms=5000)
     assert response.fallback_used is True
     assert response.attempts == 3
+
+
+def test_a_reader_result_still_serializes_like_the_envelope_it_replaced(tmp_path):
+    """`Mapping` restored subscripting, but not everything a dict was used for.
+
+    `Reader.answer` used to return the envelope dict, so call sites passed it straight to
+    `json.dumps` or to anything expecting a real `dict`. A `Mapping` is not JSON
+    serializable and is not a `dict`, so those call sites still broke - the compatibility
+    was partial.
+    """
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    luna = FakeLuna(default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]))
+    result = Reader(registry, luna).answer("sess", _request(entry))
+
+    # The shape a pre-1.1 caller would have serialized.
+    assert json.loads(json.dumps(result)) == result.envelope
+    assert dict(result) == result.envelope
+    # And it still behaves as the record it is.
+    assert result.envelope["status"] == result["status"]
+
+
+def test_a_decorated_model_id_is_not_certified_as_the_same_model():
+    """No alias contract says `luna` and `luna-2` are the same model.
+
+    Decoration was allowed to establish the *strongest* label, so a provider that answered
+    with `luna-2` was certified `actual/high` against a request for `luna`. A provider is
+    free to use numeric names for genuinely different models, so this could falsely certify
+    model-specific routing. It is equally wrong to call it a contradiction - a build date
+    really is the same model - so a decorated match is neither `actual` nor `mismatch`: it
+    is the weaker truthful label.
+    """
+    from context_shunt.provenance import Attribution, ModelIdentity, classify
+
+    requested = ModelIdentity(provider="openai", model="gpt-5.6-luna")
+
+    def status(observed: str) -> Attribution:
+        return classify(
+            requested=requested,
+            resolved=ModelIdentity(),
+            reported=ModelIdentity(provider="openai", model=observed),
+            provider_confirms_generation=True,
+        )[0]
+
+    # Exactly the requested model, however it is decorated by a namespace or case.
+    assert status("gpt-5.6-luna") is Attribution.ACTUAL
+    assert status("openai/gpt-5.6-luna") is Attribution.ACTUAL
+    assert status("GPT-5.6-Luna") is Attribution.ACTUAL
+
+    # Plausibly the same model, but nothing establishes it. Not certified, not contradicted.
+    for decorated in ("gpt-5.6-luna-2", "gpt-5.6-luna-2026-05-01"):
+        assert status(decorated) is not Attribution.ACTUAL, decorated
+        assert status(decorated) is not Attribution.MISMATCH, decorated
+
+    # A different model is still a contradiction.
+    assert status("gpt-5.6-luna-evil") is Attribution.MISMATCH
+    assert status("gpt-5.6-sol") is Attribution.MISMATCH

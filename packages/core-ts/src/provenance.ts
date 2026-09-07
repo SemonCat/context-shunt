@@ -230,6 +230,18 @@ function modelAgrees(requested: string, observed: string): boolean {
   return DECORATION.test(longer.slice(shorter.length + 1));
 }
 
+/**
+ * Identity, not resemblance: the same id once a namespace and case are normalized.
+ *
+ * `modelAgrees` is deliberately broader, because its job is to decide what counts as a
+ * *contradiction*. This one decides what counts as proof, which is a higher bar.
+ */
+function modelIsTheSame(requested?: string, observed?: string): boolean {
+  // Nothing specific was asked for, so a reported model cannot disagree with it.
+  if (!requested || !observed) return true;
+  return bareModel(requested) === bareModel(observed);
+}
+
 function contradicts(requested: ModelIdentity, observed: ModelIdentity): boolean {
   if (requested.model && observed.model && !modelAgrees(requested.model, observed.model)) {
     return true;
@@ -270,7 +282,17 @@ export function classifyAttribution(
   }
   // `actual` is a claim about which *model* generated the tokens, so a confirmation that
   // names only a provider cannot earn it - `identityKnown` is true for either half alone.
-  if (input.providerConfirmsGeneration && Boolean(input.reported.model)) {
+  // It also requires the reported id to *be* the requested one. A decorated variant
+  // (`luna-2`, `luna-2026-05-01`) is not a contradiction - a build stamp really is the
+  // same model - but nothing establishes that it is either: no provider-authoritative
+  // alias contract says `name` and `name-2` name one model, and a provider may use numeric
+  // names for genuinely different ones. Certifying that as `actual` would falsely prove
+  // model-specific routing, so it falls to the weaker truthful label.
+  if (
+    input.providerConfirmsGeneration
+    && Boolean(input.reported.model)
+    && modelIsTheSame(input.requested.model, input.reported.model)
+  ) {
     return { status: "actual", confidence: "high" };
   }
   if (resolvedKnown) return { status: "resolved", confidence: "medium" };

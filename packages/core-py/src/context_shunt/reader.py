@@ -38,7 +38,6 @@ import queue
 import re
 import threading
 import time
-from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -126,13 +125,14 @@ class _CostSink:
 
 
 @dataclass
-class ReaderResult(Mapping[str, Any]):
+class ReaderResult(dict):
     """What the session needs to finish the operation: an envelope plus its true cost.
 
-    Also a read-only :class:`Mapping` over ``envelope``. ``Reader.answer`` used to return
-    the envelope dict itself, and the 1.1 revision changed it to this record without an
-    overload, so every ``answer(...)["status"]`` call site broke. Subscripting is
-    therefore delegated to the envelope, which keeps the published API working:
+    Also a ``dict`` carrying the envelope. ``Reader.answer`` used to return the envelope
+    dict itself, and the 1.1 revision changed it to this record without an overload, so
+    every ``answer(...)["status"]`` call site broke. A ``Mapping`` restored subscripting
+    but not the rest: ``json.dumps`` still raised, and code requiring a real ``dict`` still
+    failed. Subclassing ``dict`` keeps the whole published API working:
 
         result["status"]      -> the envelope's status  (the pre-1.1 shape)
         result.envelope       -> the same dict, explicitly
@@ -149,15 +149,13 @@ class ReaderResult(Mapping[str, Any]):
     cost: ReaderCost
     source_ids: tuple[str, ...] = ()
 
-    # -- Mapping over the envelope, for pre-1.1 callers ---------------------
-    def __getitem__(self, key: str) -> Any:
-        return self.envelope[key]
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.envelope)
-
-    def __len__(self) -> int:
-        return len(self.envelope)
+    def __post_init__(self) -> None:
+        # Carry the envelope's own contents, so a pre-1.1 caller can subscript it, pass it
+        # to `json.dumps`, hand it to something that requires a real `dict`, or compare it
+        # against an expected envelope - all of which a `Mapping` refused. The envelope
+        # stays the authority; this is a snapshot of it taken at construction, and an
+        # envelope is never mutated after it is built.
+        dict.update(self, self.envelope)
 
 
 class _InputTokenBudget:
