@@ -980,3 +980,25 @@ describe("legacy Reader.answer contract", () => {
     expect(detailed.envelope.status).toBeTypeOf("string");
   });
 });
+
+describe("all-fallback failure accounting", () => {
+  it("reports every attempt the chain actually made", async () => {
+    let calls = 0;
+    const dead = async () => {
+      calls += 1;
+      throw new Error("upstream unavailable");
+    };
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const chain = new FallbackChainProvider(
+      new HostBridgeProvider(dead, L, READER_MODEL, "openai"),
+      [new HostBridgeProvider(dead, L, "gpt-5.6-sol", "openai")],
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", request(entry));
+
+    expect(calls).toBeGreaterThan(0);
+    expect(result.cost.attemptsStarted).toBe(calls);
+    expect(result.cost.attemptsUsageComplete).toBe(0);
+    expect(result.cost.method).not.toBe("exact");
+  });
+});

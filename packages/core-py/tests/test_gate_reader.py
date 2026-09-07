@@ -576,3 +576,34 @@ def test_a_partial_fallback_usage_is_not_labelled_exact():
     )
     assert partial.method is not TokenMethod.EXACT
     assert partial.attempts_started == 2 and partial.attempts_usage_complete == 1
+
+
+def test_a_chain_that_fails_everywhere_still_reports_every_attempt(tmp_path):
+    """Attempts were attached to a successful response only.
+
+    The chain counts its internal attempts and puts the total on the `ModelResponse` it
+    returns - so when *every* candidate fails it rethrows the last error and the count
+    goes with it. The reader then counts one outer invocation per retry and nothing else,
+    so a two-provider chain under the reader's one retry made four real provider calls and
+    reported two. Every one of those calls reached a provider and was billed.
+    """
+    from context_shunt.provider import FallbackChainProvider
+
+    calls = {"n": 0}
+
+    def dead(**_kwargs):
+        calls["n"] += 1
+        raise RuntimeError("upstream unavailable")
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    chain = FallbackChainProvider(HostBridgeProvider(dead), [HostBridgeProvider(dead)])
+    result = Reader(registry, chain).answer("sess", _request(entry))
+
+    assert calls["n"] > 0
+    assert result.cost.attempts_started == calls["n"], (
+        f"{calls['n']} provider calls happened, {result.cost.attempts_started} reported"
+    )
+    # Nothing reported usage, so nothing may claim to have measured it.
+    assert result.cost.attempts_usage_complete == 0
+    assert result.cost.method is not TokenMethod.EXACT

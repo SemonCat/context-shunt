@@ -312,6 +312,7 @@ class FallbackChainProvider:
         starting another call.
         """
         last: ShuntError | None = None
+        billed_usage: Usage | None = None
         started = time.monotonic()
         attempts = 0
         for index, provider in enumerate(self._chain):
@@ -319,11 +320,15 @@ class FallbackChainProvider:
             # cancelled is not waiting for an answer from anyone, so no further attempt
             # may start.
             if deadline is not None and getattr(deadline, "cancelled", False):
-                raise ShuntError("CANCELLED", "MODEL_CALL", retryable=False)
+                cancelled = ShuntError("CANCELLED", "MODEL_CALL", retryable=False)
+                cancelled.internal_attempts = attempts
+                raise cancelled
             remaining_ms = timeout_ms - int((time.monotonic() - started) * 1000)
             if remaining_ms <= 0:
                 # Out of budget. Never start another provider call the caller cannot use.
-                raise last or ShuntError("TIMEOUT", "MODEL_CALL", retryable=True)
+                exhausted = last or ShuntError("TIMEOUT", "MODEL_CALL", retryable=True)
+                exhausted.internal_attempts = attempts
+                raise exhausted
             try:
                 attempts += 1
                 response = provider.complete(
@@ -335,7 +340,16 @@ class FallbackChainProvider:
                 )
             except ShuntError as exc:
                 last = exc
+                # Every candidate reached a provider and was billed, so the count travels
+                # on the failure exactly as it travels on a success. Attaching it only to
+                # a returned response meant an all-failing chain reported one attempt for
+                # however many calls it actually made.
+                exc.internal_attempts = attempts
+                if billed := getattr(exc, "billed_usage", None):
+                    billed_usage = billed_usage.merge(billed) if billed_usage else billed
                 if not _is_availability_failure(exc) or index + 1 == len(self._chain):
+                    if billed_usage is not None:
+                        exc.billed_usage = billed_usage
                     raise
                 continue
             if index == 0:

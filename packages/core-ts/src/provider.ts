@@ -293,12 +293,20 @@ export class FallbackChainProvider implements ReaderProvider {
     for (let index = 0; index < this.chain.length; index += 1) {
       // Availability is the only thing this chain rescues. A caller who has cancelled is
       // not waiting for an answer from anyone, so no further attempt may start.
-      if (opts.signal?.aborted) throw new ShuntError("CANCELLED", "MODEL_CALL", false);
+      if (opts.signal?.aborted) {
+        const cancelled = new ShuntError("CANCELLED", "MODEL_CALL", false);
+        cancelled.internalAttempts = attempts;
+        throw cancelled;
+      }
       const provider = this.chain[index] as ReaderProvider;
       const remainingMs = opts.timeoutMs - (Date.now() - started);
       if (remainingMs <= 0) {
         // Out of budget. Never start another provider call the caller cannot use.
-        throw last ?? new ShuntError("TIMEOUT", "MODEL_CALL", true);
+        const exhausted = last instanceof ShuntError
+          ? last
+          : new ShuntError("TIMEOUT", "MODEL_CALL", true);
+        exhausted.internalAttempts = attempts;
+        throw exhausted;
       }
       let response: ModelResponse;
       try {
@@ -306,6 +314,11 @@ export class FallbackChainProvider implements ReaderProvider {
         response = await provider.complete({ ...opts, timeoutMs: remainingMs });
       } catch (err) {
         last = err;
+        // Every candidate reached a provider and was billed, so the count travels on the
+        // failure exactly as it travels on a success. Attaching it only to a returned
+        // response meant an all-failing chain reported one attempt for however many calls
+        // it actually made.
+        if (err instanceof ShuntError) err.internalAttempts = attempts;
         const availability = err instanceof ShuntError && isAvailabilityFailure(err);
         if (!availability || index + 1 === this.chain.length) throw err;
         continue;

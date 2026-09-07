@@ -46,10 +46,14 @@ class ShuntError(Exception):
     #: there was one. A rejected *reply* is still a paid *call*, so the counts travel with
     #: the error rather than being discarded with the text. Never carries prompt or reply
     #: content - only token counts - so it cannot widen what an error may reveal.
-    __slots__ = ("billed_usage", "code", "detail", "retryable")
+    #: How many provider attempts the failing operation actually made, when a composite
+    #: provider made more than one. A failure is as billable as a success, so the count
+    #: travels with it; ``1`` is assumed when nothing set it.
+    __slots__ = ("billed_usage", "code", "detail", "internal_attempts", "retryable")
 
     def __init__(self, code: str, detail: str | None = None, retryable: bool | None = None):
         self.billed_usage: Any | None = None
+        self.internal_attempts: int = 1
         if code not in SAFE_MESSAGES:
             raise ValueError(f"unknown error code: {code}")
         if detail is not None and not _is_safe_detail(detail):

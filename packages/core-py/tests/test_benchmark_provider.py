@@ -195,9 +195,18 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
     p95 = latencies[min(len(latencies) - 1, int(round(0.95 * (len(latencies) - 1))))]
 
     # Which token columns the host actually filled in, as a fact about the route.
-    reported = [s for s in samples if s["attempts_usage_complete"] > 0]
-    usage_exposed = len(reported) == len(samples) and all(
-        s["input_tokens"] is not None for s in reported
+    #
+    # "Exposed" has to mean *every started attempt* reported, not "at least one did per
+    # sample". A retry or a fallback that failed silently and then succeeded leaves a
+    # sample with one usage-complete attempt out of two: the reader correctly labels that
+    # total `bytes_div_4`, but the benchmark called the route host-exposed and published
+    # the estimate under `input_tokens_total` with the unmeasured reason cleared. That
+    # presents a partly-estimated number as a measurement.
+    usage_exposed = (
+        len(samples) > 0
+        and all(s["attempts_usage_complete"] == s["attempts_started"] for s in samples)
+        and all(s["input_tokens"] is not None for s in samples)
+        and all(s["token_method"] == TokenMethod.EXACT.value for s in samples)
     )
 
     report = {
@@ -216,7 +225,17 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
             sum(s["output_tokens"] for s in samples) if usage_exposed else None
         ),
         "token_cost_unmeasured_reason": (
-            None if usage_exposed else "host route reports no usage; absence is not zero"
+            None
+            if usage_exposed
+            else (
+                "not every started attempt reported usage; the totals below are this "
+                "core's own byte estimate, and absence is not zero"
+            )
+        ),
+        # The evidence behind that classification, so a reader can check it rather than
+        # trust the flag.
+        "attempts_missing_usage": sum(
+            s["attempts_started"] - s["attempts_usage_complete"] for s in samples
         ),
         # The host-reported totals above stay null. These are this core's own byte-based
         # estimate, carried separately and with its method attached, so a reader of the
@@ -275,3 +294,39 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         else:
             assert isinstance(sample["input_tokens"], int), report
             assert sample["token_method"] == TokenMethod.EXACT.value, report
+
+
+def test_a_partly_reported_route_is_not_called_host_exposed():
+    """`usage_exposed_by_host` must mean every started attempt reported.
+
+    A sample with one usage-complete attempt out of two - a silent failure followed by an
+    exact success - satisfied the old rule, so the benchmark published this core's byte
+    estimate as `input_tokens_total` under the host-exposed label with the unmeasured
+    reason cleared. The reader had already labelled that same total `bytes_div_4`.
+    """
+    from context_shunt.provenance import TokenMethod as TM
+
+    def sample(started: int, complete: int, method: str, tokens: int | None = 10) -> dict:
+        return {
+            "attempts_started": started,
+            "attempts_usage_complete": complete,
+            "token_method": method,
+            "input_tokens": tokens,
+            "output_tokens": tokens,
+        }
+
+    def exposed(samples: list[dict]) -> bool:
+        return (
+            len(samples) > 0
+            and all(s["attempts_usage_complete"] == s["attempts_started"] for s in samples)
+            and all(s["input_tokens"] is not None for s in samples)
+            and all(s["token_method"] == TM.EXACT.value for s in samples)
+        )
+
+    assert exposed([sample(1, 1, TM.EXACT.value), sample(2, 2, TM.EXACT.value)]) is True
+    # One attempt of two reported: partly estimated, so not host-exposed.
+    assert exposed([sample(2, 1, TM.BYTES_DIV_4.value)]) is False
+    # Reported nothing at all.
+    assert exposed([sample(1, 0, TM.BYTES_DIV_4.value, None)]) is False
+    # Mixed across samples is still not exposed.
+    assert exposed([sample(1, 1, TM.EXACT.value), sample(2, 1, TM.BYTES_DIV_4.value)]) is False

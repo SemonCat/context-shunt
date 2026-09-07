@@ -667,6 +667,11 @@ export class Reader {
           outcome.usage = mergeUsage(outcome.usage, billed as Usage);
           if (usageComplete(billed as Usage)) outcome.usageCompleteCalls += 1;
         }
+        // A composite provider may have made several calls inside this one invocation
+        // before giving up. `calls` was incremented once above for the invocation; the
+        // rest are the ones the chain made and was billed for.
+        const internal = (safe as { internalAttempts?: number }).internalAttempts ?? 1;
+        outcome.calls += Math.max(0, internal - 1);
         if (
           safe.code === "MODEL_ERROR"
           && safe.retryable

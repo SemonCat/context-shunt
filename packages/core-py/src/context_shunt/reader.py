@@ -703,6 +703,10 @@ class Reader:
                     outcome.usage = outcome.usage.merge(billed)
                     if billed.complete:
                         outcome.usage_complete_calls += 1
+                # A composite provider may have made several calls inside this one
+                # invocation before giving up. `calls` was incremented once above for the
+                # invocation; the rest are the ones the chain made and was billed for.
+                outcome.calls += max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
                 if (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable

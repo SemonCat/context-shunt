@@ -46,6 +46,12 @@ export class ShuntError extends Error {
    * content - only token counts - so it cannot widen what an error may reveal.
    */
   billedUsage?: unknown;
+  /**
+   * How many provider attempts the failing operation actually made, when a composite
+   * provider made more than one. A failure is as billable as a success, so the count
+   * travels with it; `1` is assumed when nothing set it.
+   */
+  internalAttempts?: number;
 
   constructor(code: string, detail?: string, retryable?: boolean) {
     if (!(code in SAFE_MESSAGES)) throw new Error(`unknown error code: ${code}`);
