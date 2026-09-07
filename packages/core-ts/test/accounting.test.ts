@@ -31,10 +31,15 @@ import {
 } from "../src/limits.js";
 import { ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError } from "../src/metrics.js";
 import { transientProviderError } from "../src/provider.js";
+import { Reader } from "../src/reader.js";
+import { makeRegistry } from "./support.js";
+import { snapshotBytes } from "../src/snapshot.js";
 import { ShuntSession } from "../src/session.js";
 import { FakeLuna, answerJson, makeCapability, makeConfig } from "./support.js";
 
 const CANARY = "ACCOUNTING-CANARY-51ee7a";
+
+const enc = (t: string) => new TextEncoder().encode(t);
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "shunt-acct-"));
@@ -342,5 +347,39 @@ describe("metric labels", () => {
     // An allowed key still refuses a value that is not a bounded token.
     expect(() => metrics.count("gate_decision", { reason: "path /tmp/secret with spaces" }))
       .toThrowError(MetricsError);
+  });
+});
+
+// -- exact provider usage must survive, and a late call must still be billed --
+
+describe("provider usage preservation", () => {
+  /**
+   * `ChunkOutcome.usage` started at `NO_USAGE`, whose method is `unknown` - correct for a
+   * bridge that reported no counts, wrong for an empty accumulator. `unknown + exact` is
+   * `unknown`, so the provider's exact counts were merged away and every request fell
+   * back to the byte estimate.
+   */
+  it("keeps exact provider counts instead of falling back to the estimate", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const luna = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
+    const result = await new Reader(registry, luna).answer("sess", readRequest(entry));
+
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.attemptsStarted).toBe(1);
+    expect(result.cost.attemptsUsageComplete).toBe(1);
+    expect(result.cost.inputTokens).toBe(10);
+    expect(result.cost.outputTokens).toBe(5);
+  });
+
+  it("still reports a named estimate when the bridge reports nothing", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const silent = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
+    silent.usageExact = false;
+    const result = await new Reader(registry, silent).answer("sess", readRequest(entry));
+
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.attemptsUsageComplete).toBe(0);
   });
 });

@@ -188,12 +188,18 @@ export class Reader {
     const requestId = readRequestId(request);
     const requestedDeadline = readRequestedDeadline(request, this.limits.requestDeadlineMs);
     const budget = opts.deadline ?? Deadline.start(this.clock, requestedDeadline, opts.signal);
+    // Model calls are billed the moment they complete, but the request budget is checked
+    // again at PUBLISH. A request that ran its calls and then ran out of time used to
+    // report `noReaderCost()` - "no attempt was made" - so real spend vanished from the
+    // session's accounting and every savings figure derived from it was overstated.
+    // Whatever was actually spent before the failure is carried out.
+    const spent: { cost: ReaderCost } = { cost: noReaderCost() };
     try {
-      return await this.run(sessionId, request, requestId, budget, opts.accountingId);
+      return await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
     } catch (err) {
       if (!isShuntError(err)) throw err;
       this.metrics.count("reader_error", { code: err.code });
-      const provenance = this.failureProvenance(err);
+      const provenance = this.failureProvenance(err, spent.cost.attemptsStarted);
       const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
         provenance,
         handlesValid: handlesSurvive(err),
@@ -202,7 +208,7 @@ export class Reader {
       return {
         envelope: errorEnvelope(requestId, err, envelopeOpts),
         provenance,
-        cost: noReaderCost(),
+        cost: spent.cost,
         sourceIds: [],
       };
     }
@@ -222,7 +228,14 @@ export class Reader {
     };
   }
 
-  private failureProvenance(err: ShuntError): Provenance {
+  /**
+   * Provenance for a request that published nothing.
+   *
+   * `attemptsStarted` is not always zero: a request can complete its model calls and then
+   * fail at PUBLISH, and reporting no attempts there would contradict the cost the same
+   * envelope carries.
+   */
+  private failureProvenance(err: ShuntError, attemptsStarted = 0): Provenance {
     const unknownAttribution =
       err.code === "MODEL_ERROR"
       || err.code === "INVALID_MODEL_OUTPUT"
@@ -233,7 +246,7 @@ export class Reader {
       attributionStatus: unknownAttribution ? "unknown" : "not_applicable",
       attributionConfidence: "none",
       attributionPolicy: this.policy,
-      attemptsStarted: 0,
+      attemptsStarted,
       usageComplete: false,
       citationsMechanicallyVerified: true,
       requested: targetIdentity(providerTargetOf(this.provider)),
@@ -246,6 +259,7 @@ export class Reader {
     requestId: string,
     deadline: Deadline,
     accountingId: string | undefined,
+    spent: { cost: ReaderCost } = { cost: noReaderCost() },
   ): Promise<ReaderResult> {
     const request = validateRequest(rawRequest, READ_OPERATIONS) as ReaderRequest;
     assertNoSecret(request.question, "QUESTION");
@@ -373,6 +387,9 @@ export class Reader {
       completionBytes,
       limits: this.limits,
     });
+    // Visible to the error path from here on: a failure at PUBLISH must still report what
+    // the completed calls cost.
+    spent.cost = cost;
 
     const { verified, rejected } = this.verifyAll(sessionId, rawCitations);
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
@@ -606,7 +623,12 @@ export class Reader {
       failedReason: null,
       calls: 0,
       usageCompleteCalls: 0,
-      usage: NO_USAGE,
+      // An empty accumulator, not an attempt that reported nothing. `NO_USAGE` is
+      // `unknown`, which is right for a *bridge* that returned no counts - but as a
+      // starting value it poisoned the merge: `unknown + exact` is `unknown`, so exact
+      // provider usage was downgraded to a byte estimate on *every* request, and the
+      // `usageExact` distinction the accounting layer exists to make never survived.
+      usage: { method: "not_applicable" },
       promptBytes: 0,
       completionBytes: 0,
       attribution: { status: "unknown", confidence: "none" },
@@ -635,6 +657,7 @@ export class Reader {
           system: READER_SYSTEM_PROMPT,
           user,
           maxOutputTokens: this.limits.maxOutputTokensPerCall,
+          outcome,
         }, deadline);
         validateModelResponse(response, this.limits);
         outcome.completionBytes += new TextEncoder().encode(response.text).length;
@@ -679,7 +702,13 @@ export class Reader {
   }
 
   private async completeWithinDeadline(
-    opts: { system: string; user: string; maxOutputTokens: number },
+    opts: {
+      system: string;
+      user: string;
+      maxOutputTokens: number;
+      /** Receives the cost of a call that finished too late to publish. */
+      outcome: ChunkOutcome;
+    },
     deadline: Deadline,
   ): Promise<ModelResponse> {
     deadline.check("MODEL_CALL");
@@ -710,11 +739,27 @@ export class Reader {
     });
     try {
       const response = await Promise.race([
-        this.provider.complete({ ...opts, timeoutMs, signal: controller.signal }),
+        this.provider.complete({
+          system: opts.system,
+          user: opts.user,
+          maxOutputTokens: opts.maxOutputTokens,
+          timeoutMs,
+          signal: controller.signal,
+        }),
         timeout,
         cancelled,
       ]);
-      deadline.check("MODEL_CALL");
+      try {
+        deadline.check("MODEL_CALL");
+      } catch (err) {
+        // Too late to publish, but the provider was already paid. Record what the call
+        // cost before refusing its answer; dropping the response wholesale made real
+        // spend disappear from the session's accounting.
+        opts.outcome.usage = mergeUsage(opts.outcome.usage, response.usage);
+        if (usageComplete(response.usage)) opts.outcome.usageCompleteCalls += 1;
+        opts.outcome.completionBytes += new TextEncoder().encode(response.text).length;
+        throw err;
+      }
       return response;
     } finally {
       if (timer !== undefined) clearTimeout(timer);

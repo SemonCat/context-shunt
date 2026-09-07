@@ -50,6 +50,14 @@ class ClockProvider:
         return ProviderTarget(model=L.reader_model, provider="openai")
 
 
+def make_registry_at(clock):
+    """A registry backed by a temp store, for tests that drive a fake clock."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    return make_registry(_Path(tempfile.mkdtemp()), session_id="sess")
+
+
 def test_contract_deadlines():
     assert (L.gate_probe_deadline_ms, L.spill_io_deadline_ms) == (1000, 5000)
     assert (L.model_call_deadline_ms, L.request_deadline_ms) == (45000, 60000)
@@ -239,3 +247,33 @@ def test_positional_construction_keeps_remaining_time_semantics():
     # Remaining time is floored at zero rather than going negative.
     clock.advance(100_000)
     assert deadline.remaining_ms() == 0 and deadline.expired() is True
+
+
+def test_a_deadline_after_the_call_still_accounts_for_what_the_provider_was_paid():
+    """Tokens the provider already billed must not vanish because publishing failed.
+
+    `answer` catches `ShuntError` and returned `ReaderCost.none()` - "no attempt was
+    made". But the request budget is checked again at PUBLISH, *after* every model call
+    has completed and been billed. A request that ran its calls and then ran out of time
+    reported zero cost, so a session's accounting understated real spend and every
+    savings figure derived from it was overstated.
+    """
+    clock = FakeClock()
+    # The call itself fits the budget; the remaining time does not survive to PUBLISH.
+    provider = ClockProvider(
+        clock, 60_000, answer_json("mode = fast [c1]", [(1, 1, "mode = fast")])
+    )
+    registry = make_registry_at(clock)
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+
+    result = Reader(registry, provider, clock=clock).answer("sess", _request(entry))
+
+    assert provider.calls == 1, "the provider must actually have been called"
+    assert result.envelope["status"] == "error"
+    assert result.envelope["code"] == "TIMEOUT"
+    # The call happened and was billed, so the cost must say so.
+    assert result.cost.attempts_started == 1
+    assert result.cost.input_tokens == 1
+    assert result.cost.output_tokens == 1
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.provenance.attempts_started == 1

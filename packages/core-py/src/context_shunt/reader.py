@@ -84,7 +84,12 @@ class ChunkOutcome:
     answer: str = ""
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
-    usage: Usage = field(default_factory=Usage)
+    # An empty accumulator, not an attempt that reported nothing. `Usage()` defaults to
+    # `UNKNOWN`, which is the right answer for a *bridge* that returned no counts - but as
+    # a starting value it poisoned the merge: `UNKNOWN + EXACT` is `UNKNOWN`, so exact
+    # provider usage was downgraded to a byte estimate on *every* request, and the
+    # `usage_exact` distinction the accounting layer exists to make never survived.
+    usage: Usage = field(default_factory=lambda: Usage(method=TokenMethod.NOT_APPLICABLE))
     calls: int = 0
     usage_complete_calls: int = 0
     prompt_bytes: int = 0
@@ -94,6 +99,30 @@ class ChunkOutcome:
     resolved: ModelIdentity = field(default_factory=ModelIdentity)
     reported: ModelIdentity = field(default_factory=ModelIdentity)
     fallback_used: bool = False
+
+
+#: Bounded wait used only when a request has already missed its deadline, to collect the
+#: cost of a call the bridge had in fact completed. Never used on a publishing path.
+_LATE_CALL_ACCOUNTING_WAIT_S = 0.25
+
+
+@dataclass
+class _CostSink:
+    """Carries what an attempt actually spent out past a later failure.
+
+    ``_answer`` fills this in as soon as the cost is known, so the error path in
+    ``answer`` can report real spend instead of "no attempt was made".
+    """
+
+    cost: ReaderCost = field(default_factory=ReaderCost.none)
+
+    @property
+    def attempts(self) -> int:
+        return self.cost.attempts_started
+
+    def record(self, cost: ReaderCost) -> ReaderCost:
+        self.cost = cost
+        return cost
 
 
 @dataclass
@@ -194,11 +223,17 @@ class Reader:
         request_id = _read_request_id(request)
         requested_deadline = _read_requested_deadline(request, self._limits.request_deadline_ms)
         deadline = deadline or Deadline.start(self._clock, requested_deadline)
+        # Model calls are billed the moment they complete, but the request budget is
+        # checked again at PUBLISH. A request that ran its calls and then ran out of time
+        # used to report `ReaderCost.none()` - "no attempt was made" - so real spend
+        # vanished from the session's accounting and every savings figure derived from it
+        # was overstated. Whatever was actually spent before the failure is carried out.
+        spent = _CostSink()
         try:
-            return self._answer(session_id, request, request_id, deadline, accounting_id)
+            return self._answer(session_id, request, request_id, deadline, accounting_id, spent)
         except ShuntError as exc:
             self._metrics.count("reader_error", {"code": exc.code})
-            provenance = self._failure_provenance(exc)
+            provenance = self._failure_provenance(exc, attempts_started=spent.attempts)
             return ReaderResult(
                 envelope=E.error_envelope(
                     request_id,
@@ -208,7 +243,7 @@ class Reader:
                     handles_valid=_handles_survive(exc),
                 ),
                 provenance=provenance,
-                cost=ReaderCost.none(),
+                cost=spent.cost,
             )
 
     # -- internals ---------------------------------------------------------
@@ -220,6 +255,7 @@ class Reader:
         request_id: str,
         deadline: Deadline,
         accounting_id: str | None,
+        spent: _CostSink,
     ) -> ReaderResult:
         request = validate_request(request)
         question = request["question"]
@@ -348,13 +384,15 @@ class Reader:
         self._metrics.observe("reader_model_calls", total_calls)
         self._metrics.observe("reader_attempts_usage_complete", usage_complete_calls)
 
-        cost = _reader_cost(
-            usage,
-            attempts=total_calls,
-            usage_complete=usage_complete_calls,
-            prompt_bytes=prompt_bytes,
-            completion_bytes=completion_bytes,
-            limits=self._limits,
+        cost = spent.record(
+            _reader_cost(
+                usage,
+                attempts=total_calls,
+                usage_complete=usage_complete_calls,
+                prompt_bytes=prompt_bytes,
+                completion_bytes=completion_bytes,
+                limits=self._limits,
+            )
         )
 
         verified, rejected = self._verify_all(session_id, raw_citations)
@@ -563,7 +601,13 @@ class Reader:
             requested=_target_of(self._provider).identity(),
         )
 
-    def _failure_provenance(self, exc: ShuntError) -> Provenance:
+    def _failure_provenance(self, exc: ShuntError, *, attempts_started: int = 0) -> Provenance:
+        """Provenance for a request that published nothing.
+
+        ``attempts_started`` is not always zero: a request can complete its model calls
+        and then fail at PUBLISH, and reporting no attempts there would contradict the
+        cost the same envelope carries.
+        """
         return Provenance(
             derived=False,
             label=ProvenanceLabel.NO_MODEL_OUTPUT,
@@ -574,7 +618,7 @@ class Reader:
             ),
             attribution_confidence=Confidence.NONE,
             attribution_policy=self._policy,
-            attempts_started=0,
+            attempts_started=attempts_started,
             usage_complete=False,
             requested=_target_of(self._provider).identity(),
         )
@@ -626,6 +670,7 @@ class Reader:
                     user=user,
                     max_output_tokens=self._limits.max_output_tokens_per_call,
                     deadline=deadline,
+                    outcome=outcome,
                 )
                 _validate_model_response(response, self._limits)
                 outcome.completion_bytes += len(response.text.encode("utf-8"))
@@ -671,12 +716,18 @@ class Reader:
         user: str,
         max_output_tokens: int,
         deadline: Deadline,
+        outcome: ChunkOutcome,
     ) -> ModelResponse:
         """Run an untrusted host bridge behind a real hard wall-clock deadline.
 
         Python cannot forcibly stop an arbitrary blocking host call. The bridge runs in a
         daemon thread and the request stops waiting at the earlier stage/request limit;
-        a late return is discarded and can never be published.
+        a late answer is discarded and can never be published.
+
+        Its *usage* is not discarded. A call that came back after the deadline still
+        reached the provider and was still billed, so dropping the response wholesale made
+        real spend disappear from the session's accounting. The answer is refused; the
+        tokens are recorded.
         """
         deadline.check("MODEL_CALL")
         timeout_ms = deadline.sub_budget(self._limits.model_call_deadline_ms)
@@ -706,20 +757,58 @@ class Reader:
         worker.start()
         wall_end = time.monotonic() + timeout_ms / 1000.0
         while True:
-            deadline.check("MODEL_CALL")
+            try:
+                deadline.check("MODEL_CALL")
+            except (DeadlineExceeded, CancelledError):
+                self._account_for_a_late_call(outcome, result_queue)
+                raise
             remaining = wall_end - time.monotonic()
             if remaining <= 0:
+                self._account_for_a_late_call(outcome, result_queue)
                 raise DeadlineExceeded("MODEL_CALL")
             try:
                 ok, value = result_queue.get(timeout=min(0.01, remaining))
             except queue.Empty:
                 continue
-            deadline.check("MODEL_CALL")
             if ok:
+                try:
+                    deadline.check("MODEL_CALL")
+                except (DeadlineExceeded, CancelledError):
+                    # Too late to publish, but the provider was already paid. Record what
+                    # the call cost before refusing its answer.
+                    if isinstance(value, ModelResponse):
+                        outcome.usage = outcome.usage.merge(value.usage)
+                        outcome.usage_complete_calls += 1 if value.usage.complete else 0
+                        outcome.completion_bytes += len(value.text.encode("utf-8"))
+                    raise
                 return value
+            deadline.check("MODEL_CALL")
             if isinstance(value, ShuntError):
                 raise value
             raise TransientProviderError("PROVIDER_CALL_FAILED")
+
+    def _account_for_a_late_call(
+        self, outcome: ChunkOutcome, result_queue: queue.Queue[tuple[bool, Any]]
+    ) -> None:
+        """Record the cost of a call that finished too late to publish.
+
+        The request stops waiting at its deadline, but the bridge may already have
+        returned - the response is sitting in the queue, delivered and billed, and simply
+        never read. Dropping it wholesale made real spend disappear from the session's
+        accounting; the answer still never reaches the envelope.
+
+        The short wait is bounded and happens only on this failure path, so that a call
+        which completed at essentially the same moment as the deadline is still counted.
+        """
+        try:
+            ok, value = result_queue.get(timeout=_LATE_CALL_ACCOUNTING_WAIT_S)
+        except queue.Empty:
+            return
+        if not ok or not isinstance(value, ModelResponse):
+            return
+        outcome.usage = outcome.usage.merge(value.usage)
+        outcome.usage_complete_calls += 1 if value.usage.complete else 0
+        outcome.completion_bytes += len(value.text.encode("utf-8"))
 
     def _verify_all(
         self, session_id: str, citations: list[dict[str, Any]]

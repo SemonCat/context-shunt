@@ -25,8 +25,10 @@ from context_shunt.accounting import (
 from context_shunt.limits import BASELINE_ESTIMATE_METHOD, DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION
 from context_shunt.metrics import ALLOWED_LABEL_KEYS, InMemoryMetrics, MetricsError
 from context_shunt.provenance import TokenMethod
+from context_shunt.reader import Reader
 from context_shunt.session import ShuntSession
-from tests.support import FakeLuna, answer_json, make_capability, make_config
+from context_shunt.snapshot import snapshot_bytes
+from tests.support import FakeLuna, answer_json, make_capability, make_config, make_registry
 
 pytestmark = pytest.mark.gate_accounting
 
@@ -371,3 +373,34 @@ def test_totals_preserve_null_for_an_unreported_direction(tmp_path):
     assert record["reader_token_method"] == "bytes_div_4"
     assert record["reader_cache_tokens"] is None
     assert record["attempts_usage_complete"] == 0
+
+
+def test_exact_provider_usage_survives_into_the_reader_cost(tmp_path):
+    """The whole point of `usage_exact` is that it is not an estimate.
+
+    `ChunkOutcome.usage` started at `Usage()`, whose method is `UNKNOWN` - correct for a
+    bridge that reported no counts, wrong for an empty accumulator. `UNKNOWN + EXACT` is
+    `UNKNOWN`, so the provider's exact counts were merged away and every request fell back
+    to the byte estimate. The distinction the accounting layer exists to make never
+    reached a single envelope.
+    """
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    luna = FakeLuna(default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]))
+    result = Reader(registry, luna).answer("sess", _read_request(entry))
+
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.attempts_started == 1
+    assert result.cost.attempts_usage_complete == 1
+    # The provider's own numbers, not `len(bytes) / 4`.
+    assert result.cost.input_tokens == 10
+    assert result.cost.output_tokens == 5
+
+    # A bridge that reports nothing still yields the named estimate, not a false `exact`.
+    silent = FakeLuna(
+        default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]),
+        usage_exact=False,
+    )
+    estimated = Reader(registry, silent).answer("sess", _read_request(entry))
+    assert estimated.cost.method is TokenMethod.BYTES_DIV_4
+    assert estimated.cost.attempts_usage_complete == 0
