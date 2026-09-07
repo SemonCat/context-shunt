@@ -383,3 +383,42 @@ describe("provider usage preservation", () => {
     expect(result.cost.attemptsUsageComplete).toBe(0);
   });
 });
+
+describe("mixed-source baseline credit", () => {
+  /**
+   * `baselineFor` summed the bytes of every selected source but folded the per-source
+   * credit results into a single OR, so a second read mixing an already-credited source
+   * with a new one credited both again.
+   */
+  it("credits only the newly withheld source", async () => {
+    const dir = tmp();
+    const s = session(dir);
+    const ws = join(dir, "ws");
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, "one.txt"), Array.from({ length: 2000 }, (_, i) => `one ${i} value`).join("\n"));
+    writeFileSync(join(ws, "two.txt"), Array.from({ length: 3000 }, (_, i) => `two ${i} value`).join("\n"));
+    const first = s.registerPath(join(ws, "one.txt"));
+    const second = s.registerPath(join(ws, "two.txt"));
+
+    const req = (...entries: Array<typeof first>) => {
+      const base = readRequest(first) as Record<string, unknown>;
+      base["sources"] = entries.map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      }));
+      return base;
+    };
+
+    await s.read(req(first));
+    const afterFirst = Number(stats(s).stats!.totals.baseline_credit_tokens);
+    expect(afterFirst).toBeGreaterThan(0);
+
+    await s.read(req(first, second));
+    const afterSecond = Number(stats(s).stats!.totals.baseline_credit_tokens);
+
+    const added = afterSecond - afterFirst;
+    const onlySecond = Math.ceil(second.snapshot.bytesLen / 4);
+    expect(added).toBe(onlySecond);
+  });
+});

@@ -404,3 +404,45 @@ def test_exact_provider_usage_survives_into_the_reader_cost(tmp_path):
     estimated = Reader(registry, silent).answer("sess", _read_request(entry))
     assert estimated.cost.method is TokenMethod.BYTES_DIV_4
     assert estimated.cost.attempts_usage_complete == 0
+
+
+def test_a_mixed_source_read_credits_only_the_newly_withheld_source(tmp_path):
+    """The baseline is the saving from withholding *this* source, once.
+
+    `_baseline_for` summed the bytes of every selected source but folded the per-source
+    credit results into a single OR, so a second read that mixed an already-credited
+    source with a new one credited both again - the previously withheld source's bytes
+    were counted a second time and the reported saving was inflated.
+    """
+    session = _session(tmp_path)
+    ws = tmp_path / "ws"
+    (ws / "one.txt").write_text("".join(f"one {i:04d} value\n" for i in range(1, 2001)))
+    (ws / "two.txt").write_text("".join(f"two {i:04d} value\n" for i in range(1, 3001)))
+    first = session.register_path(str(ws / "one.txt"))
+    second = session.register_path(str(ws / "two.txt"))
+
+    def request(*entries):
+        base = _read_request(first)
+        base["sources"] = [
+            {
+                "source_id": e.source_id,
+                "snapshot_id": e.snapshot.snapshot_id,
+                "selector": {"kind": "all"},
+            }
+            for e in entries
+        ]
+        return base
+
+    session.read(request(first))
+    after_first = _stats(session)["stats"]["totals"]["baseline_credit_tokens"]
+    assert after_first == estimate_tokens(first.snapshot.bytes_len)
+
+    # The second read re-uses `first` and adds `second`; only `second` is newly withheld.
+    session.read(request(first, second))
+    after_second = _stats(session)["stats"]["totals"]["baseline_credit_tokens"]
+
+    added = after_second - after_first
+    only_second = estimate_tokens(second.snapshot.bytes_len)
+    assert added == only_second, (
+        f"credited {added} tokens for the second read, but only {only_second} were newly withheld"
+    )

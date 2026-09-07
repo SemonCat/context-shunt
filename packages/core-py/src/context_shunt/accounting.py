@@ -187,6 +187,7 @@ def compose(
     reader: ReaderCost,
     egress: Egress,
     limits: Limits = DEFAULT_LIMITS,
+    credited_bytes: int | None = None,
 ) -> OperationRecord:
     """Build the record for one operation.
 
@@ -194,9 +195,21 @@ def compose(
     false the credit is zero even though ``raw_input_baseline_tokens`` still reports what
     the payload measures, so the record shows both "this much was withheld overall" and
     "this operation claims none of that saving".
+
+    ``credited_bytes`` separates the two for a *mixed* selection. The measurement covers
+    every selected source, but the credit may cover only some of them: a read that reuses
+    an already-credited source alongside a new one withholds nothing new for the former.
+    Crediting the whole measured baseline whenever any part of it was new inflated the
+    reported saving on every such read. When it is omitted the credit is the whole
+    baseline, which is the single-source case and the previous behaviour.
     """
     envelope_tokens = egress.tokens(limits)
-    credit = baseline.tokens if (baseline_credited and baseline.tokens is not None) else 0
+    if not baseline_credited or baseline.tokens is None:
+        credit = 0
+    elif credited_bytes is None:
+        credit = baseline.tokens
+    else:
+        credit = estimate_tokens(credited_bytes, limits)
     main_saved = credit - envelope_tokens
     net_saved = main_saved - reader.charged_input - reader.charged_output
     return OperationRecord(

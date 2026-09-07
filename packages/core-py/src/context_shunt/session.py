@@ -231,34 +231,45 @@ class ShuntSession:
         )
         published = enforce_or_fixed(result.envelope, self.config.limits)
         refined = bool((request or {}).get("refined"))
-        baseline, credited = self._baseline_for(result.source_ids)
+        baseline, credited_bytes = self._baseline_for(result.source_ids)
         self._record(
             operation_id=operation_id,
             kind=OperationKind.REFINED_READ if refined else OperationKind.READ,
             envelope=published,
             baseline=baseline,
-            baseline_credited=credited,
+            baseline_credited=credited_bytes > 0,
+            credited_bytes=credited_bytes,
             reader=result.cost,
             boundary=DeliveryBoundary.ENVELOPE,
         )
         return published
 
-    def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, bool]:
-        """The withheld-payload baseline, credited at most once per snapshot."""
+    def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, int]:
+        """The withheld-payload baseline, and how many of its bytes this read may claim.
+
+        The two differ for a mixed selection: the measurement covers every selected
+        source, while the credit covers only those this read newly withheld.
+        """
         total = 0
-        credited = False
+        credited_bytes = 0
         for source_id in source_ids:
             try:
                 handle = self._registry.handle(self.session_id, source_id)
             except ShuntError:
                 continue
+            # The measurement is every selected source, so a read that claims nothing
+            # still reports what the payload was worth.
             total += handle.bytes_len
-            # credit_baseline flips a persisted flag, so it returns True exactly once per
-            # handle no matter how many reads, refinements or retries follow.
-            credited = self._store.credit_baseline(self._identity, source_id) or credited
+            # The credit is only what this read newly withholds. `credit_baseline` records
+            # the claim against the content and returns True exactly once, so a source an
+            # earlier read already credited contributes nothing here. Folding the results
+            # into a single OR credited the *whole* selection whenever any part of it was
+            # new, which inflated the saving on every mixed-source read.
+            if self._store.credit_baseline(self._identity, source_id):
+                credited_bytes += handle.bytes_len
         if total == 0:
-            return Baseline.none(), False
-        return Baseline.withheld_payload(total, limits=self.config.limits), credited
+            return Baseline.none(), 0
+        return Baseline.withheld_payload(total, limits=self.config.limits), credited_bytes
 
     # -- inspect -----------------------------------------------------------
     def inspect(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -656,6 +667,7 @@ class ShuntSession:
         baseline_credited: bool,
         reader: ReaderCost,
         boundary: DeliveryBoundary,
+        credited_bytes: int | None = None,
     ) -> None:
         """Measure the exact serialized egress, then write the record.
 
@@ -671,6 +683,7 @@ class ShuntSession:
             code=str(envelope.get("code", "LIMIT_EXCEEDED")),
             baseline=baseline,
             baseline_credited=baseline_credited,
+            credited_bytes=credited_bytes,
             reader=reader,
             egress=egress,
             limits=self.config.limits,

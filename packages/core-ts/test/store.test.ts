@@ -585,3 +585,52 @@ describe("recapture accounting", () => {
     expect(s.creditBaseline(two, second.handleId)).toBe(true);
   });
 });
+
+// -- accounting must survive revocation, and stay per source ----------------
+
+describe("revocation-safe accounting", () => {
+  it("does not reset the per-source ceiling when a handle is revoked", () => {
+    const cap = 100;
+    const s = store(tmp(), narrowLimits(L, { disclosureMaxPerSourceBytes: cap }));
+    const scope = identity();
+    const first = s.publish(scope, [capture()])[0]!;
+    expect(s.chargeDisclosure(scope, first.handleId, "bytes", cap).granted).toBe(true);
+    expect(s.creditBaseline(scope, first.handleId)).toBe(true);
+
+    s.revoke(scope, first.handleId);
+    const second = s.publish(scope, [capture()])[0]!;
+
+    expect(s.disclosureAllowance(scope, second.handleId).perSourceRemaining).toBe(0);
+    const refused = s.chargeDisclosure(scope, second.handleId, "bytes", 1);
+    expect(refused.granted).toBe(false);
+    expect(refused.limitReached).toBe(true);
+    expect(s.creditBaseline(scope, second.handleId)).toBe(false);
+  });
+
+  it("clears the accounting when the scope closes", () => {
+    const cap = 100;
+    const dir = tmp();
+    const s = store(dir, narrowLimits(L, { disclosureMaxPerSourceBytes: cap }));
+    const scope = identity();
+    const handle = s.publish(scope, [capture()])[0]!;
+    s.chargeDisclosure(scope, handle.handleId, "bytes", cap);
+    s.closeScope(scope, true);
+
+    const fresh = identity("next");
+    const reborn = s.publish(fresh, [capture()])[0]!;
+    expect(s.disclosureAllowance(fresh, reborn.handleId).perSourceRemaining).toBe(cap);
+  });
+
+  it("refuses two media types for the same bytes inside one batch", () => {
+    const s = store();
+    const scope = identity();
+    const body = enc('{"a":1}\n');
+    expect(() =>
+      s.publish(scope, [
+        capture(body, { mediaType: "application/json" }),
+        capture(body, { mediaType: "text/plain" }),
+      ]),
+    ).toThrow(/BLOB_METADATA_CONFLICT/);
+    expect(s.stats().handles).toBe(0);
+  });
+});

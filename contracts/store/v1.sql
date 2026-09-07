@@ -1,4 +1,4 @@
--- context-shunt snapshot store, DDL revision 1.
+-- context-shunt snapshot store, DDL revision 2.
 --
 -- This file is normative. Both language cores execute it verbatim to create or verify
 -- their store; neither core may embed an equivalent CREATE TABLE of its own. A
@@ -113,15 +113,40 @@ CREATE INDEX IF NOT EXISTS handles_by_expiry ON handles (expires_at_ms);
 -- enum ('lines', 'bytes', 'search'). No selector text, needle or extracted content is
 -- recorded: only how much was disclosed, to which handle, and when. The cumulative
 -- ceiling is enforced by check-and-increment inside the read authorization transaction.
+-- `blob_hash` is the *content* this disclosure came from, recorded on the event itself
+-- rather than reached through `handles`. Revision 1 named only a handle, and revoking or
+-- expiring a handle deletes its row - so the per-source history became unreachable and a
+-- caller could disclose the per-source ceiling, revoke, recapture the same bytes and
+-- disclose it again. It carries no path and no payload: it is the same content digest
+-- `blobs.hash` already holds. Deliberately no foreign key, because the event must outlive
+-- both the handle and the collected blob row it describes. Nullable so a revision-1 row
+-- stays valid; the cores treat a null as "unattributable" and never credit it to a source.
 CREATE TABLE IF NOT EXISTS disclosure_events (
     event_id  INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_id  TEXT    NOT NULL REFERENCES scopes (scope_id),
     handle_id TEXT    NOT NULL,
+    blob_hash TEXT,
     kind      TEXT    NOT NULL,
     bytes     INTEGER NOT NULL,
     at_ms     INTEGER NOT NULL,
     CHECK (kind IN ('lines', 'bytes', 'search')),
-    CHECK (bytes >= 0)
+    CHECK (bytes >= 0),
+    CHECK (blob_hash IS NULL OR length(blob_hash) = 64)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS disclosure_by_source ON disclosure_events (scope_id, blob_hash);
+
+-- The one-time withheld-source baseline, per scope and per content. Revision 1 kept this
+-- as a flag on `handles`, which a recapture reset and a revocation destroyed, so the same
+-- withheld source could be credited repeatedly. Keyed by content so a recapture of the
+-- same bytes cannot claim the saving twice, and scoped so another session keeps its own.
+-- Rows are discarded with their scope, which is the window the accounting covers.
+CREATE TABLE IF NOT EXISTS source_credits (
+    scope_id     TEXT    NOT NULL REFERENCES scopes (scope_id),
+    blob_hash    TEXT    NOT NULL,
+    credited_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (scope_id, blob_hash),
+    CHECK (length(blob_hash) = 64)
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS disclosure_by_scope ON disclosure_events (scope_id, at_ms);

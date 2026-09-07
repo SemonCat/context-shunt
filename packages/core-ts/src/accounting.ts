@@ -172,6 +172,15 @@ export interface ComposeInput {
    * that saving".
    */
   baselineCredited: boolean;
+  /**
+   * How many withheld bytes this operation may claim, when that is narrower than the
+   * measured baseline. The measurement covers every selected source; the credit may cover
+   * only some of them, because a read that reuses an already-credited source withholds
+   * nothing new for it. Crediting the whole measured baseline whenever any part was new
+   * inflated the saving on every mixed-source read. Omitted means "all of it", which is
+   * the single-source case and the previous behaviour.
+   */
+  creditedBytes?: number | undefined;
   reader: ReaderCost;
   egress: Egress;
   limits?: Limits;
@@ -181,7 +190,11 @@ export function composeRecord(input: ComposeInput): OperationRecord {
   const limits = input.limits ?? DEFAULT_LIMITS;
   const envelopeTokens = estimateTokens(input.egress.byteCount, limits);
   const credit =
-    input.baselineCredited && input.baseline.tokens !== undefined ? input.baseline.tokens : 0;
+    !input.baselineCredited || input.baseline.tokens === undefined
+      ? 0
+      : input.creditedBytes === undefined
+        ? input.baseline.tokens
+        : estimateTokens(input.creditedBytes, input.limits);
   const mainSaved = credit - envelopeTokens;
   const netSaved = mainSaved - (input.reader.inputTokens ?? 0) - (input.reader.outputTokens ?? 0);
   return {

@@ -81,6 +81,7 @@ ALLOWED_COLUMNS = {
     "closed_at_ms",
     "code",
     "created_at_ms",
+    "credited_at_ms",
     "delivery_boundary",
     "disclosed_bytes",
     "envelope_token_method",
@@ -771,3 +772,80 @@ def test_a_separate_scope_keeps_its_own_disclosure_and_baseline(tmp_path):
     second = store.publish(two, [_capture()])[0]
     assert store.disclosure_allowance(two, second.handle_id).per_source_remaining == cap
     assert store.credit_baseline(two, second.handle_id) is True
+
+
+# -- accounting must survive revocation, and stay per source -----------------
+
+
+def test_revoking_a_handle_does_not_reset_its_source_disclosure_ceiling(tmp_path):
+    """The per-source ceiling must not be resettable by revoke-then-recapture.
+
+    Disclosure history is reconstructed by joining `disclosure_events` to live `handles`
+    rows, and both revoke and the expiry sweep *deleted* those rows - so the join lost the
+    history and a recaptured source started from zero. A caller could disclose the cap,
+    revoke, recapture, and disclose the cap again, up to the session ceiling.
+    """
+    cap = 100
+    store = _store(tmp_path, limits=L.narrow(disclosure_max_per_source_bytes=cap))
+    identity = _identity()
+
+    first = store.publish(identity, [_capture()])[0]
+    assert store.charge_disclosure(identity, first.handle_id, "bytes", cap).granted is True
+    assert store.credit_baseline(identity, first.handle_id) is True
+
+    store.revoke(identity, first.handle_id)
+    second = store.publish(identity, [_capture()])[0]
+
+    assert store.disclosure_allowance(identity, second.handle_id).per_source_remaining == 0
+    refused = store.charge_disclosure(identity, second.handle_id, "bytes", 1)
+    assert refused.granted is False and refused.limit_reached is True
+    # The saving was already claimed for this content; recapture does not re-claim it.
+    assert store.credit_baseline(identity, second.handle_id) is False
+
+
+def test_closing_the_scope_is_what_clears_the_accounting(tmp_path):
+    """The tombstones are bounded by the session, which is the accounting window."""
+    cap = 100
+    store = _store(tmp_path, limits=L.narrow(disclosure_max_per_source_bytes=cap))
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    store.charge_disclosure(identity, handle.handle_id, "bytes", cap)
+    store.revoke(identity, handle.handle_id)
+    store.close_scope(identity, revoke=True)
+
+    fresh = _identity(session="next")
+    reborn = store.publish(fresh, [_capture()])[0]
+    assert store.disclosure_allowance(fresh, reborn.handle_id).per_source_remaining == cap
+
+
+def test_a_revoked_handle_still_cannot_be_resolved_or_read(tmp_path):
+    """Retaining the row for accounting must not resurrect the capability."""
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = store.publish(identity, [_capture()])[0]
+    assert store.revoke(identity, handle.handle_id) is True
+    with pytest.raises(ShuntError) as exc:
+        store.resolve(identity, handle.handle_id)
+    assert exc.value.code in ("SOURCE_EXPIRED", "STORE_FAILED")
+    # And the content it held is releasable, because the refcount was dropped.
+    assert store.stats().handles == 0
+
+
+def test_a_batch_cannot_carry_two_media_types_for_the_same_bytes(tmp_path):
+    """The metadata check consulted only *committed* rows, so one batch slipped through.
+
+    Publishing identical bytes twice in a single batch returned two handles with different
+    declared media types, while the persisted row - and therefore every later resolve -
+    carried only the first. The accepted API result disagreed with the stored content.
+    """
+    store = _store(tmp_path)
+    identity = _identity()
+    body = b'{"a":1}\n'
+    with pytest.raises(ShuntError) as exc:
+        store.publish(
+            identity,
+            [_capture(data=body, media_type="application/json"), _capture(data=body)],
+        )
+    assert exc.value.detail == "BLOB_METADATA_CONFLICT"
+    # Nothing partial survived the refusal.
+    assert store.stats().handles == 0

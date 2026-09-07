@@ -347,6 +347,9 @@ export class SnapshotStore {
         db.exec(`PRAGMA busy_timeout = ${Math.trunc(this.limits.storeBusyTimeoutMs)}`);
         db.exec("PRAGMA foreign_keys = ON");
         db.exec("PRAGMA synchronous = FULL");
+        // Before the DDL, not after: revision 2 indexes a column revision 1 does not
+        // have, so executing the script first fails on a store still needing the column.
+        this.migrateSchema(db);
         db.exec(storeDdl());
         try {
           chmodSync(join(this.root, DB_NAME), FILE_MODE);
@@ -373,6 +376,38 @@ export class SnapshotStore {
     throw new ShuntError("STORE_FAILED", "OPEN_FAILED", false);
   }
 
+  /**
+   * Add what a newer revision needs, before the DDL script runs. Never destructive.
+   *
+   * Only additive steps, and only between revisions this core knows how to bridge.
+   * Revision 1 to 2 adds the durable disclosure identity: `disclosure_events` gains a
+   * nullable `blob_hash`. The contract DDL creates that column for a *new* store and also
+   * indexes it, which is why this has to run first - the index cannot be built on a table
+   * that still lacks the column.
+   *
+   * A revision-1 row keeps a null `blob_hash`. That is honest rather than convenient: the
+   * content it disclosed is genuinely unattributable now, so it still counts toward the
+   * session ceiling - where it was always counted - and is never credited to a specific
+   * source's ceiling, which would mean inventing the identity it lacks.
+   */
+  private migrateSchema(db: DatabaseSyncType): void {
+    try {
+      const hasMetadata = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata'",
+      ).get();
+      if (hasMetadata === undefined) return; // Brand-new store; the DDL builds revision 2.
+      if (this.metadata(db, "ddl_version") !== "1") return;
+      if (String(this.limits.storeDdlVersion) !== "2") return;
+      const columns = (db.prepare("PRAGMA table_info(disclosure_events)").all() as Row[])
+        .map((row) => String(row["name"]));
+      if (columns.length > 0 && !columns.includes("blob_hash")) {
+        db.exec("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT");
+      }
+    } catch {
+      throw new ShuntError("STORE_FAILED", "MIGRATION_FAILED", false);
+    }
+  }
+
   /** Seed the singletons and refuse a store written by an incompatible revision. */
   private bootstrapMetadata(db: DatabaseSyncType): void {
     try {
@@ -389,10 +424,21 @@ export class SnapshotStore {
       if (err instanceof ShuntError) throw err;
       throw new ShuntError("STORE_FAILED", "MIGRATION_FAILED", false);
     }
-    if (this.metadata(db, "ddl_version") !== String(this.limits.storeDdlVersion)) {
-      // A store from a different DDL revision is refused rather than migrated in place by
-      // guesswork; docs/install.md documents the supported path.
-      throw new ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", false);
+    const found = this.metadata(db, "ddl_version");
+    if (found !== String(this.limits.storeDdlVersion)) {
+      if (found !== "1" || String(this.limits.storeDdlVersion) !== "2") {
+        // A store from an unknown revision is refused rather than migrated in place by
+        // guesswork; docs/install.md documents the supported path.
+        throw new ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", false);
+      }
+      try {
+        this.writeTxn(db, () => {
+          db.prepare("UPDATE store_metadata SET value = ? WHERE key = 'ddl_version'")
+            .run(String(this.limits.storeDdlVersion));
+        });
+      } catch {
+        throw new ShuntError("STORE_FAILED", "MIGRATION_FAILED", false);
+      }
     }
     this.highWater = Number(this.metadata(db, "clock_high_water_ms") ?? "0");
     this.persistedHighWater = this.highWater;
@@ -683,7 +729,18 @@ export class SnapshotStore {
     staged: ReadonlyArray<{ capture: Capture; hash: string }>,
   ): void {
     const lookup = db.prepare("SELECT media_type, line_count FROM blobs WHERE hash = ?");
+    // Two entries in *this* batch can disagree with each other before either is
+    // committed. The committed-row check alone let that through: both handles were
+    // returned, the row kept the first entry's media type, and every later resolve of the
+    // second handle reported metadata its caller never asked for.
+    const withinBatch = new Map<string, string>();
     for (const { capture, hash } of staged) {
+      const declared = `${capture.mediaType}\u241f${capture.lineCount}`;
+      const seen = withinBatch.get(hash);
+      if (seen === undefined) withinBatch.set(hash, declared);
+      else if (seen !== declared) {
+        throw new ShuntError("STORE_FAILED", "BLOB_METADATA_CONFLICT", false);
+      }
       const row = lookup.get(hash) as Row | undefined;
       if (row === undefined) continue;
       if (
@@ -945,19 +1002,28 @@ export class SnapshotStore {
       return this.writeTxn(db, () => {
         const now = this.nowLocked(db);
         this.bumpHighWater(db, now);
+        // The claim is recorded against the *content*, in a row that outlives the
+        // handle. Kept on `handles.baseline_credited` it died with the handle, so
+        // revoking and recapturing the same bytes claimed the saving again - and a
+        // `handles` row cannot be retained as a tombstone, because its foreign key to
+        // `blobs` would pin the payload row and stop revoked content being collected.
+        const row = db.prepare(
+          "SELECT blob_hash FROM handles "
+            + " WHERE handle_id = ? AND scope_id = ? AND revoked = 0 AND expires_at_ms > ?",
+        ).get(handleId, identity.scopeId, now) as Row | undefined;
+        if (row === undefined) return false;
         const result = db.prepare(
-          "UPDATE handles SET baseline_credited = 1 "
-            + " WHERE handle_id = ? AND scope_id = ? AND baseline_credited = 0 "
-            + "   AND revoked = 0 AND expires_at_ms > ? "
-            // Not already claimed by any handle for the same content in this scope.
-            // Another scope is a different session and keeps its own credit.
-            + "   AND NOT EXISTS ("
-            + "     SELECT 1 FROM handles peer"
-            + "      WHERE peer.scope_id = handles.scope_id"
-            + "        AND peer.blob_hash = handles.blob_hash"
-            + "        AND peer.baseline_credited = 1)",
-        ).run(handleId, identity.scopeId, now);
-        return Number(result.changes ?? 0) > 0;
+          "INSERT OR IGNORE INTO source_credits (scope_id, blob_hash, credited_at_ms) "
+            + "VALUES (?, ?, ?)",
+        ).run(identity.scopeId, String(row["blob_hash"]), now);
+        const credited = Number(result.changes ?? 0) > 0;
+        if (credited) {
+          // Kept in step so the legacy column still reads truthfully for a live handle.
+          db.prepare(
+            "UPDATE handles SET baseline_credited = 1 WHERE handle_id = ? AND scope_id = ?",
+          ).run(handleId, identity.scopeId);
+        }
+        return credited;
       });
     } catch (err) {
       if (err instanceof ShuntError) throw err;
@@ -979,12 +1045,10 @@ export class SnapshotStore {
     // Summing this scope's disclosure events across every handle addressing this content
     // stops a caller resetting the ceiling by re-registering the file.
     const spent = db.prepare(
-      "SELECT COALESCE(SUM(event.bytes), 0) AS total "
-    + "  FROM disclosure_events event "
-    + "  JOIN handles peer ON peer.handle_id = event.handle_id "
-    + " WHERE event.scope_id = ? "
-    + "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
-    + "                          WHERE handle_id = ? AND scope_id = ?)",
+      "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events "
+    + " WHERE scope_id = ? AND blob_hash IS NOT NULL "
+    + "   AND blob_hash = (SELECT blob_hash FROM handles "
+    + "                      WHERE handle_id = ? AND scope_id = ?)",
     ).get(identity.scopeId, handleId, identity.scopeId) as Row;
     const session = db.prepare(
       "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events WHERE scope_id = ?",
@@ -1032,12 +1096,10 @@ export class SnapshotStore {
         // the cap, re-register the same file, and disclose it again without limit. The
         // session total was never affected - it already sums scope-wide.
         const spent = db.prepare(
-          "SELECT COALESCE(SUM(event.bytes), 0) AS total "
-    + "  FROM disclosure_events event "
-    + "  JOIN handles peer ON peer.handle_id = event.handle_id "
-    + " WHERE event.scope_id = ? "
-    + "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
-    + "                          WHERE handle_id = ? AND scope_id = ?)",
+          "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events "
+    + " WHERE scope_id = ? AND blob_hash IS NOT NULL "
+    + "   AND blob_hash = (SELECT blob_hash FROM handles "
+    + "                      WHERE handle_id = ? AND scope_id = ?)",
         ).get(identity.scopeId, handleId, identity.scopeId) as Row;
         const usedSource = Number(spent["total"]);
         const sessionRow = db.prepare(
@@ -1066,9 +1128,13 @@ export class SnapshotStore {
               + " WHERE handle_id = ? AND scope_id = ?",
           ).run(wantBytes, handleId, identity.scopeId);
           db.prepare(
-            "INSERT INTO disclosure_events (scope_id, handle_id, kind, bytes, at_ms) "
-              + "VALUES (?, ?, ?, ?, ?)",
-          ).run(identity.scopeId, handleId, kind, wantBytes, now);
+            // The content, not just the handle: a handle is deleted by revocation or
+            // expiry, and the per-source ceiling has to outlive both or a recapture
+            // resets it.
+            "INSERT INTO disclosure_events (scope_id, handle_id, blob_hash, kind, bytes, at_ms) "
+              + "VALUES (?, ?, (SELECT blob_hash FROM handles "
+              + "                 WHERE handle_id = ? AND scope_id = ?), ?, ?, ?)",
+          ).run(identity.scopeId, handleId, handleId, identity.scopeId, kind, wantBytes, now);
         }
         return {
           granted: true,

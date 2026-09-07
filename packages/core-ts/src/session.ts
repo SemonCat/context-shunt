@@ -234,26 +234,32 @@ export class ShuntSession {
       typeof request === "object" && request !== null
         && (request as Record<string, unknown>)["refined"],
     );
-    const { baseline, credited } = this.baselineFor(result.sourceIds);
+    const { baseline, creditedBytes } = this.baselineFor(result.sourceIds);
     this.record({
       operationId,
       kind: refined ? "refined_read" : "read",
       envelope: published,
       baseline,
-      baselineCredited: credited,
+      baselineCredited: creditedBytes > 0,
+      creditedBytes,
       reader: result.cost,
       boundary: "envelope",
     });
     return published;
   }
 
-  /** The withheld-payload baseline, credited at most once per snapshot. */
+  /**
+   * The withheld-payload baseline, and how many of its bytes this read may claim.
+   *
+   * The two differ for a mixed selection: the measurement covers every selected source,
+   * while the credit covers only those this read newly withheld.
+   */
   private baselineFor(sourceIds: readonly string[]): {
     baseline: Baseline;
-    credited: boolean;
+    creditedBytes: number;
   } {
     let total = 0;
-    let credited = false;
+    let creditedBytes = 0;
     for (const sourceId of sourceIds) {
       let bytes: number;
       try {
@@ -261,13 +267,18 @@ export class ShuntSession {
       } catch {
         continue;
       }
+      // The measurement is every selected source, so a read that claims nothing still
+      // reports what the payload was worth.
       total += bytes;
-      // creditBaseline flips a persisted flag, so it returns true exactly once per handle
-      // no matter how many reads, refinements or retries follow.
-      credited = this.store.creditBaseline(this.identity, sourceId) || credited;
+      // The credit is only what this read newly withholds. `creditBaseline` records the
+      // claim against the content and returns true exactly once, so a source an earlier
+      // read already credited contributes nothing here. Folding the results into a single
+      // OR credited the *whole* selection whenever any part of it was new, which inflated
+      // the saving on every mixed-source read.
+      if (this.store.creditBaseline(this.identity, sourceId)) creditedBytes += bytes;
     }
-    if (total === 0) return { baseline: noBaseline(), credited: false };
-    return { baseline: withheldPayloadBaseline(total, this.config.limits), credited };
+    if (total === 0) return { baseline: noBaseline(), creditedBytes: 0 };
+    return { baseline: withheldPayloadBaseline(total, this.config.limits), creditedBytes };
   }
 
   // -- inspect ---------------------------------------------------------------
@@ -684,6 +695,7 @@ export class ShuntSession {
     envelope: Envelope;
     baseline: Baseline;
     baselineCredited: boolean;
+    creditedBytes?: number | undefined;
     reader: ReaderCost;
     boundary: DeliveryBoundary;
   }): void {
@@ -694,6 +706,7 @@ export class ShuntSession {
       code: input.envelope.code,
       baseline: input.baseline,
       baselineCredited: input.baselineCredited,
+      creditedBytes: input.creditedBytes,
       reader: input.reader,
       egress: envelopeEgress(input.boundary, serializedBytes(input.envelope)),
       limits: this.config.limits,

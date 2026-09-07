@@ -380,6 +380,10 @@ class SnapshotStore:
                 conn.execute(f"PRAGMA busy_timeout = {int(self._limits.store_busy_timeout_ms)}")
                 conn.execute("PRAGMA foreign_keys = ON")
                 conn.execute("PRAGMA synchronous = FULL")
+                # Before the DDL, not after: revision 2 indexes a column revision 1 does
+                # not have, so executing the script first fails on a store that still
+                # needs the column added.
+                self._migrate_schema(conn)
                 conn.executescript(store_ddl())
                 with contextlib.suppress(OSError):
                     os.chmod(self._root / _DB_NAME, _FILE_MODE)
@@ -426,11 +430,52 @@ class SnapshotStore:
             raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
         found = self._metadata(conn, "ddl_version")
         if found != str(self._limits.store_ddl_version):
-            # A store from a different DDL revision is refused rather than migrated
-            # in place by guesswork; docs/install.md documents the supported path.
-            raise ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", retryable=False)
+            if found != "1" or str(self._limits.store_ddl_version) != "2":
+                # A store from an unknown revision is refused rather than migrated in
+                # place by guesswork; docs/install.md documents the supported path.
+                raise ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", retryable=False)
+            try:
+                with _write_txn(conn):
+                    conn.execute(
+                        "UPDATE store_metadata SET value = ? WHERE key = 'ddl_version'",
+                        (str(self._limits.store_ddl_version),),
+                    )
+            except sqlite3.Error:
+                raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
         self._high_water = int(self._metadata(conn, "clock_high_water_ms") or "0")
         self._persisted_high_water = self._high_water
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Add what a newer revision needs, before the DDL script runs. Never destructive.
+
+        Only additive steps, and only between revisions this core knows how to bridge.
+        Revision 1 to 2 adds the durable disclosure identity: ``disclosure_events`` gains a
+        nullable ``blob_hash``. The contract DDL creates that column for a *new* store and
+        also indexes it, which is why this has to run first - the index cannot be built on
+        a table that still lacks the column.
+
+        A revision-1 row keeps a null ``blob_hash``. That is honest rather than convenient:
+        the content it disclosed is genuinely unattributable now, so it still counts toward
+        the session ceiling - where it was always counted - and is never credited to a
+        specific source's ceiling, which would mean inventing the identity it lacks.
+        """
+        try:
+            has_metadata = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata'"
+            ).fetchone()
+            if has_metadata is None:
+                return  # A brand-new store; the DDL builds revision 2 directly.
+            found = self._metadata(conn, "ddl_version")
+            if found != "1" or str(self._limits.store_ddl_version) != "2":
+                return  # Not a bridge this core knows; `_bootstrap_metadata` decides.
+            columns = {
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(disclosure_events)")
+            }
+            if columns and "blob_hash" not in columns:
+                with _write_txn(conn):
+                    conn.execute("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT")
+        except sqlite3.Error:
+            raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
 
     @staticmethod
     def _metadata(conn: sqlite3.Connection, key: str) -> str | None:
@@ -709,7 +754,16 @@ class SnapshotStore:
         worse than refusing, and the store already fails closed on a content mismatch, so
         this does the same for a metadata mismatch.
         """
+        # Two entries in *this* batch can disagree with each other before either is
+        # committed. The committed-row check alone let that through: both handles were
+        # returned, the row kept the first entry's media type, and every later resolve of
+        # the second handle reported metadata its caller never asked for.
+        within_batch: dict[str, tuple[str, int]] = {}
         for capture, _final, digest in staged:
+            declared = (capture.media_type, capture.line_count)
+            seen = within_batch.setdefault(digest, declared)
+            if seen != declared:
+                raise ShuntError("STORE_FAILED", "BLOB_METADATA_CONFLICT", retryable=False)
             row = conn.execute(
                 "SELECT media_type, line_count FROM blobs WHERE hash = ?", (digest,)
             ).fetchone()
@@ -963,20 +1017,35 @@ class SnapshotStore:
                 with _write_txn(conn):
                     now = self._now_locked(conn)
                     self._bump_high_water(conn, now)
-                    cursor = conn.execute(
-                        "UPDATE handles SET baseline_credited = 1 "
-                        " WHERE handle_id = ? AND scope_id = ? AND baseline_credited = 0 "
-                        "   AND revoked = 0 AND expires_at_ms > ? "
-                        # Not already claimed by any handle for the same content in this
-                        # scope. Another scope is a different session and keeps its own.
-                        "   AND NOT EXISTS ("
-                        "     SELECT 1 FROM handles peer"
-                        "      WHERE peer.scope_id = handles.scope_id"
-                        "        AND peer.blob_hash = handles.blob_hash"
-                        "        AND peer.baseline_credited = 1)",
+                    # The claim is recorded against the *content*, in a row that outlives
+                    # the handle. Kept on `handles.baseline_credited` it died with the
+                    # handle, so revoking and recapturing the same bytes claimed the
+                    # saving again - and a `handles` row cannot be retained as a
+                    # tombstone, because its foreign key to `blobs` would pin the payload
+                    # row and stop revoked content being collected at all.
+                    row = conn.execute(
+                        "SELECT blob_hash FROM handles "
+                        " WHERE handle_id = ? AND scope_id = ? AND revoked = 0 "
+                        "   AND expires_at_ms > ?",
                         (handle_id, identity.scope_id, now),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO source_credits "
+                        "(scope_id, blob_hash, credited_at_ms) VALUES (?, ?, ?)",
+                        (identity.scope_id, str(row["blob_hash"]), now),
                     )
-                    return bool(cursor.rowcount)
+                    credited = bool(cursor.rowcount)
+                    if credited:
+                        # Kept in step so the legacy column still reads truthfully for
+                        # anything inspecting a live handle.
+                        conn.execute(
+                            "UPDATE handles SET baseline_credited = 1 "
+                            " WHERE handle_id = ? AND scope_id = ?",
+                            (handle_id, identity.scope_id),
+                        )
+                    return credited
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "BASELINE_FAILED", retryable=False) from None
 
@@ -997,12 +1066,10 @@ class SnapshotStore:
                 # that addresses this content stops a caller resetting the ceiling by
                 # re-registering the file. See `charge_disclosure`.
                 spent = conn.execute(
-                    "SELECT COALESCE(SUM(event.bytes), 0) AS total "
-                    "  FROM disclosure_events event "
-                    "  JOIN handles peer ON peer.handle_id = event.handle_id "
-                    " WHERE event.scope_id = ? "
-                    "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
-                    "                          WHERE handle_id = ? AND scope_id = ?)",
+                    "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events "
+                    " WHERE scope_id = ? AND blob_hash IS NOT NULL "
+                    "   AND blob_hash = (SELECT blob_hash FROM handles "
+                    "                      WHERE handle_id = ? AND scope_id = ?)",
                     (identity.scope_id, handle_id, identity.scope_id),
                 ).fetchone()
                 source = {"disclosed_bytes": int(spent["total"])}
@@ -1055,12 +1122,10 @@ class SnapshotStore:
                     # the cap, re-register, and disclose it again without limit. The
                     # session total was never affected - it already sums scope-wide.
                     spent = conn.execute(
-                        "SELECT COALESCE(SUM(event.bytes), 0) AS total "
-                        "  FROM disclosure_events event "
-                        "  JOIN handles peer ON peer.handle_id = event.handle_id "
-                        " WHERE event.scope_id = ? "
-                        "   AND peer.blob_hash = (SELECT blob_hash FROM handles "
-                        "                          WHERE handle_id = ? AND scope_id = ?)",
+                        "SELECT COALESCE(SUM(bytes), 0) AS total FROM disclosure_events "
+                        " WHERE scope_id = ? AND blob_hash IS NOT NULL "
+                        "   AND blob_hash = (SELECT blob_hash FROM handles "
+                        "                      WHERE handle_id = ? AND scope_id = ?)",
                         (identity.scope_id, handle_id, identity.scope_id),
                     ).fetchone()
                     used_source = int(spent["total"])
@@ -1094,9 +1159,22 @@ class SnapshotStore:
                             (want_bytes, handle_id, identity.scope_id),
                         )
                         conn.execute(
+                            # The content, not just the handle: a handle is deleted by
+                            # revocation or expiry, and the per-source ceiling has to
+                            # outlive both or a recapture resets it.
                             "INSERT INTO disclosure_events "
-                            "(scope_id, handle_id, kind, bytes, at_ms) VALUES (?, ?, ?, ?, ?)",
-                            (identity.scope_id, handle_id, kind, want_bytes, now),
+                            "(scope_id, handle_id, blob_hash, kind, bytes, at_ms) "
+                            "VALUES (?, ?, (SELECT blob_hash FROM handles "
+                            "                 WHERE handle_id = ? AND scope_id = ?), ?, ?, ?)",
+                            (
+                                identity.scope_id,
+                                handle_id,
+                                handle_id,
+                                identity.scope_id,
+                                kind,
+                                want_bytes,
+                                now,
+                            ),
                         )
                     return DisclosureCharge(
                         granted=True,
