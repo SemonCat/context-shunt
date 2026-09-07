@@ -121,6 +121,21 @@ It recognises common secret filenames, extensions, directories and content marke
 cannot recognise every secret. The reader provider must independently be an approved data
 destination; minimal chunks and an allowlist remain necessary defences.
 
+## The reader's per-call deadline is sized for a reasoning model
+
+`deadlines_ms.model_call` is 45s, inside a 60s request deadline. That is deliberately
+generous, and it is set by measurement rather than taste: the default reader model
+`gpt-5.6-luna` is a reasoning model, and a live reader call against it takes roughly 34s
+wall on the host it was measured on. It was 20s through contract revision 1.1, which meant
+every live call aborted before the default model could answer — and because `deadlines_ms`
+is a normative value a deployment may only *narrow*, no operator could raise it either.
+
+The consequence to know about: one call can occupy 45s of a 60s request budget, so the
+reader's single permitted retry will usually not fit. A transient provider failure
+therefore tends to surface as the failure itself rather than as a successful retry. That
+is the honest trade at these latencies; a deployment that would rather have the retry can
+narrow `model_call`, at the cost of aborting slow-but-fine calls.
+
 ## Benchmarks are partial by construction
 
 `benchmark core` measures what needs no provider: gate latency, envelope sizes, main-context

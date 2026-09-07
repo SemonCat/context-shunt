@@ -41,7 +41,7 @@ markers = [
   "gate_no_raw_leak", "gate_bounded_output", "gate_cancellation",
   "gate_permissions", "gate_no_writes", "gate_capability",
   "gate_store", "gate_inspect", "gate_accounting",
-  "integration_hermes", "eval_luna", "benchmark",
+  "integration_hermes", "eval_luna", "benchmark", "benchmark_provider",
 ]
 filterwarnings = ["error::DeprecationWarning:context_shunt.*"]
 

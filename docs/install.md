@@ -215,12 +215,38 @@ CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_LUNA_BRIDGE=your_module:your_callable \
   ./scripts/verify eval luna
 
+# Live provider benchmark: reader latency, and token cost where the host reports it.
+# Same prerequisite as the eval.
+CONTEXT_SHUNT_LUNA_EVAL=1 \
+CONTEXT_SHUNT_LUNA_BRIDGE=your_module:your_callable \
+  ./scripts/verify benchmark all
+
 # Deterministic benchmark half (no provider needed).
 ./scripts/verify benchmark core
 
 # Everything, in order. Expect exit 2 until live Luna access exists.
 ./scripts/verify release all
 ```
+
+### A worked bridge, for OpenClaw hosts
+
+[`evals/bridges/openclaw_cli.py`](../evals/bridges/openclaw_cli.py) is a real, working
+bridge for a machine whose OpenClaw host already has `gpt-5.6-luna` configured. It shells
+out to `openclaw infer model run`, a documented CLI surface, so the **host** resolves its
+own credentials and the bridge never reads, stores or forwards a secret:
+
+```bash
+CONTEXT_SHUNT_LUNA_EVAL=1 \
+CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_cli:complete \
+PYTHONPATH=evals \
+  ./scripts/verify eval luna
+```
+
+It lives under `evals/` rather than in a shipped package because it is scaffolding for one
+host, not product code. Read its module docstring before trusting a score from it: it
+records exactly which fidelity it does and does not have — no provider token counts on
+that route, and no separate system role, both of which it reports honestly rather than
+filling in.
 
 The bridge callable receives `system`, `user`, `provider`, `model`, `max_output_tokens` and
 `timeout_ms` as keyword arguments and returns a mapping. Only `text` is required; every

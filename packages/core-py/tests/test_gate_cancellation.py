@@ -52,7 +52,27 @@ class ClockProvider:
 
 def test_contract_deadlines():
     assert (L.gate_probe_deadline_ms, L.spill_io_deadline_ms) == (1000, 5000)
-    assert (L.model_call_deadline_ms, L.request_deadline_ms) == (20000, 60000)
+    assert (L.model_call_deadline_ms, L.request_deadline_ms) == (45000, 60000)
+
+
+def test_the_per_call_deadline_can_actually_serve_the_default_reader_model():
+    """The default model must be reachable under the default deadline.
+
+    ``model_call`` was 20000 through the 1.1 work. The default reader model is
+    ``gpt-5.6-luna``, a reasoning model, and a measured live reader call against it takes
+    roughly 34s wall - so every call aborted at 20s and the reader could never answer on a
+    stock configuration. Because ``deadlines_ms`` is a normative contract value that a
+    deployment may only *narrow*, no operator could raise it either: the default
+    configuration was unusable and unfixable from outside.
+
+    The floor here is the measured latency plus headroom. It is asserted rather than
+    commented so that lowering the cap back under what the default model needs fails here
+    instead of silently disabling the reader again.
+    """
+    measured_live_call_ms = 34_000
+    assert L.model_call_deadline_ms >= measured_live_call_ms
+    # ... and one call plus its budget must still fit inside the request deadline.
+    assert L.model_call_deadline_ms <= L.request_deadline_ms
 
 
 def test_deadline_expires_and_reports_timeout():

@@ -407,19 +407,33 @@ def run_benchmark(gate: str) -> list[GateResult]:
             )
         ]
     results = run_benchmark("core")
-    results.append(
-        GateResult(
+    results.append(run_benchmark_provider())
+    return results
+
+
+def run_benchmark_provider() -> GateResult:
+    """The provider half. NOT_RUN without live access; a real measurement with it.
+
+    This used to be hardcoded to NOT_RUN, which meant the gate could never run even where
+    live access existed - the prerequisite was never actually consulted. It now checks the
+    same prerequisite as ``eval luna`` and runs the measurement when it is satisfied.
+    """
+    started = time.monotonic()
+    if not os.environ.get("CONTEXT_SHUNT_LUNA_EVAL"):
+        return GateResult(
             "benchmark",
             "provider",
             "not_run",
             0,
             "prerequisite missing: reader latency and token cost need live gpt-5.6-luna "
             "(set CONTEXT_SHUNT_LUNA_EVAL=1 with a host bridge)",
-            0.0,
+            time.monotonic() - started,
             ["NOT_RUN benchmark provider: live gpt-5.6-luna access is required"],
         )
+    status, cases, detail = _pytest("benchmark_provider")
+    return GateResult(
+        "benchmark", "provider", status, cases, detail, time.monotonic() - started
     )
-    return results
 
 
 def run_packaging(gate: str) -> list[GateResult]:

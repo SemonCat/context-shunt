@@ -44,7 +44,7 @@
   "deadlines_ms": {
     "gate_probe": 1000,
     "spill_io": 5000,
-    "model_call": 20000,
+    "model_call": 45000,
     "request": 60000
   },
   "spill": {
