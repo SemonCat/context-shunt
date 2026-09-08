@@ -723,28 +723,6 @@ export class Reader {
       };
     }
 
-    if (answer.length === 0 && capDropped > 0) {
-      // The sources did answer and every piece of the answer hit a ceiling. Saying
-      // NO_MATCH here would report that the sources held nothing, which is a different and
-      // untrue statement; `LIMIT_EXCEEDED` names the real cause and the coverage omissions
-      // above say which source lost what.
-      const failure = new ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", false);
-      this.metrics.count("reader_error", { code: failure.code });
-      const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
-      const opts: Parameters<typeof errorEnvelope>[2] = {
-        provenance: failed,
-        sources: handles,
-        handlesValid: true,
-      };
-      if (accountingId !== undefined) opts.accountingId = accountingId;
-      return {
-        envelope: errorEnvelope(requestId, failure, opts),
-        provenance: failed,
-        cost,
-        sourceIds,
-      };
-    }
-
     if (answer.length === 0) {
       if (rejected > 0 && verified.length === 0 && rawCitations.length > 0) {
         // The handles are still valid and the caller is told so, so they have to be listed
@@ -762,6 +740,29 @@ export class Reader {
         if (accountingId !== undefined) failureOpts.accountingId = accountingId;
         return {
           envelope: errorEnvelope(requestId, failure, failureOpts),
+          provenance: failed,
+          cost,
+          sourceIds,
+        };
+      }
+      if (capDropped > 0) {
+        // The sources did answer, and every piece of the answer hit a ceiling. NO_MATCH
+        // would report that the sources held nothing, which is a different and untrue
+        // statement; `LIMIT_EXCEEDED` names the real cause, and the coverage omissions
+        // above say which source lost what. Checked *after* the verification branch, so a
+        // request whose evidence never verified is still reported as a citation failure
+        // rather than as a size one - the cap is not what emptied that answer.
+        const failure = new ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", false);
+        this.metrics.count("reader_error", { code: failure.code });
+        const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+        const opts: Parameters<typeof errorEnvelope>[2] = {
+          provenance: failed,
+          sources: handles,
+          handlesValid: true,
+        };
+        if (accountingId !== undefined) opts.accountingId = accountingId;
+        return {
+          envelope: errorEnvelope(requestId, failure, opts),
           provenance: failed,
           cost,
           sourceIds,
@@ -803,9 +804,31 @@ export class Reader {
 
     const fitted = this.fitToEnvelope(keptClaims, legacyAnswer, citations, coverage, answered);
     // The fit loop rewrites both halves, so the invariant is re-established on what is
-    // actually published rather than on what was measured before trimming.
+    // actually published rather than on what was measured before trimming. A violation here
+    // is a program bug and is reported as the citation failure it is - calling it
+    // `ANSWER_OVER_ENVELOPE` would blame a size ceiling for a marker that names evidence
+    // the envelope does not carry.
     const published = new Set(fitted.citations.map((c) => c.id));
-    if (unpublishedMarkerIds(fitted.answer, published).length > 0) fitted.answer = "";
+    if (
+      fitted.answer.length > 0
+      && unpublishedMarkerIds(fitted.answer, published).length > 0
+    ) {
+      const failure = new ShuntError("CITATION_INVALID", "MARKER_NOT_PUBLISHED", false);
+      this.metrics.count("reader_error", { code: failure.code });
+      const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+      const opts: Parameters<typeof errorEnvelope>[2] = {
+        provenance: failed,
+        sources: handles,
+        handlesValid: true,
+      };
+      if (accountingId !== undefined) opts.accountingId = accountingId;
+      return {
+        envelope: errorEnvelope(requestId, failure, opts),
+        provenance: failed,
+        cost,
+        sourceIds,
+      };
+    }
     if (fitted.answer.length === 0) {
       // Every piece of evidence had to go, so there is no supported answer left to publish.
       // Saying NO_MATCH here would claim the sources held nothing, which is a different and

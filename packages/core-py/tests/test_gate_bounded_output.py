@@ -587,3 +587,27 @@ def test_a_fallback_candidate_the_budget_can_afford_still_runs(tmp_path):
     assert primary.call_count == 1 and alternative.call_count == 1
     assert third.call_count == 0
     assert env["code"] == "ANSWERED"
+
+
+def test_a_cap_does_not_relabel_a_verification_failure(tmp_path):
+    """Precedence: nothing verified is a citation failure, whatever a cap also dropped.
+
+    The cap branch answers "the source said something and it would not fit". When no
+    citation verified there was nothing to fit, so the verification failure keeps
+    precedence and the envelope still names it.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    # The quote is real but the locator names a different line, so verification fails on
+    # the snapshot bytes and nothing survives.
+    citations = [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "key01 = value01"}]
+    claims = [
+        {"text": f"Assertion number {i}.", "citation_ids": ["c1"]}
+        for i in range(L.max_claims_per_answer + 6)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
+    assert env["recovery"]["handles_valid"] is True

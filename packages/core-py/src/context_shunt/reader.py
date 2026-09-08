@@ -734,28 +734,6 @@ class Reader:
                 source_ids=tuple(source_ids),
             )
 
-        if not answer and cap_dropped:
-            # The sources did answer and every piece of the answer hit a ceiling. Saying
-            # NO_MATCH here would report that the sources held nothing, which is a
-            # different and untrue statement; `LIMIT_EXCEEDED` names the real cause and
-            # the coverage omissions above say which source lost what.
-            exc = ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", retryable=False)
-            self._metrics.count("reader_error", {"code": exc.code})
-            failed = _as_failure_provenance(provenance)
-            return ReaderResult(
-                envelope=E.error_envelope(
-                    request_id,
-                    exc,
-                    accounting_id=accounting_id,
-                    provenance=failed,
-                    sources=handles,
-                    handles_valid=True,
-                ),
-                provenance=failed,
-                cost=cost,
-                source_ids=tuple(source_ids),
-            )
-
         if not answer:
             if rejected and not verified and raw_citations:
                 # The handles are still valid and the caller is told so, so they have to be
@@ -764,6 +742,30 @@ class Reader:
                 exc = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
                 # Nothing survived verification, so nothing model-generated is published:
                 # the failure is labelled not-derived while keeping the attribution facts.
+                failed = _as_failure_provenance(provenance)
+                return ReaderResult(
+                    envelope=E.error_envelope(
+                        request_id,
+                        exc,
+                        accounting_id=accounting_id,
+                        provenance=failed,
+                        sources=handles,
+                        handles_valid=True,
+                    ),
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+            if cap_dropped:
+                # The sources did answer, and every piece of the answer hit a ceiling.
+                # NO_MATCH would report that the sources held nothing, which is a
+                # different and untrue statement; `LIMIT_EXCEEDED` names the real cause,
+                # and the coverage omissions above say which source lost what. Checked
+                # *after* the verification branch, so a request whose evidence never
+                # verified is still reported as a citation failure rather than as a size
+                # one - the cap is not what emptied that answer.
+                exc = ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", retryable=False)
+                self._metrics.count("reader_error", {"code": exc.code})
                 failed = _as_failure_provenance(provenance)
                 return ReaderResult(
                     envelope=E.error_envelope(
@@ -814,9 +816,27 @@ class Reader:
             kept_claims, legacy_answer, verified, coverage, answered
         )
         # The fit loop rewrites both halves, so the invariant is re-established on what is
-        # actually published rather than on what was measured before trimming.
-        if unpublished_marker_ids(answer, {c["id"] for c in verified}):
-            answer = ""
+        # actually published rather than on what was measured before trimming. A violation
+        # here is a program bug and is reported as the citation failure it is - calling it
+        # `ANSWER_OVER_ENVELOPE` would blame a size ceiling for a marker that names
+        # evidence the envelope does not carry.
+        if answer and unpublished_marker_ids(answer, {c["id"] for c in verified}):
+            exc = ShuntError("CITATION_INVALID", "MARKER_NOT_PUBLISHED", retryable=False)
+            self._metrics.count("reader_error", {"code": exc.code})
+            failed = _as_failure_provenance(provenance)
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                ),
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
         if not answer:
             # Every piece of evidence had to go, so there is no supported answer left to
             # publish. Saying NO_MATCH here would claim the sources held nothing, which is a
