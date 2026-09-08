@@ -178,7 +178,12 @@ def _artifact_uri_to_path(value: Any) -> str:
     if "://" not in value:
         return value
     parts = urlsplit(value)
-    if parts.scheme != "file" or parts.netloc not in ("", "localhost") or parts.query or parts.fragment:
+    if (
+        parts.scheme != "file"
+        or parts.netloc not in ("", "localhost")
+        or parts.query
+        or parts.fragment
+    ):
         raise ShuntError("INVALID_REQUEST", "MANIFEST_UNSUPPORTED_URI", retryable=False)
     return unquote(parts.path)
 
@@ -336,9 +341,7 @@ class ArtifactImporter:
                     "LIMIT_EXCEEDED", "MANIFEST_OVER_BYTE_CAP", retryable=False
                 ) from None
             if exc.code == "UNSAFE_SOURCE" and exc.detail == "INVALID_JSON":
-                raise ShuntError(
-                    "INVALID_REQUEST", "MANIFEST_NOT_JSON", retryable=False
-                ) from None
+                raise ShuntError("INVALID_REQUEST", "MANIFEST_NOT_JSON", retryable=False) from None
             raise
         return normalize_manifest(snapshot.json_value, accepted_schemas=self._accepted)
 

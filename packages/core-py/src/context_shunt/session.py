@@ -662,9 +662,7 @@ class ShuntSession:
             )
             outcome = self._importer.adopt(self.session_id, normalized)
         except ShuntError as exc:
-            self._metrics.count(
-                "artifact_import", {"result": "refused", "code": exc.code}
-            )
+            self._metrics.count("artifact_import", {"result": "refused", "code": exc.code})
             return self._publish_failure(
                 request_id, exc, OperationKind.CAPTURE, operation_id=operation_id
             )

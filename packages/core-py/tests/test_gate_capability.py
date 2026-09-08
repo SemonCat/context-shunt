@@ -607,9 +607,7 @@ def test_the_openclaw_capability_source_reports_the_tool_it_does_not_declare():
     the mode behind it as unsupported, with a reason that names a core gap rather than a
     host limitation it does not have.
     """
-    source = (
-        REPO / "adapters" / "openclaw" / "src" / "capability.ts"
-    ).read_text(encoding="utf-8")
+    source = (REPO / "adapters" / "openclaw" / "src" / "capability.ts").read_text(encoding="utf-8")
     assert 'unsupported("artifact_import", ["IMPORT_UNIMPLEMENTED"]' in source
 
 

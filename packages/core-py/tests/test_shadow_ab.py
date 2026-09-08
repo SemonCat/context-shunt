@@ -478,9 +478,7 @@ def build_report(tmp_path: Path) -> dict[str, Any]:
             max_latency,
         ),
         "task_correctness": _gate_not_run("task_correctness", _SCORED_ELSEWHERE),
-        "semantic_evidence_support": _gate_not_run(
-            "semantic_evidence_support", _SCORED_ELSEWHERE
-        ),
+        "semantic_evidence_support": _gate_not_run("semantic_evidence_support", _SCORED_ELSEWHERE),
         "mechanical_citation_validity": _gate_not_run(
             "mechanical_citation_validity",
             f"{_SCORED_ELSEWHERE}; the retrieval lane publishes no citations, so scoring "
@@ -509,9 +507,7 @@ def build_report(tmp_path: Path) -> dict[str, Any]:
         # not driven here at all, so claiming otherwise because a bridge happens to be
         # configured would be exactly the false pass this harness exists to avoid.
         "reader_lane": (
-            "measured"
-            if any(r.lanes["reader"].status == "measured" for r in results)
-            else NOT_RUN
+            "measured" if any(r.lanes["reader"].status == "measured" for r in results) else NOT_RUN
         ),
         "refused_raw_bytes": refused_raw_bytes,
         "lanes": {
@@ -659,11 +655,7 @@ def test_the_shadow_report_meets_the_gates_that_can_run(tmp_path):
     report = build_report(tmp_path)
     _write_report(report)
 
-    runnable = {
-        name: gate
-        for name, gate in report["gates"].items()
-        if gate["status"] != NOT_RUN
-    }
+    runnable = {name: gate for name, gate in report["gates"].items() if gate["status"] != NOT_RUN}
     # The gates that need a provider or a pricing table must say so, not be scored from
     # a lane that cannot answer the question they ask.
     assert set(runnable) == {
@@ -680,9 +672,7 @@ def test_the_shadow_report_meets_the_gates_that_can_run(tmp_path):
     # be able to turn this into a claim that it was - which an `or os.environ.get(...)`
     # would have done silently.
     assert report["reader_lane"] == NOT_RUN
-    assert all(
-        row["lanes"]["reader"]["status"] == "not_run" for row in report["per_item"]
-    )
+    assert all(row["lanes"]["reader"]["status"] == "not_run" for row in report["per_item"])
 
 
 def test_a_refused_item_is_reported_rather_than_averaged_away(tmp_path):

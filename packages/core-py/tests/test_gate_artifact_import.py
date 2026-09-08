@@ -356,9 +356,7 @@ def test_refusals_carry_the_contract_detail(tmp_path, case):
         if not session.artifact_import_enabled:
             # Disabled by config or capability: the session refuses before the importer
             # exists, and there is no importer to raise from.
-            envelope = session.import_artifact(
-                "req_import", manifest_path=str(world.manifest_path)
-            )
+            envelope = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
             assert envelope["code"] == case["expect"]["code"]
             return
         importer = ArtifactImporter(
@@ -481,9 +479,7 @@ def test_an_imported_handle_answers_a_question_with_a_verified_citation(tmp_path
         provider=luna,
     )
     try:
-        imported = session.import_artifact(
-            "req_import", manifest_path=str(world.manifest_path)
-        )
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
         pointer = imported["pointer"]
         answered = session.read(
             {
@@ -810,9 +806,7 @@ def test_the_import_path_never_calls_a_provider(tmp_path):
         provider=HostBridgeProvider(refuse),
     )
     try:
-        envelope = session.import_artifact(
-            "req_import", manifest_path=str(world.manifest_path)
-        )
+        envelope = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
         assert envelope["code"] == "IMPORTED"
         assert envelope["provenance"]["derived"] is False
         assert envelope["provenance"]["label"] == "pointer_only"
@@ -829,9 +823,7 @@ def test_an_imported_and_a_captured_handle_share_the_same_store(tmp_path):
     world = World(tmp_path, {"setup": {"artifact": {"content": IMPORTED_BODY}}, "manifest": {}})
     session = world.session()
     try:
-        imported = session.import_artifact(
-            "req_import", manifest_path=str(world.manifest_path)
-        )
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
         source_file = world.workspace / "same.log"
         source_file.write_text(IMPORTED_BODY, encoding="utf-8")
         captured = session.register_path(str(source_file))
