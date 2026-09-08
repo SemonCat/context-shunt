@@ -2,16 +2,17 @@
 
 What each supported host can actually do, and what it cannot. A mode is enabled only when
 the adapter can prove the host gives it what the mode needs; where the proof does not
-exist the mode is reported `unsupported`, stays off, and fails closed if configuration
-asks for it. Nothing here is aspirational.
+exist the mode is reported `unsupported` and stays off even if configuration requests it.
+Nothing here is aspirational.
 
 Both adapters emit this as a machine-readable capability report at startup
 (`capability_report()` in Python, `capabilityJson()` in TypeScript). It carries the host
 and SDK version, the tools covered, the mode decisions with reasons and evidence, and the
 fixture id the adapter was tested against.
 
-The compatibility evidence in this release is pinned to the exact host versions below.
-An upgrade is unverified until the local integration gate is rerun and reviewed.
+The adapter assertions and live integration gates target the exact host versions below.
+Runtime compatibility on a particular checkout is proven only by that checkout's local
+integration result. An upgrade is unverified until the gate is rerun and reviewed.
 
 ## Mode summary
 
@@ -112,15 +113,16 @@ than inherited.
 
 ## What the disabled mode still gets you
 
-The spill engine itself is implemented, exercised and passing. `unit bounded-output` runs
+The spill engine itself is implemented and exercised by `unit bounded-output`, which runs
 the shared `contracts/v1/conformance/spill-cases.json` corpus in both cores: oversized
 string, object, array and content-block results all spill with **zero** model calls and no
 heuristic summary; image/audio/resource blocks are refused; quota exhaustion, write
 failure, readback mismatch, cycles, excessive depth and node counts all produce a bounded
 `SPILL_FAILED` or `LIMIT_EXCEEDED` envelope and never the raw payload.
 
-So the engine is not the blocker — host enablement is. Keep those two facts separate when
-reading any report: *the engine passes its gates*, and *no supported host enables it*.
+So the engine is not the host blocker. Keep those facts separate when reading a report:
+the deterministic gate has an executable implementation, while no supported host enables
+the mode. Whether the gate passed a particular checkout comes from that run's result.
 
 ## Tool coverage
 
@@ -132,6 +134,11 @@ needs comprehensive protection must disable uncontrolled read tools at the host.
 | --- | --- | --- | --- |
 | Hermes | `read_file` | `search_files` | `terminal` |
 | OpenClaw | `read` | none | `exec` |
+
+The three context-shunt tools themselves are registered on both hosts, but their advertised
+parameter schema is currently the portable subset described in
+[`limitations.md`](limitations.md): optional read selectors and per-call inspect budget
+overrides exist in the internal contract but are not uniformly exposed by host registration.
 
 ## Gate status
 
@@ -165,3 +172,5 @@ needs comprehensive protection must disable uncontrolled read tools at the host.
   the adapter reads `auxiliary.context_shunt_reader` itself through the public
   `hermes_cli.config.load_config` and applies the same user-over-plugin precedence. If the
   facade gains a `task=` parameter, that indirection can go away.
+- Adapter registration schemas that expose the shared optional read selector and inspect
+  per-call budget fields consistently on both hosts.

@@ -82,9 +82,10 @@ read, before a byte is returned**. Two concurrent inspects cannot overshoot betw
 
 Once the ceiling is reached, further pages return no content and say
 `DISCLOSURE_EXHAUSTED`. There is no configuration in which repeated small reads reassemble a
-*large* payload into the main model context. 上限是位元組預算，而非「來源永不會被完整取回」的
-承諾：小到能放進 per-page／per-source／per-session 上限的來源，`inspect` 可以完整回傳；350 行
-的 pre-read gate 是 context 成本控制，不是機密性邊界。
+*large* payload into the main model context. The ceiling is a byte budget, not a promise
+that no source can ever be returned in full: `inspect` can return a source small enough to
+fit the per-page, per-source, and per-session limits. The 350-line pre-read gate controls
+context cost; it is not a confidentiality boundary.
 
 Continuation cursors are HMAC-tagged with a per-store key held in `store_metadata` and bound
 to the handle, the snapshot hash and the canonical selector. A cursor cannot be edited to
@@ -92,10 +93,12 @@ jump the scan budget, repointed at another snapshot, or replayed into a differen
 
 ## What never leaves
 
-The intercepted payload does not appear in the envelope, the transcript, tool history,
-persistence, a trace, a log, a metric label, an exception, a fallback or a retry. Provider
-error bodies are dropped at the provider boundary — only a bounded `MODEL_ERROR` crosses it,
-because a provider exception text can contain the prompt or a payload echo.
+Outside two explicit disclosure forms—short mechanically verified citation quotes and
+bounded `inspect` segments—the intercepted raw payload does not appear in an envelope, the
+transcript, tool history, persistence, a trace, a log, a metric label, an exception, a
+fallback, or a retry. Provider error bodies are dropped at the provider boundary; only a
+bounded `MODEL_ERROR` crosses it, because an exception text can contain the prompt or a
+payload echo.
 
 Error details are bounded `UPPER_SNAKE` tokens, not free text, so no payload can ride along
 inside one. The output guard is the final fixed boundary; if the guard itself fails it emits

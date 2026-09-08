@@ -5,9 +5,10 @@ Merge these into your host's config; do not replace the file.
 - [`hermes.config.yaml`](hermes.config.yaml) — Hermes (`~/.hermes/config.yaml`)
 - [`openclaw.json`](openclaw.json) — OpenClaw (`openclaw.json`)
 
-Both are checked by `./scripts/verify packaging all`, which loads the `config` block through
-the real loader. An example that would not actually load fails the gate — so what is here is
-exactly what the plugin accepts, with no explanatory keys smuggled in.
+Both files are required by `./scripts/verify packaging all`; the OpenClaw `config` block is
+also loaded through the real core loader. Hermes-specific outer keys belong to the host and
+are exercised by the opt-in Hermes integration gate. Comments carry explanation without
+adding fake keys to either plugin `config` block.
 
 ## The keys
 
@@ -24,7 +25,7 @@ exactly what the plugin accepts, with no explanatory keys smuggled in.
 | `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
-| `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill. Unsupported on both hosts, so setting it `true` changes nothing. |
+| `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill request. Both adapters report it unsupported, so `true` does not activate the mode. |
 | `limits` | `{}` | Deployment caps. **May only be narrowed** — a wider value is refused at load. |
 
 ## `attribution_policy`
@@ -68,3 +69,8 @@ limits:
 
 A wider value is refused at load with `LIMIT_MAY_ONLY_NARROW`, so a config file cannot widen
 the boundary the acceptance gates measure.
+
+The complete list of accepted keys and current defaults, including concurrency, retry,
+deadline, store, TTL, JSON, inspect, disclosure, and stats limits, is in
+[`docs/configuration.md`](../../docs/configuration.md). Token and attempt accounting is in
+[`docs/metrics.md`](../../docs/metrics.md).

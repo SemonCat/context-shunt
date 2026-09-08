@@ -25,8 +25,12 @@ and review the host hook/model APIs before upgrading either host.
 
 ## Build and self-check first
 
+If a remote repository is available, the intended public URL is
+`https://github.com/SemonCat/context-shunt`; this documentation does not assert that it has
+already been published. From an existing checkout:
+
 ```bash
-git clone <your-fork> context-shunt && cd context-shunt
+cd context-shunt
 
 # Python core
 python3 -m venv .venv
@@ -65,8 +69,11 @@ ln -s "$PWD/adapters/hermes/context-shunt" ~/.hermes/plugins/context-shunt
 # 4. Restart Hermes. The capability report is logged at startup.
 ```
 
-The `llm` block in the example config is required: Hermes gates plugin model overrides per
-plugin, and the reader only ever asks for `gpt-5.6-luna`.
+The `llm` block in the example config authorizes the default model request. Hermes gates
+plugin model/provider overrides per plugin, so update its allowlist when changing
+`reader.model`, `reader.provider`, or the auxiliary target. User values under
+`auxiliary.context_shunt_reader` take precedence over plugin reader defaults; `auto` means
+inherit. See [`configuration.md`](configuration.md).
 
 Verify against your own install:
 
@@ -285,7 +292,7 @@ A reported or resolved value that contradicts the requested model fails the call
 | Reader returns `MODEL_ERROR` with an empty answer | The host cannot serve the configured model, or reported one that contradicts it. The gate, `inspect` and `stats` keep working. |
 | Reader returns `PROVENANCE_UNAVAILABLE` | `reader.attribution_policy: require_match` is set and the host cannot prove which model answered. See [`capability-matrix.md`](capability-matrix.md) for the per-host ceiling. |
 | Envelope says `attribution_status: unverified` | Expected on Hermes: the plugin LLM facade cannot be distinguished from an echo of the request. This is reported, not hidden. |
-| `inspect` returns `DISCLOSURE_EXHAUSTED` | The cumulative per-source or per-session disclosure ceiling is used up. That is the ceiling working; raise it with `limits.disclosure_max_per_*_bytes` only if you mean to. |
+| `inspect` returns `DISCLOSURE_EXHAUSTED` | The cumulative per-source or per-session disclosure ceiling is used up. Current configuration can only narrow contract defaults, not raise them. Refine the question, use a narrower selector, or start a genuinely new session if appropriate. |
 | Store refuses with `DDL_VERSION_MISMATCH` | The cache was created by a different revision. Remove the cache root; see "Migrating from a pre-1.1 cache" above. |
 | A handle is `SOURCE_EXPIRED` sooner than expected | The default TTL is one hour, and a real session boundary revokes early. A per-turn boundary does not. |
 | A large read is not blocked | The tool id is outside the covered list in [`capability-matrix.md`](capability-matrix.md). Disable uncontrolled read tools at the host. |

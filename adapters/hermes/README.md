@@ -1,5 +1,7 @@
 # Hermes adapter
 
+[Project README](../../README.md) | [繁體中文](../../README.zh-TW.md)
+
 Install, uninstall, cleanup and migration instructions live in
 [`docs/install.md`](../../docs/install.md). The mode matrix — including the model
 attribution ceiling on this host, the session-lifecycle rule, and why the optional
@@ -16,3 +18,9 @@ This adapter registers three read-only tools and no writer:
 
 Run `./scripts/verify integration hermes --mode local` against a real host checkout to
 check the wiring; without one it reports `NOT_RUN`, never a pass.
+
+The effective reader target uses `auxiliary.context_shunt_reader` over the plugin's
+`reader` defaults; Hermes' `auto` means inherit. The plugin `llm` policy must authorize the
+chosen overrides. This host can report only `attribution_status: unverified`, never
+provider-authoritative `actual`. See the checked
+[`hermes.config.yaml`](../../examples/config/hermes.config.yaml).

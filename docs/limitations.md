@@ -21,6 +21,17 @@ them. A read tool outside that list is not protected. If your host gains a new r
 tool, this does not automatically cover it, and the capability report will not pretend
 otherwise.
 
+## The registered tool schemas expose a portable subset
+
+The shared internal tool-argument contract supports an optional selector for
+`context_shunt_read` and per-call `max_result_bytes` / `max_scan_lines` on
+`context_shunt_inspect`. The current adapter registration schemas omit those optional
+fields. In particular, OpenClaw declares `additionalProperties: false`, so an agent cannot
+portably send them even though the handler/core understands them internally. The documented
+host-facing examples therefore use full-source reader selection and configured inspect
+limits. Aligning the registered schemas with the shared contract remains an adapter release
+task, not a capability this documentation assumes.
+
 ## The oversized post-tool mode is off on both hosts
 
 The engine is implemented and tested. It stays disabled because neither supported host can
@@ -30,8 +41,8 @@ receives post-truncation content inside a fail-open `try/except`; OpenClaw caps 
 before invoking the plugin's persist hook.
 
 The tests that exist for it are core tests behind a capability gate. They are not evidence
-about a host, and turning the flag on does not turn the mode on — the capability probe
-overrides configuration, and forcing it yields `HOST_UNSAFE`.
+about a host, and turning the flag on does not turn the mode on: the unsupported capability
+decision takes precedence over the configuration request.
 
 What is *not* proven either way: a live runtime sentinel measurement of capture / truncation
 / persistence ordering inside a running gateway. The host-integration gate reads the
@@ -126,18 +137,15 @@ destination; minimal chunks and an allowlist remain necessary defences.
 
 ## The reader's per-call deadline is sized for a reasoning model
 
-`deadlines_ms.model_call` is 45s, inside a 60s request deadline. That is deliberately
-generous, and it is set by measurement rather than taste: the default reader model
-`gpt-5.6-luna` is a reasoning model, and a live reader call against it takes roughly 34s
-wall on the host it was measured on. It was 20s through contract revision 1.1, which meant
-every live call aborted before the default model could answer — and because `deadlines_ms`
-is a normative value a deployment may only *narrow*, no operator could raise it either.
+`model_call_deadline_ms` is 45 seconds, inside a 60-second `request_deadline_ms`. A
+deployment may only narrow these normative defaults, not raise them. The longer per-call
+budget accommodates slow reasoning-model calls but leaves little request time for recovery.
 
 The consequence to know about: one call can occupy 45s of a 60s request budget, so the
 reader's single permitted retry will usually not fit. A transient provider failure
 therefore tends to surface as the failure itself rather than as a successful retry. That
 is the honest trade at these latencies; a deployment that would rather have the retry can
-narrow `model_call`, at the cost of aborting slow-but-fine calls.
+narrow `model_call_deadline_ms`, at the cost of aborting slow-but-fine calls.
 
 ## Benchmarks are partial by construction
 
