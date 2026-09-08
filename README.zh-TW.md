@@ -35,7 +35,7 @@ pre-read gate ---- 小型或可證明有界 ----> 原本的 host 工具
           |                               |
           v                               v
  query-aware reader                 決定性 inspect
- 每個 chunk 一次呼叫               精確 lines/bytes/search
+ 每個已處理 chunk 至少一次呼叫     精確 lines/bytes/search
  retry/fallback 有界                零模型呼叫
           |                               |
           v                               v
@@ -224,9 +224,9 @@ handle、snapshot、selector 連同上一頁的 opaque `next_cursor` 繼續。
     "deterministic": true,
     "segments": [{"kind": "lines", "start": 40, "end": 42,
       "text": "counts:\n  max_citations: 16\n  max_transient_retries: 1"}],
-    "result_bytes": 52, "complete": true, "next_cursor": null,
+    "result_bytes": 54, "complete": true, "next_cursor": null,
     "lines_scanned": 3, "scan_budget_exhausted": false,
-    "disclosed_bytes_source": 52, "disclosed_bytes_session": 52,
+    "disclosed_bytes_source": 54, "disclosed_bytes_session": 54,
     "disclosure_limit_reached": false},
   "accounting_id": "acc_1111222233334444"
 }
@@ -258,7 +258,7 @@ counter、修改 retention 或取得來源內容。
 | `spill_dir` | legacy alias | 只有未設定 `cache_dir` 時才使用的 1.1 前別名。 |
 | `denylist` | `[]` | 額外 relative glob；內建 secret policy 仍會套用。 |
 | `gate_enabled` | `true` | 啟用 pre-read gate。 |
-| `reader.enabled` | `true` | Host bridge 存在時啟用 model reader。 |
+| `reader.enabled` | `true` | 控制執行；`false` 會在不呼叫模型的情況下拒絕 read，但 adapter 仍可能註冊工具。 |
 | `reader.model` | `gpt-5.6-luna` | Reader 要求的模型；1.1 起可設定。 |
 | `reader.provider` | `""` | 可選 provider pin；空字串交由 host routing。 |
 | `reader.attribution_policy` | `allow_unverified` | 誠實發布較弱歸屬；`require_match` 則拒絕。 |
@@ -268,9 +268,10 @@ counter、修改 retention 或取得來源內容。
 | `suma_post_tool.enabled` | `false` | Optional post-tool spill；兩個 host 都不支援，因此不會啟用。 |
 | `limits` | contract 預設 | Integer override 只能縮小 `contracts/v1/limits.json` 的值。 |
 
-`writer.enabled: true` 及含 `propose_patch` 的 `operations` 會被拒絕。未知 nested key／limit
-name、型別錯誤、放寬 limit、空 model 或超過四個 fallback entry 也會被拒絕；Python loader
-與 OpenClaw manifest 另外會封閉 top-level plugin config object。
+`writer.enabled: true` 及含 `propose_patch` 的 `operations` 會被拒絕。兩個公開 core loader
+都會拒絕未知的 top-level key、nested key 與 limit name，以及型別錯誤、放寬 limit、空 model
+或超過四個 fallback entry。OpenClaw manifest 是額外的 host-side 驗證邊界，不是 core 唯一
+的防線。
 
 Threshold、cache/store、TTL、disclosure、token、concurrency、retry、deadline、JSON、paging
 的目前預設，以及 host-specific `llm` 與 Hermes auxiliary key，完整列於
@@ -359,11 +360,12 @@ content、每個 inspect result 16 KiB、每個 source 累計揭露 256 KiB、�
 | Writer / `propose_patch` | 未實作 | 未實作 |
 
 這張表是 code/source capability evidence，不表示此 checkout 的所有 live release gate 都已
-通過。Deterministic unit、unsupported-mode、core benchmark 與 packaging gates 已實作；
-Hermes/OpenClaw local integration 需要使用者提供真實 host checkout。Post-tool seam 不受 host
-支援，因此維持 `NOT_RUN`。40 題 production Luna eval 與 provider benchmark 需要 live model，
-缺少時為 `NOT_RUN`。在這些前置條件真正執行成功前，`release all` 不能視為 production release
-pass。詳見 [`docs/capability-matrix.md`](docs/capability-matrix.md) 與
+通過。Deterministic unit、unsupported-mode、core benchmark 與 packaging gates 已實作。
+已記錄的真實 host integration evidence 共執行 122 個 cases、0 failed；重新執行仍須由使用者
+提供 Hermes 與 OpenClaw checkout。兩個 post-tool gate 因 host seam 不受支援，維持
+`NOT_RUN`。40 題 production-equivalent Luna eval 與 provider benchmark 也仍為 `NOT_RUN`；
+不能把缺少的 live model 證據描述成通過。因此 `release all` 尚不是通過的 production release
+signal。詳見 [`docs/capability-matrix.md`](docs/capability-matrix.md) 與
 [`docs/acceptance.md`](docs/acceptance.md)。
 
 ## 開發、相容性與支援

@@ -1,6 +1,7 @@
 /** unit contract (TypeScript core) - the schemas are the cross-language boundary. */
 import { describe, expect, it } from "vitest";
 
+import { loadConfig } from "../src/config.js";
 import { ShuntError } from "../src/errors.js";
 import { DEFAULT_LIMITS, statusCodePairs, legalPair } from "../src/limits.js";
 import { envelopeValidator, requestValidator, validateRequest } from "../src/schema.js";
@@ -72,5 +73,33 @@ describe("contract invariants", () => {
     expect(DEFAULT_LIMITS.fullReadMaxLines).toBe(350);
     expect(DEFAULT_LIMITS.readerModel).toBe("gpt-5.6-luna");
     expect(DEFAULT_LIMITS.maxEnvelopeBytes).toBe(16384);
+  });
+
+  it.each([
+    ["reader", { enabld: true }],
+    ["inspect", { enabld: true }],
+    ["stats", { enabld: true }],
+    ["suma_post_tool", { enabld: true }],
+    ["writer", { enabld: true }],
+  ])("rejects unknown keys in the %s config section", (section, value) => {
+    const raw = { workspace_roots: ["/tmp/context-shunt-config"], [section]: value };
+    expect(() => loadConfig(raw as never, "/tmp/context-shunt-cache"))
+      .toThrowError(ShuntError);
+    try {
+      loadConfig(raw as never, "/tmp/context-shunt-cache");
+    } catch (err) {
+      expect((err as ShuntError).detail).toBe("BAD_CONFIGURATION");
+    }
+  });
+
+  it.each([
+    { limits: { store_busy_timeout_mss: 1000 } },
+    { store: { busy_timeout_ms: 1000 } },
+    { accounting: { max_stats_pages: 4 } },
+  ])("rejects an unknown limit or top-level section", (extra) => {
+    expect(() => loadConfig(
+      { workspace_roots: ["/tmp/context-shunt-config"], ...extra } as never,
+      "/tmp/context-shunt-cache",
+    )).toThrowError(ShuntError);
   });
 });

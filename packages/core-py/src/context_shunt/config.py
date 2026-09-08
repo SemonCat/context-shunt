@@ -67,6 +67,7 @@ _CONFIG_KEYS = {
     "limits",
 }
 _READER_KEYS = {"enabled", "model", "provider", "attribution_policy", "fallback_chain"}
+_ENABLED_SECTION_KEYS = {"enabled"}
 _MAX_FALLBACK_ENTRIES = 4
 _MAX_MODEL_REF_BYTES = 128
 
@@ -139,6 +140,9 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     reader_raw = raw.get("reader") or {}
     if set(reader_raw) - _READER_KEYS:
         raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    for key in ("inspect", "stats", "suma_post_tool", "writer"):
+        if set(raw.get(key) or {}) - _ENABLED_SECTION_KEYS:
+            raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     for value in (
         raw.get("gate_enabled"),
         reader_raw.get("enabled"),

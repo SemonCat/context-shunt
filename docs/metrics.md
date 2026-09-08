@@ -48,12 +48,16 @@ applicable `not_applicable`.
 
 - Source and envelope estimates are reproducible `ceil(UTF-8 bytes / 4)` calculations and
   are labeled `bytes_div_4`.
-- Reader usage is `exact` only when the provider returned counts. If the core must estimate
-  a returned attempt from prompt/completion bytes, it says `bytes_div_4`.
-- When a started attempt lacks provider input/output counts, the core estimates from the
-  prompt/completion bytes it measured and labels the result `bytes_div_4`. Cache usage has
-  no byte-derived substitute and can remain `null`; no-call fields can also be null. A null
-  is never rendered as zero, and zero means a real zero.
+- Reader usage is `exact` only when every physical attempt returned complete provider
+  counts. One incomplete attempt switches the request-wide reader totals to
+  `bytes_div_4`; partial exact counts are not presented as an exact aggregate.
+- Under request-wide estimation, `reader_input_tokens` estimates all accumulated prompt
+  bytes and `reader_output_tokens` estimates all completion bytes received by the core,
+  then adds any reported output-token counts from failed attempts whose completion text
+  never reached the core. Those byte-visible and unseen outputs do not overlap.
+- Estimated requests set `reader_cache_tokens` to `null`, because there is no byte-derived
+  cache substitute. No-call fields can also be null. A null is never rendered as zero, and
+  zero means a real zero.
 - `usage_complete` in provenance is true only when every started attempt returned complete
   provider usage.
 
@@ -62,9 +66,10 @@ applicable `not_applicable`.
 Every physical provider call contributes once to `attempts_started`, including transient
 retries, failed fallback candidates, invalid or over-cap responses, and a late response
 whose result cannot be published. `attempts_usage_complete` counts the attempts that
-returned complete usable token counts. Reader input, output, and cache totals aggregate
-all attempts whose usage is available; a successful final candidate does not erase the
-cost of earlier candidates.
+returned complete usable token counts. Exact reader totals aggregate every attempt only
+when all attempts are complete; otherwise the request-wide estimate above accounts for
+every measured prompt/completion plus non-overlapping unseen output. A successful final
+candidate never erases the cost of earlier candidates.
 
 `fallback_used` belongs to provenance and reports whether an availability fallback
 produced the published result. It is not a statement about quality.

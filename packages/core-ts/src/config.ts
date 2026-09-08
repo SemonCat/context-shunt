@@ -105,6 +105,11 @@ const MAX_FALLBACK_ENTRIES = 4;
 const READER_KEYS = new Set([
   "enabled", "model", "provider", "attribution_policy", "fallback_chain",
 ]);
+const ENABLED_SECTION_KEYS = new Set(["enabled"]);
+const CONFIG_KEYS = new Set([
+  "workspace_roots", "spill_dir", "cache_dir", "denylist", "gate_enabled", "reader",
+  "inspect", "stats", "suma_post_tool", "writer", "operations", "limits",
+]);
 
 /** One availability target: a model, optionally pinned to a provider. */
 export interface ProviderRef {
@@ -151,7 +156,14 @@ export interface RawConfig {
 }
 
 export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string): Config {
+  if (raw !== undefined && (
+    typeof raw !== "object" || raw === null || Array.isArray(raw)
+  )) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   const cfg = raw ?? {};
+
+  for (const key of Object.keys(cfg)) {
+    if (!CONFIG_KEYS.has(key)) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
 
   for (const nested of [cfg.reader, cfg.inspect, cfg.stats, cfg.suma_post_tool, cfg.writer]) {
     if (nested !== undefined && (
@@ -175,6 +187,13 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   )) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   for (const key of Object.keys(cfg.reader ?? {})) {
     if (!READER_KEYS.has(key)) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
+  for (const section of [cfg.inspect, cfg.stats, cfg.suma_post_tool, cfg.writer]) {
+    for (const key of Object.keys(section ?? {})) {
+      if (!ENABLED_SECTION_KEYS.has(key)) {
+        throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+      }
+    }
   }
   for (const value of [
     cfg.gate_enabled,

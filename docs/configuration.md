@@ -14,7 +14,7 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `spill_dir` | string | unset | Deprecated pre-1.1 alias, used only when `cache_dir` is absent. |
 | `denylist` | string array | `[]` | Additional relative glob denials inside roots. Built-in secret checks always remain active. |
 | `gate_enabled` | boolean | `true` | Registers the local pre-read gate when the host capability is supported. |
-| `reader.enabled` | boolean | `true` | Enables the model-derived reader. A host model bridge is still required. |
+| `reader.enabled` | boolean | `true` | Controls reader execution: `false` refuses with `INVALID_REQUEST` before a model call (core reason `READER_DISABLED`). A capable adapter may still register the tool. |
 | `reader.model` | non-empty string, at most 128 UTF-8 bytes | `gpt-5.6-luna` | Model requested from the host. |
 | `reader.provider` | string, at most 128 UTF-8 bytes | `""` | Provider request; empty delegates routing to the host. |
 | `reader.attribution_policy` | enum | `allow_unverified` | `allow_unverified` publishes the host's truthful attribution status; `require_match` refuses below actual/resolved agreement. |
@@ -26,8 +26,8 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 
 Compatibility inputs `writer.enabled: true` and an `operations` array containing
 `propose_patch` are explicitly refused with `WRITER_UNSUPPORTED_CONFIGURATION`. There is no
-writer tool. Unknown nested keys/limit names and invalid types are refused; the Python
-loader and OpenClaw manifest also reject unknown top-level plugin config keys.
+writer tool. Both public core loaders reject unknown top-level keys, nested keys, limit
+names, and invalid types. The OpenClaw manifest adds a separate host validation boundary.
 
 ## Model selection and fallback
 

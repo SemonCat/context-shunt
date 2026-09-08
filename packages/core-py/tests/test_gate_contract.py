@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from context_shunt.config import load as load_config
 from context_shunt.errors import ShuntError
 from context_shunt.limits import DEFAULT_LIMITS, legal_pair, status_code_pairs
 from context_shunt.schema import envelope_validator, request_validator, validate_request
@@ -88,3 +89,40 @@ def test_limits_match_the_shared_contract():
     assert DEFAULT_LIMITS.full_read_max_lines == raw["gate"]["full_read_max_lines"] == 350
     assert DEFAULT_LIMITS.reader_model == raw["reader_model"] == "gpt-5.6-luna"
     assert DEFAULT_LIMITS.max_envelope_bytes == 16384
+
+
+@pytest.mark.parametrize(
+    ("section", "value"),
+    [
+        ("reader", {"enabld": True}),
+        ("inspect", {"enabld": True}),
+        ("stats", {"enabld": True}),
+        ("suma_post_tool", {"enabld": True}),
+        ("writer", {"enabld": True}),
+    ],
+)
+def test_config_rejects_unknown_nested_keys(tmp_path, section, value):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ShuntError) as exc:
+        load_config(
+            {"workspace_roots": [str(workspace)], section: value},
+            default_spill_dir=tmp_path / "cache",
+        )
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.detail == "BAD_CONFIGURATION"
+
+
+def test_config_rejects_unknown_limit_and_top_level_sections(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for extra in (
+        {"limits": {"store_busy_timeout_mss": 1000}},
+        {"store": {"busy_timeout_ms": 1000}},
+        {"accounting": {"max_stats_pages": 4}},
+    ):
+        with pytest.raises(ShuntError):
+            load_config(
+                {"workspace_roots": [str(workspace)], **extra},
+                default_spill_dir=tmp_path / "cache",
+            )

@@ -37,10 +37,15 @@ available on the current checkout; consult the most recent verification output.
 
 ## Remaining release evidence
 
-A production release signal still requires successful runs of both real host local
-integration gates, the live 40-item Luna evaluation, and the provider benchmark. These
-remain `NOT_RUN` whenever their checkout/model prerequisites are absent and must never be
-described as passing on the strength of unit tests.
+The recorded real-host integration run is no longer outstanding: Hermes and OpenClaw local
+plus unsupported-mode gates executed 122 cases with 0 failures. The two post-tool gates
+truthfully remained `NOT_RUN`, because both hosts lack the required seam; they are not
+counted as passes.
+
+A production release signal still requires the production-equivalent 40-item Luna
+evaluation and provider benchmark. Both remain `NOT_RUN` without live model access and
+must never be described as passing on the strength of deterministic or host integration
+tests.
 
 Future host support for post-tool spill needs a new capability proof and runtime sentinel
 measurement before activation. A future writer requires a new contract revision, explicit

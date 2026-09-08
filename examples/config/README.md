@@ -18,7 +18,7 @@ adding fake keys to either plugin `config` block.
 | `cache_dir` | `~/.cache/context-shunt` | Private cache: SQLite authorization metadata plus content-addressed payload files. Refused if it resolves inside a workspace root. `spill_dir` is accepted as a pre-1.1 alias. |
 | `denylist` | `[]` | Extra administrator denials, relative globs inside a root. The built-in secret policy applies regardless. |
 | `gate_enabled` | `true` | Block oversized and unprovable reads before they run. |
-| `reader.enabled` | `true` | The question-driven reader. The only key here that needs a model. |
+| `reader.enabled` | `true` | Controls reader execution; `false` refuses without a model call even if an adapter still registers the tool. |
 | `reader.model` | `gpt-5.6-luna` | Configurable since contract revision 1.1. What keeps a substitution from going unnoticed is the envelope's provenance block, not a hardcoded value. |
 | `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
 | `reader.attribution_policy` | `allow_unverified` | What to do when the host cannot prove which model answered. See below. |

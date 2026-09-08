@@ -528,15 +528,12 @@ export class ContextShuntPlugin {
         // The host owns credentials and routing; provider exception text is dropped by
         // HostBridgeProvider so only MODEL_ERROR crosses back.
         //
-        // The route comes from *this candidate's* provider. Building it from
-        // `config.readerProvider` instead sent every fallback to the primary's provider
-        // under the fallback's model name, so a chain onto a different provider silently
-        // asked the wrong one for a model it does not serve. `openai` remains the default
-        // only when nothing has been pinned at all.
+        // Prefix only this candidate's explicitly configured provider. A bare model
+        // deliberately delegates routing to OpenClaw so selection and provenance agree.
         const result = await llm.complete({
           messages: [{ role: "user", content: user }],
           systemPrompt: system,
-          model: `${provider || this.config.readerProvider || "openai"}/${model}`,
+          model: provider ? `${provider}/${model}` : model,
           maxTokens: maxOutputTokens,
           temperature: 0,
           signal,

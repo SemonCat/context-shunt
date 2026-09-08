@@ -39,7 +39,7 @@ authorize + snapshot ----> SQLite metadata + content-addressed private blob
           |                               |
           v                               v
  query-aware reader                 deterministic inspect
- one call per chunk                 exact lines/bytes/search
+ >=1 call per processed chunk       exact lines/bytes/search
  retries/fallback bounded           zero model calls
           |                               |
           v                               v
@@ -233,9 +233,9 @@ partial page with its opaque `next_cursor` and the same handle, snapshot, and se
     "deterministic": true,
     "segments": [{"kind": "lines", "start": 40, "end": 42,
       "text": "counts:\n  max_citations: 16\n  max_transient_retries: 1"}],
-    "result_bytes": 52, "complete": true, "next_cursor": null,
+    "result_bytes": 54, "complete": true, "next_cursor": null,
     "lines_scanned": 3, "scan_budget_exhausted": false,
-    "disclosed_bytes_source": 52, "disclosed_bytes_session": 52,
+    "disclosed_bytes_source": 54, "disclosed_bytes_session": 54,
     "disclosure_limit_reached": false},
   "accounting_id": "acc_1111222233334444"
 }
@@ -267,7 +267,7 @@ Shared plugin configuration uses these keys:
 | `spill_dir` | legacy alias | Pre-1.1 alias used only when `cache_dir` is absent. |
 | `denylist` | `[]` | Extra relative path globs; built-in secret checks still apply. |
 | `gate_enabled` | `true` | Enable pre-read blocking. |
-| `reader.enabled` | `true` | Register/use the model reader when the host bridge exists. |
+| `reader.enabled` | `true` | Controls execution: `false` refuses reads without a model call, although an adapter may still register the tool. |
 | `reader.model` | `gpt-5.6-luna` | Requested reader model; configurable since 1.1. |
 | `reader.provider` | `""` | Optional provider pin; empty lets the host route. |
 | `reader.attribution_policy` | `allow_unverified` | Publish truthful weak attribution, or use `require_match` to refuse it. |
@@ -277,10 +277,10 @@ Shared plugin configuration uses these keys:
 | `suma_post_tool.enabled` | `false` | Optional post-tool spill request; unsupported on both hosts and therefore never activated. |
 | `limits` | contract defaults | Integer overrides may only narrow the values in `contracts/v1/limits.json`. |
 
-`writer.enabled: true` and `operations` containing `propose_patch` are refused. Unknown
-nested keys/limit names, invalid types, widened limits, an empty model, or more than four
-fallback entries are also refused. The Python loader and OpenClaw manifest additionally
-close the top-level plugin config object.
+`writer.enabled: true` and `operations` containing `propose_patch` are refused. Both public
+core loaders reject unknown top-level keys, nested keys, and limit names, as well as invalid
+types, widened limits, an empty model, or more than four fallback entries. The OpenClaw
+manifest is an additional host-side validation boundary, not the core's only defense.
 
 Current threshold, cache/store, TTL, disclosure, token, concurrency, retry, deadline, JSON,
 and paging defaults—and the host-specific `llm` and Hermes auxiliary keys—are listed in
@@ -376,11 +376,12 @@ retention details are in [`docs/security.md`](docs/security.md).
 
 This matrix is code/source capability evidence, not a claim that every live release gate
 passed on this checkout. Deterministic unit, unsupported-mode, core benchmark, and packaging
-gates are implemented. Real Hermes/OpenClaw local integration requires user-supplied host
-checkouts. Post-tool gates remain `NOT_RUN` because the required host seams are unsupported.
-The 40-item production Luna eval and provider benchmark require live model access and are
-`NOT_RUN` without it. Therefore `release all` is not a passing production release signal
-until those prerequisites are run successfully. See
+gates are implemented. The recorded real-host integration evidence executed 122 cases with
+0 failures; fresh runs still require user-supplied Hermes and OpenClaw checkouts. The two
+post-tool gates remain `NOT_RUN` because the required host seams are unsupported. The 40-item
+production-equivalent Luna eval and provider benchmark also remain `NOT_RUN`; no live model
+evidence is being presented as a pass. Therefore `release all` is not yet a passing
+production release signal. See
 [`docs/capability-matrix.md`](docs/capability-matrix.md) and
 [`docs/acceptance.md`](docs/acceptance.md).
 
