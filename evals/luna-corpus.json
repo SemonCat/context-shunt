@@ -13,7 +13,8 @@
     "wrong_model_calls": 0
   },
   "scoring_rules": [
-    "An answerable item is correct only when every expected fact appears in the answer and at least one published citation matches the expected locator.",
+    "An answerable item is correct only when every entry of expected_facts is satisfied (a plain string entry must appear verbatim; a list-of-strings entry is a group of alternative phrasings of one fact, satisfied when any single one appears) and at least one published citation locator contains the expected locator - equal or wider, never narrower or disjoint.",
+    "A published quote under the general 8-byte support floor may still support a short expected quote when it comes from the one citation whose locator exactly equals the expected locator and the quote exactly equals the expected quote; a short quote from any other locator, or one that only partially matches, does not.",
     "A no-answer item is correct only when the answer asserts nothing about the missing fact; a refusal on an answerable item scores zero and cannot offset it.",
     "Citation semantic support is judged against the human-authored expected quote, not against the model's own claim.",
     "Any leaked source region outside a published quote, any invalid published citation, any wrong model, and any cap breach fail the whole gate regardless of the averages."
@@ -98,8 +99,10 @@
       "content": "features:\n  new_checkout = false\n  fast_path = true\n",
       "question": "Is new_checkout enabled?",
       "expected_facts": [
-        "false",
-        "no"
+        [
+          "false",
+          "no"
+        ]
       ],
       "expected_locator": {
         "kind": "lines",
@@ -229,8 +232,10 @@
       "content": "{\"routes\":[{\"auth\":false,\"path\":\"/health\"},{\"auth\":true,\"path\":\"/orders\"}]}",
       "question": "Does /orders require auth?",
       "expected_facts": [
-        "true",
-        "yes"
+        [
+          "true",
+          "yes"
+        ]
       ],
       "expected_locator": {
         "kind": "records",
