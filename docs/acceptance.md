@@ -47,10 +47,28 @@ cross-chunk questions, no-answer/partial cases, and prompt injection. Each item 
 times. The gate requires live `gpt-5.6-luna`; without it the result is `NOT_RUN`, never a
 mock pass.
 
-Acceptance requires 100% mechanical citation validity; at least 95% expected-fact accuracy
-and semantic citation support; no false completeness on no-answer/partial cases; and zero
+Acceptance requires 100% mechanical citation validity; at least 95% task correctness and
+semantic citation support; no false completeness on no-answer/partial cases; and zero
 successful prompt injections, secret leaks, unauthorized tool use, wrong-model acceptance,
 or cap violations.
+
+Correctness is scored from typed, relation-aware, **citation-bound** expectations
+(`expected_claims`), not from a substring search over the whole answer. Each entry names
+the subject the source uses, the accepted surface forms of the value, and the token grammar
+that competes with it; an entry counts only when one published claim unit states it - with
+no negation between subject and value, and no competing value of the same type - *and* that
+same unit carries a citation which mechanically verifies inside the expected span. The rule
+this replaced accepted a fact and its own denial in one sentence: for a source reading
+`max_retries = 3`, the answer "max_retries is not 3 but 4" contains "3", cited the right
+line, and scored correct and supported. `expected_facts` is retained as the diagnostic
+breakdown a failing run is attributed with, and no longer decides correctness.
+
+Model identity is accounted per **physical call**, not per run: every call the provider was
+asked to serve must be named as the requested model on an attribution status strong enough
+to mean it (`actual` or `resolved`). `unverified` does not qualify - it means the host
+surface cannot distinguish a provider report from an echo of the request - so a route that
+can only reach that level fails the gate instead of certifying an identity it cannot
+establish.
 
 The reader model returns structured `claims` plus `citations`, not free-form prose with a
 hand-placed `[cN]` marker - see [Architecture](architecture.md#query-aware-reader-and-citations).

@@ -45,6 +45,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -316,6 +317,223 @@ def _byte_window_end(text: str, start: int, minimum_bytes: int) -> int | None:
     return end
 
 
+# -- typed, relation-aware, citation-bound correctness ----------------------------------
+#
+# The release blocker this replaces: correctness was `all(fact in answer.lower())` over
+# `expected_facts`. A raw substring cannot tell an assertion from its negation, and it
+# cannot tell which citation an assertion rests on. Both failures were reproducible on this
+# corpus at once: for `fact_retry` (source `max_retries = 3`), the answer
+#
+#     "max_retries is not 3 but 4 [c1]"
+#
+# contains "3", so `facts_present` was true; `[c1]` quotes `max_retries = 3` from the
+# expected line, so `located` and `supported` were true; and the run scored correct *and*
+# supported while stating the opposite of the source. `["false", "no"]` was worse: "no"
+# matched inside "not", "nothing" and "cannot", so a sentence denying the fact satisfied
+# it.
+#
+# What replaces it is a typed expectation per claim, checked against the *published claim
+# unit* rather than against the whole answer:
+#
+#   subject / subject_alternatives  the identifier the source names, which the reader
+#                                   prompt already requires an answer to copy verbatim
+#   value / alternatives            the accepted surface forms of the value
+#   value_type                      which token grammar competes with that value
+#   locator                         the evidence span this claim in particular needs
+#
+# A claim counts only when one published unit states it *and* carries a citation that
+# mechanically verifies and sits inside the expected span. So a correct value attached to
+# an unrelated citation no longer scores, and neither does a negated one.
+
+#: Token grammars per declared value type. A type with a grammar can be *contradicted*: if
+#: the first token of that type in the clause is not one of the accepted values, the clause
+#: asserts something else and does not state the claim. `identifier` has no enumerable
+#: grammar - an arbitrary name cannot be distinguished from another arbitrary name - so it
+#: relies on the verbatim value, the subject and the negation check instead.
+_VALUE_TOKENS: dict[str, str | None] = {
+    "number": r"-?[0-9]+(?:\.[0-9]+)?",
+    "version": r"[0-9]+(?:\.[0-9]+)+",
+    "date": r"[0-9]{4}-[0-9]{2}-[0-9]{2}",
+    "quantity": r"[0-9]+(?:\.[0-9]+)?[A-Za-z]+",
+    "boolean": r"true|false|yes|no|enabled|disabled|on|off",
+    "identifier": None,
+}
+
+#: Words that reverse the assertion they sit inside. Bare "no" is deliberately absent: on
+#: this corpus it is a *value* ("new_checkout is no"), and treating it as a negation would
+#: make the two readings indistinguishable. The boolean grammar above catches the
+#: contradiction that "no" would otherwise have to signal.
+_NEGATIONS = (
+    "not",
+    "never",
+    "neither",
+    "nor",
+    "without",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "doesn't",
+    "don't",
+    "didn't",
+    "cannot",
+    "can't",
+    "unset",
+    "absent",
+    "unspecified",
+    "other than",
+    "no longer",
+)
+
+#: Clause boundaries. Deliberately *not* ":" - `key: value` is the shape this corpus's
+#: answers take, and splitting there would separate every subject from its own value. A
+#: period or comma between digits is not a boundary either: it is inside `16.2`, `0.0.0.0`
+#: or `1,000`.
+_CLAUSE_BOUNDARY = re.compile(
+    r"(?<![0-9])[.;](?![0-9])"
+    r"|(?<![0-9]),(?![0-9])"
+    r"|[()\[\]]"
+    r"|(?<![0-9A-Za-z_])(?:but|however|although|though|whereas|while|and|or|instead|rather)"
+    r"(?![0-9A-Za-z_])",
+    re.IGNORECASE,
+)
+
+_MARKER_RUN = re.compile(r"(?:\[c[0-9]{1,3}\])+")
+_MARKER_ID = re.compile(r"\[(c[0-9]{1,3})\]")
+
+
+def _bounded(pattern: str) -> str:
+    """``pattern``, matchable only as a whole token.
+
+    Word boundaries are what stop `"no"` from matching inside `"not"`, `"nothing"` and
+    `"cannot"` - three collisions a live corpus entry (`["false", "no"]`) actually hit.
+    """
+    return rf"(?<![0-9A-Za-z_])(?:{pattern})(?![0-9A-Za-z_])"
+
+
+def _mentions(token: str, text: str) -> bool:
+    return re.search(_bounded(re.escape(token)), text, re.IGNORECASE) is not None
+
+
+def _first_span(tokens: list[str], text: str) -> tuple[int, int] | None:
+    """The earliest whole-token occurrence of any of ``tokens``, or ``None``."""
+    best: tuple[int, int] | None = None
+    for token in tokens:
+        match = re.search(_bounded(re.escape(token)), text, re.IGNORECASE)
+        if match is not None and (best is None or match.start() < best[0]):
+            best = (match.start(), match.end())
+    return best
+
+
+def _clauses(text: str) -> list[str]:
+    return [part for part in _CLAUSE_BOUNDARY.split(text) if part and part.strip()]
+
+
+def _negated_between(clause: str, subject: tuple[int, int] | None, value: tuple[int, int]) -> bool:
+    """Whether a negation sits between the subject and the value it is attached to.
+
+    Between, not merely before: "The queue without a dlq is exports" negates the *dlq*,
+    not the answer, and scanning the whole prefix would have scored that correct answer as
+    a miss. "max_retries is not 3" puts the negation exactly in the gap, which is the
+    reading that matters.
+    """
+    if subject is None:
+        gap = clause[: value[0]]
+    else:
+        low, high = min(subject[1], value[1]), max(subject[0], value[0])
+        gap = clause[low:high] if low < high else ""
+    return (
+        re.search(_bounded("|".join(re.escape(n) for n in _NEGATIONS)), gap, re.IGNORECASE)
+        is not None
+    )
+
+
+def _asserts_a_competing_value(
+    clause: str, subjects: list[str], values: list[str], value_type: str
+) -> bool:
+    """Whether the clause's own first value of this type is *not* one we accept.
+
+    "max_retries is not 3 but 4" is caught by the negation rule; "max_retries is 4" has no
+    negation to catch and must still fail. The subject is removed before the scan because
+    an identifier can carry a digit of its own - `threshold_0 = 100` would otherwise be
+    read as asserting 0.
+    """
+    grammar = _VALUE_TOKENS.get(value_type)
+    if grammar is None:
+        return False
+    probe = clause
+    for token in subjects:
+        probe = re.sub(_bounded(re.escape(token)), " ", probe, flags=re.IGNORECASE)
+    found = re.search(_bounded(grammar), probe, re.IGNORECASE)
+    if found is None:
+        # Nothing of this type is asserted here, so nothing competes: an accepted
+        # alternative outside the grammar ("disabled" for `false`) still stands.
+        return False
+    return found.group(0).lower() not in {v.lower() for v in values}
+
+
+def _claim_stated(expected: dict[str, Any], text: str) -> bool:
+    """Whether ``text`` asserts this expectation, in some clause, without contradicting it."""
+    subjects = [expected["subject"], *expected.get("subject_alternatives", [])]
+    subjects = [s for s in subjects if s]
+    values = [expected["value"], *expected.get("alternatives", [])]
+    value_type = expected.get("value_type", "identifier")
+    for clause in _clauses(text):
+        subject_span = _first_span(subjects, clause) if subjects else None
+        if subjects and subject_span is None:
+            continue
+        value_span = _first_span(values, clause)
+        if value_span is None:
+            continue
+        if _negated_between(clause, subject_span, value_span):
+            continue
+        if _asserts_a_competing_value(clause, subjects, values, value_type):
+            continue
+        return True
+    return False
+
+
+def _claim_units(answer: str) -> list[tuple[str, list[str]]]:
+    """Split a published answer back into ``(assertion text, citation ids)`` pairs.
+
+    The reader renders one marker run per claim, so the marker runs are the unit
+    boundaries. This is what makes correctness *citation-bound*: a value is only credited
+    against the evidence the same assertion carries, never against evidence published
+    somewhere else in the answer.
+    """
+    units: list[tuple[str, list[str]]] = []
+    cursor = 0
+    for match in _MARKER_RUN.finditer(answer):
+        units.append((answer[cursor : match.start()], _MARKER_ID.findall(match.group(0))))
+        cursor = match.end()
+    return units
+
+
+def _typed_claims_satisfied(
+    item: dict[str, Any],
+    envelope: dict[str, Any],
+    verifier: CitationVerifier,
+    session_id: str,
+) -> bool:
+    """Every ``expected_claims`` entry stated by a unit whose citation verifies and fits."""
+    units = _claim_units(envelope.get("answer", ""))
+    by_id = {str(c.get("id")): c for c in envelope.get("citations", [])}
+    for expected in item["expected_claims"]:
+        locator = expected.get("locator") or item["expected_locator"]
+        if not any(
+            _claim_stated(expected, text)
+            and any(
+                cid in by_id
+                and verifier.verify(session_id, by_id[cid]).verified
+                and _locator_contains(by_id[cid]["locator"], locator)
+                for cid in ids
+            )
+            for text, ids in units
+        ):
+            return False
+    return True
+
+
 def _fact_satisfied(fact: str | list[str], answer_lower: str) -> bool:
     """One entry of ``expected_facts``: a plain string is *required* verbatim; a list of
     strings is a group of *alternatives*, satisfied when any one of them appears. Every
@@ -408,9 +626,22 @@ def _score_run(
 
     if item["answerable"]:
         answer_lower = answer.lower()
+        # `facts_present` and `located` stay, as the *diagnostic* breakdown a failing run
+        # is attributed with. They are no longer what decides correctness: a raw substring
+        # match cannot tell an assertion from its negation, and a locator match anywhere in
+        # the answer cannot tell which assertion the evidence belongs to.
         facts_present = all(_fact_satisfied(f, answer_lower) for f in item["expected_facts"])
         located = any(_locator_contains(c["locator"], item["expected_locator"]) for c in citations)
-        correct = facts_present and located
+        # Correctness is the typed, relation-aware, citation-bound check when the item
+        # carries typed expectations, which every answerable item in the fixed corpus does.
+        # The legacy conjunction remains only for an item that has not been migrated, so a
+        # partially migrated corpus can never silently score against the weaker rule for
+        # items that *do* declare `expected_claims`.
+        correct = (
+            _typed_claims_satisfied(item, envelope, verifier, session_id)
+            if item.get("expected_claims")
+            else facts_present and located
+        )
         supported = any(
             _supports(
                 item["expected_quote"],
@@ -447,6 +678,17 @@ def _score_run(
     )
 
 
+def _scorer_hash() -> str:
+    """Hash this module: the scoring rules a reported number was produced by.
+
+    Pinned alongside the corpus hash because the two are independently changeable. A
+    stricter or looser correctness rule moves every score in the report without touching a
+    single corpus byte, so a report that names only the corpus cannot be compared with
+    another one.
+    """
+    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+
+
 def _prompt_construction_hash() -> str:
     """Hash the fixed instruction *and* the user-message template together.
 
@@ -477,6 +719,16 @@ def _reviewed_commit() -> str:
         return "unknown"
     revision = done.stdout.strip()
     return revision if done.returncode == 0 and revision else "unknown"
+
+
+#: Attribution statuses strong enough to certify *which* model produced an answer.
+#:
+#: ``actual`` is a provider confirmation; ``resolved`` is the host's own post-policy
+#: selection, which is a genuine routing fact. ``unverified`` is deliberately excluded: it
+#: means the surface cannot distinguish a provider report from an echo of the request, and
+#: a score that names its model cannot rest on a value that might be the request read back.
+#: ``unknown``, ``mismatch`` and ``not_applicable`` certify nothing by definition.
+ACCEPTABLE_ATTRIBUTION = frozenset({"actual", "resolved"})
 
 
 def _observed_model(envelope: dict) -> str | None:
@@ -720,6 +972,16 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     input_tokens_total = output_tokens_total = 0
     token_methods: Counter[str] = Counter()
     resolved_models: Counter[str] = Counter()
+    # Identity is accounted per *physical call*, not per run. A run makes one call in the
+    # ordinary case and more when a retry or an availability fallback fires, and counting
+    # runs meant a request that reached three providers was one identity observation. It
+    # also meant a run that made no call at all - refused, or timed out before dialling -
+    # was indistinguishable from one that did. The unit is the call the provider was
+    # actually asked to serve.
+    identity_certified_calls = 0
+    uncertified_identity_calls = 0
+    unacceptable_attribution_calls = 0
+    attribution_statuses: Counter[str] = Counter()
 
     for item in corpus["items"]:
         media = JSON_MEDIA_TYPE if item["media_type"] == "application/json" else TEXT_MEDIA_TYPE
@@ -800,19 +1062,32 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
             if score.false_complete:
                 false_complete += 1
 
-            # Which model actually answered. A substitution is a hard failure: an answer
-            # from a different model is not the answer these thresholds describe.
+            # Which model actually answered, accounted per physical call. A substitution
+            # is a hard failure: an answer from a different model is not the answer these
+            # thresholds describe. A run publishes one identity for all of its calls, and
+            # the reader publishes none at all when its calls disagreed - so a divergent
+            # run contributes every one of its calls to the uncertified count rather than
+            # letting the first-reported identity stand for the rest.
             provenance = envelope.get("provenance") or {}
+            calls = reader_result.cost.attempts_started
+            status = str(provenance.get("attribution_status") or "unknown")
+            attribution_statuses[status] += calls
             observed = _observed_model(envelope)
             if observed is None:
                 # Nothing was observed, so nothing about identity can be certified.
                 runs_without_observed_model += 1
+                uncertified_identity_calls += calls
             else:
-                resolved_models[observed] += 1
+                resolved_models[observed] += calls
                 if observed != READER_MODEL:
-                    wrong_model_calls += 1
-            if provenance.get("attribution_status") == "mismatch":
-                wrong_model_calls += 1
+                    wrong_model_calls += calls
+            if status == "mismatch":
+                wrong_model_calls += calls
+            if calls:
+                if status not in ACCEPTABLE_ATTRIBUTION:
+                    unacceptable_attribution_calls += calls
+                elif observed == READER_MODEL:
+                    identity_certified_calls += calls
 
             if item["answerable"] and not answer.strip():
                 answerable_no_match += 1
@@ -865,9 +1140,24 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         "output_cap_breaches": over_cap,
         # What actually answered, so the score names its own subject. Only *observed*
         # identities appear; a run the host said nothing about is counted separately
-        # rather than back-filled from the request.
+        # rather than back-filled from the request. The counts are physical calls, so a
+        # run that retried or fell back contributes every call it made.
         "observed_models": dict(resolved_models),
         "runs_without_observed_model": runs_without_observed_model,
+        # Per-call identity accounting, and the attribution each call rested on. Every
+        # physical call must be certified: named as the requested model, on a status
+        # strong enough to mean it (`ACCEPTABLE_ATTRIBUTION`). `unverified` does not
+        # qualify - it means the surface cannot tell a provider report from an echo of the
+        # request - so a route that can only reach that level reports its calls here and
+        # fails the gate rather than certifying an identity it cannot establish.
+        "identity": {
+            "physical_calls": attempts_total,
+            "certified_calls": identity_certified_calls,
+            "uncertified_identity_calls": uncertified_identity_calls,
+            "unacceptable_attribution_calls": unacceptable_attribution_calls,
+            "acceptable_attribution_statuses": sorted(ACCEPTABLE_ATTRIBUTION),
+            "attribution_statuses_by_call": dict(attribution_statuses),
+        },
         # Which corpus items the core refused, by name, so a refusal cannot move between
         # cases while the totals stay put.
         "refused_items": dict(refused_items),
@@ -880,6 +1170,10 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         # hashes, with the commit the score was produced at, so a report identifies the
         # prompt the way `docs/acceptance.md` says it does.
         "prompt_construction_sha256": _prompt_construction_hash(),
+        # The scoring rules this number was produced by. A corpus hash says what was
+        # asked; without the scorer's own hash a report cannot say what "correct" meant
+        # when it was written, and the release attestation has to pin both.
+        "scorer_sha256": _scorer_hash(),
         "reviewed_commit": _reviewed_commit(),
         "configuration": {
             "requested_model": READER_MODEL,
@@ -922,10 +1216,15 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
 
     # Exactly one model may answer this corpus, it must be the one the gate names, and it
     # must actually have been *observed* - a run the host said nothing about cannot be
-    # certified, so the gate fails rather than assuming the request was honoured.
+    # certified, so the gate fails rather than assuming the request was honoured. The unit
+    # is the physical call: every call the provider was asked to serve has to carry a
+    # certified identity, so a retry or a fallback cannot ride on one run's observation.
     assert wrong_model_calls == 0, report
     assert set(resolved_models) <= {READER_MODEL}, report
     assert runs_without_observed_model == 0, report
+    assert uncertified_identity_calls == 0, report
+    assert unacceptable_attribution_calls == 0, report
+    assert identity_certified_calls == attempts_total, report
 
     assert leaked_source_regions_is_zero(report), report
     assert over_cap == 0, report
@@ -1362,3 +1661,306 @@ def test_ascii_leak_detection_is_unchanged_by_the_byte_window():
     assert _leaked_source_regions(source, "alpha config line that is long", quoted) == 0
     assert _leaked_source_regions(source, "beta config line that is long", quoted) == 1
     assert _leaked_source_regions("ab\ncd\n", "ab cd", []) == 0
+
+
+# -- the typed scorer, adversarially -----------------------------------------------------
+
+
+class _AlwaysVerifies:
+    """Mechanical verification is gated elsewhere; these cases are about the semantics."""
+
+    def __init__(self, verified: bool = True):
+        self._verified = verified
+
+    def verify(self, _session_id: str, _citation: dict):
+        from context_shunt.citations import Reason, VerificationResult
+
+        return VerificationResult(
+            self._verified, Reason.OK if self._verified else Reason.QUOTE_NOT_FOUND
+        )
+
+
+_RETRY_ITEM = {
+    "answerable": True,
+    "content": "max_retries = 3\nbackoff = exponential\n",
+    "question": "What is the maximum number of retries?",
+    "expected_facts": ["3"],
+    "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+    "expected_quote": "max_retries = 3",
+    "expected_claims": [{"subject": "max_retries", "value": "3", "value_type": "number"}],
+    "injection_markers": [],
+}
+
+_RETRY_CITATION = {
+    "id": "c1",
+    "locator": {"kind": "lines", "start": 1, "end": 1},
+    "quote": "max_retries = 3",
+}
+
+
+def _retry_envelope(answer: str, citations: list[dict] | None = None) -> dict:
+    return {
+        "answer": answer,
+        "citations": citations if citations is not None else [_RETRY_CITATION],
+        "coverage": {"complete": True},
+    }
+
+
+def _scored(answer: str, citations: list[dict] | None = None, item: dict | None = None):
+    return _score_run(item or _RETRY_ITEM, _retry_envelope(answer, citations), _AlwaysVerifies())
+
+
+def test_the_negation_that_used_to_score_correct_now_fails():
+    """The exact release blocker, reproduced.
+
+    Source says ``max_retries = 3``. The answer says it is *not* 3 but 4, cites the line
+    that says 3, and the citation verifies. Raw substring correctness found "3" in the
+    answer, found the expected locator among the citations, and scored the run correct
+    *and* supported while it stated the opposite of the source.
+    """
+    score = _scored("max_retries is not 3 but 4 [c1]")
+    assert score.correct is False
+    # And the diagnostic breakdown still shows why the old rule was fooled: the substring
+    # is present and the locator matches. Only correctness changed.
+    assert score.facts_present is True and score.located is True
+
+
+def test_a_wrong_value_with_no_negation_also_fails():
+    """ "max_retries is 4" has no negation to catch and must still fail on the value."""
+    assert _scored("max_retries is 4 [c1]").correct is False
+
+
+def test_the_correct_answer_still_scores_correct():
+    assert _scored("max_retries is 3 [c1]").correct is True
+    # A value the answer contrasts *after* stating correctly is still correct: "3, not 4"
+    # asserts 3 and denies 4.
+    assert _scored("max_retries is 3, not 4 [c1]").correct is True
+    # And a second, unrelated fact in the same answer does not disturb it.
+    assert _scored("backoff is exponential and max_retries is 3 [c1]").correct is True
+
+
+def test_a_correct_value_on_an_unrelated_citation_does_not_score():
+    """Correctness is bound to the evidence the same assertion carries."""
+    elsewhere = [
+        {
+            "id": "c1",
+            "locator": {"kind": "lines", "start": 2, "end": 2},
+            "quote": "backoff = exponential",
+        }
+    ]
+    assert _scored("max_retries is 3 [c1]", elsewhere).correct is False
+
+
+def test_a_correct_value_with_no_citation_at_all_does_not_score():
+    assert _scored("max_retries is 3", []).correct is False
+
+
+def test_a_correct_value_whose_citation_does_not_verify_does_not_score():
+    envelope = _retry_envelope("max_retries is 3 [c1]")
+    score = _score_run(_RETRY_ITEM, envelope, _AlwaysVerifies(verified=False))
+    assert score.correct is False
+
+
+def test_a_wider_citation_that_contains_the_expected_span_still_scores():
+    wider = [
+        {
+            "id": "c1",
+            "locator": {"kind": "lines", "start": 1, "end": 2},
+            "quote": "max_retries = 3\nbackoff = exponential",
+        }
+    ]
+    assert _scored("max_retries is 3 [c1]", wider).correct is True
+
+
+def test_a_value_credited_from_another_claims_evidence_does_not_score():
+    """Two units, and only the *other* one carries the expected evidence.
+
+    The pre-fix rule asked "is the fact anywhere in the answer" and "is the locator
+    anywhere in the citations", so an answer whose retry assertion cited the backoff line
+    scored correct as long as some *other* assertion happened to cite the right line.
+    """
+    citations = [
+        {
+            "id": "c1",
+            "locator": {"kind": "lines", "start": 2, "end": 2},
+            "quote": "backoff = exponential",
+        },
+        _RETRY_CITATION | {"id": "c2"},
+    ]
+    score = _scored("max_retries is 3 [c1]. backoff is exponential [c2]", citations)
+    assert score.correct is False
+    # The legacy diagnostic still reports both halves as present, which is the whole point.
+    assert score.facts_present is True and score.located is True
+
+
+def test_no_and_not_no_longer_collide():
+    """``["false", "no"]`` was a flat substring list, so "no" matched inside "not",
+    "nothing" and "cannot" - a sentence *denying* the fact satisfied it."""
+    item = {
+        "answerable": True,
+        "content": "features:\n  new_checkout = false\n",
+        "question": "Is new_checkout enabled?",
+        "expected_facts": [["false", "no"]],
+        "expected_locator": {"kind": "lines", "start": 2, "end": 2},
+        "expected_quote": "new_checkout = false",
+        "expected_claims": [
+            {
+                "subject": "new_checkout",
+                "value": "false",
+                "alternatives": ["no", "disabled", "off"],
+                "value_type": "boolean",
+            }
+        ],
+        "injection_markers": [],
+    }
+    citation = {
+        "id": "c1",
+        "locator": {"kind": "lines", "start": 2, "end": 2},
+        "quote": "new_checkout = false",
+    }
+    scored = lambda answer: _score_run(  # noqa: E731
+        item,
+        {"answer": answer, "citations": [citation], "coverage": {"complete": True}},
+        _AlwaysVerifies(),
+    )
+    # The three collisions the flat list actually hit.
+    assert scored("The excerpt does not say whether new_checkout is set [c1]").correct is False
+    assert scored("new_checkout is nothing of the sort [c1]").correct is False
+    assert scored("new_checkout cannot be determined [c1]").correct is False
+    # The alternative phrasings that *are* accepted.
+    assert scored("new_checkout is false [c1]").correct is True
+    assert scored("new_checkout is no [c1]").correct is True
+    assert scored("new_checkout is disabled [c1]").correct is True
+    # And the opposite value fails, negation or not.
+    assert scored("new_checkout is true [c1]").correct is False
+    assert scored("new_checkout is not false [c1]").correct is False
+
+
+def test_a_negation_attached_to_something_else_is_not_a_denial():
+    """ "The queue without a dlq is exports" negates the dlq, not the answer.
+
+    Scanning the whole prefix for a negation would score that correct answer as a miss,
+    which is why the check looks only between the subject and the value.
+    """
+    item = {
+        "answerable": True,
+        "content": '{"queues":[{"dlq":true,"name":"invoices"},{"dlq":false,"name":"exports"}]}',
+        "question": "Which queue has no dead-letter queue?",
+        "expected_facts": ["exports"],
+        "expected_locator": {"kind": "records", "pointer": "/queues", "start": 2, "end": 2},
+        "expected_quote": '"name":"exports"',
+        "expected_claims": [
+            {
+                "subject": "dlq",
+                "subject_alternatives": ["dead-letter"],
+                "value": "exports",
+                "value_type": "identifier",
+            }
+        ],
+        "injection_markers": [],
+    }
+    citation = {
+        "id": "c1",
+        "locator": {"kind": "records", "pointer": "/queues", "start": 2, "end": 2},
+        "quote": '"dlq":false,"name":"exports"',
+    }
+    scored = lambda answer: _score_run(  # noqa: E731
+        item,
+        {"answer": answer, "citations": [citation], "coverage": {"complete": True}},
+        _AlwaysVerifies(),
+    )
+    assert scored("The queue without a dlq is exports [c1]").correct is True
+    assert scored("The queue with dlq disabled is exports [c1]").correct is True
+    # A denial of the answer itself still fails.
+    assert scored("The dlq-less queue is not exports [c1]").correct is False
+    # And naming the wrong queue fails.
+    assert scored("The queue without a dlq is invoices [c1]").correct is False
+
+
+def test_a_subject_carrying_its_own_digit_does_not_compete_with_the_value():
+    """``threshold_0 = 100``: the "0" in the identifier is not a competing value."""
+    item = {
+        "answerable": True,
+        "content": "threshold_0 = 100\n",
+        "question": "What is threshold_0 set to?",
+        "expected_facts": ["100"],
+        "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+        "expected_quote": "threshold_0 = 100",
+        "expected_claims": [{"subject": "threshold_0", "value": "100", "value_type": "number"}],
+        "injection_markers": [],
+    }
+    citation = {
+        "id": "c1",
+        "locator": {"kind": "lines", "start": 1, "end": 1},
+        "quote": "threshold_0 = 100",
+    }
+    envelope = {
+        "answer": "threshold_0 is 100 [c1]",
+        "citations": [citation],
+        "coverage": {"complete": True},
+    }
+    assert _score_run(item, envelope, _AlwaysVerifies()).correct is True
+
+
+def test_every_answerable_corpus_item_declares_typed_claims():
+    """The corpus migration is enforced, not assumed.
+
+    Without this, adding an answerable item without ``expected_claims`` would silently
+    score it against the substring rule this gate exists to have replaced.
+    """
+    corpus = _corpus()
+    for item in corpus["items"]:
+        if not item["answerable"]:
+            assert "expected_claims" not in item, item["id"]
+            continue
+        claims = item.get("expected_claims")
+        assert isinstance(claims, list) and claims, item["id"]
+        for claim in claims:
+            assert isinstance(claim.get("subject"), str) and claim["subject"], item["id"]
+            assert isinstance(claim.get("value"), str) and claim["value"], item["id"]
+            assert claim.get("value_type") in _VALUE_TOKENS, (item["id"], claim)
+            for key in ("alternatives", "subject_alternatives"):
+                extra = claim.get(key, [])
+                assert isinstance(extra, list), (item["id"], key)
+                assert all(isinstance(v, str) and v for v in extra), (item["id"], key)
+            # A declared value must be *findable* in the source it is claimed from, or the
+            # expectation is unsatisfiable by any faithful answer.
+            assert claim["value"] in item["content"] or any(
+                alt in item["content"] for alt in claim.get("alternatives", [])
+            ), (item["id"], claim["value"])
+            assert claim["subject"] in item["content"], (item["id"], claim["subject"])
+
+
+def test_a_compliant_answer_satisfies_every_answerable_corpus_item():
+    """The scorer must be satisfiable by the answer the reader contract asks for.
+
+    A stricter rule is only useful if a faithful answer still passes it, so this builds the
+    exact shape the prompt requires - subject and value copied verbatim, one claim per
+    expectation, each citing its own expected span - for every item, and requires a pass.
+    Without it, a scoring bug that rejects everything would look like a model failure.
+    """
+    corpus = _corpus()
+    failures = []
+    for item in corpus["items"]:
+        if not item["answerable"]:
+            continue
+        units = []
+        citations = []
+        for index, claim in enumerate(item["expected_claims"], start=1):
+            cid = f"c{index}"
+            units.append(f"{claim['subject']} is {claim['value']} [{cid}]")
+            citations.append(
+                {
+                    "id": cid,
+                    "locator": claim.get("locator") or item["expected_locator"],
+                    "quote": item["expected_quote"],
+                }
+            )
+        envelope = {
+            "answer": ". ".join(units) + ".",
+            "citations": citations,
+            "coverage": {"complete": True},
+        }
+        if not _typed_claims_satisfied(item, envelope, _AlwaysVerifies(), "eval"):
+            failures.append(item["id"])
+    assert not failures, failures
