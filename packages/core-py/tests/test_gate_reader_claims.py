@@ -355,3 +355,21 @@ def test_a_content_judgement_is_never_retried_as_a_format_failure(tmp_path):
     # Not retryable at all: BAD_USAGE is neither a transient-provider failure nor an
     # allowlisted format failure, so it costs exactly the one call it made.
     assert provider.calls == 1
+
+
+# -- prompt regression: literal identifiers/numbers/booleans are not paraphrased away ----
+
+
+def test_prompt_instructs_verbatim_identifiers_numbers_and_booleans():
+    """A live eval found the model paraphrasing hyphenated identifiers ("payments-team"
+    -> "payments team") and boolean flags in claim text, missing a corpus's literal
+    expected-fact check even though the answer was semantically correct and the citation
+    verified. The prompt now asks for verbatim preservation of exactly those token
+    classes; this pins the instruction so it cannot be silently dropped again."""
+    from context_shunt.provider import READER_SYSTEM_PROMPT
+
+    assert "exactly as they appear in the excerpt" in READER_SYSTEM_PROMPT
+    assert "hyphenated or compound names" in READER_SYSTEM_PROMPT
+    assert "boolean or yes/no values" in READER_SYSTEM_PROMPT
+    # The marker rule this whole contract exists for must still be there too.
+    assert "no citation marker such as" in READER_SYSTEM_PROMPT

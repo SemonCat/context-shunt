@@ -262,10 +262,12 @@ def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
 def test_invalid_model_output_gets_one_format_retry_then_fails_closed_and_leaks_nothing(
     tmp_path,
 ):
-    """Malformed JSON is a schema failure: eligible for exactly one format retry, distinct
-    from - and never stacked with - the transient-provider retry budget. Once that one
-    retry is also malformed, the chunk fails closed and nothing it said crosses the
-    boundary."""
+    """Malformed JSON is a schema failure: eligible for exactly one format retry, drawn
+    from its own budget - separate from, and independent of, the transient-provider retry
+    budget (the two may both fire for the same chunk; see
+    ``test_the_format_and_transient_retry_budgets_are_independent_and_may_both_fire``
+    below). Once that one format retry is also malformed, the chunk fails closed and
+    nothing it said crosses the boundary."""
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
     luna = FakeLuna(replies=["this is not json at all", "still not json, still not json"])
@@ -288,9 +290,12 @@ def test_invalid_model_output_recovers_on_its_one_format_retry(tmp_path):
     assert env["status"] == "ok" and env["code"] == "ANSWERED"
 
 
-def test_the_format_retry_never_stacks_with_a_transient_retry(tmp_path):
-    """A transient provider failure and a schema failure on the same chunk each get their
-    own budget - never more than one call beyond what each alone would cost."""
+def test_the_format_and_transient_retry_budgets_are_independent_and_may_both_fire(tmp_path):
+    """A transient provider failure and a schema failure on the same chunk each draw from
+    their own budget, and both budgets may be spent on the same chunk: one call, one
+    transient retry, one format retry - three calls total, the sum of the two limits, not
+    a single shared retry slot. 'Independent' means neither budget can steal the other's
+    slot, not that only one of them may ever fire."""
     from context_shunt.provider import TransientProviderError
 
     registry = make_registry(tmp_path, session_id="sess")

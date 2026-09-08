@@ -13,8 +13,8 @@ import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { classifyAttribution } from "../src/provenance.js";
 import {
-  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, UnavailableProvider,
-  responseAttribution,
+  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, READER_SYSTEM_PROMPT,
+  UnavailableProvider, responseAttribution,
 } from "../src/provider.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
@@ -249,8 +249,9 @@ describe("reader gate", () => {
   });
 
   it("gets one format retry on invalid model output, then fails closed leaking nothing", async () => {
-    // Malformed JSON is a schema failure: eligible for exactly one format retry, distinct
-    // from - and never stacked with - the transient-provider retry budget.
+    // Malformed JSON is a schema failure: eligible for exactly one format retry, drawn
+    // from its own budget - separate from, and independent of, the transient-provider
+    // retry budget. The two may both fire for the same chunk; see the test below.
     const { registry, entry } = fixture();
     const luna = new FakeLuna(["this is not json at all", "still not json, still not json"]);
     const env = await new Reader(registry, luna).answer("sess", request(entry));
@@ -271,7 +272,10 @@ describe("reader gate", () => {
     expect(env.code).toBe("ANSWERED");
   });
 
-  it("never stacks the format retry with a transient retry", async () => {
+  it("draws from independent transient and format retry budgets, and both may fire", async () => {
+    // "Independent" means neither budget can steal the other's slot, not that only one
+    // of them may ever fire: one call, one transient retry, one format retry - three
+    // calls total, the sum of the two limits.
     const { registry, entry } = fixture();
     const good = answerJson("Three [c1].", [
       { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
@@ -1294,5 +1298,18 @@ describe("structured claims contract", () => {
     const env = await new Reader(registry, provider).answer("sess", multiRequest(entries));
     expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
     expect(provider.calls).toBe(1);
+  });
+
+  it("instructs verbatim identifiers, numbers and booleans in claim text", () => {
+    // A live eval found the model paraphrasing hyphenated identifiers ("payments-team"
+    // -> "payments team") and boolean flags in claim text, missing a corpus's literal
+    // expected-fact check even though the answer was semantically correct and the
+    // citation verified. The prompt now asks for verbatim preservation of exactly those
+    // token classes; this pins the instruction so it cannot be silently dropped again.
+    expect(READER_SYSTEM_PROMPT).toContain("exactly as they appear in the excerpt");
+    expect(READER_SYSTEM_PROMPT).toContain("hyphenated or compound names");
+    expect(READER_SYSTEM_PROMPT).toContain("boolean or yes/no values");
+    // The marker rule this whole contract exists for must still be there too.
+    expect(READER_SYSTEM_PROMPT).toContain("no citation marker such as");
   });
 });

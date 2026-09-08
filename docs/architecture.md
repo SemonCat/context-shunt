@@ -181,10 +181,11 @@ Text chunks preserve physical-line locations and UTF-8 boundaries. JSON snapshot
 deterministic record index; citations identify stable record ordinals rather than pretty
 printed lines. A request may plan at most eight chunks, use at most two concurrent model
 calls, and start at most one core retry per transient failure, plus at most one further
-retry for a schema or claims/citations relationship failure - a separately bounded budget
-so the two never stack into more than the sum of their limits. All attempts share the
-64,000-token input and 60-second request budgets. One model call is capped at 45 seconds and
-2,048 output tokens.
+retry for a schema or claims/citations relationship failure. The two budgets are
+independent - each may spend its own retry on the same chunk, so both can fire together -
+and the combined worst case for one chunk is bounded by the sum of the two limits, never
+more. All attempts share the 64,000-token input and 60-second request budgets. One model
+call is capped at 45 seconds and 2,048 output tokens.
 
 Each model call receives the original question. The model returns structured `claims`
 (`{"text", "citation_ids"}`) plus the `citations` array those ids reference, never a

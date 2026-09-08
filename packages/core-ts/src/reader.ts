@@ -733,9 +733,12 @@ export class Reader {
       reported: UNKNOWN_IDENTITY,
       fallbackUsed: false,
     };
-    // Two independent, separately bounded retry budgets so one never lends its slot to
-    // the other: a transient provider failure and a schema failure on the same chunk can
-    // each get their allotted retry without stacking into an unbounded chain.
+    // Two independent, separately bounded retry budgets: a transient provider failure and
+    // a schema failure on the same chunk can each spend their own allotted retry, and both
+    // may fire for the same chunk. "Independent" means neither budget can borrow the
+    // other's slot - it does not mean only one of them may ever fire. The combined worst
+    // case for one chunk is bounded by the sum of the two limits
+    // (1 + maxTransientRetries + maxFormatRetries), never more.
     let transientUsed = 0;
     let formatUsed = 0;
     const maxAttempts = 1 + this.limits.maxTransientRetries + this.limits.maxFormatRetries;

@@ -771,9 +771,12 @@ class Reader:
         input_budget: _InputTokenBudget,
     ) -> ChunkOutcome:
         outcome = ChunkOutcome(chunk=chunk)
-        # Two independent, separately bounded retry budgets so one never lends its slot to
-        # the other: a transient provider failure and a schema failure on the same chunk
-        # can each get their allotted retry without stacking into an unbounded chain.
+        # Two independent, separately bounded retry budgets: a transient provider failure
+        # and a schema failure on the same chunk can each spend their own allotted retry,
+        # and both may fire for the same chunk. "Independent" means neither budget can
+        # borrow the other's slot - it does not mean only one of them may ever fire. The
+        # combined worst case for one chunk is bounded by the sum of the two limits
+        # (1 + max_transient_retries + max_format_retries), never more.
         transient_used = 0
         format_used = 0
         max_attempts = 1 + self._limits.max_transient_retries + self._limits.max_format_retries
