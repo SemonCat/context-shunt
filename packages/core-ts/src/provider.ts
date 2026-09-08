@@ -106,12 +106,31 @@ export function responseAttribution(
   });
 }
 
+/**
+ * Charges the request's shared input-token budget for one more physical call.
+ *
+ * Handed to a composite provider so the budget is spent per *call* rather than per
+ * invocation. `debitCall` throws `LIMIT_EXCEEDED / REQUEST_OVER_TOKEN_CAP` when the prompt
+ * no longer fits, and the chain must let that stop it: an exhausted budget is not an
+ * availability failure, and advancing past it is how a chain of three transmitted three
+ * times the request's ceiling against a single debit.
+ */
+export interface CallInputBudget {
+  debitCall(): void;
+}
+
 export interface CompleteOptions {
   system: string;
   user: string;
   maxOutputTokens: number;
   timeoutMs: number;
   signal?: AbortSignal | undefined;
+  /**
+   * Optional, and only a provider that makes more than one physical call per invocation
+   * needs it: the reader debits the call it starts before the invocation begins, so a
+   * provider that ignores this is already accounted for.
+   */
+  inputBudget?: CallInputBudget | undefined;
 }
 
 /** Implemented by each adapter over its host's model bridge. */
@@ -380,6 +399,14 @@ export class FallbackChainProvider implements ReaderProvider {
    * could run three times over the caller's budget - and could still start a fallback
    * after the caller had already been handed `TIMEOUT`. Each attempt now gets only what
    * is left, and an exhausted budget stops the chain rather than starting another call.
+   *
+   * The *token* budget is shared the same way. The reader debits it once for the call it
+   * starts, and `opts.inputBudget` debits it again before each extra candidate, which is
+   * the only reason the count of debits equals the count of physical calls. Without it a
+   * three-candidate chain transmitted three prompts against one debit and could exceed
+   * `maxRequestInputTokens` outright. A candidate whose prompt no longer fits is never
+   * started: the debit throws `LIMIT_EXCEEDED` first, and that is not an availability
+   * failure, so the chain stops rather than advancing.
    */
   async complete(opts: CompleteOptions): Promise<ModelResponse> {
     let last: unknown;
@@ -452,6 +479,16 @@ export class FallbackChainProvider implements ReaderProvider {
         // aggregate is already complete - no attempt happened here - so it is reported,
         // not recollected.
         throw chainFailure(last, () => new ShuntError("TIMEOUT", "MODEL_CALL", true));
+      }
+      if (index > 0 && opts.inputBudget) {
+        // This candidate re-sends the whole prompt, so it costs the request's input
+        // budget again. Debited *before* the call and before `attempts` is incremented,
+        // so a candidate the budget cannot afford is never started and never counted.
+        try {
+          opts.inputBudget.debitCall();
+        } catch (err) {
+          throw chainFailure(err, () => new ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP", false));
+        }
       }
       let response: ModelResponse;
       try {

@@ -53,6 +53,7 @@ from .citations import (
     referenced_ids,
     render_claims,
     strip_unsupported_assertions,
+    unpublished_marker_ids,
 )
 from .clock import Clock, Deadline, MonotonicClock
 from .errors import CancelledError, DeadlineExceeded, ShuntError
@@ -79,6 +80,7 @@ from .provider import (
     TransientProviderError,
     build_user_message,
     deadline_kwarg,
+    input_budget_kwarg,
 )
 from .registry import SourceRegistry
 from .schema import validate_request
@@ -120,9 +122,20 @@ class ChunkOutcome:
     completion_bytes: int = 0
     attribution: Attribution = Attribution.UNKNOWN
     confidence: Confidence = Confidence.NONE
+    #: What the call that actually answered asked for. Not always the chain head: an
+    #: availability fallback answers as the candidate it advanced to, and publishing the
+    #: head's identity for that answer certifies a request that was never served.
+    requested: ModelIdentity = field(default_factory=ModelIdentity)
     resolved: ModelIdentity = field(default_factory=ModelIdentity)
     reported: ModelIdentity = field(default_factory=ModelIdentity)
+    #: Whether a provider response was ever seen for this chunk. The identity fields above
+    #: mean nothing without one, so aggregation reads this rather than ``calls`` - a call
+    #: can be started, billed and still return nothing.
+    responses_seen: int = 0
     fallback_used: bool = False
+    #: Claims the model wrote beyond ``max_claims_per_answer``. They are never read, so
+    #: they are material this request dropped, and the caller has to be told.
+    claims_over_cap: int = 0
 
 
 class _AttemptLedger:
@@ -177,6 +190,37 @@ class _AttemptLedger:
             if response.usage_complete_attempts is not None
             else (1 if response.usage.complete else 0)
         )
+
+    def record_untrusted_usage(self, response: Any, limits: Limits) -> None:
+        """Record what a returned response cost when its *usage claim* cannot be trusted.
+
+        A response whose usage metadata is malformed still reached the provider, still
+        transmitted the prompt and still came back carrying completion bytes we can
+        measure ourselves. Rejecting it through ``record_failure`` threw all of that away:
+        the error carries no ``billed_usage``, so a call that produced 1,200 bytes of text
+        was published as ``output_tokens: 0`` - the one direction this accounting must
+        never err in.
+
+        The response's own numbers are still refused; only what this core measured is
+        kept, and the completion measurement is clamped to the reply ceiling so a provider
+        cannot inflate the estimate by returning an unbounded body.
+        """
+        if self._recorded or not isinstance(response, ModelResponse):
+            return
+        if not isinstance(response.text, str):
+            return
+        self._recorded = True
+        outcome = self._outcome
+        attempts = response.attempts if isinstance(response.attempts, int) else 1
+        extra_attempts = max(0, attempts - 1)
+        outcome.calls += extra_attempts
+        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        outcome.completion_bytes += min(
+            len(response.text.encode("utf-8")), limits.max_tool_result_bytes
+        )
+        # No usage is merged and no attempt is counted as usage-complete: the claim was
+        # refused, so every attempt behind this response has unknown usage. That is what
+        # `attempts_started` > `attempts_usage_complete` is for.
 
     def record_failure(self, exc: BaseException) -> None:
         """What a failed call cost. A rejected reply is still a paid call."""
@@ -271,6 +315,30 @@ class _InputTokenBudget:
             if tokens < 0 or self._spent + tokens > self._maximum:
                 raise ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP", retryable=False)
             self._spent += tokens
+
+    def per_call(self, tokens: int) -> _PerCallDebit:
+        """A debit handle for one chunk's prompt, spendable once per physical call."""
+        return _PerCallDebit(self, tokens)
+
+
+@dataclass(frozen=True)
+class _PerCallDebit:
+    """Charges the shared request budget for one more physical call of the same prompt.
+
+    ``max_request_input_tokens`` bounds what one request may transmit, and the reader used
+    to debit it once per *invocation* - outside the provider chain. A composite provider
+    then sent the same prompt to two or three candidates on that single debit, so a chain
+    of three could transmit three times the request's ceiling. The chain debits through
+    this handle before it starts each extra candidate, so the count of debits equals the
+    count of physical calls, and a candidate whose prompt no longer fits is never started:
+    :meth:`_InputTokenBudget.spend` raises first.
+    """
+
+    budget: _InputTokenBudget
+    tokens: int
+
+    def debit_call(self) -> None:
+        self.budget.spend(self.tokens)
 
 
 class Reader:
@@ -453,9 +521,16 @@ class Reader:
         next_citation = 1
         attribution = Attribution.NOT_APPLICABLE
         confidence = Confidence.NONE
-        resolved = ModelIdentity()
-        reported = ModelIdentity()
+        # Every answering call's own identity, kept apart until aggregation: one shared
+        # slot filled by whichever chunk happened to report first hid divergence, which is
+        # exactly what a provenance block must not do.
+        requested_seen: list[ModelIdentity] = []
+        resolved_seen: list[ModelIdentity] = []
+        reported_seen: list[ModelIdentity] = []
         fallback_used = False
+        #: Material this request produced and then dropped against a ceiling. Counted so
+        #: an answer that ends up empty can say *why* it is empty.
+        cap_dropped = 0
 
         for outcome in outcomes:
             total_calls += outcome.calls
@@ -469,8 +544,15 @@ class Reader:
                 attribution, confidence = _weakest(
                     attribution, confidence, outcome.attribution, outcome.confidence
                 )
-                resolved = resolved if resolved.known else outcome.resolved
-                reported = reported if reported.known else outcome.reported
+            if outcome.responses_seen:
+                requested_seen.append(outcome.requested)
+                resolved_seen.append(outcome.resolved)
+                reported_seen.append(outcome.reported)
+            if outcome.claims_over_cap:
+                cap_dropped += outcome.claims_over_cap
+                coverage.omit_once(
+                    outcome.chunk.source_id, outcome.chunk.locator, "BUDGET_EXCEEDED"
+                )
             if outcome.failed_reason:
                 coverage.omit(outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason)
                 continue
@@ -485,6 +567,24 @@ class Reader:
             raw_citations.extend(namespaced_citations)
 
         target = _target_of(self._provider)
+        # One answer, one identity - or none. Each side is published only when every
+        # answering call agreed on it; a request whose calls disagree cannot be described
+        # by any single value, and picking one would certify a model that produced part of
+        # the answer as the model that produced all of it. Divergence also drops the
+        # attribution to `unknown`, because a status is a claim *about* the requested
+        # identity and there is no longer one to make it about.
+        agreed_requested = _agreed_identity(requested_seen)
+        agreed_resolved = _agreed_identity(resolved_seen)
+        agreed_reported = _agreed_identity(reported_seen)
+        if None in (agreed_requested, agreed_resolved, agreed_reported):
+            attribution, confidence = _weakest(
+                attribution, confidence, Attribution.UNKNOWN, Confidence.NONE
+            )
+        # No answering call at all: the strongest truthful statement is what was asked
+        # for, which is what the pre-1.1 envelope always published.
+        requested = target.identity() if not requested_seen else (agreed_requested or UNKNOWN)
+        resolved = agreed_resolved or UNKNOWN
+        reported = agreed_reported or UNKNOWN
         self._metrics.observe("reader_model_calls", total_calls)
         self._metrics.observe("reader_attempts_usage_complete", usage_complete_calls)
 
@@ -504,23 +604,57 @@ class Reader:
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
         self._metrics.observe("citations_rejected", rejected, {"result": "rejected"})
 
-        allowed = verified[: self._limits.max_citations]
+        # The citation ceiling is applied to a *prioritized* list, not to whatever order
+        # the model happened to emit. Truncating arbitrarily lost twice over: the citation
+        # went, and then every claim that referenced it went with it - so an answer could
+        # lose material that would have fitted had the surviving citations been the ones
+        # anything actually cited.
+        legacy_all = " ".join(legacy_parts)
+        wanted = {cid for c in all_claims for cid in c["citation_ids"]}
+        wanted |= set(referenced_ids(legacy_all))
+        prioritized = sorted(verified, key=lambda c: c["id"] not in wanted)
+        allowed = prioritized[: self._limits.max_citations]
+        for citation in prioritized[self._limits.max_citations :]:
+            cap_dropped += 1
+            coverage.omit_once(
+                str(citation.get("source_id", "")),
+                citation.get("locator") or _WHOLE_SOURCE,
+                "BUDGET_EXCEEDED",
+            )
         allowed_ids = {c["id"] for c in allowed}
+        by_id = {c["id"]: c for c in allowed}
         kept_claims = [
             c for c in all_claims if c["citation_ids"] and set(c["citation_ids"]) <= allowed_ids
         ]
-        legacy_answer = strip_unsupported_assertions(" ".join(legacy_parts), allowed_ids)
+        legacy_answer = strip_unsupported_assertions(legacy_all, allowed_ids)
         answer = _render_answer(kept_claims, legacy_answer)
         # Drop whole claims/sentences from the end until the render fits, rather than
         # truncating raw bytes: a byte cut can split a marker or a multi-byte character,
         # which is why the old pipeline had to strip a second time after truncating.
         # Dropping structured units instead never produces a half-written marker.
+        #
+        # Each drop is recorded. Silently shrinking the answer to fit `max_answer_bytes`
+        # and then reporting `complete: true` told the caller the whole selection had been
+        # read when part of the reading had just been deleted.
         max_answer = min(budgets["max_answer_bytes"], self._limits.max_answer_bytes)
         while len(answer.encode("utf-8")) > max_answer and (kept_claims or legacy_answer):
             if kept_claims:
+                orphaned = set(kept_claims[-1]["citation_ids"])
                 kept_claims = kept_claims[:-1]
             else:
-                legacy_answer = _drop_last_sentence(legacy_answer)
+                shorter = _drop_last_sentence(legacy_answer)
+                orphaned = set(referenced_ids(legacy_answer)) - set(referenced_ids(shorter))
+                legacy_answer = shorter
+            cap_dropped += 1
+            for cid in sorted(orphaned):
+                citation = by_id.get(cid)
+                if citation is None:
+                    continue
+                coverage.omit_once(
+                    str(citation.get("source_id", "")),
+                    citation.get("locator") or _WHOLE_SOURCE,
+                    "BUDGET_EXCEEDED",
+                )
             answer = _render_answer(kept_claims, legacy_answer)
         used_ids = {cid for c in kept_claims for cid in c["citation_ids"]}
         used_ids |= set(referenced_ids(legacy_answer))
@@ -539,7 +673,7 @@ class Reader:
             attempts_started=total_calls,
             usage_complete=bool(total_calls) and usage_complete_calls == total_calls,
             citations_mechanically_verified=True,
-            requested=target.identity(),
+            requested=requested,
             resolved=resolved,
             reported=reported,
             fallback_used=fallback_used if total_calls else None,
@@ -573,6 +707,54 @@ class Reader:
             and coverage.planned_chunks > 0
         )
         coverage.upstream_truncated = False
+
+        # Publication invariant: every marker in the answer names a citation this
+        # envelope publishes. `render_claims` only ever writes ids the model supplied
+        # *and* the verifier confirmed, and `normalize_claims` drops a claim that wrote
+        # its own marker - so a violation here is a program bug, not a model one, and it
+        # is refused rather than published. Without it a forged `[c999]` in claim text
+        # shipped inside an answer whose provenance said every citation had been
+        # mechanically verified.
+        forged = unpublished_marker_ids(answer, {c["id"] for c in verified})
+        if forged:
+            exc = ShuntError("CITATION_INVALID", "MARKER_NOT_PUBLISHED", retryable=False)
+            self._metrics.count("reader_error", {"code": exc.code})
+            failed = _as_failure_provenance(provenance)
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                ),
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
+
+        if not answer and cap_dropped:
+            # The sources did answer and every piece of the answer hit a ceiling. Saying
+            # NO_MATCH here would report that the sources held nothing, which is a
+            # different and untrue statement; `LIMIT_EXCEEDED` names the real cause and
+            # the coverage omissions above say which source lost what.
+            exc = ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", retryable=False)
+            self._metrics.count("reader_error", {"code": exc.code})
+            failed = _as_failure_provenance(provenance)
+            return ReaderResult(
+                envelope=E.error_envelope(
+                    request_id,
+                    exc,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                ),
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
 
         if not answer:
             if rejected and not verified and raw_citations:
@@ -631,6 +813,10 @@ class Reader:
         answer, verified, dropped = self._fit_to_envelope(
             kept_claims, legacy_answer, verified, coverage, answered
         )
+        # The fit loop rewrites both halves, so the invariant is re-established on what is
+        # actually published rather than on what was measured before trimming.
+        if unpublished_marker_ids(answer, {c["id"] for c in verified}):
+            answer = ""
         if not answer:
             # Every piece of evidence had to go, so there is no supported answer left to
             # publish. Saying NO_MATCH here would claim the sources held nothing, which is a
@@ -792,10 +978,13 @@ class Reader:
             ledger = _AttemptLedger(outcome)
             try:
                 user = build_user_message(question, chunk.text, chunk.locator)
-                input_budget.spend(
-                    estimate_tokens(READER_SYSTEM_PROMPT, self._limits)
-                    + estimate_tokens(user, self._limits)
-                )
+                per_call_tokens = estimate_tokens(
+                    READER_SYSTEM_PROMPT, self._limits
+                ) + estimate_tokens(user, self._limits)
+                # This debit covers the physical call this frame is about to start. A
+                # composite provider that advances to another candidate re-sends the same
+                # prompt, and debits again through the handle below before it does.
+                input_budget.spend(per_call_tokens)
                 outcome.calls += 1
                 # The same prompt is sent again by every candidate a fallback tries, so
                 # this is per physical call, not per invocation. Charging it once per
@@ -812,10 +1001,19 @@ class Reader:
                     max_output_tokens=self._limits.max_output_tokens_per_call,
                     deadline=deadline,
                     ledger=ledger,
+                    input_budget=input_budget.per_call(per_call_tokens),
                 )
-                _validate_model_response(response, self._limits)
+                try:
+                    _validate_model_response(response, self._limits)
+                except ShuntError:
+                    # The reply is refused, but it was delivered and billed. Its own
+                    # numbers are untrustworthy; the bytes this core measured are not.
+                    ledger.record_untrusted_usage(response, self._limits)
+                    raise
                 ledger.record_success(response)
+                outcome.responses_seen += 1
                 outcome.attribution, outcome.confidence = response.attribution()
+                outcome.requested = response.requested
                 outcome.resolved = response.resolved
                 outcome.reported = response.reported
                 outcome.fallback_used = outcome.fallback_used or response.fallback_used
@@ -847,6 +1045,12 @@ class Reader:
                     for item in raw_claims[: self._limits.max_claims_per_answer]:
                         if isinstance(item, dict) and isinstance(item.get("text"), str):
                             assert_no_secret(item["text"].encode("utf-8"), "ANSWER")
+                    # Claims past the ceiling are never read. That is dropped material,
+                    # so it is carried out and reported as an omission rather than
+                    # silently disappearing behind a `complete: true`.
+                    outcome.claims_over_cap = max(
+                        0, len(raw_claims) - self._limits.max_claims_per_answer
+                    )
                     valid_local_ids = {c["id"] for c in citations_local}
                     outcome.claims = normalize_claims(raw_claims, valid_local_ids, self._limits)
                     outcome.citations = citations_local
@@ -897,6 +1101,7 @@ class Reader:
         max_output_tokens: int,
         deadline: Deadline,
         ledger: _AttemptLedger,
+        input_budget: _PerCallDebit | None = None,
     ) -> ModelResponse:
         """Run an untrusted host bridge behind a real hard wall-clock deadline.
 
@@ -932,6 +1137,12 @@ class Reader:
                             # widening of a published protocol, and a provider written
                             # against the previous signature must keep working.
                             **deadline_kwarg(self._provider, deadline),
+                            # The same widening, for the same reason: a composite provider
+                            # debits the shared request input budget before every extra
+                            # candidate it starts, so no chain can transmit more than the
+                            # request's ceiling. A provider that ignores it makes one
+                            # call, which this frame has already debited.
+                            **input_budget_kwarg(self._provider, input_budget),
                         ),
                     )
                 )
@@ -1033,6 +1244,27 @@ class Reader:
 
 
 # -- helpers ----------------------------------------------------------------
+
+#: Nothing is known about this side of the provenance triple.
+UNKNOWN = ModelIdentity()
+
+#: The coarsest legal locator, for an omission whose material had no narrower one.
+_WHOLE_SOURCE: dict[str, Any] = {"kind": "all"}
+
+
+def _agreed_identity(values: list[ModelIdentity]) -> ModelIdentity | None:
+    """The one identity every answering call reported, or ``None`` when they differ.
+
+    ``None`` is the honest answer for a mixed request, and it is deliberately also the
+    answer when one call named a model and another named nothing: publishing the one that
+    did would describe the whole answer by the half of it that could be identified. The
+    caller degrades the attribution status alongside it, so the envelope never carries a
+    strong status over an identity that covers only part of the work.
+    """
+    if not values:
+        return ModelIdentity()
+    first = values[0]
+    return first if all(value == first for value in values[1:]) else None
 
 
 def _target_of(provider: Any) -> ProviderTarget:
@@ -1294,6 +1526,12 @@ def _validate_model_response(response: Any, limits: Limits) -> None:
             raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
 
 
+#: Stands in for a legacy marker that names an id its own chunk never declared. Inside
+#: the `[cN]` grammar, so it is still seen by `referenced_ids`, and outside the allocated
+#: id space, so it can never match a published citation.
+_UNMAPPABLE_MARKER = "[c0]"
+
+
 def _namespace_outcome(
     outcome: ChunkOutcome, first_id: int
 ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]], int]:
@@ -1318,7 +1556,13 @@ def _namespace_outcome(
 
     def replace(match: re.Match[str]) -> str:
         global_id = names.get(match.group(1))
-        return f"[{global_id}]" if global_id else match.group(0)
+        # A marker naming an id this chunk never declared cannot be remapped, and leaving
+        # it alone let it collide with a *different* chunk's global id: chunk 2 writing
+        # `[c2]` for evidence it never declared was published as chunk 1's verified
+        # citation c2. Global ids are allocated from c1 upwards, so `c0` can never be one
+        # - the sentence carrying it fails the subset test in
+        # `strip_unsupported_assertions` and is dropped, which is the fail-closed answer.
+        return f"[{global_id}]" if global_id else _UNMAPPABLE_MARKER
 
     legacy_answer = re.sub(r"\[(c[0-9]{1,3})\]", replace, outcome.legacy_answer)
     return claims, legacy_answer, citations, len(names)

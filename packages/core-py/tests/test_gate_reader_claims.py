@@ -13,13 +13,21 @@ would have failed against the pre-fix reader; it is the direct regression proof.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
-from context_shunt.provider import TransientProviderError
+from context_shunt.limits import READER_MODEL
+from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
+from context_shunt.provider import (
+    FallbackChainProvider,
+    ModelResponse,
+    ProviderTarget,
+    TransientProviderError,
+)
 from context_shunt.reader import Reader
 from context_shunt.snapshot import snapshot_bytes
-from tests.support import FakeLuna, answer_json, claims_json, make_registry
+from tests.support import FakeLuna, answer_json, claims_json, make_registry, transient
 
 pytestmark = pytest.mark.gate_reader
 
@@ -373,3 +381,177 @@ def test_prompt_instructs_verbatim_identifiers_numbers_and_booleans():
     assert "boolean or yes/no values" in READER_SYSTEM_PROMPT
     # The marker rule this whole contract exists for must still be there too.
     assert "no citation marker such as" in READER_SYSTEM_PROMPT
+
+
+# -- forged markers ---------------------------------------------------------------------
+
+
+def test_a_forged_marker_in_claim_text_never_reaches_the_envelope(tmp_path):
+    """The release blocker, reproduced and closed.
+
+    Before the fix, ``claims[].text`` was rendered verbatim, so a model that wrote its own
+    ``[c999]`` published it - inside an envelope whose provenance still said every citation
+    had been mechanically verified, and next to a ``citations`` array that never contained
+    c999. The claim is dropped now, so the answer is the one supported claim and nothing
+    else.
+    """
+    registry, (entry,) = _fixture(tmp_path, SOURCE)
+    reply = claims_json(
+        [
+            {"text": "Retries stop after three attempts [c999].", "citation_ids": ["c1"]},
+            {"text": "Backoff is exponential.", "citation_ids": ["c2"]},
+        ],
+        [
+            {"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"},
+            {"id": "c2", "line_start": 3, "line_end": 3, "quote": 'backoff = "exponential"'},
+        ],
+    )
+    env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
+    assert env["status"] == "ok" and env["code"] == "ANSWERED"
+    assert "c999" not in env["answer"]
+    assert env["answer"] == "Backoff is exponential [c2]."
+    # And the invariant holds on what shipped: every marker names a published citation.
+    published = {c["id"] for c in env["citations"]}
+    assert set(re.findall(r"\[(c[0-9]{1,3})\]", env["answer"])) <= published
+
+
+def test_an_answer_that_is_only_forged_markers_publishes_nothing(tmp_path):
+    """Every claim forged means no supported claim survived, so nothing is asserted."""
+    registry, (entry,) = _fixture(tmp_path, SOURCE)
+    reply = claims_json(
+        [{"text": "Retries stop after three attempts [c1].", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
+    )
+    env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
+    assert env["code"] == "NO_MATCH"
+    assert env.get("answer", "") == ""
+
+
+def test_a_legacy_marker_from_another_chunk_cannot_borrow_its_evidence(tmp_path):
+    """A cross-chunk marker collision, closed.
+
+    Chunk-local ids are renamed into one global space. A legacy sentence citing an id its
+    *own* chunk never declared used to be left alone - and after renaming, chunk 2's
+    ``[c2]`` named chunk 1's verified citation c2, so an assertion from one excerpt was
+    published as though the other excerpt's evidence supported it. It is rewritten to an
+    id the allocator can never issue, so the sentence is dropped instead.
+    """
+    registry, entries = _fixture(tmp_path, SOURCE, "alpha = 1\nbeta = 2\n")
+    first = answer_json(
+        "Retries stop after three attempts [c1]. Backoff is exponential [c2].",
+        [
+            {"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"},
+            {"id": "c2", "line_start": 3, "line_end": 3, "quote": 'backoff = "exponential"'},
+        ],
+    )
+    # Chunk two declares only its own c1 and then cites "[c2]", which after namespacing
+    # would have been chunk one's second citation.
+    second = answer_json(
+        "Alpha is one [c1]. Beta is two [c2].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+    )
+    env = (
+        Reader(registry, FakeLuna(replies=[first, second]))
+        .answer("sess", _request(entries))
+        .envelope
+    )
+    assert "Beta is two" not in env["answer"]
+    published = {c["id"] for c in env["citations"]}
+    assert set(re.findall(r"\[(c[0-9]{1,3})\]", env["answer"])) <= published
+
+
+# -- provenance: one answer, one identity -----------------------------------------------
+
+
+def test_a_fallback_winner_is_published_as_the_model_that_answered(tmp_path):
+    """The chain head is what was asked for first, not what answered.
+
+    Publishing ``requested_model`` from the chain head certified a request that was never
+    served: the primary was unavailable and an alternative produced the answer.
+    """
+    registry, (entry,) = _fixture(tmp_path, SOURCE)
+    reply = claims_json(
+        [{"text": "Retries stop after three attempts.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
+    )
+    primary = FakeLuna(model="gpt-5.6-luna", replies=[transient()])
+    alternative = FakeLuna(model="fallback-model", replies=[reply])
+    chain = FallbackChainProvider(primary, [alternative])
+    env = Reader(registry, chain).answer("sess", _request([entry])).envelope
+    assert env["code"] == "ANSWERED"
+    assert env["provenance"]["requested_model"] == "fallback-model"
+    assert env["provenance"]["resolved_model"] == "fallback-model"
+    assert env["provenance"]["fallback_used"] is True
+
+
+def test_two_chunks_answered_by_different_models_certify_neither(tmp_path):
+    """Mixed identity is not one identity.
+
+    First-known-wins hid divergence: chunk one's model was published as the model that
+    produced the whole answer. When the answering calls disagree, no single value can
+    describe the result, so each side goes to null and the attribution drops to
+    ``unknown``.
+    """
+    registry, entries = _fixture(tmp_path, SOURCE, "alpha = 1\n")
+    replies = [
+        claims_json(
+            [{"text": "Retries stop after three attempts.", "citation_ids": ["c1"]}],
+            [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
+        ),
+        claims_json(
+            [{"text": "Alpha is one.", "citation_ids": ["c1"]}],
+            [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+        ),
+    ]
+
+    class PerChunkModel:
+        """Reports a different model depending on which excerpt it was handed.
+
+        Deterministic under the reader's concurrency: the identity comes from the chunk,
+        not from a mutable call counter two worker threads would race on.
+        """
+
+        @property
+        def target(self):
+            return ProviderTarget(model=READER_MODEL, provider="openai")
+
+        def complete(self, *, system, user, max_output_tokens, timeout_ms):
+            second = "alpha = 1" in user
+            identity = ModelIdentity(
+                provider="openai", model="some-other-model" if second else READER_MODEL
+            )
+            return ModelResponse(
+                text=replies[1] if second else replies[0],
+                requested=identity,
+                resolved=identity,
+                reported=identity,
+                provider_confirms_generation=True,
+                usage=Usage(input_tokens=10, output_tokens=5, method=TokenMethod.EXACT),
+            )
+
+    env = Reader(registry, PerChunkModel()).answer("sess", _request(entries)).envelope
+    assert env["code"] == "ANSWERED"
+    provenance = env["provenance"]
+    assert provenance["attribution_status"] == "unknown"
+    assert provenance["resolved_model"] is None
+    assert provenance["reported_model"] is None
+    assert "requested_model" not in provenance
+
+
+def test_one_model_answering_every_chunk_still_certifies_it(tmp_path):
+    """The ordinary case is untouched: agreement publishes the identity."""
+    registry, entries = _fixture(tmp_path, SOURCE, "alpha = 1\n")
+    replies = [
+        claims_json(
+            [{"text": "Retries stop after three attempts.", "citation_ids": ["c1"]}],
+            [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
+        ),
+        claims_json(
+            [{"text": "Alpha is one.", "citation_ids": ["c1"]}],
+            [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+        ),
+    ]
+    env = Reader(registry, FakeLuna(replies=replies)).answer("sess", _request(entries)).envelope
+    assert env["provenance"]["attribution_status"] == "actual"
+    assert env["provenance"]["reported_model"] == READER_MODEL
+    assert env["provenance"]["requested_model"] == READER_MODEL

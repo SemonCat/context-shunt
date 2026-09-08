@@ -132,6 +132,19 @@ class TransientProviderError(ShuntError):
         super().__init__("MODEL_ERROR", detail, retryable=True)
 
 
+class CallInputBudget(Protocol):
+    """Charges the request's shared input-token budget for one more physical call.
+
+    Passed to a composite provider so the budget is spent per *call* rather than per
+    invocation. ``debit_call`` raises ``LIMIT_EXCEEDED / REQUEST_OVER_TOKEN_CAP`` when the
+    prompt no longer fits, and the chain must let that stop it: an exhausted budget is not
+    an availability failure and advancing past it is how a chain of three transmitted
+    three times the request's ceiling.
+    """
+
+    def debit_call(self) -> None: ...
+
+
 class ReaderProvider(Protocol):
     """Implemented by each adapter over its host's model bridge.
 
@@ -140,6 +153,10 @@ class ReaderProvider(Protocol):
     to consult and kept advancing after the caller had already been given up on, which
     TypeScript's signal-carrying contract prevented. A provider that ignores it is still
     valid - the reader enforces the same bound around every call either way.
+
+    ``input_budget`` is optional in the same way and for the same reason: only a provider
+    that makes more than one physical call per invocation needs it, and one that ignores
+    it still has its single call debited by the reader before the invocation starts.
     """
 
     def complete(
@@ -150,6 +167,7 @@ class ReaderProvider(Protocol):
         max_output_tokens: int,
         timeout_ms: int,
         deadline: Any | None = None,
+        input_budget: CallInputBudget | None = None,
     ) -> ModelResponse: ...
 
 
@@ -205,10 +223,12 @@ class HostBridgeProvider:
         max_output_tokens: int,
         timeout_ms: int,
         deadline: Any | None = None,
+        input_budget: Any | None = None,
     ) -> ModelResponse:
-        # `deadline` is accepted for the composite contract and deliberately unused here:
-        # the reader already wraps this call in the request budget, and the host bridge
-        # has its own `timeout_ms`.
+        # `deadline` and `input_budget` are accepted for the composite contract and
+        # deliberately unused here: the reader already wraps this call in the request
+        # budget and debited it before the invocation, this bridge makes exactly one
+        # physical call, and the host bridge has its own `timeout_ms`.
         capped = min(max_output_tokens, self._limits.max_output_tokens_per_call)
         try:
             result = self._call(
@@ -386,6 +406,7 @@ class FallbackChainProvider:
         max_output_tokens: int,
         timeout_ms: int,
         deadline: Any | None = None,
+        input_budget: Any | None = None,
     ) -> ModelResponse:
         """Try each target in turn, inside *one* shared budget.
 
@@ -395,6 +416,14 @@ class FallbackChainProvider:
         fallback after the caller had already been handed ``TIMEOUT``. Each attempt now
         gets only what is left, and an exhausted budget stops the chain rather than
         starting another call.
+
+        The *token* budget is shared the same way. The reader debits it once for the call
+        it starts, and ``input_budget`` debits it again before each extra candidate, which
+        is the only reason the count of debits equals the count of physical calls. Without
+        it a three-candidate chain transmitted three prompts against one debit and could
+        exceed ``max_request_input_tokens`` outright. A candidate whose prompt no longer
+        fits is never started: the debit raises ``LIMIT_EXCEEDED`` first, and that is not
+        an availability failure, so the chain stops rather than advancing.
         """
         last: ShuntError | None = None
         started = time.monotonic()
@@ -459,6 +488,15 @@ class FallbackChainProvider:
                 # The aggregate is already complete - no attempt happened here - so it is
                 # reported, not recollected.
                 raise chain_failure(last, ShuntError("TIMEOUT", "MODEL_CALL", retryable=True))
+            if index > 0 and input_budget is not None:
+                # This candidate re-sends the whole prompt, so it costs the request's
+                # input budget again. Debited *before* the call and before `attempts` is
+                # incremented, so a candidate the budget cannot afford is never started
+                # and never counted.
+                try:
+                    input_budget.debit_call()
+                except ShuntError as exc:
+                    raise chain_failure(exc, exc) from None
             try:
                 attempts += 1
                 response = provider.complete(
@@ -525,15 +563,20 @@ def _is_availability_failure(exc: ShuntError) -> bool:
     return exc.code == "MODEL_ERROR" and exc.detail not in ("MODEL_SUBSTITUTED",)
 
 
-@lru_cache(maxsize=64)
-def _complete_accepts_deadline(complete: Any) -> bool:
+@lru_cache(maxsize=256)
+def _complete_accepts(complete: Any, name: str) -> bool:
     try:
         parameters = inspect.signature(complete).parameters
     except (TypeError, ValueError):
         return False
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return True
-    return "deadline" in parameters
+    return name in parameters
+
+
+def _complete_accepts_deadline(complete: Any) -> bool:
+    """Kept as its own name: adapters and tests import it."""
+    return _complete_accepts(complete, "deadline")
 
 
 def deadline_kwarg(provider: Any, deadline: Any | None) -> dict[str, Any]:
@@ -543,9 +586,21 @@ def deadline_kwarg(provider: Any, deadline: Any | None) -> dict[str, Any]:
     signature has to keep working. Callers splat this rather than passing the argument
     unconditionally.
     """
-    if deadline is None or not _complete_accepts_deadline(type(provider).complete):
+    if deadline is None or not _complete_accepts(type(provider).complete, "deadline"):
         return {}
     return {"deadline": deadline}
+
+
+def input_budget_kwarg(provider: Any, budget: Any | None) -> dict[str, Any]:
+    """``{"input_budget": ...}`` for a provider that accepts it, otherwise nothing.
+
+    The same widening rule as :func:`deadline_kwarg`. A provider written against the
+    previous signature keeps working and makes one call, which the reader has already
+    debited; only a provider that fans out needs to charge for the extra calls itself.
+    """
+    if budget is None or not _complete_accepts(type(provider).complete, "input_budget"):
+        return {}
+    return {"input_budget": budget}
 
 
 def build_user_message(question: str, chunk_text: str, locator: dict[str, Any]) -> str:
@@ -561,6 +616,7 @@ def build_user_message(question: str, chunk_text: str, locator: dict[str, Any]) 
 
 __all__ = [
     "READER_SYSTEM_PROMPT",
+    "CallInputBudget",
     "FallbackChainProvider",
     "HostBridgeProvider",
     "LunaProvider",
@@ -570,4 +626,6 @@ __all__ = [
     "TransientProviderError",
     "UnavailableProvider",
     "build_user_message",
+    "deadline_kwarg",
+    "input_budget_kwarg",
 ]

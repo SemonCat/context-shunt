@@ -912,3 +912,106 @@ def test_a_legal_sum_above_the_single_call_ceiling_is_accepted(tmp_path):
     assert result.cost.method is TokenMethod.EXACT
     assert result.cost.output_tokens == half * 2
     assert result.cost.output_tokens > L.max_output_tokens_per_call
+
+
+# -- a refused usage claim does not erase measured bytes --------------------------------
+
+
+class _BadUsageProvider:
+    """Returns a real completion alongside a usage claim no call could have made."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.calls = 0
+
+    @property
+    def target(self) -> ProviderTarget:
+        return ProviderTarget()
+
+    def complete(self, *, system, user, max_output_tokens, timeout_ms):
+        self.calls += 1
+        return ModelResponse(
+            text=self.text,
+            requested=ModelIdentity(model="gpt-5.6-luna"),
+            resolved=ModelIdentity(model="gpt-5.6-luna"),
+            # Above every ceiling, so `_validate_model_response` refuses the claim.
+            usage=Usage(input_tokens=10, output_tokens=10**9, method=TokenMethod.EXACT),
+        )
+
+
+def test_invalid_usage_metadata_does_not_erase_the_bytes_we_measured(tmp_path):
+    """The release blocker: a refused usage claim took real completion bytes with it.
+
+    The response reached the provider, transmitted the prompt and came back carrying
+    completion bytes this core can measure itself. Rejecting the whole response for a
+    malformed usage claim reported ``output_tokens: 0`` for a call that had produced
+    hundreds of bytes - understating spend, which is the one direction this accounting
+    must never err in. The claim is still refused; the measurement is kept.
+    """
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha = 1\nbeta = 2\n"))
+    text = answer_json(
+        "Alpha is one [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+    )
+    provider = _BadUsageProvider(text)
+    result = Reader(registry, provider).answer(
+        "sess",
+        {
+            "schema_version": "1.0",
+            "request_id": "req_usage",
+            "operation": "read",
+            "question": "What is alpha?",
+            "sources": [
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "selector": {"kind": "all"},
+                }
+            ],
+            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+        },
+    )
+    assert provider.calls == 1
+    cost = result.cost
+    assert cost.attempts_started == 1
+    # The provider's own numbers are refused, so no attempt counts as usage-complete and
+    # the method says the totals are this core's estimate.
+    assert cost.attempts_usage_complete == 0
+    assert cost.method is TokenMethod.BYTES_DIV_4
+    # And the completion bytes survive: the estimate is the text we actually received.
+    assert cost.output_tokens == estimate_tokens(len(text.encode("utf-8")))
+    assert cost.output_tokens > 0
+    assert cost.input_tokens > 0
+    # The refused reply is still refused - nothing from it is published.
+    assert result.envelope["code"] in ("NO_MATCH", "INVALID_MODEL_OUTPUT")
+    assert result.envelope.get("answer", "") == ""
+
+
+def test_a_valid_usage_claim_is_still_reported_exactly(tmp_path):
+    """The control: a legal claim is used, and the record says so."""
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha = 1\n"))
+    reply = answer_json(
+        "Alpha is one [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+    )
+    result = Reader(registry, FakeLuna(replies=[reply])).answer(
+        "sess",
+        {
+            "schema_version": "1.0",
+            "request_id": "req_usage_ok",
+            "operation": "read",
+            "question": "What is alpha?",
+            "sources": [
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "selector": {"kind": "all"},
+                }
+            ],
+            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+        },
+    )
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.attempts_usage_complete == 1

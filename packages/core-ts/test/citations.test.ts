@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CitationVerifier, normalizeClaims, renderClaims, stripUnsupportedAssertions,
+  unpublishedMarkerIds,
 } from "../src/citations.js";
 import { DEFAULT_LIMITS } from "../src/limits.js";
 import { Reader } from "../src/reader.js";
@@ -105,6 +106,41 @@ describe("structured claims conformance", () => {
       const rendered = renderClaims(survivors);
       expect(survivors).toEqual(c.expect.surviving_claims);
       expect(rendered).toBe(c.expect.rendered);
+    });
+  }
+
+  // A claim that writes its own marker is dropped, whatever the marker names. The
+  // published `answer` is rendered from `text` verbatim, so a model-authored `[c999]` used
+  // to reach the envelope as though the program had placed it - naming a citation that was
+  // never published, inside an envelope still reporting citationsMechanicallyVerified.
+  // Escaping would keep model bytes in a field whose whole meaning is that the program
+  // wrote them, so the claim goes instead.
+  it("refuses marker syntax in claim text rather than escaping it", () => {
+    const seen = new Set(["c1"]);
+    expect(
+      normalizeClaims([{ text: "Retries stop after three attempts [c999]." , citation_ids: ["c1"] }], seen),
+    ).toEqual([]);
+    // The id being real changes nothing.
+    expect(normalizeClaims([{ text: "Three [c1].", citation_ids: ["c1"] }], seen)).toEqual([]);
+    // Brackets that are not marker syntax are ordinary prose.
+    expect(
+      normalizeClaims([{ text: "Read from config[cache] on startup.", citation_ids: ["c1"] }], seen),
+    ).toEqual([{ text: "Read from config[cache] on startup.", citation_ids: ["c1"] }]);
+  });
+});
+
+describe("the publication invariant", () => {
+  // Every `[cN]` in a published answer must name a citation the same envelope publishes.
+  // `normalizeClaims` closes the forged-marker route in; this is the check on the way out,
+  // so no later path can reintroduce one.
+  it("has a corpus", () => {
+    expect(claimsCases.marker_cases.cases.length).toBeGreaterThanOrEqual(6);
+  });
+  for (const c of claimsCases.marker_cases.cases) {
+    it(`reports unpublished markers for ${c.id}`, () => {
+      expect(unpublishedMarkerIds(c.text, new Set<string>(c.published))).toEqual(
+        c.expect.unpublished,
+      );
     });
   }
 });

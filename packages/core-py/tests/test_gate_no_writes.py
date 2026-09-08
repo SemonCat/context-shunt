@@ -116,7 +116,11 @@ def test_reader_has_no_shell_network_or_write_capability(tmp_path):
     # An exact set, so a capability cannot be added to the reader's provider surface
     # without this failing. `deadline` carries the request's cancellation state and no
     # authority: it lets a composite provider stop between attempts, and nothing in it
-    # can name a tool, a host, a path or a destination.
+    # can name a tool, a host, a path or a destination. `input_budget` is the same shape
+    # of thing in the other direction - a composite provider debits the request's shared
+    # input-token budget through it before each extra candidate it starts. Its whole
+    # surface is `debit_call()`, which returns nothing and can only refuse; it names no
+    # tool, host, path or destination either.
     assert params == {
         "self",
         "system",
@@ -124,6 +128,7 @@ def test_reader_has_no_shell_network_or_write_capability(tmp_path):
         "max_output_tokens",
         "timeout_ms",
         "deadline",
+        "input_budget",
     }
     reader.answer(
         "sess",

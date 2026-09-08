@@ -34,7 +34,7 @@ import {
 import { Chunk, estimateTokens, planChunks } from "./chunking.js";
 import {
   type Claim, CitationVerifier, normalizeClaims, referencedIds, renderClaims,
-  stripUnsupportedAssertions,
+  stripUnsupportedAssertions, unpublishedMarkerIds,
 } from "./citations.js";
 import { Clock, Deadline, monotonicClock } from "./clock.js";
 import {
@@ -60,6 +60,7 @@ import {
   type AttributionPolicy,
 } from "./provenance.js";
 import {
+  type CallInputBudget,
   ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider, buildUserMessage,
   providerTargetOf, responseAttribution, targetIdentity, transientProviderError,
 } from "./provider.js";
@@ -67,6 +68,34 @@ import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
 import { type ReaderRequest, READ_OPERATIONS, validateRequest } from "./schema.js";
 import { utf8Length } from "./textindex.js";
+
+/** The coarsest legal locator, for an omission whose material had no narrower one. */
+const WHOLE_SOURCE: Record<string, unknown> = { kind: "all" };
+
+/**
+ * Stands in for a legacy marker that names an id its own chunk never declared. Inside the
+ * `[cN]` grammar, so it is still seen by `referencedIds`, and outside the allocated id
+ * space, so it can never match a published citation.
+ */
+const UNMAPPABLE_MARKER = "[c0]";
+
+/**
+ * The one identity every answering call reported, or `null` when they differ.
+ *
+ * `null` is the honest answer for a mixed request, and it is deliberately also the answer
+ * when one call named a model and another named nothing: publishing the one that did would
+ * describe the whole answer by the half of it that could be identified. The caller
+ * degrades the attribution status alongside it, so the envelope never carries a strong
+ * status over an identity that covers only part of the work.
+ */
+function agreedIdentity(values: ModelIdentity[]): ModelIdentity | null {
+  const first = values[0];
+  if (first === undefined) return UNKNOWN_IDENTITY;
+  for (const value of values.slice(1)) {
+    if (value.provider !== first.provider || value.model !== first.model) return null;
+  }
+  return first;
+}
 
 /** `INVALID_MODEL_OUTPUT` details eligible for the one-shot format retry: a shape or
  * claims/citations *relationship* failure, never a content judgement. Retrying
@@ -99,9 +128,20 @@ interface ChunkOutcome {
   promptBytes: number;
   completionBytes: number;
   attribution: { status: Attribution; confidence: Confidence };
+  /** What the call that actually answered asked for. Not always the chain head: an
+   * availability fallback answers as the candidate it advanced to, and publishing the
+   * head's identity for that answer certifies a request that was never served. */
+  requested: ModelIdentity;
   resolved: ModelIdentity;
   reported: ModelIdentity;
+  /** Whether a provider response was ever seen for this chunk. The identity fields above
+   * mean nothing without one, so aggregation reads this rather than `calls` - a call can
+   * be started, billed and still return nothing. */
+  responsesSeen: number;
   fallbackUsed: boolean;
+  /** Claims the model wrote beyond `maxClaimsPerAnswer`. They are never read, so they are
+   * material this request dropped, and the caller has to be told. */
+  claimsOverCap: number;
 }
 
 /** What the session needs to finish the operation: an envelope plus its true cost. */
@@ -122,6 +162,20 @@ class InputTokenBudget {
       throw new ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP", false);
     }
     this.spent += tokens;
+  }
+
+  /**
+   * A debit handle for one chunk's prompt, spendable once per physical call.
+   *
+   * `maxRequestInputTokens` bounds what one request may transmit, and the reader used to
+   * debit it once per *invocation* - outside the provider chain. A composite provider then
+   * sent the same prompt to two or three candidates on that single debit, so a chain of
+   * three could transmit three times the request's ceiling. The chain debits through this
+   * handle before it starts each extra candidate, so the count of debits equals the count
+   * of physical calls, and a candidate whose prompt no longer fits is never started.
+   */
+  perCall(tokens: number): CallInputBudget {
+    return { debitCall: (): void => this.spend(tokens) };
   }
 }
 
@@ -170,6 +224,37 @@ class AttemptLedger {
     // plain one supplies one attempt, so the winner alone decides.
     outcome.usageCompleteCalls +=
       response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
+  }
+
+  /**
+   * What a returned response cost when its *usage claim* cannot be trusted.
+   *
+   * A response whose usage metadata is malformed still reached the provider, still
+   * transmitted the prompt and still came back carrying completion bytes we can measure
+   * ourselves. Rejecting it through `recordFailure` threw all of that away: the error
+   * carries no `billedUsage`, so a call that produced 1,200 bytes of text was published as
+   * `output_tokens: 0` - the one direction this accounting must never err in.
+   *
+   * The response's own numbers are still refused; only what this core measured is kept,
+   * and the completion measurement is clamped to the reply ceiling so a provider cannot
+   * inflate the estimate by returning an unbounded body.
+   */
+  recordUntrustedUsage(response: unknown, limits: Limits): void {
+    if (this.recorded) return;
+    const candidate = response as ModelResponse | undefined;
+    if (!candidate || typeof candidate.text !== "string") return;
+    this.recorded = true;
+    const outcome = this.outcome;
+    const extraAttempts = Math.max(0, (candidate.attempts ?? 1) - 1);
+    outcome.calls += extraAttempts;
+    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    outcome.completionBytes += Math.min(
+      new TextEncoder().encode(candidate.text).length,
+      limits.maxToolResultBytes,
+    );
+    // No usage is merged and no attempt is counted as usage-complete: the claim was
+    // refused, so every attempt behind this response has unknown usage. That is what
+    // `attempts_started` > `attempts_usage_complete` is for.
   }
 
   /** What a failed call cost. A rejected reply is still a paid call. */
@@ -426,10 +511,17 @@ export class Reader {
       status: "not_applicable",
       confidence: "none",
     };
-    let resolved: ModelIdentity = UNKNOWN_IDENTITY;
-    let reported: ModelIdentity = UNKNOWN_IDENTITY;
+    // Every answering call's own identity, kept apart until aggregation: one shared slot
+    // filled by whichever chunk happened to report first hid divergence, which is exactly
+    // what a provenance block must not do.
+    const requestedSeen: ModelIdentity[] = [];
+    const resolvedSeen: ModelIdentity[] = [];
+    const reportedSeen: ModelIdentity[] = [];
     let fallbackUsed = false;
     let unseenUsage: Usage = { method: "not_applicable" };
+    // Material this request produced and then dropped against a ceiling. Counted so an
+    // answer that ends up empty can say *why* it is empty.
+    let capDropped = 0;
     for (const outcome of outcomes) {
       totalCalls += outcome.calls;
       usageCompleteCalls += outcome.usageCompleteCalls;
@@ -438,10 +530,15 @@ export class Reader {
       promptBytes += outcome.promptBytes;
       completionBytes += outcome.completionBytes;
       fallbackUsed = fallbackUsed || outcome.fallbackUsed;
-      if (outcome.calls > 0) {
-        attribution = weakestAttribution(attribution, outcome.attribution);
-        if (!identityKnown(resolved)) resolved = outcome.resolved;
-        if (!identityKnown(reported)) reported = outcome.reported;
+      if (outcome.calls > 0) attribution = weakestAttribution(attribution, outcome.attribution);
+      if (outcome.responsesSeen > 0) {
+        requestedSeen.push(outcome.requested);
+        resolvedSeen.push(outcome.resolved);
+        reportedSeen.push(outcome.reported);
+      }
+      if (outcome.claimsOverCap > 0) {
+        capDropped += outcome.claimsOverCap;
+        coverage.omitOnce(outcome.chunk.sourceId, outcome.chunk.locator, "BUDGET_EXCEEDED");
       }
       if (outcome.failedReason) {
         coverage.omit(outcome.chunk.sourceId, outcome.chunk.locator, outcome.failedReason);
@@ -454,6 +551,26 @@ export class Reader {
       if (namespaced.legacyAnswer) legacyParts.push(namespaced.legacyAnswer);
       rawCitations.push(...namespaced.citations);
     }
+    // One answer, one identity - or none. Each side is published only when every answering
+    // call agreed on it; a request whose calls disagree cannot be described by any single
+    // value, and picking one would certify a model that produced part of the answer as the
+    // model that produced all of it. Divergence also drops the attribution to `unknown`,
+    // because a status is a claim *about* the requested identity and there is no longer one
+    // to make it about.
+    const agreedRequested = agreedIdentity(requestedSeen);
+    const agreedResolved = agreedIdentity(resolvedSeen);
+    const agreedReported = agreedIdentity(reportedSeen);
+    if (agreedRequested === null || agreedResolved === null || agreedReported === null) {
+      attribution = weakestAttribution(attribution, { status: "unknown", confidence: "none" });
+    }
+    // No answering call at all: the strongest truthful statement is what was asked for,
+    // which is what the pre-1.1 envelope always published.
+    const requested =
+      requestedSeen.length === 0
+        ? targetIdentity(providerTargetOf(this.provider))
+        : (agreedRequested ?? UNKNOWN_IDENTITY);
+    const resolved = agreedResolved ?? UNKNOWN_IDENTITY;
+    const reported = agreedReported ?? UNKNOWN_IDENTITY;
     this.metrics.observe("reader_model_calls", totalCalls);
     this.metrics.observe("reader_attempts_usage_complete", usageCompleteCalls);
 
@@ -474,21 +591,64 @@ export class Reader {
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
     this.metrics.observe("citations_rejected", rejected, { result: "rejected" });
 
-    const allowed = verified.slice(0, this.limits.maxCitations);
+    // The citation ceiling is applied to a *prioritized* list, not to whatever order the
+    // model happened to emit. Truncating arbitrarily lost twice over: the citation went,
+    // and then every claim that referenced it went with it - so an answer could lose
+    // material that would have fitted had the surviving citations been the ones anything
+    // actually cited.
+    const legacyAll = legacyParts.join(" ");
+    const wanted = new Set<string>(referencedIds(legacyAll));
+    for (const c of allClaims) for (const id of c.citation_ids) wanted.add(id);
+    const prioritized = [
+      ...verified.filter((c) => wanted.has(c.id)),
+      ...verified.filter((c) => !wanted.has(c.id)),
+    ];
+    const allowed = prioritized.slice(0, this.limits.maxCitations);
+    for (const citation of prioritized.slice(this.limits.maxCitations)) {
+      capDropped += 1;
+      coverage.omitOnce(
+        String(citation.source_id ?? ""),
+        (citation.locator as Record<string, unknown>) ?? WHOLE_SOURCE,
+        "BUDGET_EXCEEDED",
+      );
+    }
     const allowedIds = new Set(allowed.map((c) => c.id));
+    const byId = new Map(allowed.map((c) => [c.id, c] as const));
     let keptClaims = allClaims.filter(
       (c) => c.citation_ids.length > 0 && c.citation_ids.every((id) => allowedIds.has(id)),
     );
-    let legacyAnswer = stripUnsupportedAssertions(legacyParts.join(" "), allowedIds);
+    let legacyAnswer = stripUnsupportedAssertions(legacyAll, allowedIds);
     let answer = renderAnswer(keptClaims, legacyAnswer);
     // Drop whole claims/sentences from the end until the render fits, rather than
     // truncating raw bytes: a byte cut can split a marker or a multi-byte character,
     // which is why the old pipeline had to strip a second time after truncating. Dropping
     // structured units instead never produces a half-written marker.
+    //
+    // Each drop is recorded. Silently shrinking the answer to fit `max_answer_bytes` and
+    // then reporting `complete: true` told the caller the whole selection had been read
+    // when part of the reading had just been deleted.
     const maxAnswer = Math.min(request.budgets.max_answer_bytes, this.limits.maxAnswerBytes);
     while (utf8Length(answer) > maxAnswer && (keptClaims.length > 0 || legacyAnswer.length > 0)) {
-      if (keptClaims.length > 0) keptClaims = keptClaims.slice(0, -1);
-      else legacyAnswer = dropLastSentence(legacyAnswer);
+      let orphaned: string[];
+      if (keptClaims.length > 0) {
+        orphaned = [...(keptClaims[keptClaims.length - 1] as Claim).citation_ids];
+        keptClaims = keptClaims.slice(0, -1);
+      } else {
+        const shorter = dropLastSentence(legacyAnswer);
+        const stillThere = new Set(referencedIds(shorter));
+        orphaned = referencedIds(legacyAnswer).filter((id) => !stillThere.has(id));
+        legacyAnswer = shorter;
+      }
+      capDropped += 1;
+      for (const id of [...new Set(orphaned)].sort()) {
+        const citation = byId.get(id);
+        if (!citation) continue;
+        coverage.omitOnce(
+          String(citation.source_id ?? ""),
+          (citation.locator as Record<string, unknown>) ?? WHOLE_SOURCE,
+          "BUDGET_EXCEEDED",
+        );
+      }
       answer = renderAnswer(keptClaims, legacyAnswer);
     }
     const usedIds = new Set<string>(referencedIds(legacyAnswer));
@@ -504,7 +664,7 @@ export class Reader {
       attemptsStarted: totalCalls,
       usageComplete: totalCalls > 0 && usageCompleteCalls === totalCalls,
       citationsMechanicallyVerified: true,
-      requested: targetIdentity(providerTargetOf(this.provider)),
+      requested,
       resolved,
       reported,
       ...(totalCalls > 0 ? { fallbackUsed } : {}),
@@ -538,6 +698,52 @@ export class Reader {
       coverage.processedChunks === coverage.plannedChunks &&
       coverage.plannedChunks > 0;
     coverage.upstreamTruncated = false;
+
+    // Publication invariant: every marker in the answer names a citation this envelope
+    // publishes. `renderClaims` only ever writes ids the model supplied *and* the verifier
+    // confirmed, and `normalizeClaims` drops a claim that wrote its own marker - so a
+    // violation here is a program bug, not a model one, and it is refused rather than
+    // published. Without it a forged `[c999]` in claim text shipped inside an answer whose
+    // provenance said every citation had been mechanically verified.
+    if (unpublishedMarkerIds(answer, new Set(citations.map((c) => c.id))).length > 0) {
+      const failure = new ShuntError("CITATION_INVALID", "MARKER_NOT_PUBLISHED", false);
+      this.metrics.count("reader_error", { code: failure.code });
+      const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+      const opts: Parameters<typeof errorEnvelope>[2] = {
+        provenance: failed,
+        sources: handles,
+        handlesValid: true,
+      };
+      if (accountingId !== undefined) opts.accountingId = accountingId;
+      return {
+        envelope: errorEnvelope(requestId, failure, opts),
+        provenance: failed,
+        cost,
+        sourceIds,
+      };
+    }
+
+    if (answer.length === 0 && capDropped > 0) {
+      // The sources did answer and every piece of the answer hit a ceiling. Saying
+      // NO_MATCH here would report that the sources held nothing, which is a different and
+      // untrue statement; `LIMIT_EXCEEDED` names the real cause and the coverage omissions
+      // above say which source lost what.
+      const failure = new ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", false);
+      this.metrics.count("reader_error", { code: failure.code });
+      const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+      const opts: Parameters<typeof errorEnvelope>[2] = {
+        provenance: failed,
+        sources: handles,
+        handlesValid: true,
+      };
+      if (accountingId !== undefined) opts.accountingId = accountingId;
+      return {
+        envelope: errorEnvelope(requestId, failure, opts),
+        provenance: failed,
+        cost,
+        sourceIds,
+      };
+    }
 
     if (answer.length === 0) {
       if (rejected > 0 && verified.length === 0 && rawCitations.length > 0) {
@@ -596,6 +802,10 @@ export class Reader {
     };
 
     const fitted = this.fitToEnvelope(keptClaims, legacyAnswer, citations, coverage, answered);
+    // The fit loop rewrites both halves, so the invariant is re-established on what is
+    // actually published rather than on what was measured before trimming.
+    const published = new Set(fitted.citations.map((c) => c.id));
+    if (unpublishedMarkerIds(fitted.answer, published).length > 0) fitted.answer = "";
     if (fitted.answer.length === 0) {
       // Every piece of evidence had to go, so there is no supported answer left to publish.
       // Saying NO_MATCH here would claim the sources held nothing, which is a different and
@@ -729,9 +939,12 @@ export class Reader {
       promptBytes: 0,
       completionBytes: 0,
       attribution: { status: "unknown", confidence: "none" },
+      requested: UNKNOWN_IDENTITY,
       resolved: UNKNOWN_IDENTITY,
       reported: UNKNOWN_IDENTITY,
+      responsesSeen: 0,
       fallbackUsed: false,
+      claimsOverCap: 0,
     };
     // Two independent, separately bounded retry budgets: a transient provider failure and
     // a schema failure on the same chunk can each spend their own allotted retry, and both
@@ -757,9 +970,12 @@ export class Reader {
       const ledger = new AttemptLedger(outcome);
       try {
         const user = buildUserMessage(question, chunk.text, chunk.locator);
-        inputBudget.spend(
-          estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits),
-        );
+        const perCallTokens =
+          estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits);
+        // This debit covers the physical call this frame is about to start. A composite
+        // provider that advances to another candidate re-sends the same prompt, and debits
+        // again through the handle below before it does.
+        inputBudget.spend(perCallTokens);
         outcome.calls += 1;
         // The same prompt is sent again by every candidate a fallback tries, so this is
         // per physical call, not per invocation. Counting it once per invocation halved
@@ -775,10 +991,20 @@ export class Reader {
           user,
           maxOutputTokens: this.limits.maxOutputTokensPerCall,
           ledger,
+          inputBudget: inputBudget.perCall(perCallTokens),
         }, deadline);
-        validateModelResponse(response, this.limits);
+        try {
+          validateModelResponse(response, this.limits);
+        } catch (err) {
+          // The reply is refused, but it was delivered and billed. Its own numbers are
+          // untrustworthy; the bytes this core measured are not.
+          ledger.recordUntrustedUsage(response, this.limits);
+          throw err;
+        }
         ledger.recordSuccess(response);
+        outcome.responsesSeen += 1;
         outcome.attribution = responseAttribution(response);
+        outcome.requested = response.requested;
         outcome.resolved = response.resolved;
         outcome.reported = response.reported;
         outcome.fallbackUsed = outcome.fallbackUsed || response.fallbackUsed;
@@ -812,6 +1038,13 @@ export class Reader {
               if (typeof text === "string") assertNoSecret(text, "ANSWER");
             }
           }
+          // Claims past the ceiling are never read. That is dropped material, so it is
+          // carried out and reported as an omission rather than silently disappearing
+          // behind a `complete: true`.
+          outcome.claimsOverCap = Math.max(
+            0,
+            rawClaims.length - this.limits.maxClaimsPerAnswer,
+          );
           const validLocalIds = new Set(citationsLocal.map((c) => String(c["id"])));
           outcome.claims = normalizeClaims(rawClaims, validLocalIds, this.limits);
           outcome.citations = citationsLocal;
@@ -865,6 +1098,9 @@ export class Reader {
       maxOutputTokens: number;
       /** Receives the cost of this physical call, whichever path notices it finished. */
       ledger: AttemptLedger;
+      /** Debits the request's shared input budget for each extra candidate a composite
+       * provider starts, so no chain transmits more than the request's ceiling. */
+      inputBudget?: CallInputBudget | undefined;
     },
     deadline: Deadline,
   ): Promise<ModelResponse> {
@@ -906,6 +1142,10 @@ export class Reader {
         maxOutputTokens: opts.maxOutputTokens,
         timeoutMs,
         signal: controller.signal,
+        // Only a provider that fans out reads this. It debits the request's shared input
+        // budget before every extra candidate it starts, so the number of debits equals
+        // the number of physical calls rather than the number of invocations.
+        ...(opts.inputBudget ? { inputBudget: opts.inputBudget } : {}),
       })
       .then(
         (value) => {
@@ -1203,9 +1443,15 @@ function namespaceOutcome(
     text: claim.text,
     citation_ids: claim.citation_ids.map((id) => names.get(id) as string),
   }));
-  const legacyAnswer = outcome.legacyAnswer.replace(/\[(c\d{1,3})\]/g, (whole, local: string) => {
+  const legacyAnswer = outcome.legacyAnswer.replace(/\[(c\d{1,3})\]/g, (_whole, local: string) => {
     const global = names.get(local);
-    return global ? `[${global}]` : whole;
+    // A marker naming an id this chunk never declared cannot be remapped, and leaving it
+    // alone let it collide with a *different* chunk's global id: chunk 2 writing `[c2]`
+    // for evidence it never declared was published as chunk 1's verified citation c2.
+    // Global ids are allocated from c1 upwards, so `c0` can never be one - the sentence
+    // carrying it fails the subset test in `stripUnsupportedAssertions` and is dropped,
+    // which is the fail-closed answer.
+    return global ? `[${global}]` : UNMAPPABLE_MARKER;
   });
   return { claims, legacyAnswer, citations, idsAllocated: names.size };
 }

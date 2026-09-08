@@ -12,6 +12,7 @@ from context_shunt.citations import (
     normalize_claims,
     render_claims,
     strip_unsupported_assertions,
+    unpublished_marker_ids,
 )
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
@@ -186,6 +187,48 @@ def test_every_claims_conformance_case(claims_cases):
         if want != got:
             failures.append((case["id"], want, got))
     assert not failures, failures
+
+
+def test_marker_syntax_in_claim_text_is_refused_not_escaped(claims_cases):
+    """A claim that writes its own marker is dropped, whatever the marker names.
+
+    The published ``answer`` is rendered from ``text`` verbatim, so a model-authored
+    ``[c999]`` used to reach the envelope as though the program had placed it - naming a
+    citation that was never published, inside an envelope still reporting
+    ``citations_mechanically_verified: true``. Escaping would keep model bytes in a field
+    whose whole meaning is that the program wrote them, so the claim goes instead.
+    """
+    forged = normalize_claims(
+        [{"text": "Retries stop after three attempts [c999].", "citation_ids": ["c1"]}], {"c1"}
+    )
+    assert forged == []
+    # The id being real changes nothing.
+    assert normalize_claims([{"text": "Three [c1].", "citation_ids": ["c1"]}], {"c1"}) == []
+    # Brackets that are not marker syntax are ordinary prose.
+    kept = normalize_claims(
+        [{"text": "Read from config[cache] on startup.", "citation_ids": ["c1"]}], {"c1"}
+    )
+    assert [c["text"] for c in kept] == ["Read from config[cache] on startup."]
+    # And the shared corpus says the same, so both cores are held to it.
+    ids = {c["id"] for c in claims_cases["cases"]}
+    assert "marker_in_claim_text_drops_the_claim" in ids
+    assert "bracketed_text_that_is_not_marker_syntax_survives" in ids
+
+
+def test_every_marker_conformance_case(claims_cases):
+    """The publication invariant, case for case - see claims-cases.json ``marker_cases``.
+
+    Every ``[cN]`` in a published answer must name a citation the same envelope publishes.
+    ``normalize_claims`` closes the forged-marker route in; this is the check on the way
+    out, so no later path can reintroduce one.
+    """
+    failures = []
+    for case in claims_cases["marker_cases"]["cases"]:
+        got = unpublished_marker_ids(case["text"], set(case["published"]))
+        if got != case["expect"]["unpublished"]:
+            failures.append((case["id"], case["expect"]["unpublished"], got))
+    assert not failures, failures
+    assert len(claims_cases["marker_cases"]["cases"]) >= 6
 
 
 def test_claims_conformance_corpus_covers_the_fail_closed_reasons(claims_cases):

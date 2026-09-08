@@ -31,6 +31,9 @@ from .errors import RETRYABLE_CODES, ShuntError
 from .limits import EMITTED_SCHEMA_VERSION, legal_pair
 from .provenance import Provenance, ProvenanceLabel, ResultKind, deterministic
 
+#: The contract's ceiling on `coverage.omitted` (envelope.schema.json, maxItems).
+MAX_OMISSIONS = 32
+
 OMISSION_REASONS = frozenset(
     {
         "BUDGET_EXCEEDED",
@@ -109,7 +112,28 @@ class Coverage:
     def omit(self, source_id: str, selector: dict[str, Any], reason: str) -> None:
         if reason not in OMISSION_REASONS:
             raise ValueError(f"unknown omission reason: {reason}")
+        if len(self.omitted) >= MAX_OMISSIONS:
+            # The contract caps the list at 32 entries, and an over-long list is rejected
+            # by the output guard - which would convert "we told you what we left out"
+            # into a bare LIMIT_EXCEEDED. The list stops growing and the omissions
+            # already in it still make `complete` false, so the envelope stays truthful
+            # about *that* material having been dropped; only the enumeration is bounded.
+            return
         self.omitted.append({"source_id": source_id, "selector": selector, "reason": reason})
+
+    def omit_once(self, source_id: str, selector: dict[str, Any], reason: str) -> None:
+        """:meth:`omit`, collapsed onto an identical entry that is already recorded.
+
+        A cap can drop many things that belong to the same source, selector and reason -
+        twelve claims over the per-answer ceiling are one fact about one chunk, not twelve
+        - and the coverage list holds 32 entries in total. Deduplicating keeps the list
+        inside its contract bound while still saying, once, that this source lost material
+        for this reason.
+        """
+        entry = {"source_id": source_id, "selector": selector, "reason": reason}
+        if entry in self.omitted:
+            return
+        self.omit(source_id, selector, reason)
 
     def to_dict(self) -> dict[str, Any]:
         return {
