@@ -36,15 +36,24 @@ context_shunt = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+# Must mirror the root pytest.ini: this registry is the one in effect when pytest runs
+# from inside the package rather than from the repo root, and two registries that disagree
+# let a marker be silently unknown on one path and a gate selector select nothing. The
+# PytestUnknownMarkWarning filter below is what keeps them honest - a marker missing here
+# is an error, not a warning, so the divergence cannot recur quietly.
 markers = [
   "gate_contract", "gate_pre_read", "gate_reader", "gate_citations",
   "gate_no_raw_leak", "gate_bounded_output", "gate_cancellation",
   "gate_permissions", "gate_no_writes", "gate_capability",
-  "gate_store", "gate_inspect", "gate_accounting",
-  "integration_hermes", "eval_luna", "benchmark", "benchmark_provider",
+  "gate_store", "gate_inspect", "gate_accounting", "gate_artifact_import",
   "bridge_contract", "shadow_ab",
+  "integration_hermes", "integration_openclaw",
+  "eval_luna", "benchmark", "benchmark_provider",
 ]
-filterwarnings = ["error::DeprecationWarning:context_shunt.*"]
+filterwarnings = [
+  "error::DeprecationWarning:context_shunt.*",
+  "error::pytest.PytestUnknownMarkWarning",
+]
 
 [tool.ruff]
 line-length = 100
