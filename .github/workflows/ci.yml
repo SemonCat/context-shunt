@@ -68,6 +68,13 @@ jobs:
       - name: Deterministic benchmark half
         run: ./scripts/verify benchmark core
 
+      - name: Deterministic shadow A/B half
+        # The three gates that need no provider: main-context reduction, no evidence
+        # regression against the raw baseline, and retrieval latency. The reader half
+        # (`shadow reader`) is NOT_RUN by design and is not run here - it would report
+        # exit 2 and is scored by `eval luna` instead.
+        run: ./scripts/verify shadow deterministic
+
       - name: Packaging gate
         run: ./scripts/verify packaging all
 
