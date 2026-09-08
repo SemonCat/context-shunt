@@ -79,12 +79,16 @@ export interface Limits {
   readonly maxQuoteBytes: number;
   readonly maxQuestionBytes: number;
   readonly sessionSpillQuotaBytes: number;
+  readonly maxClaimTextBytes: number;
   readonly maxSourcesPerRequest: number;
   readonly maxChunksPerRequest: number;
   readonly maxCitations: number;
   readonly maxConcurrentModelCalls: number;
   readonly maxChunkOverlapLines: number;
   readonly maxTransientRetries: number;
+  readonly maxClaimsPerAnswer: number;
+  readonly maxCitationIdsPerClaim: number;
+  readonly maxFormatRetries: number;
   readonly maxChunkTokens: number;
   readonly maxRequestInputTokens: number;
   readonly maxOutputTokensPerCall: number;
@@ -143,12 +147,16 @@ export function defaultLimits(): Limits {
     maxQuoteBytes: pick(raw.bytes, "max_quote_bytes"),
     maxQuestionBytes: pick(raw.bytes, "max_question_bytes"),
     sessionSpillQuotaBytes: pick(raw.bytes, "session_spill_quota_bytes"),
+    maxClaimTextBytes: pick(raw.bytes, "max_claim_text_bytes"),
     maxSourcesPerRequest: pick(raw.counts, "max_sources_per_request"),
     maxChunksPerRequest: pick(raw.counts, "max_chunks_per_request"),
     maxCitations: pick(raw.counts, "max_citations"),
     maxConcurrentModelCalls: pick(raw.counts, "max_concurrent_model_calls"),
     maxChunkOverlapLines: pick(raw.counts, "max_chunk_overlap_lines"),
     maxTransientRetries: pick(raw.counts, "max_transient_retries"),
+    maxClaimsPerAnswer: pick(raw.counts, "max_claims_per_answer"),
+    maxCitationIdsPerClaim: pick(raw.counts, "max_citation_ids_per_claim"),
+    maxFormatRetries: pick(raw.counts, "max_format_retries"),
     maxChunkTokens: pick(raw.tokens, "max_chunk_tokens"),
     maxRequestInputTokens: pick(raw.tokens, "max_request_input_tokens"),
     maxOutputTokensPerCall: pick(raw.tokens, "max_output_tokens_per_call"),

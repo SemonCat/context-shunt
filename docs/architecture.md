@@ -180,15 +180,27 @@ enter the internal request schema or output envelope.
 Text chunks preserve physical-line locations and UTF-8 boundaries. JSON snapshots have a
 deterministic record index; citations identify stable record ordinals rather than pretty
 printed lines. A request may plan at most eight chunks, use at most two concurrent model
-calls, and start at most one core retry per transient failure. All attempts share the
+calls, and start at most one core retry per transient failure, plus at most one further
+retry for a schema or claims/citations relationship failure - a separately bounded budget
+so the two never stack into more than the sum of their limits. All attempts share the
 64,000-token input and 60-second request budgets. One model call is capped at 45 seconds and
 2,048 output tokens.
 
-Each model call receives the original question. The model returns structured assertions and
-citations. The verifier independently checks handle scope, full snapshot hash, locator
-range, and exact quote bytes. It deletes an assertion whose citation fails; if nothing
-survives the result is `CITATION_INVALID`. Mechanical verification proves that a quote
-exists, not that the quote semantically supports the assertion.
+Each model call receives the original question. The model returns structured `claims`
+(`{"text", "citation_ids"}`) plus the `citations` array those ids reference, never a
+hand-placed inline marker: the reader validates every `citation_ids` entry against the same
+reply's own `citations` (unknown, duplicate, or missing ids drop that one claim, never the
+whole answer, and never guessed at) and mechanically verifies each surviving id against the
+snapshot exactly as before. Only after that does it deterministically render the public
+`answer` string, placing every `[cN]` marker itself - the model never writes one. This
+removes a formatting task the model previously had to get right twice (once as a marker in
+prose, once as a citation object); a reply already shaped the old way - hand-placed markers
+in free-form prose - is still accepted only when it already satisfies that older contract,
+never inferred from markerless prose. A reply carrying both shapes at once is refused as
+ambiguous rather than guessed at. The verifier independently checks handle scope, full
+snapshot hash, locator range, and exact quote bytes. It deletes an assertion whose citation
+fails; if nothing survives the result is `CITATION_INVALID`. Mechanical verification proves
+that a quote exists, not that the quote semantically supports the assertion.
 
 Coverage reports processed/planned chunks, omissions, and whether upstream truncation is
 known. Incomplete or unknown coverage cannot be published as complete. If a serialized

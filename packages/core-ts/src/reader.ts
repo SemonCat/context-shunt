@@ -32,7 +32,10 @@ import {
   noReaderCost,
 } from "./accounting.js";
 import { Chunk, estimateTokens, planChunks } from "./chunking.js";
-import { CitationVerifier, referencedIds, stripUnsupportedAssertions } from "./citations.js";
+import {
+  type Claim, CitationVerifier, normalizeClaims, referencedIds, renderClaims,
+  stripUnsupportedAssertions,
+} from "./citations.js";
 import { Clock, Deadline, monotonicClock } from "./clock.js";
 import {
   Citation, Coverage, Envelope, SourceHandle, buildEnvelope, errorEnvelope, isoExpiry,
@@ -63,11 +66,25 @@ import {
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
 import { type ReaderRequest, READ_OPERATIONS, validateRequest } from "./schema.js";
-import { capBytes } from "./textindex.js";
+import { utf8Length } from "./textindex.js";
+
+/** `INVALID_MODEL_OUTPUT` details eligible for the one-shot format retry: a shape or
+ * claims/citations *relationship* failure, never a content judgement. Retrying
+ * `BAD_USAGE` would not fix a provider accounting bug, and retrying
+ * `MODEL_OUTPUT_OVER_CAP` would not make the model write less - neither belongs here. */
+const FORMAT_RETRY_DETAILS = new Set([
+  "NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE",
+]);
 
 interface ChunkOutcome {
   chunk: Chunk;
-  answer: string;
+  /** The current contract: structurally valid `{text, citation_ids}` objects, chunk-local
+   * ids. Populated only when this call's reply used the `claims` shape. */
+  claims: Claim[];
+  /** The legacy contract: raw prose the model marked up itself with `[cN]`. Populated
+   * only when this call's reply used the `answer` shape - never both, an ambiguous reply
+   * carrying both fails the call instead of guessing which one to trust. */
+  legacyAnswer: string;
   citations: Array<Record<string, unknown>>;
   failedReason: string | null;
   calls: number;
@@ -396,7 +413,8 @@ export class Reader {
       new InputTokenBudget(this.limits.maxRequestInputTokens),
     );
 
-    const answers: string[] = [];
+    const allClaims: Claim[] = [];
+    const legacyParts: string[] = [];
     const rawCitations: Array<Record<string, unknown>> = [];
     let totalCalls = 0;
     let usageCompleteCalls = 0;
@@ -432,7 +450,8 @@ export class Reader {
       coverage.processedChunks += 1;
       const namespaced = namespaceOutcome(outcome, nextCitation);
       nextCitation += namespaced.idsAllocated;
-      if (namespaced.answer) answers.push(namespaced.answer);
+      allClaims.push(...namespaced.claims);
+      if (namespaced.legacyAnswer) legacyParts.push(namespaced.legacyAnswer);
       rawCitations.push(...namespaced.citations);
     }
     this.metrics.observe("reader_model_calls", totalCalls);
@@ -457,12 +476,23 @@ export class Reader {
 
     const allowed = verified.slice(0, this.limits.maxCitations);
     const allowedIds = new Set(allowed.map((c) => c.id));
-    let answer = stripUnsupportedAssertions(answers.join(" "), allowedIds);
-    answer = capBytes(answer, Math.min(request.budgets.max_answer_bytes, this.limits.maxAnswerBytes));
-    // Byte truncation can remove a marker or split an assertion. Re-run the deterministic
-    // evidence filter on the exact bytes that will be published.
-    answer = stripUnsupportedAssertions(answer, allowedIds);
-    const usedIds = new Set(referencedIds(answer));
+    let keptClaims = allClaims.filter(
+      (c) => c.citation_ids.length > 0 && c.citation_ids.every((id) => allowedIds.has(id)),
+    );
+    let legacyAnswer = stripUnsupportedAssertions(legacyParts.join(" "), allowedIds);
+    let answer = renderAnswer(keptClaims, legacyAnswer);
+    // Drop whole claims/sentences from the end until the render fits, rather than
+    // truncating raw bytes: a byte cut can split a marker or a multi-byte character,
+    // which is why the old pipeline had to strip a second time after truncating. Dropping
+    // structured units instead never produces a half-written marker.
+    const maxAnswer = Math.min(request.budgets.max_answer_bytes, this.limits.maxAnswerBytes);
+    while (utf8Length(answer) > maxAnswer && (keptClaims.length > 0 || legacyAnswer.length > 0)) {
+      if (keptClaims.length > 0) keptClaims = keptClaims.slice(0, -1);
+      else legacyAnswer = dropLastSentence(legacyAnswer);
+      answer = renderAnswer(keptClaims, legacyAnswer);
+    }
+    const usedIds = new Set<string>(referencedIds(legacyAnswer));
+    for (const c of keptClaims) for (const id of c.citation_ids) usedIds.add(id);
     const citations = allowed.filter((c) => usedIds.has(c.id));
 
     const provenance: Provenance = {
@@ -565,7 +595,7 @@ export class Reader {
       });
     };
 
-    const fitted = this.fitToEnvelope(answer, citations, coverage, answered);
+    const fitted = this.fitToEnvelope(keptClaims, legacyAnswer, citations, coverage, answered);
     if (fitted.answer.length === 0) {
       // Every piece of evidence had to go, so there is no supported answer left to publish.
       // Saying NO_MATCH here would claim the sources held nothing, which is a different and
@@ -607,16 +637,19 @@ export class Reader {
    * drops and stops as soon as it fits.
    */
   private fitToEnvelope(
-    answer: string,
+    claims: Claim[],
+    legacyAnswer: string,
     citations: Citation[],
     coverage: Coverage,
     build: (text: string, cited: Citation[], ok: boolean) => Envelope,
   ): { answer: string; citations: Citation[]; dropped: number } {
-    let text = answer;
+    let keptClaims = claims;
+    let legacy = legacyAnswer;
     let kept = citations;
     let dropped = 0;
     // One drop per pass, so this cannot run longer than there are citations.
     for (let pass = 0; pass <= citations.length; pass += 1) {
+      const text = renderAnswer(keptClaims, legacy);
       const candidate = build(text, kept, false);
       // The same function the guard uses, not a constant: if a later revision moves
       // model_derived to a different cap, trimming must move with it rather than quietly
@@ -636,10 +669,12 @@ export class Reader {
         "BUDGET_EXCEEDED",
       );
       dropped += 1;
-      const survivors = kept.filter((entry) => entry.id !== victim.id);
-      text = stripUnsupportedAssertions(text, new Set(survivors.map((entry) => entry.id)));
-      const used = new Set(referencedIds(text));
-      kept = survivors.filter((entry) => used.has(entry.id));
+      const keptIds = new Set(kept.filter((entry) => entry.id !== victim.id).map((e) => e.id));
+      keptClaims = keptClaims.filter((c) => c.citation_ids.every((id) => keptIds.has(id)));
+      legacy = stripUnsupportedAssertions(legacy, keptIds);
+      const used = new Set<string>(referencedIds(legacy));
+      for (const c of keptClaims) for (const id of c.citation_ids) used.add(id);
+      kept = kept.filter((entry) => entry.id !== victim.id && used.has(entry.id));
     }
     return { answer: "", citations: [], dropped };
   }
@@ -678,7 +713,8 @@ export class Reader {
   ): Promise<ChunkOutcome> {
     const outcome: ChunkOutcome = {
       chunk,
-      answer: "",
+      claims: [],
+      legacyAnswer: "",
       citations: [],
       failedReason: null,
       calls: 0,
@@ -697,8 +733,13 @@ export class Reader {
       reported: UNKNOWN_IDENTITY,
       fallbackUsed: false,
     };
-    const attempts = 1 + this.limits.maxTransientRetries;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    // Two independent, separately bounded retry budgets so one never lends its slot to
+    // the other: a transient provider failure and a schema failure on the same chunk can
+    // each get their allotted retry without stacking into an unbounded chain.
+    let transientUsed = 0;
+    let formatUsed = 0;
+    const maxAttempts = 1 + this.limits.maxTransientRetries + this.limits.maxFormatRetries;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         deadline.check("MODEL_CALL");
       } catch (err) {
@@ -742,12 +783,43 @@ export class Reader {
           throw new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
         }
         const parsed = parseModelJson(response.text, this.limits.maxToolResultBytes);
-        if (typeof parsed["answer"] !== "string" || !Array.isArray(parsed["citations"])) {
+        const hasClaims = "claims" in parsed;
+        const hasLegacyAnswer = "answer" in parsed;
+        if (hasClaims && hasLegacyAnswer) {
+          // Both shapes at once is not "prefer one" - it is a response the program cannot
+          // trust to say which one the model meant, so it is refused rather than silently
+          // picking a side.
+          throw new ShuntError("INVALID_MODEL_OUTPUT", "AMBIGUOUS_RESPONSE_SHAPE", false);
+        }
+        if (!Array.isArray(parsed["citations"])) {
+          throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
+        }
+        const citationsLocal = normalizeCitations(parsed["citations"], chunk);
+        if (hasClaims) {
+          const rawClaims = parsed["claims"];
+          if (!Array.isArray(rawClaims)) {
+            throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
+          }
+          // Scan every claim the model wrote, not only the ones that survive structural
+          // validation: a malformed claim (bad citation_ids) can still carry a secret in
+          // its text, and a claim dropped later must still have been scanned first.
+          for (const item of rawClaims.slice(0, this.limits.maxClaimsPerAnswer)) {
+            if (typeof item === "object" && item !== null) {
+              const text = (item as Record<string, unknown>)["text"];
+              if (typeof text === "string") assertNoSecret(text, "ANSWER");
+            }
+          }
+          const validLocalIds = new Set(citationsLocal.map((c) => String(c["id"])));
+          outcome.claims = normalizeClaims(rawClaims, validLocalIds, this.limits);
+          outcome.citations = citationsLocal;
+          return outcome;
+        }
+        if (!hasLegacyAnswer || typeof parsed["answer"] !== "string") {
           throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
         }
         assertNoSecret(parsed["answer"], "ANSWER");
-        outcome.answer = parsed["answer"];
-        outcome.citations = normalizeCitations(parsed["citations"], chunk);
+        outcome.legacyAnswer = parsed["answer"];
+        outcome.citations = citationsLocal;
         return outcome;
       } catch (err) {
         const safe = isShuntError(err) ? err : transientProviderError();
@@ -755,12 +827,19 @@ export class Reader {
         // It is a no-op when the call was already accounted for on the way out - a late
         // response, or a cancellation that won the race against the provider.
         ledger.recordFailure(safe);
-        if (
+        const canRetryTransient =
           safe.code === "MODEL_ERROR"
           && safe.retryable
-          && attempt + 1 < attempts
-          && !deadline.expired()
-        ) continue;
+          && transientUsed < this.limits.maxTransientRetries;
+        const canRetryFormat =
+          safe.code === "INVALID_MODEL_OUTPUT"
+          && FORMAT_RETRY_DETAILS.has(safe.detail ?? "")
+          && formatUsed < this.limits.maxFormatRetries;
+        if ((canRetryTransient || canRetryFormat) && !deadline.expired()) {
+          if (canRetryTransient) transientUsed += 1;
+          else formatUsed += 1;
+          continue;
+        }
         outcome.failedReason =
           safe.code === "MODEL_ERROR" ? "MODEL_ERROR"
           : safe.code === "INVALID_MODEL_OUTPUT" ? "INVALID_MODEL_OUTPUT"
@@ -1090,10 +1169,22 @@ function readerCostOf(input: {
   };
 }
 
+/**
+ * Give one chunk's local `cN` ids a slice of the answer's global id space.
+ *
+ * A claim's `citation_ids` are remapped through the same table built from this chunk's own
+ * `citations` array - the same table {@link normalizeClaims} already checked them against,
+ * so every id here is guaranteed present and the remap can never drop one.
+ */
 function namespaceOutcome(
   outcome: ChunkOutcome,
   firstId: number,
-): { answer: string; citations: Array<Record<string, unknown>>; idsAllocated: number } {
+): {
+  claims: Claim[];
+  legacyAnswer: string;
+  citations: Array<Record<string, unknown>>;
+  idsAllocated: number;
+} {
   const names = new Map<string, string>();
   const citations: Array<Record<string, unknown>> = [];
   for (const citation of outcome.citations) {
@@ -1105,11 +1196,34 @@ function namespaceOutcome(
     }
     citations.push({ ...citation, id: global });
   }
-  const answer = outcome.answer.replace(/\[(c\d{1,3})\]/g, (whole, local: string) => {
+  const claims: Claim[] = outcome.claims.map((claim) => ({
+    text: claim.text,
+    citation_ids: claim.citation_ids.map((id) => names.get(id) as string),
+  }));
+  const legacyAnswer = outcome.legacyAnswer.replace(/\[(c\d{1,3})\]/g, (whole, local: string) => {
     const global = names.get(local);
     return global ? `[${global}]` : whole;
   });
-  return { answer, citations, idsAllocated: names.size };
+  return { claims, legacyAnswer, citations, idsAllocated: names.size };
+}
+
+/**
+ * The one place the two published shapes are joined into the public `answer` field.
+ *
+ * Order is deliberate: rendered claims first, then whatever legacy prose survived - a
+ * request mixing both shapes across its chunks (a stale cached response alongside a
+ * current one, say) still reads as one coherent answer rather than interleaving.
+ */
+function renderAnswer(claims: Claim[], legacyAnswer: string): string {
+  const parts = [renderClaims(claims), legacyAnswer].filter((p) => p.length > 0);
+  return parts.join(" ").trim();
+}
+
+/** Drop the last legacy sentence, for the same byte-fit loop that drops claims. */
+function dropLastSentence(text: string): string {
+  if (text.trim().length === 0) return "";
+  const parts = text.trim().split(/(?<=[.!?。！？\n])\s+/);
+  return parts.slice(0, -1).join(" ").trim();
 }
 
 /**

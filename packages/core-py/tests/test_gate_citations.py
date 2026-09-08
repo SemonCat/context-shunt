@@ -7,7 +7,12 @@ import json
 import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
-from context_shunt.citations import CitationVerifier, strip_unsupported_assertions
+from context_shunt.citations import (
+    CitationVerifier,
+    normalize_claims,
+    render_claims,
+    strip_unsupported_assertions,
+)
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
@@ -160,6 +165,40 @@ def test_source_change_between_snapshot_and_citation_is_rejected(tmp_path):
         "quote": "changed",
     }
     assert not verifier.verify("sess", mixed).verified
+
+
+def test_every_claims_conformance_case(claims_cases):
+    """Both cores must agree on every case here - see contracts/v1/conformance/claims-cases.json.
+
+    This is the structural half of the fix for the historical marker-omission class: a
+    claim survives only when its citation_ids are well-formed, unique, and every one of
+    them names an id the same response actually declared. Rendering then places every
+    marker mechanically, so the model can never again produce a citation the reader cannot
+    show.
+    """
+    failures = []
+    for case in claims_cases["cases"]:
+        valid_ids = set(case["citations_seen"])
+        survivors = normalize_claims(case["claims"], valid_ids)
+        rendered = render_claims(survivors)
+        want = (case["expect"]["surviving_claims"], case["expect"]["rendered"])
+        got = (survivors, rendered)
+        if want != got:
+            failures.append((case["id"], want, got))
+    assert not failures, failures
+
+
+def test_claims_conformance_corpus_covers_the_fail_closed_reasons(claims_cases):
+    ids = {c["id"] for c in claims_cases["cases"]}
+    assert len(claims_cases["cases"]) >= 15
+    assert {
+        "unknown_citation_id_drops_the_claim",
+        "duplicate_citation_id_within_a_claim_drops_it",
+        "empty_citation_ids_drops_the_claim",
+        "multi_citation_claim",
+        "multi_claim_answer",
+        "one_bad_claim_does_not_sink_a_good_one",
+    } <= ids
 
 
 def _req(entry, selector=None):

@@ -57,26 +57,39 @@ Usage
 Thinking level
 --------------
 Pinned to ``low`` rather than left at the host's default, on measurement. One reader call
-on this corpus item, same prompt, three levels:
+on this corpus item, same prompt, three levels, measured under the **pre-fix** reader
+contract (hand-placed ``[cN]`` markers in free-form prose):
 
 ===========  =========  ==================================================
 level        wall       output
 ===========  =========  ==================================================
-``low``      34.0 s     correct, and carries the required ``[c1]`` marker
-``off``      37.7 s     correct, but **drops the citation marker**
+``low``      34.0 s     correct, and carried the then-required ``[c1]`` marker
+``off``      37.7 s     correct, but **dropped the citation marker**
 ``medium``   73.7 s     correct, marker present, far over the call budget
 ===========  =========  ==================================================
 
-``low`` is both the fastest and the only level that is fast *and* compliant, so it is the
-level a real deployment would pin for a bounded reader call. ``off`` is slower and loses
-the marker, which the reader then strips as an unsupported assertion - an answer deleted
-for a formatting reason looks identical to "the source did not say", so it matters.
+``low`` was both the fastest and the only level that was fast *and* compliant, so it was
+the level a real deployment would pin for a bounded reader call. ``off`` was slower and
+lost the marker, which the reader then stripped as an unsupported assertion - an answer
+deleted for a formatting reason looked identical to "the source did not say", so it
+mattered.
 
 The table is a single measurement per level, and the marker result for ``low`` did not
-hold up: a full 40x3 eval run shows ``low`` omitting the marker intermittently on items
-the model otherwise answers correctly. Read the table as "``off`` is not usable", not as
-"``low`` always emits the marker". ``eval luna`` therefore counts the omissions directly
-(``of_which_missing_citation_marker``) rather than assuming the level prevents them.
+hold up: a full 40x3 eval run under that contract recorded ``answer_correctness: 0.333``,
+with 69 of 120 answerable runs coming back empty - most of them ``low`` omitting the
+marker intermittently on items the model otherwise answered correctly, not a wrong
+answer. That failure class is why the reader model now returns structured ``claims``
+(``{"text", "citation_ids"}``) instead of prose with a hand-placed marker: the program
+places every ``[cN]`` deterministically after verification, so there is nothing left for
+the model to omit. ``eval luna``'s ``_ClaimsRecorder`` now classifies each raw reply's
+*shape* instead (``raw_reply_shapes``, and the ``of_which_*`` breakdown of an empty
+answerable run) - the diagnostic this table motivated, generalized to the new contract.
+
+The latency numbers above were never re-measured against the claims contract; a change to
+what the model is asked to return can move wall clock in either direction, so ``low``
+remains the configured default on the strength of its *latency* measurement, not a claim
+that it re-runs the same timing under the new prompt. Only a fresh ``eval luna`` run
+establishes that.
 
 Environment:
     CONTEXT_SHUNT_OPENCLAW_BIN       path to the CLI (default: "openclaw")

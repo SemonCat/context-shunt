@@ -129,6 +129,11 @@ def strip_unsupported_assertions(answer: str, valid_ids: set[str]) -> str:
 
     Sentences with no citation at all are also dropped: an assertion about the source
     with no evidence is exactly what must not survive into the envelope.
+
+    This is the legacy contract: a model that places its own ``[cN]`` markers in prose. It
+    is kept, unmodified, for a response that already used that shape - see
+    :func:`normalize_claims` and :func:`render_claims` for the current one, where the
+    program places every marker instead of trusting the model to.
     """
     if not answer.strip():
         return ""
@@ -139,3 +144,82 @@ def strip_unsupported_assertions(answer: str, valid_ids: set[str]) -> str:
         if refs and refs.issubset(valid_ids):
             kept.append(part.strip())
     return " ".join(kept).strip()
+
+
+_CLAIM_CITATION_ID = re.compile(r"c[0-9]{1,3}")
+_TRAILING_PUNCT = re.compile(r"^(.*?)([.!?。！？]*)$", re.S)
+
+
+def normalize_claims(
+    raw: Any, valid_local_ids: set[str], limits: Limits = DEFAULT_LIMITS
+) -> list[dict[str, Any]]:
+    """Structurally validate a model's ``claims`` array against its own ``citations``.
+
+    A claim survives only if ``text`` is a non-empty string within
+    ``limits.max_claim_text_bytes`` and ``citation_ids`` is a non-empty, duplicate-free
+    list of well-formed ids that all appear in ``valid_local_ids`` - the ids the same
+    response actually declared in its ``citations`` array (before namespacing). Unknown,
+    duplicate or missing ids drop *that claim*, never the whole answer, and never guessed
+    at: a dropped claim is exactly as much evidence-free as a legacy sentence with no
+    marker, so it is held to the same fail-closed rule.
+
+    This is structural validation only. Whether a surviving id also verifies against the
+    snapshot bytes is decided later, once, by :class:`CitationVerifier` - this function
+    never marks anything ``verified``.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[: limits.max_claims_per_answer]:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        ids = item.get("citation_ids")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if len(text.encode("utf-8")) > limits.max_claim_text_bytes:
+            continue
+        if not isinstance(ids, list) or not ids or len(ids) > limits.max_citation_ids_per_claim:
+            continue
+        seen: set[str] = set()
+        malformed = False
+        for cid in ids:
+            if (
+                not isinstance(cid, str)
+                or not _CLAIM_CITATION_ID.fullmatch(cid)
+                or cid in seen
+                or cid not in valid_local_ids
+            ):
+                malformed = True
+                break
+            seen.add(cid)
+        if not malformed:
+            out.append({"text": text.strip(), "citation_ids": list(ids)})
+    return out
+
+
+def render_claims(claims: list[dict[str, Any]]) -> str:
+    """Deterministically render surviving claims into prose with ``[cN]`` markers.
+
+    The model never places a marker itself; every one in a published answer is put there
+    by this function, from a citation id the model supplied *and* the verifier confirmed.
+    Marker placement is therefore no longer a formatting task the model can get right or
+    wrong - the historical failure this replaces was exactly that: a correct answer with a
+    valid ``citations`` entry, discarded because the marker was missing from the prose.
+
+    A claim with no ``citation_ids`` is not rendered: an assertion with nothing left to
+    support it is exactly what must not survive, matching the legacy rule in
+    :func:`strip_unsupported_assertions`.
+    """
+    parts: list[str] = []
+    for claim in claims:
+        ids = claim.get("citation_ids") or []
+        text = str(claim.get("text", "")).strip()
+        if not ids or not text:
+            continue
+        markers = "".join(f"[{cid}]" for cid in ids)
+        match = _TRAILING_PUNCT.match(text)
+        body, punct = match.groups() if match else (text, "")
+        rendered = f"{body} {markers}{punct}" if punct else f"{text} {markers}"
+        parts.append(rendered.strip())
+    return " ".join(parts).strip()

@@ -29,8 +29,8 @@ import { ScopeIdentity, SnapshotStore } from "../src/store.js";
 import { ShuntSession } from "../src/session.js";
 import { conformance } from "./fixtures.js";
 import {
-  FakeLuna, answerJson, derivedProvenance, makeCapability, makeConfig, makeIdentity,
-  makeRegistry,
+  FakeLuna, answerJson, claimsJson, derivedProvenance, makeCapability, makeConfig,
+  makeIdentity, makeRegistry,
 } from "./support.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -248,12 +248,43 @@ describe("reader gate", () => {
     expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
   });
 
-  it("does not retry invalid model output and leaks none of it", async () => {
-    const { entry, luna, reader } = fixture("this is not json at all");
-    const env = await reader.answer("sess", request(entry));
-    expect(luna.callCount).toBe(1);
+  it("gets one format retry on invalid model output, then fails closed leaking nothing", async () => {
+    // Malformed JSON is a schema failure: eligible for exactly one format retry, distinct
+    // from - and never stacked with - the transient-provider retry budget.
+    const { registry, entry } = fixture();
+    const luna = new FakeLuna(["this is not json at all", "still not json, still not json"]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(2);
     expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
     expect(JSON.stringify(env)).not.toContain("not json");
+  });
+
+  it("recovers on its one format retry", async () => {
+    const { registry, entry } = fixture();
+    const good = answerJson("Three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const luna = new FakeLuna(["this is not json at all", good]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(2);
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
+  });
+
+  it("never stacks the format retry with a transient retry", async () => {
+    const { registry, entry } = fixture();
+    const good = answerJson("Three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const luna = new FakeLuna([
+      new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true),
+      "not json",
+      good,
+    ]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(3);
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
   });
 
   it("reports SOURCE_CHANGED when the named snapshot no longer matches", async () => {
@@ -1003,5 +1034,265 @@ describe("all-fallback failure accounting", () => {
     expect(result.cost.attemptsStarted).toBe(calls);
     expect(result.cost.attemptsUsageComplete).toBe(0);
     expect(result.cost.method).not.toBe("exact");
+  });
+});
+
+/**
+ * The structured-claims contract (TypeScript core).
+ *
+ * The historical failure this replaces: a model produced a factually correct answer with
+ * a mechanically valid `citations` entry, and the reader still erased it, because
+ * `stripUnsupportedAssertions` requires every sentence to carry a hand-placed `[cN]`
+ * marker and the model had forgotten to write one. Under the claims contract there is no
+ * marker for the model to forget - the reader places every one, mechanically, from a
+ * `citation_ids` list it structurally validates. The first test below is the direct
+ * regression proof: it would fail against the pre-fix reader, which had no `claims` field
+ * to read at all.
+ */
+describe("structured claims contract", () => {
+  function claimsFixture(...sources: string[]) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entries = sources.map((s) => registry.register("sess", snapshotBytes(enc(s))));
+    return { registry, entries };
+  }
+
+  function multiRequest(
+    entries: Array<{ sourceId: string; snapshot: { snapshotId: string } }>,
+    question = QUESTION,
+  ) {
+    return {
+      schema_version: "1.0",
+      request_id: "req_claims",
+      operation: "read",
+      question,
+      sources: entries.map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      })),
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    };
+  }
+
+  it("publishes a claim with no hand-placed marker", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe("Retries stop after three attempts [c1].");
+    expect(env.citations.map((c) => c.id)).toEqual(["c1"]);
+    expect((env.citations[0] as any).verified).toBe(true);
+  });
+
+  it("renders every marker for a multi-claim, multi-citation answer", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [
+        { text: "Retries stop after three attempts.", citation_ids: ["c1"] },
+        {
+          text: "The timeout backs off exponentially before that ceiling.",
+          citation_ids: ["c1", "c2"],
+        },
+      ],
+      [
+        { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+        { id: "c2", line_start: 3, line_end: 3, quote: 'backoff = "exponential"' },
+      ],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe(
+      "Retries stop after three attempts [c1]. "
+      + "The timeout backs off exponentially before that ceiling [c1][c2].",
+    );
+    expect(new Set(env.citations.map((c) => c.id))).toEqual(new Set(["c1", "c2"]));
+  });
+
+  it("drops only the claim with an unknown citation id", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [
+        { text: "Retries stop after three attempts.", citation_ids: ["c1"] },
+        { text: "A fact with a citation id nobody declared.", citation_ids: ["c9"] },
+      ],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe("Retries stop after three attempts [c1].");
+  });
+
+  it("drops a claim whose citation fails mechanical verification", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Timeout is thirty seconds.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "timeout_seconds = 30" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(["NO_MATCH", "CITATION_INVALID"]).toContain(env.code);
+    expect(env.answer ?? "").toBe("");
+  });
+
+  it("drops a claim with a duplicate citation id", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Repeated evidence.", citation_ids: ["c1", "c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("never publishes a claim with no citations", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "An assertion nobody backed with evidence.", citation_ids: [] }],
+      [],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("refuses a reply carrying both claims and answer, and can recover on retry", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const ambiguous = JSON.stringify({
+      answer: "Three [c1].",
+      claims: [{ text: "Three.", citation_ids: ["c1"] }],
+      citations: [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    });
+    const good = claimsJson(
+      [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const luna = new FakeLuna([ambiguous, good]);
+    const env = await new Reader(registry, luna).answer("sess", multiRequest(entries));
+    expect(luna.callCount).toBe(2);
+    expect(env.code).toBe("ANSWERED");
+  });
+
+  it("exhausts its retry on a persistently ambiguous reply and fails closed", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const ambiguous = JSON.stringify({
+      answer: "x [c1].", claims: [], citations: [{ id: "c1", quote: "x" }],
+    });
+    const luna = new FakeLuna([ambiguous, ambiguous]);
+    const env = await new Reader(registry, luna).answer("sess", multiRequest(entries));
+    expect(luna.callCount).toBe(2);
+    expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
+  });
+
+  it("namespaces claims from two chunks into disjoint global ids", async () => {
+    // The two chunk calls race for concurrency (maxConcurrentModelCalls); which one
+    // reaches the fake provider first is not a contract this test controls, so the reply
+    // is chosen from the excerpt each call actually received, not from call order.
+    const { registry, entries } = claimsFixture("alpha config line\n", "beta config line\n");
+    const replyFor = (user: string): string =>
+      user.includes("alpha")
+        ? claimsJson(
+            [{ text: "The first source mentions alpha.", citation_ids: ["c1"] }],
+            [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha config line" }],
+          )
+        : claimsJson(
+            [{ text: "The second source mentions beta.", citation_ids: ["c1"] }],
+            [{ id: "c1", line_start: 1, line_end: 1, quote: "beta config line" }],
+          );
+    const luna = new FakeLuna([], replyFor);
+    const env = await new Reader(registry, luna)
+      .answer("sess", multiRequest(entries, "What do the sources say?"));
+    expect(env.code).toBe("ANSWERED");
+    const ids = env.citations.map((c) => c.id);
+    expect(new Set(ids).size).toBe(2);
+    expect(env.answer).toContain("alpha");
+    expect(env.answer).toContain("beta");
+    for (const id of ids) expect(env.answer).toContain(`[${id}]`);
+  });
+
+  it("still accepts a legacy answer with a valid hand-placed marker", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = answerJson("The retry ceiling is three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toContain("[c1]");
+  });
+
+  it("still erases a legacy answer missing its marker - never auto-rescued", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = answerJson("The retry ceiling is three.", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("refuses a secret in claim text even with a valid citation", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{
+        text: "The API key is sk-ant-abcdef1234567890abcdef1234567890abcdef.",
+        citation_ids: ["c1"],
+      }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).not.toBe("ok");
+    expect(env.answer ?? "").toBe("");
+    expect(JSON.stringify(env)).not.toContain("sk-ant-");
+  });
+
+  it("catches a secret even in a structurally dropped claim", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{
+        text: "The API key is sk-ant-abcdef1234567890abcdef1234567890abcdef.",
+        citation_ids: ["c9"],
+      }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).not.toBe("ok");
+    expect(JSON.stringify(env)).not.toContain("sk-ant-");
+  });
+
+  it("never retries a content judgement (BAD_USAGE) as a format failure", async () => {
+    class BadUsageProvider {
+      calls = 0;
+      readonly target = { model: READER_MODEL, provider: "openai" };
+      async complete() {
+        this.calls += 1;
+        return {
+          text: claimsJson([], []),
+          requested: { provider: "openai", model: READER_MODEL },
+          resolved: {},
+          reported: {},
+          providerConfirmsGeneration: false,
+          usage: { inputTokens: 10 ** 9, outputTokens: 5, method: "exact" as const },
+          fallbackUsed: false,
+        };
+      }
+    }
+    const { registry, entries } = claimsFixture(SOURCE);
+    const provider = new BadUsageProvider();
+    const env = await new Reader(registry, provider).answer("sess", multiRequest(entries));
+    expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
+    expect(provider.calls).toBe(1);
   });
 });

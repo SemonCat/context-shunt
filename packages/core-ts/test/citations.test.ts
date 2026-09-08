@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { CitationVerifier, stripUnsupportedAssertions } from "../src/citations.js";
+import {
+  CitationVerifier, normalizeClaims, renderClaims, stripUnsupportedAssertions,
+} from "../src/citations.js";
 import { DEFAULT_LIMITS } from "../src/limits.js";
 import { Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
@@ -70,6 +72,39 @@ describe("citation verification conformance", () => {
         verified: c.expect.verified,
         reason: c.expect.reason,
       });
+    });
+  }
+});
+
+const claimsCases = conformance("claims-cases.json");
+
+describe("structured claims conformance", () => {
+  it("has a corpus covering the fail-closed reasons", () => {
+    expect(claimsCases.cases.length).toBeGreaterThanOrEqual(15);
+    const ids = new Set(claimsCases.cases.map((c: any) => c.id));
+    for (const id of [
+      "unknown_citation_id_drops_the_claim",
+      "duplicate_citation_id_within_a_claim_drops_it",
+      "empty_citation_ids_drops_the_claim",
+      "multi_citation_claim",
+      "multi_claim_answer",
+      "one_bad_claim_does_not_sink_a_good_one",
+    ]) {
+      expect(ids.has(id)).toBe(true);
+    }
+  });
+
+  // Both cores must agree on every case here - this is the structural half of the fix for
+  // the historical marker-omission class: a claim survives only when its citation_ids are
+  // well-formed, unique, and every one of them names an id the same response actually
+  // declared. Rendering then places every marker mechanically.
+  for (const c of claimsCases.cases) {
+    it(`normalizes and renders ${c.id}`, () => {
+      const validIds = new Set<string>(c.citations_seen);
+      const survivors = normalizeClaims(c.claims, validIds);
+      const rendered = renderClaims(survivors);
+      expect(survivors).toEqual(c.expect.surviving_claims);
+      expect(rendered).toBe(c.expect.rendered);
     });
   }
 });

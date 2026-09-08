@@ -22,6 +22,21 @@ refusal is a different fact, reported in its own named field. Dropping the run f
 denominator instead would raise the score by hiding a run, which is why it is not done.
 The ceiling this imposes is explicit: 117/120 = 0.975, still above the fixed 0.95
 threshold, so the honest accounting does not need the gate relaxed to pass.
+
+The structured-claims contract and the historical marker-omission class
+--------------------------------------------------------------------------
+A prior revision of this gate recorded ``answer_correctness: 0.333`` with 69 of 120
+answerable runs coming back with no answer, most of them a model reply that was factually
+right, carried a mechanically valid ``citations`` entry, and was still erased - because the
+reader required a hand-placed ``[cN]`` marker inside free-form prose, and the marker was
+what the model omitted. The reader model now returns structured ``claims`` (each a
+``{"text", "citation_ids"}`` pair) instead of prose with hand-placed markers; the program
+places every ``[cN]`` deterministically after verification, so there is no marker left for
+the model to omit. ``_ClaimsRecorder`` below classifies each raw reply's *shape* -
+``claims``, legacy ``answer``, both at once (refused as ambiguous), or unparseable - purely
+to attribute an empty answerable run to a cause, the same diagnostic role its predecessor
+played. It never inspects or retains the reader's own citation verification, which is
+unaffected by this change and still decided once, mechanically, by ``CitationVerifier``.
 """
 
 from __future__ import annotations
@@ -32,11 +47,12 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
-from context_shunt.citations import CitationVerifier, referenced_ids
+from context_shunt.citations import CitationVerifier
 from context_shunt.errors import ShuntError
 from context_shunt.limits import DEFAULT_LIMITS, READER_MODEL
 from context_shunt.provider import READER_SYSTEM_PROMPT, HostBridgeProvider
@@ -79,35 +95,88 @@ def _load_bridge():
     return getattr(importlib.import_module(module_name), attr)
 
 
-class _MarkerRecorder:
-    """Wraps the bridge to measure *why* an answer vanished, retaining no text.
+def _classify_raw_reply(text: Any) -> tuple[str, bool]:
+    """Classify one raw bridge reply's shape, retaining no text.
 
-    The reader deletes any sentence whose citation marker is missing
-    (``strip_unsupported_assertions``), so a model reply that is factually right but omits
-    ``[c1]`` produces exactly the same envelope as "the source did not say": ``NO_MATCH``
-    with no citations. Those two are worth telling apart - one is a model formatting slip,
-    the other is the behaviour under test - so this records, per call, only two booleans:
-    whether the reply carried a citations array, and whether its answer text carried an
-    inline marker. No prompt, answer or quote is kept, and only counts reach the report.
+    Returns ``(shape, claim_referenced_unknown_id)`` where ``shape`` is one of ``claims``,
+    ``legacy``, ``ambiguous`` (both ``claims`` and ``answer`` present - the reader refuses
+    this outright) or ``unparseable``. ``claim_referenced_unknown_id`` is set only for a
+    ``claims``-shaped reply in which some claim's ``citation_ids`` names an id the same
+    reply never declared in its own ``citations`` array - the structural fail-closed rule
+    ``normalize_claims`` enforces, surfaced here only as a count.
+    """
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return "unparseable", False
+    if not isinstance(parsed, dict):
+        return "unparseable", False
+    has_claims = "claims" in parsed
+    has_answer = "answer" in parsed
+    if has_claims and has_answer:
+        return "ambiguous", False
+    if has_answer and not has_claims:
+        return "legacy", False
+    if not has_claims:
+        return "unparseable", False
+    citations = parsed.get("citations")
+    valid_ids = (
+        {c.get("id") for c in citations if isinstance(c, dict)}
+        if isinstance(citations, list)
+        else set()
+    )
+    unknown_id = False
+    claims = parsed.get("claims")
+    if isinstance(claims, list):
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            ids = claim.get("citation_ids")
+            if isinstance(ids, list) and any(cid not in valid_ids for cid in ids):
+                unknown_id = True
+    return "claims", unknown_id
+
+
+class _ClaimsRecorder:
+    """Wraps the bridge to measure *why* an answerable run came back empty.
+
+    The predecessor of this class recorded whether a reply carried a citations array but
+    omitted the inline ``[cN]`` marker the old contract required - the historical failure
+    this repository's claims contract eliminates by construction. There is no marker left
+    to omit, so that count cannot recur; what remains worth attributing an empty run to is
+    the raw reply's *shape*: legacy prose, both shapes at once (refused as ambiguous), an
+    unparseable body, or a claims reply whose citation_ids referenced an id it never
+    declared. Retains no prompt, answer or quote - only per-run booleans and a running
+    per-shape total, both counts.
     """
 
     def __init__(self, call):
         self._call = call
-        self.cited_without_marker = False
+        self.shape_totals: Counter[str] = Counter()
+        self.reset()
 
     def reset(self) -> None:
-        self.cited_without_marker = False
+        self.saw_legacy_shape = False
+        self.saw_ambiguous_shape = False
+        self.saw_unparseable_reply = False
+        self.claim_referenced_unknown_id = False
 
     def __call__(self, **kwargs):
         result = self._call(**kwargs)
         try:
-            parsed = json.loads(result["text"])
-            has_citations = bool(parsed.get("citations"))
-            has_marker = bool(referenced_ids(str(parsed.get("answer", ""))))
-        except (ValueError, KeyError, TypeError):
+            text = result["text"]
+        except (KeyError, TypeError):
             return result
-        if has_citations and not has_marker:
-            self.cited_without_marker = True
+        shape, unknown_id = _classify_raw_reply(text)
+        self.shape_totals[shape] += 1
+        if shape == "legacy":
+            self.saw_legacy_shape = True
+        elif shape == "ambiguous":
+            self.saw_ambiguous_shape = True
+        elif shape == "unparseable":
+            self.saw_unparseable_reply = True
+        if unknown_id:
+            self.claim_referenced_unknown_id = True
         return result
 
 
@@ -349,7 +418,7 @@ def test_a_leaked_source_region_is_detected_outside_a_published_quote():
 )
 def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     corpus = _corpus()
-    recorder = _MarkerRecorder(_load_bridge())
+    recorder = _ClaimsRecorder(_load_bridge())
     provider = HostBridgeProvider(recorder, DEFAULT_LIMITS, READER_MODEL)
     thresholds = corpus["thresholds"]
 
@@ -359,7 +428,9 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     refused_by_core: Counter[str] = Counter()
     refused_items: Counter[str] = Counter()
     runs_without_observed_model = 0
-    answerable_no_match = marker_omissions = 0
+    answerable_no_match = 0
+    no_match_legacy_shape = no_match_ambiguous_shape = 0
+    no_match_unparseable_reply = no_match_unknown_citation_id = 0
     # Hard-failure counters: each of these is asserted zero, not averaged away.
     wrong_model_calls = leaked_regions = over_cap = 0
     attempts_total = attempts_reported_total = 0
@@ -470,8 +541,14 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
             if item["answerable"]:
                 if not answer.strip():
                     answerable_no_match += 1
-                    if recorder.cited_without_marker:
-                        marker_omissions += 1
+                    if recorder.saw_legacy_shape:
+                        no_match_legacy_shape += 1
+                    if recorder.saw_ambiguous_shape:
+                        no_match_ambiguous_shape += 1
+                    if recorder.saw_unparseable_reply:
+                        no_match_unparseable_reply += 1
+                    if recorder.claim_referenced_unknown_id:
+                        no_match_unknown_citation_id += 1
                 facts_present = all(
                     fact.lower() in answer.lower() for fact in item["expected_facts"]
                 )
@@ -514,11 +591,25 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         "runs_refused_by_core": sum(refused_by_core.values()),
         "refusal_reasons": dict(refused_by_core),
         "max_achievable_correctness": (scored - sum(refused_by_core.values())) / scored,
-        # Why answers came back empty on answerable items. `marker_omissions` is the
-        # subset where the model cited the source but omitted the inline [cN] marker, so
-        # the reader correctly deleted an otherwise-supported sentence.
+        # Why answers came back empty on answerable items. Under the pre-fix contract this
+        # was dominated by `of_which_missing_citation_marker`: a model reply that cited the
+        # source correctly but omitted the hand-placed [cN] marker, so the reader correctly
+        # deleted an otherwise-supported sentence. That failure class cannot occur under
+        # the claims contract - there is no marker to omit - so the fields below cover what
+        # remains: legacy prose the model reverted to despite the prompt, both shapes at
+        # once (refused as ambiguous), an unparseable reply, or a claims reply that named a
+        # citation_id it never declared. Each is a subset of `answerable_runs_with_no_answer`,
+        # not mutually exclusive with the others (a run can have made more than one call).
         "answerable_runs_with_no_answer": answerable_no_match,
-        "of_which_missing_citation_marker": marker_omissions,
+        "of_which_legacy_shape_reply": no_match_legacy_shape,
+        "of_which_ambiguous_shape_reply": no_match_ambiguous_shape,
+        "of_which_unparseable_reply": no_match_unparseable_reply,
+        "of_which_claim_referenced_unknown_id": no_match_unknown_citation_id,
+        # Every raw reply's shape, across the whole run - not only the empty-answer ones -
+        # so adoption of the claims contract is visible even when it did not cause a
+        # failure: a model reverting to legacy prose that still carried a marker still
+        # shows up here, where the historical failure class could not have been detected.
+        "raw_reply_shapes": dict(recorder.shape_totals),
         # Hard failures, each asserted zero below.
         "wrong_model_calls": wrong_model_calls,
         "leaked_source_regions": leaked_regions,
@@ -649,3 +740,66 @@ def test_the_prompt_hash_covers_the_whole_construction():
     finally:
         provider_module.build_user_message = original
     assert _prompt_construction_hash() == baseline
+
+
+def test_classify_raw_reply_covers_every_shape():
+    """The eval's shape classifier, exercised without a live bridge.
+
+    This is what replaced the historical marker-omission diagnostic: there is no marker
+    left to omit under the claims contract, so what the eval now attributes an empty
+    answerable run to is the raw reply's shape - and this pins that classification so the
+    report's `raw_reply_shapes` counter cannot silently drift from what the reader itself
+    accepts or refuses.
+    """
+    claims_reply = json.dumps(
+        {
+            "claims": [{"text": "Three.", "citation_ids": ["c1"]}],
+            "citations": [{"id": "c1", "quote": "x"}],
+        }
+    )
+    assert _classify_raw_reply(claims_reply) == ("claims", False)
+
+    unknown_id_reply = json.dumps(
+        {
+            "claims": [{"text": "Three.", "citation_ids": ["c9"]}],
+            "citations": [{"id": "c1", "quote": "x"}],
+        }
+    )
+    assert _classify_raw_reply(unknown_id_reply) == ("claims", True)
+
+    legacy_reply = json.dumps({"answer": "Three [c1].", "citations": [{"id": "c1"}]})
+    assert _classify_raw_reply(legacy_reply) == ("legacy", False)
+
+    ambiguous_reply = json.dumps({"answer": "x", "claims": [], "citations": []})
+    assert _classify_raw_reply(ambiguous_reply) == ("ambiguous", False)
+
+    assert _classify_raw_reply("not json") == ("unparseable", False)
+    assert _classify_raw_reply(json.dumps({"citations": []})) == ("unparseable", False)
+    assert _classify_raw_reply(json.dumps([1, 2])) == ("unparseable", False)
+
+
+def test_claims_recorder_tracks_per_run_flags_and_a_running_total():
+    calls = iter(
+        [
+            "not json",
+            json.dumps({"answer": "x [c1].", "citations": [{"id": "c1"}]}),
+            json.dumps(
+                {
+                    "claims": [{"text": "x.", "citation_ids": ["c1"]}],
+                    "citations": [{"id": "c1"}],
+                }
+            ),
+        ]
+    )
+    recorder = _ClaimsRecorder(lambda **_kw: {"text": next(calls)})
+    recorder(system="s", user="u", max_output_tokens=10, timeout_ms=10)
+    assert recorder.saw_unparseable_reply is True
+    recorder.reset()
+    recorder(system="s", user="u", max_output_tokens=10, timeout_ms=10)
+    assert recorder.saw_legacy_shape is True
+    assert recorder.saw_unparseable_reply is False
+    recorder.reset()
+    recorder(system="s", user="u", max_output_tokens=10, timeout_ms=10)
+    assert recorder.saw_legacy_shape is False
+    # The running total survives every reset - it is a whole-eval diagnostic.
+    assert recorder.shape_totals == Counter({"unparseable": 1, "legacy": 1, "claims": 1})

@@ -259,12 +259,49 @@ def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
     assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
 
 
-def test_invalid_model_output_is_not_retried_and_leaks_nothing(tmp_path):
-    registry, entry, luna, reader = _fixture(tmp_path, "this is not json at all")
-    env = reader.answer("sess", _request(entry)).envelope
-    assert luna.call_count == 1
+def test_invalid_model_output_gets_one_format_retry_then_fails_closed_and_leaks_nothing(
+    tmp_path,
+):
+    """Malformed JSON is a schema failure: eligible for exactly one format retry, distinct
+    from - and never stacked with - the transient-provider retry budget. Once that one
+    retry is also malformed, the chunk fails closed and nothing it said crosses the
+    boundary."""
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    luna = FakeLuna(replies=["this is not json at all", "still not json, still not json"])
+    env = Reader(registry, luna).answer("sess", _request(entry)).envelope
+    assert luna.call_count == 2
     assert env["coverage"]["omitted"][0]["reason"] == "INVALID_MODEL_OUTPUT"
     assert "not json" not in json.dumps(env)
+
+
+def test_invalid_model_output_recovers_on_its_one_format_retry(tmp_path):
+    """The one-shot format retry is a real recovery path, not just a second failure."""
+    good = answer_json(
+        "Three [c1].", [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}]
+    )
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    luna = FakeLuna(replies=["this is not json at all", good])
+    env = Reader(registry, luna).answer("sess", _request(entry)).envelope
+    assert luna.call_count == 2
+    assert env["status"] == "ok" and env["code"] == "ANSWERED"
+
+
+def test_the_format_retry_never_stacks_with_a_transient_retry(tmp_path):
+    """A transient provider failure and a schema failure on the same chunk each get their
+    own budget - never more than one call beyond what each alone would cost."""
+    from context_shunt.provider import TransientProviderError
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
+    good = answer_json(
+        "Three [c1].", [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}]
+    )
+    luna = FakeLuna(replies=[TransientProviderError("PROVIDER_CALL_FAILED"), "not json", good])
+    env = Reader(registry, luna).answer("sess", _request(entry)).envelope
+    assert luna.call_count == 3
+    assert env["status"] == "ok" and env["code"] == "ANSWERED"
 
 
 def test_snapshot_mismatch_is_source_changed(tmp_path):

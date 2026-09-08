@@ -42,3 +42,8 @@ def citation_cases():
 @pytest.fixture(scope="session")
 def spill_cases():
     return load_json(CONTRACTS / "conformance" / "spill-cases.json")
+
+
+@pytest.fixture(scope="session")
+def claims_cases():
+    return load_json(CONTRACTS / "conformance" / "claims-cases.json")

@@ -99,12 +99,16 @@ class Limits:
     max_quote_bytes: int
     max_question_bytes: int
     session_spill_quota_bytes: int
+    max_claim_text_bytes: int
     max_sources_per_request: int
     max_chunks_per_request: int
     max_citations: int
     max_concurrent_model_calls: int
     max_chunk_overlap_lines: int
     max_transient_retries: int
+    max_claims_per_answer: int
+    max_citation_ids_per_claim: int
+    max_format_retries: int
     max_chunk_tokens: int
     max_request_input_tokens: int
     max_output_tokens_per_call: int
@@ -155,12 +159,16 @@ class Limits:
             max_quote_bytes=raw["bytes"]["max_quote_bytes"],
             max_question_bytes=raw["bytes"]["max_question_bytes"],
             session_spill_quota_bytes=raw["bytes"]["session_spill_quota_bytes"],
+            max_claim_text_bytes=raw["bytes"]["max_claim_text_bytes"],
             max_sources_per_request=raw["counts"]["max_sources_per_request"],
             max_chunks_per_request=raw["counts"]["max_chunks_per_request"],
             max_citations=raw["counts"]["max_citations"],
             max_concurrent_model_calls=raw["counts"]["max_concurrent_model_calls"],
             max_chunk_overlap_lines=raw["counts"]["max_chunk_overlap_lines"],
             max_transient_retries=raw["counts"]["max_transient_retries"],
+            max_claims_per_answer=raw["counts"]["max_claims_per_answer"],
+            max_citation_ids_per_claim=raw["counts"]["max_citation_ids_per_claim"],
+            max_format_retries=raw["counts"]["max_format_retries"],
             max_chunk_tokens=raw["tokens"]["max_chunk_tokens"],
             max_request_input_tokens=raw["tokens"]["max_request_input_tokens"],
             max_output_tokens_per_call=raw["tokens"]["max_output_tokens_per_call"],

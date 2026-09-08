@@ -51,8 +51,10 @@ export class FakeLuna implements ReaderProvider {
   private readonly provider: string;
 
   constructor(
-    private readonly replies: Array<string | ShuntError | (() => string | ShuntError)> = [],
-    private readonly defaultReply: string | ShuntError | (() => string | ShuntError) =
+    private readonly replies: Array<
+      string | ShuntError | ((user: string) => string | ShuntError)
+    > = [],
+    private readonly defaultReply: string | ShuntError | ((user: string) => string | ShuntError) =
       JSON.stringify({ answer: "", citations: [] }),
     readonly model: string = READER_MODEL,
     options: FakeLunaOptions = {},
@@ -79,7 +81,9 @@ export class FakeLuna implements ReaderProvider {
   }): Promise<ModelResponse> {
     this.calls.push({ ...opts, model: this.model });
     let reply = this.replies.length > 0 ? (this.replies.shift() as never) : this.defaultReply;
-    if (typeof reply === "function") reply = (reply as () => string | ShuntError)() as never;
+    if (typeof reply === "function") {
+      reply = (reply as (user: string) => string | ShuntError)(opts.user) as never;
+    }
     if (reply instanceof ShuntError) throw reply;
     const identity = { provider: this.provider, model: this.model };
     return {
@@ -96,8 +100,18 @@ export class FakeLuna implements ReaderProvider {
   }
 }
 
+/** The legacy reply shape: prose the model marks up itself with `[cN]`. */
 export function answerJson(answer: string, citations: unknown[]): string {
   return JSON.stringify({ answer, citations });
+}
+
+/**
+ * The current reply shape: structured claims plus the citations they reference. `claims`
+ * items are `{text: string, citation_ids: string[]}`; markers are never written by the
+ * caller here either - the reader places them, mechanically, from `citation_ids`.
+ */
+export function claimsJson(claims: unknown[], citations: unknown[]): string {
+  return JSON.stringify({ claims, citations });
 }
 
 export function makeConfig(tmpDir: string, overrides: Record<string, unknown> = {}): Config {

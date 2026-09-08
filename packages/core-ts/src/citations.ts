@@ -137,6 +137,11 @@ export function referencedIds(text: string): string[] {
 /**
  * Drop every sentence whose citation did not verify. Sentences with no citation are also
  * dropped: an assertion about the source with no evidence must not survive.
+ *
+ * This is the legacy contract: a model that places its own `[cN]` markers in prose. It is
+ * kept, unmodified, for a response that already used that shape - see
+ * {@link normalizeClaims} and {@link renderClaims} for the current one, where the program
+ * places every marker instead of trusting the model to.
  */
 export function stripUnsupportedAssertions(answer: string, validIds: Set<string>): string {
   if (answer.trim().length === 0) return "";
@@ -147,4 +152,91 @@ export function stripUnsupportedAssertions(answer: string, validIds: Set<string>
     if (refs.size > 0 && [...refs].every((id) => validIds.has(id))) kept.push(part.trim());
   }
   return kept.join(" ").trim();
+}
+
+export interface Claim {
+  readonly text: string;
+  readonly citation_ids: string[];
+}
+
+const CLAIM_CITATION_ID = /^c\d{1,3}$/;
+const TRAILING_PUNCT = /^(.*?)([.!?。！？]*)$/s;
+
+/**
+ * Structurally validate a model's `claims` array against its own `citations`.
+ *
+ * A claim survives only if `text` is a non-empty string within
+ * `limits.maxClaimTextBytes` and `citation_ids` is a non-empty, duplicate-free list of
+ * well-formed ids that all appear in `validLocalIds` - the ids the same response actually
+ * declared in its `citations` array (before namespacing). Unknown, duplicate or missing
+ * ids drop *that claim*, never the whole answer, and never guessed at: a dropped claim is
+ * exactly as much evidence-free as a legacy sentence with no marker, so it is held to the
+ * same fail-closed rule.
+ *
+ * This is structural validation only. Whether a surviving id also verifies against the
+ * snapshot bytes is decided later, once, by {@link CitationVerifier} - this function never
+ * marks anything `verified`.
+ */
+export function normalizeClaims(
+  raw: unknown,
+  validLocalIds: Set<string>,
+  limits: Limits = DEFAULT_LIMITS,
+): Claim[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Claim[] = [];
+  for (const item of raw.slice(0, limits.maxClaimsPerAnswer)) {
+    if (typeof item !== "object" || item === null) continue;
+    const rec = item as Record<string, unknown>;
+    const text = rec["text"];
+    const ids = rec["citation_ids"];
+    if (typeof text !== "string" || text.trim().length === 0) continue;
+    if (utf8Length(text) > limits.maxClaimTextBytes) continue;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > limits.maxCitationIdsPerClaim) {
+      continue;
+    }
+    const seen = new Set<string>();
+    let malformed = false;
+    for (const cid of ids) {
+      if (
+        typeof cid !== "string"
+        || !CLAIM_CITATION_ID.test(cid)
+        || seen.has(cid)
+        || !validLocalIds.has(cid)
+      ) {
+        malformed = true;
+        break;
+      }
+      seen.add(cid);
+    }
+    if (!malformed) out.push({ text: text.trim(), citation_ids: [...(ids as string[])] });
+  }
+  return out;
+}
+
+/**
+ * Deterministically render surviving claims into prose with `[cN]` markers.
+ *
+ * The model never places a marker itself; every one in a published answer is put there by
+ * this function, from a citation id the model supplied *and* the verifier confirmed.
+ * Marker placement is therefore no longer a formatting task the model can get right or
+ * wrong - the historical failure this replaces was exactly that: a correct answer with a
+ * valid `citations` entry, discarded because the marker was missing from the prose.
+ *
+ * A claim with no `citation_ids` is not rendered: an assertion with nothing left to
+ * support it is exactly what must not survive, matching the legacy rule in
+ * {@link stripUnsupportedAssertions}.
+ */
+export function renderClaims(claims: Claim[]): string {
+  const parts: string[] = [];
+  for (const claim of claims) {
+    const ids = claim.citation_ids ?? [];
+    const text = (claim.text ?? "").trim();
+    if (ids.length === 0 || text.length === 0) continue;
+    const markers = ids.map((id) => `[${id}]`).join("");
+    const match = TRAILING_PUNCT.exec(text);
+    const [body, punct] = match ? [match[1] ?? text, match[2] ?? ""] : [text, ""];
+    const rendered = punct ? `${body} ${markers}${punct}` : `${text} ${markers}`;
+    parts.push(rendered.trim());
+  }
+  return parts.join(" ").trim();
 }

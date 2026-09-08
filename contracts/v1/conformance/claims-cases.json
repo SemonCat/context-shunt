@@ -1,0 +1,347 @@
+{
+  "schema_version": "1.0",
+  "description": "Structured claims contract: normalize_claims/normalizeClaims validates a model's claims array structurally against its own citations array before verification; render_claims/renderClaims deterministically places every [cN] marker from the surviving claims. Both language cores must agree on every case here. citations_seen is the set of local ids the same response declared in its citations array (before namespacing) - what normalize_claims checks citation_ids against.",
+  "cases": [
+    {
+      "id": "single_claim_single_citation",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts.",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Retries stop after three attempts.",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "Retries stop after three attempts [c1]."
+      }
+    },
+    {
+      "id": "multi_citation_claim",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "The timeout backs off exponentially before that ceiling.",
+          "citation_ids": [
+            "c1",
+            "c2"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "The timeout backs off exponentially before that ceiling.",
+            "citation_ids": [
+              "c1",
+              "c2"
+            ]
+          }
+        ],
+        "rendered": "The timeout backs off exponentially before that ceiling [c1][c2]."
+      }
+    },
+    {
+      "id": "multi_claim_answer",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts.",
+          "citation_ids": [
+            "c1"
+          ]
+        },
+        {
+          "text": "Backoff is exponential.",
+          "citation_ids": [
+            "c2"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Retries stop after three attempts.",
+            "citation_ids": [
+              "c1"
+            ]
+          },
+          {
+            "text": "Backoff is exponential.",
+            "citation_ids": [
+              "c2"
+            ]
+          }
+        ],
+        "rendered": "Retries stop after three attempts [c1]. Backoff is exponential [c2]."
+      }
+    },
+    {
+      "id": "unknown_citation_id_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Guessed fact.",
+          "citation_ids": [
+            "c9"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "duplicate_citation_id_within_a_claim_drops_it",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Repeated evidence.",
+          "citation_ids": [
+            "c1",
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "empty_citation_ids_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Unsupported assertion.",
+          "citation_ids": []
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "citation_ids_not_a_list_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Malformed shape.",
+          "citation_ids": "c1"
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "blank_text_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "   ",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "non_string_text_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": 42,
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "malformed_id_pattern_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Bad id shape.",
+          "citation_ids": [
+            "C1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "too_many_citation_ids_drops_the_claim",
+      "citations_seen": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5"
+      ],
+      "claims": [
+        {
+          "text": "Five-way evidence exceeds the per-claim cap.",
+          "citation_ids": [
+            "c1",
+            "c2",
+            "c3",
+            "c4",
+            "c5"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "claim_text_over_byte_cap_is_dropped",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "no_trailing_punctuation_appends_markers",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "mode is fast",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "mode is fast",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "mode is fast [c1]"
+      }
+    },
+    {
+      "id": "one_bad_claim_does_not_sink_a_good_one",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Good claim.",
+          "citation_ids": [
+            "c1"
+          ]
+        },
+        {
+          "text": "Bad claim.",
+          "citation_ids": [
+            "c9"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Good claim.",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "Good claim [c1]."
+      }
+    },
+    {
+      "id": "claims_not_a_list_yields_nothing",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": {
+        "text": "not a list"
+      },
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "non_dict_item_in_claims_is_skipped",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        "not a claim object"
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    }
+  ]
+}

@@ -52,6 +52,12 @@ and semantic citation support; no false completeness on no-answer/partial cases;
 successful prompt injections, secret leaks, unauthorized tool use, wrong-model acceptance,
 or cap violations.
 
+The reader model returns structured `claims` plus `citations`, not free-form prose with a
+hand-placed `[cN]` marker - see [Architecture](architecture.md#query-aware-reader-and-citations).
+The report's `raw_reply_shapes` and `of_which_*` breakdown of an empty answerable run are
+diagnostics, not thresholds: they replace a prior revision's marker-omission count, which
+this contract change eliminates by construction rather than by a scoring adjustment.
+
 ## Shadow A/B
 
 `./scripts/verify shadow all` compares four lanes over the fixed synthetic corpus in

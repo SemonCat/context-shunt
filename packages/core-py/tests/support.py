@@ -91,7 +91,18 @@ class FakeLuna:
 
 
 def answer_json(answer: str, citations: list[dict[str, Any]]) -> str:
+    """The legacy reply shape: prose the model marks up itself with ``[cN]``."""
     return json.dumps({"answer": answer, "citations": citations})
+
+
+def claims_json(claims: list[dict[str, Any]], citations: list[dict[str, Any]]) -> str:
+    """The current reply shape: structured claims plus the citations they reference.
+
+    ``claims`` items are ``{"text": str, "citation_ids": [str, ...]}``; markers are never
+    written by the caller here either - the reader places them, mechanically, from
+    ``citation_ids``.
+    """
+    return json.dumps({"claims": claims, "citations": citations})
 
 
 def derived_provenance(**overrides: Any) -> Provenance:

@@ -47,7 +47,13 @@ from . import envelope as E
 from .accounting import ReaderCost
 from .accounting import estimate_tokens as accounting_tokens
 from .chunking import Chunk, estimate_tokens, plan
-from .citations import CitationVerifier, referenced_ids, strip_unsupported_assertions
+from .citations import (
+    CitationVerifier,
+    normalize_claims,
+    referenced_ids,
+    render_claims,
+    strip_unsupported_assertions,
+)
 from .clock import Clock, Deadline, MonotonicClock
 from .errors import CancelledError, DeadlineExceeded, ShuntError
 from .limits import DEFAULT_LIMITS, Limits, envelope_byte_cap
@@ -77,11 +83,25 @@ from .provider import (
 from .registry import SourceRegistry
 from .schema import validate_request
 
+#: ``INVALID_MODEL_OUTPUT`` details eligible for the one-shot format retry: a shape or
+#: claims/citations *relationship* failure, never a content judgement. Retrying
+#: ``BAD_USAGE`` would not fix a provider accounting bug, and retrying
+#: ``MODEL_OUTPUT_OVER_CAP`` would not make the model write less - neither belongs here.
+_FORMAT_RETRY_DETAILS = frozenset(
+    {"NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE"}
+)
+
 
 @dataclass
 class ChunkOutcome:
     chunk: Chunk
-    answer: str = ""
+    #: The current contract: structurally valid {"text", "citation_ids"} objects, chunk-
+    #: local ids. Populated only when this call's reply used the ``claims`` shape.
+    claims: list[dict[str, Any]] = field(default_factory=list)
+    #: The legacy contract: raw prose the model marked up itself with ``[cN]``. Populated
+    #: only when this call's reply used the ``answer`` shape - never both, an ambiguous
+    #: reply carrying both fails the call instead of guessing which one to trust.
+    legacy_answer: str = ""
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
     # An empty accumulator, not an attempt that reported nothing. `Usage()` defaults to
@@ -422,7 +442,8 @@ class Reader:
             _InputTokenBudget(self._limits.max_request_input_tokens),
         )
 
-        answers: list[str] = []
+        all_claims: list[dict[str, Any]] = []
+        legacy_parts: list[str] = []
         raw_citations: list[dict[str, Any]] = []
         total_calls = 0
         usage_complete_calls = 0
@@ -454,12 +475,13 @@ class Reader:
                 coverage.omit(outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason)
                 continue
             coverage.processed_chunks += 1
-            namespaced_answer, namespaced_citations, allocated = _namespace_outcome(
-                outcome, next_citation
+            namespaced_claims, namespaced_legacy, namespaced_citations, allocated = (
+                _namespace_outcome(outcome, next_citation)
             )
             next_citation += allocated
-            if namespaced_answer:
-                answers.append(namespaced_answer)
+            all_claims.extend(namespaced_claims)
+            if namespaced_legacy:
+                legacy_parts.append(namespaced_legacy)
             raw_citations.extend(namespaced_citations)
 
         target = _target_of(self._provider)
@@ -484,12 +506,24 @@ class Reader:
 
         allowed = verified[: self._limits.max_citations]
         allowed_ids = {c["id"] for c in allowed}
-        answer = strip_unsupported_assertions(" ".join(answers), allowed_ids)
-        answer = _cap_bytes(answer, min(budgets["max_answer_bytes"], self._limits.max_answer_bytes))
-        # Truncation can remove a marker or split an assertion. Verify the exact string
-        # that will cross the output boundary a second time.
-        answer = strip_unsupported_assertions(answer, allowed_ids)
-        used_ids = set(referenced_ids(answer))
+        kept_claims = [
+            c for c in all_claims if c["citation_ids"] and set(c["citation_ids"]) <= allowed_ids
+        ]
+        legacy_answer = strip_unsupported_assertions(" ".join(legacy_parts), allowed_ids)
+        answer = _render_answer(kept_claims, legacy_answer)
+        # Drop whole claims/sentences from the end until the render fits, rather than
+        # truncating raw bytes: a byte cut can split a marker or a multi-byte character,
+        # which is why the old pipeline had to strip a second time after truncating.
+        # Dropping structured units instead never produces a half-written marker.
+        max_answer = min(budgets["max_answer_bytes"], self._limits.max_answer_bytes)
+        while len(answer.encode("utf-8")) > max_answer and (kept_claims or legacy_answer):
+            if kept_claims:
+                kept_claims = kept_claims[:-1]
+            else:
+                legacy_answer = _drop_last_sentence(legacy_answer)
+            answer = _render_answer(kept_claims, legacy_answer)
+        used_ids = {cid for c in kept_claims for cid in c["citation_ids"]}
+        used_ids |= set(referenced_ids(legacy_answer))
         verified = [c for c in allowed if c["id"] in used_ids]
 
         provenance = Provenance(
@@ -594,7 +628,9 @@ class Reader:
                 accounting_id=accounting_id,
             )
 
-        answer, verified, dropped = self._fit_to_envelope(answer, verified, coverage, answered)
+        answer, verified, dropped = self._fit_to_envelope(
+            kept_claims, legacy_answer, verified, coverage, answered
+        )
         if not answer:
             # Every piece of evidence had to go, so there is no supported answer left to
             # publish. Saying NO_MATCH here would claim the sources held nothing, which is a
@@ -625,7 +661,8 @@ class Reader:
 
     def _fit_to_envelope(
         self,
-        answer: str,
+        kept_claims: list[dict[str, Any]],
+        legacy_answer: str,
         verified: list[dict[str, Any]],
         coverage: E.Coverage,
         build: Any,
@@ -641,13 +678,14 @@ class Reader:
 
         Evidence is dropped largest-first rather than last-first: the model's citation order
         is arbitrary, so trimming by position would make the surviving set depend on it,
-        while trimming by cost is deterministic and converges fastest. Each drop re-strips
-        the assertions it orphaned, which shrinks the answer too, so the loop re-measures
-        between drops and stops as soon as it fits.
+        while trimming by cost is deterministic and converges fastest. Each drop removes the
+        claims and legacy sentences it orphaned, which shrinks the answer too, so the loop
+        re-measures between drops and stops as soon as it fits.
         """
         dropped = 0
         # One drop per pass, so this cannot run longer than there are citations.
         for _ in range(len(verified) + 1):
+            answer = _render_answer(kept_claims, legacy_answer)
             candidate = build(answer, verified, False)
             # The same function the guard uses, not a constant: if a later revision moves
             # model_derived to a different cap, trimming must move with it rather than
@@ -664,10 +702,12 @@ class Reader:
                 "BUDGET_EXCEEDED",
             )
             dropped += 1
-            kept = [c for c in verified if c["id"] != victim["id"]]
-            answer = strip_unsupported_assertions(answer, {c["id"] for c in kept})
-            used = set(referenced_ids(answer))
-            verified = [c for c in kept if c["id"] in used]
+            kept_ids = {c["id"] for c in verified if c["id"] != victim["id"]}
+            kept_claims = [c for c in kept_claims if set(c["citation_ids"]) <= kept_ids]
+            legacy_answer = strip_unsupported_assertions(legacy_answer, kept_ids)
+            used = {cid for c in kept_claims for cid in c["citation_ids"]}
+            used |= set(referenced_ids(legacy_answer))
+            verified = [c for c in verified if c["id"] != victim["id"] and c["id"] in used]
         return "", [], dropped
 
     # -- provenance for paths that never produced model output --------------
@@ -731,8 +771,13 @@ class Reader:
         input_budget: _InputTokenBudget,
     ) -> ChunkOutcome:
         outcome = ChunkOutcome(chunk=chunk)
-        attempts = 1 + self._limits.max_transient_retries
-        for attempt in range(attempts):
+        # Two independent, separately bounded retry budgets so one never lends its slot to
+        # the other: a transient provider failure and a schema failure on the same chunk
+        # can each get their allotted retry without stacking into an unbounded chain.
+        transient_used = 0
+        format_used = 0
+        max_attempts = 1 + self._limits.max_transient_retries + self._limits.max_format_retries
+        for _attempt in range(max_attempts):
             try:
                 deadline.check("MODEL_CALL")
             except (DeadlineExceeded, CancelledError) as exc:
@@ -774,13 +819,40 @@ class Reader:
                 if outcome.attribution is Attribution.MISMATCH:
                     raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
                 parsed = _parse_model_json(response.text, self._limits.max_tool_result_bytes)
-                if not isinstance(parsed.get("answer"), str) or not isinstance(
-                    parsed.get("citations"), list
-                ):
+                has_claims = "claims" in parsed
+                has_legacy_answer = "answer" in parsed
+                if has_claims and has_legacy_answer:
+                    # Both shapes at once is not "prefer one" - it is a response the
+                    # program cannot trust to say which one the model meant, so it is
+                    # refused rather than silently picking a side.
+                    raise ShuntError(
+                        "INVALID_MODEL_OUTPUT", "AMBIGUOUS_RESPONSE_SHAPE", retryable=False
+                    )
+                if not isinstance(parsed.get("citations"), list):
+                    raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
+                citations_local = _normalize_citations(parsed["citations"], chunk)
+                if has_claims:
+                    raw_claims = parsed["claims"]
+                    if not isinstance(raw_claims, list):
+                        raise ShuntError(
+                            "INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False
+                        )
+                    # Scan every claim the model wrote, not only the ones that survive
+                    # structural validation: a malformed claim (bad citation_ids) can
+                    # still carry a secret in its text, and a claim dropped later must
+                    # still have been scanned before it is discarded.
+                    for item in raw_claims[: self._limits.max_claims_per_answer]:
+                        if isinstance(item, dict) and isinstance(item.get("text"), str):
+                            assert_no_secret(item["text"].encode("utf-8"), "ANSWER")
+                    valid_local_ids = {c["id"] for c in citations_local}
+                    outcome.claims = normalize_claims(raw_claims, valid_local_ids, self._limits)
+                    outcome.citations = citations_local
+                    return outcome
+                if not has_legacy_answer or not isinstance(parsed["answer"], str):
                     raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
                 assert_no_secret(parsed["answer"].encode("utf-8"), "ANSWER")
-                outcome.answer = parsed["answer"]
-                outcome.citations = _normalize_citations(parsed.get("citations", []), chunk)
+                outcome.legacy_answer = parsed["answer"]
+                outcome.citations = citations_local
                 return outcome
             except Exception as raw_exc:
                 exc = (
@@ -793,12 +865,21 @@ class Reader:
                 # way out - a late response, or a cancellation that landed between the
                 # provider returning and this frame seeing it.
                 ledger.record_failure(exc)
-                if (
+                can_retry_transient = (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable
-                    and attempt + 1 < attempts
-                    and not deadline.expired()
-                ):
+                    and transient_used < self._limits.max_transient_retries
+                )
+                can_retry_format = (
+                    exc.code == "INVALID_MODEL_OUTPUT"
+                    and exc.detail in _FORMAT_RETRY_DETAILS
+                    and format_used < self._limits.max_format_retries
+                )
+                if (can_retry_transient or can_retry_format) and not deadline.expired():
+                    if can_retry_transient:
+                        transient_used += 1
+                    else:
+                        format_used += 1
                     continue
                 outcome.failed_reason = _omission_reason(exc)
                 return outcome
@@ -1057,17 +1138,23 @@ def _omission_reason(exc: ShuntError) -> str:
     }.get(exc.code, "CHUNK_FAILED")
 
 
-def _cap_bytes(text: str, max_bytes: int) -> str:
-    raw = text.encode("utf-8")
-    if len(raw) <= max_bytes:
-        return text
-    raw = raw[:max_bytes]
-    while raw:
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raw = raw[:-1]
-    return ""
+def _render_answer(claims: list[dict[str, Any]], legacy_answer: str) -> str:
+    """The one place the two published shapes are joined into the public ``answer`` field.
+
+    Order is deliberate: rendered claims first, then whatever legacy prose survived - a
+    request mixing both shapes across its chunks (a stale cached response alongside a
+    current one, say) still reads as one coherent answer rather than interleaving.
+    """
+    parts = [p for p in (render_claims(claims), legacy_answer) if p]
+    return " ".join(parts).strip()
+
+
+def _drop_last_sentence(text: str) -> str:
+    """Drop the last legacy sentence, for the same byte-fit loop that drops claims."""
+    if not text.strip():
+        return ""
+    parts = re.split(r"(?<=[.!?。！？\n])\s+", text.strip())
+    return " ".join(parts[:-1]).strip()
 
 
 def _read_request_id(request: Any) -> str:
@@ -1206,7 +1293,14 @@ def _validate_model_response(response: Any, limits: Limits) -> None:
 
 def _namespace_outcome(
     outcome: ChunkOutcome, first_id: int
-) -> tuple[str, list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]], int]:
+    """Give one chunk's local ``cN`` ids a slice of the answer's global id space.
+
+    Returns ``(claims, legacy_answer, citations, ids_allocated)`` with every id rewritten.
+    A claim's ``citation_ids`` are remapped through the same table built from this chunk's
+    own ``citations`` array - the same table :func:`normalize_claims` already checked them
+    against, so every id here is guaranteed present and the remap can never drop one.
+    """
     names: dict[str, str] = {}
     citations: list[dict[str, Any]] = []
     for citation in outcome.citations:
@@ -1214,12 +1308,17 @@ def _namespace_outcome(
         global_id = names.setdefault(local, f"c{first_id + len(names)}")
         citations.append({**citation, "id": global_id})
 
+    claims = [
+        {"text": claim["text"], "citation_ids": [names[cid] for cid in claim["citation_ids"]]}
+        for claim in outcome.claims
+    ]
+
     def replace(match: re.Match[str]) -> str:
         global_id = names.get(match.group(1))
         return f"[{global_id}]" if global_id else match.group(0)
 
-    answer = re.sub(r"\[(c[0-9]{1,3})\]", replace, outcome.answer)
-    return answer, citations, len(names)
+    legacy_answer = re.sub(r"\[(c[0-9]{1,3})\]", replace, outcome.legacy_answer)
+    return claims, legacy_answer, citations, len(names)
 
 
 def _search_selector_to_lines(snapshot, selector: dict[str, Any]) -> dict[str, Any]:
