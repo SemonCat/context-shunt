@@ -74,6 +74,7 @@ from .provenance import (
 )
 from .provider import (
     READER_SYSTEM_PROMPT,
+    CallIdentity,
     ModelResponse,
     ProviderTarget,
     ReaderProvider,
@@ -136,6 +137,15 @@ class ChunkOutcome:
     #: Claims the model wrote beyond ``max_claims_per_answer``. They are never read, so
     #: they are material this request dropped, and the caller has to be told.
     claims_over_cap: int = 0
+    #: Claims whose evidence was cut by the raw-citation bound before anything could
+    #: verify it. ``_normalize_citations`` stops at ``MAX_RAW_CITATIONS``, so a claim
+    #: citing ``c65`` lost its citation to a ceiling, not to a failed verification - and
+    #: reporting that as "the model cited something that does not exist" blamed the model
+    #: for the program's own bound.
+    citations_over_cap: int = 0
+    #: One record per physical call this chunk made. Exactly as many as ``calls``, which
+    #: is what makes a count over them a count over calls.
+    call_identities: list[CallIdentity] = field(default_factory=list)
 
 
 class _AttemptLedger:
@@ -182,6 +192,7 @@ class _AttemptLedger:
         if isinstance(unseen, Usage):
             outcome.unseen_usage = outcome.unseen_usage.merge(unseen)
         outcome.completion_bytes += len(response.text.encode("utf-8"))
+        outcome.call_identities.extend(_response_identities(response))
         outcome.usage = outcome.usage.merge(response.usage)
         # A composite provider reports how many of its attempts supplied complete usage; a
         # plain one supplies one attempt, so the winner alone decides.
@@ -218,6 +229,9 @@ class _AttemptLedger:
         outcome.completion_bytes += min(
             len(response.text.encode("utf-8")), limits.max_tool_result_bytes
         )
+        # A refused usage *claim* says nothing about which model ran, so the identity
+        # records stand exactly as reported.
+        outcome.call_identities.extend(_response_identities(response))
         # No usage is merged and no attempt is counted as usage-complete: the claim was
         # refused, so every attempt behind this response has unknown usage. That is what
         # `attempts_started` > `attempts_usage_complete` is for.
@@ -243,12 +257,48 @@ class _AttemptLedger:
             )
             # Nothing came back, so every attempt here is one whose output was never seen.
             outcome.unseen_usage = outcome.unseen_usage.merge(billed)
+        # Bytes a reply carried that this core measured itself. Present when the reply
+        # arrived intact but its usage claim did not: the claim is refused, the
+        # measurement is kept, and the estimate built from it is the conservative one.
+        # Without this a malformed usage block erased known output entirely.
+        measured = getattr(exc, "response_bytes", None)
+        if isinstance(measured, int) and not isinstance(measured, bool) and measured > 0:
+            outcome.completion_bytes += measured
         # A composite provider may have made several calls inside this one invocation
         # before giving up. `calls` was incremented once by the caller for the invocation;
         # the rest are the ones the chain made and was billed for.
         extra_attempts = max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
         outcome.calls += extra_attempts
         outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        # Every physical call behind this failure still happened. Whatever the provider
+        # observed is taken; the rest are unobserved, which is the truthful record for a
+        # call that returned nothing.
+        outcome.call_identities.extend(
+            _pad_identities(getattr(exc, "call_identities", ()), extra_attempts + 1)
+        )
+
+
+def _response_identities(response: Any) -> list[CallIdentity]:
+    """One record per physical call behind a returned response.
+
+    A provider that reports its own records is believed. One that reports none still
+    answered *this* call, so its origin describes one of them and every other call it
+    made stays unobserved - the alternative, repeating this identity for each of them, is
+    the false certification these records exist to prevent.
+    """
+    attempts = response.attempts if isinstance(response.attempts, int) else 1
+    carried = getattr(response, "call_identities", ())
+    if not carried:
+        carried = (response.identity_of_this_call(),)
+    return _pad_identities(carried, max(1, attempts))
+
+
+def _pad_identities(carried: Any, calls: int) -> list[CallIdentity]:
+    """``carried``, trimmed or extended with unobserved records to cover ``calls``."""
+    records = [c for c in carried if isinstance(c, CallIdentity)] if carried else []
+    if len(records) >= calls:
+        return records[:calls]
+    return [*records, *(CallIdentity() for _ in range(calls - len(records)))]
 
 
 @dataclass
@@ -531,6 +581,11 @@ class Reader:
         #: Material this request produced and then dropped against a ceiling. Counted so
         #: an answer that ends up empty can say *why* it is empty.
         cap_dropped = 0
+        #: One record per physical call across every chunk, in the order the chunks were
+        #: processed. Counting identity per *call* is the only way a release can say which
+        #: model produced every measured answer; counting per run and weighting by the
+        #: call count credits failed candidates with the winner's identity.
+        call_identities: list[CallIdentity] = []
 
         for outcome in outcomes:
             total_calls += outcome.calls
@@ -539,6 +594,7 @@ class Reader:
             unseen_usage = unseen_usage.merge(outcome.unseen_usage)
             prompt_bytes += outcome.prompt_bytes
             completion_bytes += outcome.completion_bytes
+            call_identities.extend(_pad_identities(outcome.call_identities, outcome.calls))
             fallback_used = fallback_used or outcome.fallback_used
             if outcome.calls:
                 attribution, confidence = _weakest(
@@ -548,8 +604,9 @@ class Reader:
                 requested_seen.append(outcome.requested)
                 resolved_seen.append(outcome.resolved)
                 reported_seen.append(outcome.reported)
-            if outcome.claims_over_cap:
-                cap_dropped += outcome.claims_over_cap
+            dropped_by_ceiling = outcome.claims_over_cap + outcome.citations_over_cap
+            if dropped_by_ceiling:
+                cap_dropped += dropped_by_ceiling
                 coverage.omit_once(
                     outcome.chunk.source_id, outcome.chunk.locator, "BUDGET_EXCEEDED"
                 )
@@ -685,6 +742,7 @@ class Reader:
             resolved=resolved,
             reported=reported,
             fallback_used=fallback_used if total_calls else None,
+            call_identities=tuple(call_identities),
         )
         # Policy runs before publication so a refused attribution never ships an answer.
         # The failure keeps the provenance it was judged on: an operator needs to see the
@@ -1060,6 +1118,7 @@ class Reader:
                 if not isinstance(parsed.get("citations"), list):
                     raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
                 citations_local = _normalize_citations(parsed["citations"], chunk)
+                over_cap_ids = _citation_ids_over_cap(parsed["citations"])
                 if has_claims:
                     raw_claims = parsed["claims"]
                     if not isinstance(raw_claims, list):
@@ -1080,12 +1139,29 @@ class Reader:
                         0, len(raw_claims) - self._limits.max_claims_per_answer
                     )
                     valid_local_ids = {c["id"] for c in citations_local}
+                    # A claim whose only evidence sat past the raw-citation bound is about
+                    # to be dropped by `normalize_claims` for citing an unknown id. It is
+                    # dropped either way - nothing verified that citation - but the reason
+                    # is a ceiling this program chose, so it is counted here and reported
+                    # as an omission instead of vanishing behind `complete: true`.
+                    if over_cap_ids:
+                        outcome.citations_over_cap = sum(
+                            1
+                            for item in raw_claims[: self._limits.max_claims_per_answer]
+                            if _claim_cites_over_cap(item, over_cap_ids)
+                        )
                     outcome.claims = normalize_claims(raw_claims, valid_local_ids, self._limits)
                     outcome.citations = citations_local
                     return outcome
                 if not has_legacy_answer or not isinstance(parsed["answer"], str):
                     raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
                 assert_no_secret(parsed["answer"].encode("utf-8"), "ANSWER")
+                # Same ceiling, the legacy shape: a hand-placed marker naming an id past
+                # the bound would be published as a marker no citation backs, which reads
+                # as a model fault. It is the program's bound, so it is reported as one.
+                outcome.citations_over_cap = len(
+                    over_cap_ids & set(referenced_ids(parsed["answer"]))
+                )
                 outcome.legacy_answer = parsed["answer"]
                 outcome.citations = citations_local
                 return outcome
@@ -1318,6 +1394,7 @@ def _as_failure_provenance(provenance: Provenance) -> Provenance:
         resolved=provenance.resolved,
         reported=provenance.reported,
         fallback_used=provenance.fallback_used,
+        call_identities=provenance.call_identities,
     )
 
 
@@ -1454,6 +1531,48 @@ def _parse_model_json(text: str, max_bytes: int) -> dict[str, Any]:
     return value
 
 
+#: How many raw citation entries one chunk's reply may declare. A bound is needed - the
+#: array is model-controlled - but it is the program's bound, so what it cuts is the
+#: program's omission to report. See :func:`_citation_ids_over_cap`.
+MAX_RAW_CITATIONS = 64
+
+
+def _citation_ids_over_cap(raw: Any) -> set[str]:
+    """The well-formed citation ids ``_normalize_citations`` will not reach.
+
+    Read from the entries past :data:`MAX_RAW_CITATIONS` so a claim referencing one can be
+    told apart from a claim referencing an id that was never declared at all. Only the id
+    is read, and only to recognise it later - nothing here is trusted as evidence.
+    """
+    if not isinstance(raw, list) or len(raw) <= MAX_RAW_CITATIONS:
+        return set()
+    out: set[str] = set()
+    for item in raw[MAX_RAW_CITATIONS:]:
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("id")
+        if isinstance(cid, str) and re.fullmatch(r"c[0-9]{1,3}", cid):
+            out.add(cid)
+    return out
+
+
+def _claim_cites_over_cap(item: Any, over_cap_ids: set[str]) -> bool:
+    """Whether this raw claim named a citation the bound cut before it could verify.
+
+    One such id is enough. :func:`normalize_claims` is fail-closed on *any* unknown id, so
+    a claim citing one surviving citation and one the ceiling removed is dropped whole -
+    the surviving evidence buys it nothing. Requiring that the claim be left with *no*
+    valid id would therefore under-report: the claim is gone either way, and the ceiling
+    is still why.
+    """
+    if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+        return False
+    ids = item.get("citation_ids")
+    if not isinstance(ids, list):
+        return False
+    return any(isinstance(cid, str) and cid in over_cap_ids for cid in ids)
+
+
 def _normalize_citations(raw: Any, chunk: Chunk) -> list[dict[str, Any]]:
     """Rebuild each citation from trusted chunk metadata.
 
@@ -1463,7 +1582,7 @@ def _normalize_citations(raw: Any, chunk: Chunk) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
-    for item in raw[:64]:
+    for item in raw[:MAX_RAW_CITATIONS]:
         if not isinstance(item, dict):
             continue
         cid = item.get("id")

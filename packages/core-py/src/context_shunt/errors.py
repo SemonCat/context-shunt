@@ -53,18 +53,32 @@ class ShuntError(Exception):
     #: How many of those attempts reported complete usage. Without it the reader could
     #: only guess - it counted one aggregate error as one report, so a chain of two billed
     #: candidates looked like one usage-complete attempt out of two started.
+    #: Bytes of reply this core measured for itself on a call whose *usage claim* was
+    #: refused. Not a token count and not the provider's word for anything: it is what the
+    #: response body weighed, so the ledger can build a conservative estimate instead of
+    #: publishing ``output_tokens: 0`` for a call that plainly produced output. A byte
+    #: count reveals no content, so it cannot widen what an error may say.
+    #: One per-call identity record for each physical call the failing operation made,
+    #: when a composite provider made more than one. A call that failed observed nothing
+    #: about which model ran, so these records are mostly unknown - which is the point:
+    #: without them the reader could only spread the *answering* call's identity over
+    #: calls that never reported one.
     __slots__ = (
         "billed_usage",
+        "call_identities",
         "code",
         "detail",
         "internal_attempts",
+        "response_bytes",
         "retryable",
         "usage_complete_attempts",
     )
 
     def __init__(self, code: str, detail: str | None = None, retryable: bool | None = None):
         self.billed_usage: Any | None = None
+        self.call_identities: tuple[Any, ...] = ()
         self.internal_attempts: int = 1
+        self.response_bytes: int | None = None
         self.usage_complete_attempts: int | None = None
         if code not in SAFE_MESSAGES:
             raise ValueError(f"unknown error code: {code}")

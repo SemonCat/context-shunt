@@ -60,9 +60,11 @@ import {
   type AttributionPolicy,
 } from "./provenance.js";
 import {
+  type CallIdentity,
   type CallInputBudget,
-  ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider, buildUserMessage,
-  providerTargetOf, responseAttribution, targetIdentity, transientProviderError,
+  ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider, UNOBSERVED_CALL, buildUserMessage,
+  identityOfThisCall, providerTargetOf, responseAttribution, targetIdentity,
+  transientProviderError,
 } from "./provider.js";
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
@@ -142,6 +144,15 @@ interface ChunkOutcome {
   /** Claims the model wrote beyond `maxClaimsPerAnswer`. They are never read, so they are
    * material this request dropped, and the caller has to be told. */
   claimsOverCap: number;
+  /** Claims whose evidence was cut by the raw-citation bound before anything could verify
+   * it. `normalizeCitations` stops at `MAX_RAW_CITATIONS`, so a claim citing `c65` lost
+   * its citation to a ceiling, not to a failed verification - and reporting that as "the
+   * model cited something that does not exist" blamed the model for this program's own
+   * bound. */
+  citationsOverCap: number;
+  /** One record per physical call this chunk made. Exactly as many as `calls`, which is
+   * what makes a count over them a count over calls. */
+  callIdentities: CallIdentity[];
 }
 
 /** What the session needs to finish the operation: an envelope plus its true cost. */
@@ -214,6 +225,7 @@ class AttemptLedger {
     outcome.calls += extraAttempts;
     outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
     outcome.completionBytes += new TextEncoder().encode(response.text).length;
+    outcome.callIdentities.push(...responseIdentities(response));
     // Output the reader never saw: a failed candidate returned no text to measure, so its
     // reported tokens are the only evidence of what it produced. Held apart from the
     // winner's bytes precisely so the two are never added twice.
@@ -252,6 +264,9 @@ class AttemptLedger {
       new TextEncoder().encode(candidate.text).length,
       limits.maxToolResultBytes,
     );
+    // A refused usage *claim* says nothing about which model ran, so the identity records
+    // stand exactly as reported.
+    outcome.callIdentities.push(...responseIdentities(candidate));
     // No usage is merged and no attempt is counted as usage-complete: the claim was
     // refused, so every attempt behind this response has unknown usage. That is what
     // `attempts_started` > `attempts_usage_complete` is for.
@@ -274,6 +289,14 @@ class AttemptLedger {
     outcome.usageCompleteCalls +=
       reportedAttempts
       ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
+    // Bytes a reply carried that this core measured itself. Present when the reply
+    // arrived intact but its usage claim did not: the claim is refused, the measurement
+    // is kept, and the estimate built from it is the conservative one. Without this a
+    // malformed usage block erased known output entirely.
+    const measured = (err as { responseBytes?: unknown })?.responseBytes;
+    if (typeof measured === "number" && Number.isInteger(measured) && measured > 0) {
+      outcome.completionBytes += measured;
+    }
     // A composite provider may have made several calls inside this one invocation before
     // giving up. `calls` was incremented once by the caller for the invocation; the rest
     // are the ones the chain made and was billed for.
@@ -283,7 +306,39 @@ class AttemptLedger {
     );
     outcome.calls += extraAttempts;
     outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    // Every physical call behind this failure still happened. Whatever the provider
+    // observed is taken; the rest are unobserved, which is the truthful record for a call
+    // that returned nothing.
+    outcome.callIdentities.push(
+      ...padIdentities((err as { callIdentities?: readonly unknown[] })?.callIdentities, extraAttempts + 1),
+    );
   }
+}
+
+/**
+ * One record per physical call behind a returned response.
+ *
+ * A provider that reports its own records is believed. One that reports none still
+ * answered *this* call, so its origin describes one of them and every other call it made
+ * stays unobserved - the alternative, repeating this identity for each of them, is the
+ * false certification these records exist to prevent.
+ */
+function responseIdentities(response: ModelResponse): CallIdentity[] {
+  const attempts = Math.max(1, response.attempts ?? 1);
+  const carried = response.callIdentities?.length
+    ? response.callIdentities
+    : [identityOfThisCall(response)];
+  return padIdentities(carried, attempts);
+}
+
+/** `carried`, trimmed or extended with unobserved records to cover `calls`. */
+function padIdentities(carried: readonly unknown[] | undefined, calls: number): CallIdentity[] {
+  if (calls <= 0) return [];
+  const records = (carried ?? []).filter(
+    (c): c is CallIdentity => typeof c === "object" && c !== null && "attribution" in c,
+  );
+  if (records.length >= calls) return records.slice(0, calls);
+  return [...records, ...Array.from({ length: calls - records.length }, () => UNOBSERVED_CALL)];
 }
 
 export class Reader {
@@ -522,6 +577,11 @@ export class Reader {
     // Material this request produced and then dropped against a ceiling. Counted so an
     // answer that ends up empty can say *why* it is empty.
     let capDropped = 0;
+    // One record per physical call across every chunk, in the order the chunks were
+    // processed. Counting identity per *call* is the only way a release can say which
+    // model produced every measured answer; counting per run and weighting by the call
+    // count credits failed candidates with the winner's identity.
+    const callIdentities: CallIdentity[] = [];
     for (const outcome of outcomes) {
       totalCalls += outcome.calls;
       usageCompleteCalls += outcome.usageCompleteCalls;
@@ -529,6 +589,7 @@ export class Reader {
       unseenUsage = mergeUsage(unseenUsage, outcome.unseenUsage);
       promptBytes += outcome.promptBytes;
       completionBytes += outcome.completionBytes;
+      callIdentities.push(...padIdentities(outcome.callIdentities, outcome.calls));
       fallbackUsed = fallbackUsed || outcome.fallbackUsed;
       if (outcome.calls > 0) attribution = weakestAttribution(attribution, outcome.attribution);
       if (outcome.responsesSeen > 0) {
@@ -536,8 +597,9 @@ export class Reader {
         resolvedSeen.push(outcome.resolved);
         reportedSeen.push(outcome.reported);
       }
-      if (outcome.claimsOverCap > 0) {
-        capDropped += outcome.claimsOverCap;
+      const droppedByCeiling = outcome.claimsOverCap + outcome.citationsOverCap;
+      if (droppedByCeiling > 0) {
+        capDropped += droppedByCeiling;
         coverage.omitOnce(outcome.chunk.sourceId, outcome.chunk.locator, "BUDGET_EXCEEDED");
       }
       if (outcome.failedReason) {
@@ -675,6 +737,7 @@ export class Reader {
       resolved,
       reported,
       ...(totalCalls > 0 ? { fallbackUsed } : {}),
+      callIdentities,
     };
     // Policy runs before publication so a refused attribution never ships an answer. The
     // failure keeps the provenance it was judged on: an operator needs to see the value
@@ -975,6 +1038,8 @@ export class Reader {
       responsesSeen: 0,
       fallbackUsed: false,
       claimsOverCap: 0,
+      citationsOverCap: 0,
+      callIdentities: [],
     };
     // Two independent, separately bounded retry budgets: a transient provider failure and
     // a schema failure on the same chunk can each spend their own allotted retry, and both
@@ -1054,6 +1119,7 @@ export class Reader {
           throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
         }
         const citationsLocal = normalizeCitations(parsed["citations"], chunk);
+        const overCapIds = citationIdsOverCap(parsed["citations"]);
         if (hasClaims) {
           const rawClaims = parsed["claims"];
           if (!Array.isArray(rawClaims)) {
@@ -1076,6 +1142,16 @@ export class Reader {
             rawClaims.length - this.limits.maxClaimsPerAnswer,
           );
           const validLocalIds = new Set(citationsLocal.map((c) => String(c["id"])));
+          // A claim whose only evidence sat past the raw-citation bound is about to be
+          // dropped by `normalizeClaims` for citing an unknown id. It is dropped either
+          // way - nothing verified that citation - but the reason is a ceiling this
+          // program chose, so it is counted here and reported as an omission instead of
+          // vanishing behind `complete: true`.
+          if (overCapIds.size > 0) {
+            outcome.citationsOverCap = rawClaims
+              .slice(0, this.limits.maxClaimsPerAnswer)
+              .filter((item) => claimCitesOverCap(item, overCapIds)).length;
+          }
           outcome.claims = normalizeClaims(rawClaims, validLocalIds, this.limits);
           outcome.citations = citationsLocal;
           return outcome;
@@ -1084,6 +1160,12 @@ export class Reader {
           throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
         }
         assertNoSecret(parsed["answer"], "ANSWER");
+        // Same ceiling, the legacy shape: a hand-placed marker naming an id past the
+        // bound would be published as a marker no citation backs, which reads as a model
+        // fault. It is this program's bound, so it is reported as one.
+        outcome.citationsOverCap = referencedIds(parsed["answer"]).filter((id) =>
+          overCapIds.has(id),
+        ).length;
         outcome.legacyAnswer = parsed["answer"];
         outcome.citations = citationsLocal;
         return outcome;
@@ -1293,10 +1375,51 @@ function parseModelJson(text: string, maxBytes: number): Record<string, unknown>
  * the quote come from the model; source and snapshot always come from the chunk, and
  * `verified` is never taken from the model.
  */
+/**
+ * How many raw citation entries one chunk's reply may declare. A bound is needed - the
+ * array is model-controlled - but it is this program's bound, so what it cuts is this
+ * program's omission to report. See `citationIdsOverCap`.
+ */
+export const MAX_RAW_CITATIONS = 64;
+
+/**
+ * The well-formed citation ids `normalizeCitations` will not reach. Read from the entries
+ * past `MAX_RAW_CITATIONS` so a claim referencing one can be told apart from a claim
+ * referencing an id that was never declared at all. Only the id is read, and only to
+ * recognise it later - nothing here is trusted as evidence.
+ */
+function citationIdsOverCap(raw: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(raw) || raw.length <= MAX_RAW_CITATIONS) return out;
+  for (const item of raw.slice(MAX_RAW_CITATIONS)) {
+    if (typeof item !== "object" || item === null) continue;
+    const id = (item as Record<string, unknown>)["id"];
+    if (typeof id === "string" && /^c\d{1,3}$/.test(id)) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * Whether this raw claim named a citation the bound cut before it could verify.
+ *
+ * One such id is enough. `normalizeClaims` is fail-closed on *any* unknown id, so a claim
+ * citing one surviving citation and one the ceiling removed is dropped whole - the
+ * surviving evidence buys it nothing. Requiring that the claim be left with *no* valid id
+ * would therefore under-report: the claim is gone either way, and the ceiling is still why.
+ */
+function claimCitesOverCap(item: unknown, overCapIds: Set<string>): boolean {
+  if (typeof item !== "object" || item === null) return false;
+  const rec = item as Record<string, unknown>;
+  if (typeof rec["text"] !== "string") return false;
+  const ids = rec["citation_ids"];
+  if (!Array.isArray(ids)) return false;
+  return ids.some((id) => typeof id === "string" && overCapIds.has(id));
+}
+
 function normalizeCitations(raw: unknown, chunk: Chunk): Array<Record<string, unknown>> {
   if (!Array.isArray(raw)) return [];
   const out: Array<Record<string, unknown>> = [];
-  for (const item of raw.slice(0, 64)) {
+  for (const item of raw.slice(0, MAX_RAW_CITATIONS)) {
     if (typeof item !== "object" || item === null) continue;
     const rec = item as Record<string, unknown>;
     const id = rec["id"];

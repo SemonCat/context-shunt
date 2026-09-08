@@ -98,6 +98,64 @@ def _load_bridge():
     return getattr(importlib.import_module(module_name), attr)
 
 
+def _route_facts() -> dict[str, Any]:
+    """Which route produced this score, and what it declares about itself.
+
+    Recorded in the report so the release attestation can bind a number to the surface it
+    was measured through. Without it the attestation could only say a score existed at
+    this commit: a run through a route that folds the system prompt into the user turn is
+    a different measurement, and nothing in the report said which one it had been.
+    """
+    spec = os.environ.get(BRIDGE_ENV, "")
+    module_name = spec.partition(":")[0]
+    out: dict[str, Any] = {"spec": spec, "bridge": None, "module_sha256": None}
+    if not module_name:
+        return out
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:  # noqa: BLE001 - a missing route is reported, not raised
+        return out
+    descriptor = getattr(module, "BRIDGE", None)
+    if isinstance(descriptor, dict):
+        out["bridge"] = dict(descriptor)
+    source = getattr(module, "__file__", None)
+    if isinstance(source, str) and Path(source).is_file():
+        out["module_sha256"] = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+    return out
+
+
+def _effective_provider_config() -> dict[str, Any]:
+    """The caps and policy this score was produced under.
+
+    The same values the release attestation hashes, computed here so the report carries
+    its own copy: a score measured under a different ceiling is a different score, and a
+    report that names only the corpus cannot say which ceiling it ran against.
+    """
+    from context_shunt.provenance import AttributionPolicy
+
+    return {
+        "reader_model": READER_MODEL,
+        "max_output_tokens_per_call": DEFAULT_LIMITS.max_output_tokens_per_call,
+        "max_request_input_tokens": DEFAULT_LIMITS.max_request_input_tokens,
+        "max_transient_retries": DEFAULT_LIMITS.max_transient_retries,
+        "max_format_retries": DEFAULT_LIMITS.max_format_retries,
+        "max_concurrent_model_calls": DEFAULT_LIMITS.max_concurrent_model_calls,
+        "model_call_deadline_ms": DEFAULT_LIMITS.model_call_deadline_ms,
+        "request_deadline_ms": DEFAULT_LIMITS.request_deadline_ms,
+        "max_answer_bytes": DEFAULT_LIMITS.max_answer_bytes,
+        "max_citations": DEFAULT_LIMITS.max_citations,
+        "max_claims_per_answer": DEFAULT_LIMITS.max_claims_per_answer,
+        "default_attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED.value,
+    }
+
+
+def _config_hash(config: dict[str, Any]) -> str:
+    """A canonical digest of an effective-configuration mapping."""
+    return hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _classify_raw_reply(text: Any) -> tuple[str, bool]:
     """Classify one raw bridge reply's shape, retaining no text.
 
@@ -389,9 +447,18 @@ _NEGATIONS = (
 #: answers take, and splitting there would separate every subject from its own value. A
 #: period or comma between digits is not a boundary either: it is inside `16.2`, `0.0.0.0`
 #: or `1,000`.
+#:
+#: The comma rule guards only what *follows* it, and the semicolon is not guarded at all.
+#: Guarding the preceding character made "max_retries is 3, which is not correct" and
+#: "max_retries is 3; that is unspecified" single clauses - both punctuation marks sit
+#: right after a digit - so the retraction lived inside the clause that stated the value
+#: and no contradiction rule could see it. A digit *after* a comma is what `1,000` needs
+#: and that is kept; a semicolon never appears inside a numeric literal, so it needs no
+#: guard in either direction. The period keeps both guards: `16.2` and `0.0.0.0` need them.
 _CLAUSE_BOUNDARY = re.compile(
-    r"(?<![0-9])[.;](?![0-9])"
-    r"|(?<![0-9]),(?![0-9])"
+    r"(?<![0-9])\.(?![0-9])"
+    r"|;"
+    r"|,(?![0-9])"
     r"|[()\[\]]"
     r"|(?<![0-9A-Za-z_])(?:but|however|although|though|whereas|while|and|or|instead|rather)"
     r"(?![0-9A-Za-z_])",
@@ -448,49 +515,115 @@ def _negated_between(clause: str, subject: tuple[int, int] | None, value: tuple[
     )
 
 
-def _asserts_a_competing_value(
+def _competing_value_span(
     clause: str, subjects: list[str], values: list[str], value_type: str
-) -> bool:
-    """Whether the clause's own first value of this type is *not* one we accept.
+) -> tuple[int, int] | None:
+    """Where the clause asserts a value of this type that is *not* one we accept.
 
     "max_retries is not 3 but 4" is caught by the negation rule; "max_retries is 4" has no
-    negation to catch and must still fail. The subject is removed before the scan because
+    negation to catch and must still fail. The subject is blanked before the scan because
     an identifier can carry a digit of its own - `threshold_0 = 100` would otherwise be
-    read as asserting 0.
+    read as asserting 0 - and blanked to *spaces of the same width* so the span this
+    returns still indexes the original clause.
     """
     grammar = _VALUE_TOKENS.get(value_type)
     if grammar is None:
-        return False
+        return None
     probe = clause
     for token in subjects:
-        probe = re.sub(_bounded(re.escape(token)), " ", probe, flags=re.IGNORECASE)
+        probe = re.sub(
+            _bounded(re.escape(token)),
+            lambda m: " " * len(m.group(0)),
+            probe,
+            flags=re.IGNORECASE,
+        )
     found = re.search(_bounded(grammar), probe, re.IGNORECASE)
     if found is None:
         # Nothing of this type is asserted here, so nothing competes: an accepted
         # alternative outside the grammar ("disabled" for `false`) still stands.
+        return None
+    if found.group(0).lower() in {v.lower() for v in values}:
+        return None
+    return found.span()
+
+
+def _asserts_a_competing_value(
+    clause: str, subjects: list[str], values: list[str], value_type: str
+) -> bool:
+    """Whether the clause's own first value of this type is *not* one we accept."""
+    return _competing_value_span(clause, subjects, values, value_type) is not None
+
+
+#: Words a clause uses to keep talking about the subject of the clause before it. Without
+#: them a contradiction only counts when it repeats the subject by name, and
+#: "max_retries is 3, which is not correct; it is 4" walked straight through: the clause
+#: that retracts the answer and the clause that replaces it both refer back instead of
+#: naming anything.
+_ANAPHORS = ("it", "its", "that", "this", "they", "them", "those", "these", "which")
+
+
+def _contradicts_the_claim(
+    clause: str, subjects: list[str], values: list[str], value_type: str
+) -> bool:
+    """Whether this clause takes back the claim a *neighbouring* clause stated.
+
+    Scoped to clauses that are about the same subject - either naming it or referring back
+    to it - because a unit may legitimately carry an unrelated second assertion, and
+    "p95_ms is 250, and error_rate is 0.01" must not read as two competing numbers.
+
+    Two shapes count:
+
+    * A competing value of the same type, asserted rather than denied. "it is 4" competes;
+      "it is not 4" *denies the competitor*, which supports the claim rather than
+      contradicting it, so the negation is checked before the clause is condemned.
+    * A bare repudiation: a negation, no accepted value to attach it to, nothing else
+      asserted. "which is not correct" says the answer is wrong without saying what is
+      right, and a scorer that ignores it credits an answer that withdrew itself.
+    """
+    subject_span = _first_span(subjects, clause) if subjects else None
+    anchor = subject_span if subject_span is not None else _first_span(list(_ANAPHORS), clause)
+    if anchor is None:
         return False
-    return found.group(0).lower() not in {v.lower() for v in values}
+    competing = _competing_value_span(clause, subjects, values, value_type)
+    if competing is not None:
+        return not _negated_between(clause, anchor, competing)
+    if _first_span(values, clause) is not None:
+        # It restates an accepted value; the per-clause rules already judge that.
+        return False
+    return (
+        re.search(_bounded("|".join(re.escape(n) for n in _NEGATIONS)), clause, re.IGNORECASE)
+        is not None
+    )
 
 
 def _claim_stated(expected: dict[str, Any], text: str) -> bool:
-    """Whether ``text`` asserts this expectation, in some clause, without contradicting it."""
+    """Whether ``text`` asserts this expectation without any clause taking it back.
+
+    Both halves matter, and the first alone was a false pass. Returning on the first
+    satisfying clause credited "max_retries is 3 but max_retries is 4" and
+    "max_retries is 3, which is not correct; it is 4": each states the expected value in
+    its opening clause and then retracts it, so the answer is wrong and the citation is
+    real. Every clause is now read before the unit is credited.
+    """
     subjects = [expected["subject"], *expected.get("subject_alternatives", [])]
     subjects = [s for s in subjects if s]
     values = [expected["value"], *expected.get("alternatives", [])]
     value_type = expected.get("value_type", "identifier")
+    stated = False
     for clause in _clauses(text):
         subject_span = _first_span(subjects, clause) if subjects else None
-        if subjects and subject_span is None:
-            continue
         value_span = _first_span(values, clause)
-        if value_span is None:
+        if (
+            (not subjects or subject_span is not None)
+            and value_span is not None
+            and not _negated_between(clause, subject_span, value_span)
+            and not _asserts_a_competing_value(clause, subjects, values, value_type)
+        ):
+            stated = True
             continue
-        if _negated_between(clause, subject_span, value_span):
-            continue
-        if _asserts_a_competing_value(clause, subjects, values, value_type):
-            continue
-        return True
-    return False
+        if _contradicts_the_claim(clause, subjects, values, value_type):
+            return False
+    return stated
 
 
 def _claim_units(answer: str) -> list[tuple[str, list[str]]]:
@@ -981,6 +1114,9 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     identity_certified_calls = 0
     uncertified_identity_calls = 0
     unacceptable_attribution_calls = 0
+    #: Runs whose per-call identity records did not cover every physical call. Any such
+    #: run makes the accounting unsound, so it is reported and the gate fails.
+    identity_record_gaps = 0
     attribution_statuses: Counter[str] = Counter()
 
     for item in corpus["items"]:
@@ -1062,32 +1198,46 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
             if score.false_complete:
                 false_complete += 1
 
-            # Which model actually answered, accounted per physical call. A substitution
-            # is a hard failure: an answer from a different model is not the answer these
-            # thresholds describe. A run publishes one identity for all of its calls, and
-            # the reader publishes none at all when its calls disagreed - so a divergent
-            # run contributes every one of its calls to the uncertified count rather than
-            # letting the first-reported identity stand for the rest.
-            provenance = envelope.get("provenance") or {}
+            # Which model actually answered, accounted per physical call - from the
+            # reader's own per-call records, never from one envelope statement multiplied
+            # by the call count. That multiplication was the false certification this
+            # accounting exists to prevent: a run that fell back twice before answering
+            # credited all three calls with the winner's identity, when two of them
+            # reported no identity at all. A substitution is still a hard failure: an
+            # answer from a different model is not the answer these thresholds describe.
+            records = reader_result.provenance.call_identities
             calls = reader_result.cost.attempts_started
-            status = str(provenance.get("attribution_status") or "unknown")
-            attribution_statuses[status] += calls
-            observed = _observed_model(envelope)
-            if observed is None:
-                # Nothing was observed, so nothing about identity can be certified.
-                runs_without_observed_model += 1
+            if len(records) != calls:
+                # The reader pads its records to the physical-call count, so a mismatch
+                # means the accounting itself is wrong. Certifying anything from records
+                # that do not cover every call would be the same false pass by another
+                # route, so the whole run is counted uncertified and the gate fails.
+                identity_record_gaps += 1
                 uncertified_identity_calls += calls
+                attribution_statuses["record_gap"] += calls
+                continue_identity = False
             else:
-                resolved_models[observed] += calls
-                if observed != READER_MODEL:
-                    wrong_model_calls += calls
-            if status == "mismatch":
-                wrong_model_calls += calls
-            if calls:
+                continue_identity = True
+            if not records:
+                runs_without_observed_model += 1
+            for record in records if continue_identity else ():
+                status = record.attribution.value
+                attribution_statuses[status] += 1
+                observed = record.observed_model
+                if not observed:
+                    # This call observed nothing, so nothing about its identity can be
+                    # certified - whatever any other call in the same run reported.
+                    uncertified_identity_calls += 1
+                else:
+                    resolved_models[observed] += 1
+                    if observed != READER_MODEL:
+                        wrong_model_calls += 1
+                if status == "mismatch":
+                    wrong_model_calls += 1
                 if status not in ACCEPTABLE_ATTRIBUTION:
-                    unacceptable_attribution_calls += calls
+                    unacceptable_attribution_calls += 1
                 elif observed == READER_MODEL:
-                    identity_certified_calls += calls
+                    identity_certified_calls += 1
 
             if item["answerable"] and not answer.strip():
                 answerable_no_match += 1
@@ -1157,6 +1307,9 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
             "unacceptable_attribution_calls": unacceptable_attribution_calls,
             "acceptable_attribution_statuses": sorted(ACCEPTABLE_ATTRIBUTION),
             "attribution_statuses_by_call": dict(attribution_statuses),
+            # Runs whose records did not cover every physical call. Must be zero: a gap
+            # means the per-call accounting cannot see one of the calls it is certifying.
+            "identity_record_gaps": identity_record_gaps,
         },
         # Which corpus items the core refused, by name, so a refusal cannot move between
         # cases while the totals stay put.
@@ -1175,6 +1328,12 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         # when it was written, and the release attestation has to pin both.
         "scorer_sha256": _scorer_hash(),
         "reviewed_commit": _reviewed_commit(),
+        # The surface this score was measured through, and the caps it ran under. The
+        # release attestation binds a number to both: a score is only about this release
+        # if it came from a production-equivalent route under this tree's ceilings.
+        "route": _route_facts(),
+        "effective_provider_config": _effective_provider_config(),
+        "effective_provider_config_sha256": _config_hash(_effective_provider_config()),
         "configuration": {
             "requested_model": READER_MODEL,
             "max_chunks": 8,
@@ -1222,6 +1381,7 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     assert wrong_model_calls == 0, report
     assert set(resolved_models) <= {READER_MODEL}, report
     assert runs_without_observed_model == 0, report
+    assert identity_record_gaps == 0, report
     assert uncertified_identity_calls == 0, report
     assert unacceptable_attribution_calls == 0, report
     assert identity_certified_calls == attempts_total, report
@@ -1728,6 +1888,73 @@ def test_the_negation_that_used_to_score_correct_now_fails():
 def test_a_wrong_value_with_no_negation_also_fails():
     """ "max_retries is 4" has no negation to catch and must still fail on the value."""
     assert _scored("max_retries is 4 [c1]").correct is False
+
+
+def test_a_unit_that_states_the_value_and_then_takes_it_back_does_not_score():
+    """The exact repros: a unit that contradicts itself was credited by its first clause.
+
+    `_claim_stated` returned on the first satisfying clause, so both of these scored
+    correct - each states the expected value, then withdraws it, and each carries a
+    citation that genuinely verifies. The answer is wrong; the evidence is real; only
+    reading the *whole* unit catches it.
+    """
+    # Names the subject again with a competing value.
+    assert _scored("max_retries is 3 but max_retries is 4 [c1]").correct is False
+    # Refers back instead of naming it: "which" retracts, "it" replaces.
+    assert _scored("max_retries is 3, which is not correct; it is 4 [c1]").correct is False
+    # The diagnostic still shows why a substring rule was fooled by them.
+    assert _scored("max_retries is 3 but max_retries is 4 [c1]").facts_present is True
+
+
+def test_a_competing_value_the_unit_denies_is_not_a_contradiction():
+    """ "it is not 4" refuses the competitor, which supports the claim.
+
+    The distinction the contradiction rule has to make: a clause asserting a rival value
+    takes the answer back, and a clause *denying* one confirms it. Reading "not" as fatal
+    wherever it appears would have failed every answer that ruled an alternative out.
+    """
+    assert _scored("max_retries is 3; it is not 4 [c1]").correct is True
+    assert _scored("max_retries is 3, and it is never 4 [c1]").correct is True
+
+
+def test_an_unrelated_second_assertion_is_not_read_as_a_rival_value():
+    """Contradiction is subject-bound, or every multi-fact answer would collapse.
+
+    "p95_ms is 250, and error_rate is 0.01" carries two numbers, and only one of them is
+    about the subject. A rule that flagged any competing number in the unit would score
+    this - a correct answer - as self-contradictory.
+    """
+    expected = {"subject": "p95_ms", "value": "250", "value_type": "number"}
+    assert _claim_stated(expected, "p95_ms is 250, and error_rate is 0.01") is True
+    assert _claim_stated(expected, "p95_ms is 250, and it is 300") is False
+
+
+def test_a_bare_repudiation_with_no_replacement_still_withdraws_the_claim():
+    """ "which is not correct" says the answer is wrong without saying what is right.
+
+    A scorer that only looked for rival *values* credited this: there is no competing
+    number to find. What withdraws the claim is the negation attached to a clause that
+    refers back to the subject and asserts nothing of its own.
+    """
+    expected = {"subject": "max_retries", "value": "3", "value_type": "number"}
+    assert _claim_stated(expected, "max_retries is 3, which is not correct") is False
+    assert _claim_stated(expected, "max_retries is 3; that is unspecified") is False
+    # A clause with neither a negation nor a rival value is left alone: this rule reads
+    # negation, not sentiment, and "wrong" is not in the negation vocabulary.
+    assert _claim_stated(expected, "max_retries is 3, which is wrong") is True
+
+
+def test_the_contradiction_rule_leaves_ordinary_phrasings_alone():
+    """Every shape the corpus's own answers take must still score."""
+    expected = {"subject": "max_retries", "value": "3", "value_type": "number"}
+    for text in (
+        "max_retries is 3",
+        "max_retries is 3.",
+        "The max_retries setting is 3, so retries stop there",
+        "max_retries is 3, and backoff is exponential",
+        "Retries: max_retries is 3",
+    ):
+        assert _claim_stated(expected, text) is True, text
 
 
 def test_the_correct_answer_still_scores_correct():

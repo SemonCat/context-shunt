@@ -13,8 +13,9 @@ import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { classifyAttribution } from "../src/provenance.js";
 import {
-  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, READER_SYSTEM_PROMPT,
-  UnavailableProvider, buildUserMessage, responseAttribution,
+  type CallIdentity, FallbackChainProvider, type HostBridgeCall, HostBridgeProvider,
+  type ModelResponse, READER_SYSTEM_PROMPT, UnavailableProvider, buildUserMessage,
+  observedModel, responseAttribution,
 } from "../src/provider.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
@@ -23,7 +24,7 @@ import { Deadline, FakeClock } from "../src/clock.js";
 import { estimateTokens as accountingTokens } from "../src/accounting.js";
 import { estimateTokens, planChunks } from "../src/chunking.js";
 import { referencedIds } from "../src/citations.js";
-import { Reader } from "../src/reader.js";
+import { MAX_RAW_CITATIONS, Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
 import { SpillEngine } from "../src/spill.js";
@@ -1749,5 +1750,259 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(result.cost.outputTokens).toBe(accountingTokens(new TextEncoder().encode(text).length));
     expect(result.cost.outputTokens as number).toBeGreaterThan(0);
     expect(result.envelope.answer ?? "").toBe("");
+  });
+});
+
+describe("release blockers: raw-citation bound, nested chains, bridge usage, per-call identity", () => {
+  const tmp = () => mkdtempSync(join(tmpdir(), "shunt-blockers-"));
+  const CAP_SOURCE = Array.from(
+    { length: 20 },
+    (_v, i) => `key${String(i + 1).padStart(2, "0")} = value${String(i + 1).padStart(2, "0")}\n`,
+  ).join("");
+  const OVER_BOUND = MAX_RAW_CITATIONS + 4;
+
+  function fixture(content = CAP_SOURCE) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    return { registry, entry: registry.register("sess", snapshotBytes(enc(content))) };
+  }
+
+  function request(entry: { sourceId: string; snapshot: { snapshotId: string } }) {
+    return {
+      schema_version: "1.0",
+      request_id: "req_blockers",
+      operation: "read",
+      question: "Which keys are configured and to what?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    };
+  }
+
+  const manyCitations = (count: number) =>
+    Array.from({ length: count }, (_v, i) => {
+      const line = (i % 20) + 1;
+      return {
+        id: `c${i + 1}`,
+        line_start: line,
+        line_end: line,
+        quote: `key${String(line).padStart(2, "0")} = value${String(line).padStart(2, "0")}`,
+      };
+    });
+
+  // `raw.slice(0, 64)` cut before anything discovered c65 was cited, so a well-formed
+  // reply well under the byte cap came back `ok` / `complete: true` with nothing
+  // published: a request whose answer a ceiling removed reported no ceiling.
+  it("reports a claim whose citation the raw bound cut", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 65 is set to value05.", citation_ids: ["c65"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.answer ?? "").toBe("");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.coverage?.complete).toBe(false);
+  });
+
+  it("leaves an answer the bound did not touch complete", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 1 is set to value01.", citation_ids: ["c1"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toContain("value01");
+    expect(env.status).toBe("ok");
+    expect(env.coverage?.complete).toBe(true);
+  });
+
+  // `normalizeClaims` is fail-closed on any unknown id, so the surviving citation buys
+  // the claim nothing and the ceiling is still why it is gone.
+  it("reports a claim citing one good and one cut citation", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 1 is set to value01.", citation_ids: ["c1", "c66"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.answer ?? "").toBe("");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+  });
+
+  // The discriminator is the bound, not "the id is missing": nothing was cut here, so the
+  // reply cited something that never existed and NO_MATCH is the truthful answer.
+  it("still blames the model for an id nobody declared", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 99 is set to nothing.", citation_ids: ["c99"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(4))]),
+    ).answer("sess", request(entry));
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
+  });
+
+  const unavailableBridge: HostBridgeCall = async () => {
+    throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+  };
+
+  // Every rule the chain enforces is written per entry - one entry, one physical call. A
+  // nested chain made several behind one entry, so `attempts` counted one and the winner's
+  // aggregate reply was judged against a single-call ceiling.
+  it("flattens a nested chain into one ordered candidate list", () => {
+    const a = new HostBridgeProvider(unavailableBridge, L, "a", "openai");
+    const b = new HostBridgeProvider(unavailableBridge, L, "b", "openai");
+    const c = new HostBridgeProvider(unavailableBridge, L, "c", "openai");
+    const nested = new FallbackChainProvider(a, [new FallbackChainProvider(b, [c], L)], L);
+    expect((nested as unknown as { chain: unknown[] }).chain).toEqual([a, b, c]);
+    const deeper = new FallbackChainProvider(
+      new FallbackChainProvider(a, [new FallbackChainProvider(b, [c], L)], L),
+      [],
+      L,
+    );
+    expect((deeper as unknown as { chain: unknown[] }).chain).toEqual([a, b, c]);
+    expect(nested.target.model).toBe("a");
+  });
+
+  it("refuses a nested chain built with other limits rather than widening it", () => {
+    const innerLimits = narrowLimits(L, { maxOutputTokensPerCall: 64 });
+    const inner = new FallbackChainProvider(
+      new HostBridgeProvider(unavailableBridge, innerLimits, "b", "openai"),
+      [],
+      innerLimits,
+    );
+    expect(
+      () =>
+        new FallbackChainProvider(
+          new HostBridgeProvider(unavailableBridge, L, "a", "openai"),
+          [inner],
+          L,
+        ),
+    ).toThrow(/NESTED_CHAIN_LIMITS_DIFFER/);
+  });
+
+  // A malformed usage count is refused *while the usage object is built*, so no response
+  // existed and the error carried nothing: a call that returned hundreds of bytes was
+  // published as `outputTokens: 0`.
+  it("keeps the reply bytes when a bridge usage claim is refused", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
+    const text = claimsJson(
+      [{ text: "Alpha is one.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" }],
+    );
+    let calls = 0;
+    const bridge: HostBridgeCall = async () => {
+      calls += 1;
+      // Negative is not a count.
+      return { text, usage_exact: true, input_tokens: 5, output_tokens: -1 };
+    };
+    const result = await new Reader(
+      registry,
+      new HostBridgeProvider(bridge, L, READER_MODEL, "openai"),
+    ).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_badusage",
+      operation: "read",
+      question: "What is alpha?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(result.cost.attemptsUsageComplete).toBe(0);
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.outputTokens as number).toBeGreaterThanOrEqual(
+      accountingTokens(new TextEncoder().encode(text).length),
+    );
+  });
+
+  class Unavailable {
+    constructor(private readonly name: string) {}
+    get target() {
+      return { model: this.name, provider: "openai" };
+    }
+    complete(): Promise<ModelResponse> {
+      throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+    }
+  }
+
+  // One identity times `attemptsStarted` certified every call in a run that fell back:
+  // only the last one reported which model ran, and the other two reported nothing.
+  it("records identity per physical call rather than multiplying the winner's", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const reply = claimsJson(
+      [{ text: "The mode is fast.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }],
+    );
+    const chain = new FallbackChainProvider(
+      new Unavailable("down-a") as never,
+      [new Unavailable("down-b") as never, new FakeLuna([reply])],
+      L,
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_identity",
+      operation: "read",
+      question: "What is the mode?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(result.envelope.code).toBe("ANSWERED");
+    const records = (result.provenance.callIdentities ?? []) as CallIdentity[];
+    expect(records.length).toBe(result.cost.attemptsStarted);
+    expect(records.length).toBe(3);
+    const observed = records.map(observedModel);
+    expect(observed.filter((m) => m === READER_MODEL).length).toBe(1);
+    expect(observed.filter((m) => m === "").length).toBe(2);
+    expect(records.filter((r) => r.attribution === "unknown").length).toBe(2);
+  });
+
+  it("records exactly one identity for a single call", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const reply = claimsJson(
+      [{ text: "The mode is fast.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }],
+    );
+    const result = await new Reader(registry, new FakeLuna([reply])).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_one",
+      operation: "read",
+      question: "What is the mode?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    const records = (result.provenance.callIdentities ?? []) as CallIdentity[];
+    expect(records.length).toBe(1);
+    expect(result.cost.attemptsStarted).toBe(1);
+    expect(observedModel(records[0] as CallIdentity)).toBe(READER_MODEL);
   });
 });

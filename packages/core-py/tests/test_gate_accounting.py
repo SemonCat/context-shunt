@@ -1015,3 +1015,244 @@ def test_a_valid_usage_claim_is_still_reported_exactly(tmp_path):
     )
     assert result.cost.method is TokenMethod.EXACT
     assert result.cost.attempts_usage_complete == 1
+
+
+# -- nested chains, bridge usage bytes, and per-call identity ----------------------------
+
+
+def test_a_nested_chain_is_flattened_into_one_ordered_candidate_list():
+    """The release blocker: a chain inside a chain broke every per-constituent invariant.
+
+    Every rule `FallbackChainProvider` enforces is written per entry - one entry, one
+    physical call. A nested chain made three physical calls behind one entry, so the outer
+    `attempts` counted one, the shared input-token debit never charged the inner
+    candidates, and the winner's aggregate reply was judged against a *single*-call
+    ceiling. Flattening restores all three without changing the candidate order.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    def bridge(_name):
+        def call(**_kwargs):
+            raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+        return call
+
+    a = HostBridgeProvider(bridge("a"), L, "a", provider="openai")
+    b = HostBridgeProvider(bridge("b"), L, "b", provider="openai")
+    c = HostBridgeProvider(bridge("c"), L, "c", provider="openai")
+    nested = FallbackChainProvider(a, [FallbackChainProvider(b, [c], L)], L)
+    assert nested._chain == [a, b, c]
+    # And recursively, however deep it was built.
+    deeper = FallbackChainProvider(
+        FallbackChainProvider(a, [FallbackChainProvider(b, [c], L)], L), [], L
+    )
+    assert deeper._chain == [a, b, c]
+    # The head's target is still the first candidate's, so `target` is unchanged.
+    assert nested.target.model == "a"
+
+
+def test_a_nested_chain_built_with_other_limits_is_refused_not_widened():
+    """Flattening makes the outer limits govern every candidate, so a mismatch is fatal.
+
+    Silently widening a ceiling someone set deliberately is the one outcome worse than
+    refusing the arrangement, so this fails closed at construction rather than at the
+    first call that would have exceeded the inner cap.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    def call(**_kwargs):
+        raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+    inner_limits = L.narrow(max_output_tokens_per_call=64)
+    inner = FallbackChainProvider(
+        HostBridgeProvider(call, inner_limits, "b", provider="openai"), [], inner_limits
+    )
+    with pytest.raises(ShuntError) as caught:
+        FallbackChainProvider(HostBridgeProvider(call, L, "a", provider="openai"), [inner], L)
+    assert caught.value.detail == "NESTED_CHAIN_LIMITS_DIFFER"
+
+
+def test_a_flattened_chain_never_transmits_more_prompts_than_the_budget_allows(tmp_path):
+    """Physical calls stay inside `max_request_input_tokens`, nesting or not.
+
+    Nesting used to hide candidates from the shared debit entirely: the inner chain
+    received no `input_budget`, so its extra calls transmitted the whole prompt again
+    against nobody's allowance. Flattened, every candidate past the first is debited, and
+    the one the budget cannot afford is never started.
+    """
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    seen = {"calls": 0}
+
+    def unavailable(**_kwargs):
+        seen["calls"] += 1
+        raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    question = "What is the mode?"
+    request = _read_request(entry, question)
+    # A budget for exactly two prompts, and no outer retry to confuse the count with.
+    limits = L.narrow(
+        max_request_input_tokens=_prompt_tokens(entry, question) * 2,
+        max_transient_retries=0,
+    )
+    inner = FallbackChainProvider(
+        HostBridgeProvider(unavailable, limits, "b", provider="openai"),
+        [HostBridgeProvider(unavailable, limits, "c", provider="openai")],
+        limits,
+    )
+    chain = FallbackChainProvider(
+        HostBridgeProvider(unavailable, limits, "a", provider="openai"), [inner], limits
+    )
+    result = Reader(registry, chain, limits=limits).answer("sess", request)
+    # Three candidates, a budget for two prompts: the third is never started. Before
+    # flattening, the inner chain saw no budget at all and made both of its calls.
+    assert seen["calls"] == 2
+    assert result.cost.attempts_started == 2
+    # Nothing was answered, and the envelope says the chunk was not covered rather than
+    # reporting an answer the budget stopped it from producing.
+    assert result.envelope.get("answer", "") == ""
+    assert result.envelope["coverage"]["complete"] is False
+
+
+def _prompt_tokens(entry, question: str, limits=L) -> int:
+    """What the reader debits for one physical call of this chunk's prompt."""
+    from context_shunt.chunking import estimate_tokens as chunk_tokens
+    from context_shunt.chunking import plan
+    from context_shunt.provider import READER_SYSTEM_PROMPT, build_user_message
+
+    chunk = plan(
+        [(entry.source_id, entry.snapshot, {"kind": "all"})],
+        max_chunks=8,
+        limits=limits,
+        question=question,
+    ).chunks[0]
+    return chunk_tokens(READER_SYSTEM_PROMPT, limits) + chunk_tokens(
+        build_user_message(question, chunk.text, chunk.locator), limits
+    )
+
+
+class _BadBridgeUsage:
+    """A host bridge whose reply is intact and whose usage claim is not."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.calls = 0
+
+    def __call__(self, **_kwargs):
+        self.calls += 1
+        # Negative is not a count. `_usage_value` refuses it before any response exists,
+        # which is the path that used to lose the reply's measured bytes entirely.
+        return {"text": self.text, "usage_exact": True, "input_tokens": 5, "output_tokens": -1}
+
+
+def test_a_bridge_usage_claim_this_core_refuses_still_keeps_the_reply_bytes(tmp_path):
+    """The release blocker: `_unpack` raised before the reply could be measured.
+
+    `_usage_value` rejects a malformed count *while the usage object is being built*, so
+    the `ModelResponse` was never constructed and the error carried nothing. The call had
+    reached the provider, transmitted the prompt and returned hundreds of bytes of text -
+    all of which was published as `output_tokens: 0`. The claim is still refused whole; the
+    measurement this core made itself survives it.
+    """
+    from context_shunt.provider import HostBridgeProvider
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha = 1\n"))
+    text = answer_json(
+        "Alpha is one [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+    )
+    bridge = _BadBridgeUsage(text)
+    result = Reader(registry, HostBridgeProvider(bridge, L, provider="openai")).answer(
+        "sess", _read_request(entry, "What is alpha?")
+    )
+    assert bridge.calls >= 1
+    cost = result.cost
+    assert cost.attempts_started >= 1
+    # None of the host's numbers are believed.
+    assert cost.attempts_usage_complete == 0
+    assert cost.method is TokenMethod.BYTES_DIV_4
+    # The bytes are: one refused claim must not read as a call that produced nothing.
+    assert cost.output_tokens >= estimate_tokens(len(text.encode("utf-8")))
+    assert cost.output_tokens > 0
+
+
+class _Unavailable:
+    """A candidate that always fails on availability, reporting no identity."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    @property
+    def target(self) -> ProviderTarget:
+        return ProviderTarget(model=self.name, provider="openai")
+
+    def complete(self, **_kwargs):
+        raise ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+
+
+def test_identity_is_recorded_per_physical_call_not_multiplied_by_the_attempt_count(tmp_path):
+    """The release blocker: one identity times `attempts_started` certified every call.
+
+    A run that fell back twice before answering made three physical calls, and only the
+    third reported which model ran. Multiplying the winner's identity by the attempt count
+    - the only arithmetic available without per-call records - certified all three, which
+    is precisely the claim no evidence supports. There is now one record per call, and the
+    two that observed nothing say so.
+    """
+    from context_shunt.provider import FallbackChainProvider
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    reply = answer_json(
+        "The mode is fast [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "mode = fast"}],
+    )
+    chain = FallbackChainProvider(
+        _Unavailable("down-a"), [_Unavailable("down-b"), FakeLuna(replies=[reply])], L
+    )
+    result = Reader(registry, chain).answer("sess", _read_request(entry, "What is the mode?"))
+    assert result.envelope["code"] == "ANSWERED"
+    records = result.provenance.call_identities
+    # One record per physical call, which is what makes a count over them a call count.
+    assert len(records) == result.cost.attempts_started == 3
+    observed = [r.observed_model for r in records]
+    # Exactly one call observed a model. The other two are unobserved, not the winner's.
+    assert observed.count(L.reader_model) == 1
+    assert observed.count("") == 2
+    statuses = [r.attribution.value for r in records]
+    assert statuses.count("unknown") == 2
+    assert "actual" in statuses or "resolved" in statuses
+
+
+def test_a_single_call_still_records_exactly_one_identity(tmp_path):
+    """The ordinary case: one call, one record, and it describes that call."""
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    reply = answer_json(
+        "The mode is fast [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "mode = fast"}],
+    )
+    result = Reader(registry, FakeLuna(replies=[reply])).answer(
+        "sess", _read_request(entry, "What is the mode?")
+    )
+    records = result.provenance.call_identities
+    assert len(records) == result.cost.attempts_started == 1
+    assert records[0].observed_model == L.reader_model
+    assert records[0].attribution.value in ("actual", "resolved")
+
+
+def test_a_failed_request_still_accounts_for_every_call_it_made(tmp_path):
+    """A chain that answered nothing made calls, and each is one record."""
+    from context_shunt.provider import FallbackChainProvider
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
+    chain = FallbackChainProvider(_Unavailable("down-a"), [_Unavailable("down-b")], L)
+    result = Reader(registry, chain).answer("sess", _read_request(entry, "What is the mode?"))
+    records = result.provenance.call_identities
+    assert len(records) == result.cost.attempts_started
+    assert result.cost.attempts_started >= 2
+    assert all(r.observed_model == "" for r in records)

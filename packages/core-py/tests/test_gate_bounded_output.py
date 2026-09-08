@@ -10,7 +10,7 @@ from context_shunt.guard import OutputGuardError, enforce, enforce_or_fixed
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.provenance import ResultKind
 from context_shunt.provider import FallbackChainProvider
-from context_shunt.reader import Reader
+from context_shunt.reader import MAX_RAW_CITATIONS, Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.spill import SpillEngine
@@ -665,3 +665,105 @@ def test_a_cap_does_not_relabel_a_verification_failure(tmp_path):
     )
     assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
     assert env["recovery"]["handles_valid"] is True
+
+
+# -- the raw-citation bound reports what it cut ------------------------------------------
+
+_OVER_BOUND = MAX_RAW_CITATIONS + 4
+
+
+def _many_citations(count: int) -> list[dict]:
+    """``count`` citations over a 20-line source, cycling the lines it can quote."""
+    return [
+        {
+            "id": f"c{i}",
+            "line_start": (i - 1) % 20 + 1,
+            "line_end": (i - 1) % 20 + 1,
+            "quote": f"key{(i - 1) % 20 + 1:02d} = value{(i - 1) % 20 + 1:02d}",
+        }
+        for i in range(1, count + 1)
+    ]
+
+
+def test_a_claim_whose_citation_the_raw_bound_cut_is_not_silently_dropped(tmp_path):
+    """The release blocker: `raw[:64]` sliced before anything discovered c65 was cited.
+
+    Sixty-eight citations are declared and the bound is sixty-four, so `c65` never becomes
+    a citation at all. The one surviving claim cites exactly that id, so
+    `normalize_claims` drops it for naming an id its own reply "never declared" - which is
+    the model's fault when it is true and this program's bound when it is not. The reply is
+    well formed and well under the byte cap, and it came back `ok` / `complete: true` with
+    nothing published: a request whose answer was cut by a ceiling reported no ceiling.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 65 is set to value05.", "citation_ids": ["c65"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["answer"] == ""
+    # Not NO_MATCH: the source did answer, and a ceiling is why nothing was published.
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+    assert env["coverage"]["complete"] is False
+
+
+def test_a_claim_the_bound_did_not_touch_still_publishes_completely(tmp_path):
+    """The bound only reports what it actually cost.
+
+    The same over-bound reply, but the surviving claim cites `c1` - inside the bound. The
+    citation it rests on verified, so nothing about this answer was lost and the envelope
+    must not claim otherwise. Sixty-seven unread citations are not dropped answer material.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 1 is set to value01.", "citation_ids": ["c1"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED" and "value01" in env["answer"]
+    assert env["status"] == "ok" and env["coverage"]["complete"] is True
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+
+
+def test_a_claim_citing_one_good_and_one_cut_citation_is_still_lost_to_the_ceiling(tmp_path):
+    """Surviving evidence does not rescue a claim, because the rule is fail-closed.
+
+    `normalize_claims` drops a claim on *any* unknown id, so a claim citing `c1` (inside
+    the bound) and `c66` (past it) is dropped whole - the valid citation buys it nothing.
+    The ceiling is still the reason, so this counts as material dropped, and a version of
+    the check that required the claim to be left with no valid id at all would have
+    under-reported exactly this case.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 1 is set to value01.", "citation_ids": ["c1", "c66"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["answer"] == ""
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+
+
+def test_a_claim_citing_an_id_nobody_declared_is_still_the_models_fault(tmp_path):
+    """The discriminator is the *bound*, not "the id is missing".
+
+    Four citations, well inside the bound, and a claim citing `c99`. Nothing was cut, so
+    there is no omission to report and no ceiling to blame: the reply cited something that
+    never existed, the claim is dropped, and `NO_MATCH` is the truthful answer.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(4)
+    claims = [{"text": "Key 99 is set to nothing.", "citation_ids": ["c99"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]

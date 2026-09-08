@@ -190,6 +190,14 @@ class Provenance:
     resolved: ModelIdentity = field(default_factory=ModelIdentity)
     reported: ModelIdentity = field(default_factory=ModelIdentity)
     fallback_used: bool | None = None
+    #: One identity record per physical provider call behind this request, in call order.
+    #: Deliberately **not** published by :meth:`to_dict`: the envelope contract is a
+    #: single statement about the answer, and per-call detail belongs to whoever is
+    #: auditing the calls rather than to every consumer of an answer. It exists because
+    #: the fields above describe the call that *answered* - multiplying them by
+    #: ``attempts_started`` is the one arithmetic that certifies calls no evidence
+    #: describes. Empty when nothing made a call.
+    call_identities: tuple[Any, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

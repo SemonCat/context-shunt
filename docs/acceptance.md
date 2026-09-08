@@ -13,6 +13,20 @@ reader lane, which `eval luna` owns. It does not block, and it is counted and re
 separately from `NOT_RUN`. Collapsing the two made `release all` incapable of exiting 0
 anywhere, because it waited on gates that were never coming.
 
+The two words are not interchangeable, and this document uses each for one thing only:
+
+* **`NOT_RUN`** — a *required* gate whose prerequisite is absent **here**. Supplying the
+  prerequisite (a checkout, a credential, a qualifying route) would make it run. It blocks
+  the release and exits 2. It is never a pass.
+* **`expected_unsupported`**, printed `N/A` — a gate that will not run **anywhere**,
+  because the seam it needs does not exist. No environment changes the answer, so it does
+  not block and is counted separately.
+
+Reporting the second as the first implied a checkout could fix it; reporting the first as
+the second would let a missing measurement look like a decision. Where an earlier revision
+of this document said `NOT_RUN by design`, the status is `expected_unsupported` and the
+table below says so.
+
 ## Deterministic unit gates
 
 `./scripts/verify unit all` first checks vendored contract parity, then runs both language
@@ -43,7 +57,7 @@ cores where applicable.
 | `./scripts/verify integration hermes --mode local` | Exercises the real Hermes checkout: hook ordering, three registered tools, model bridge/auxiliary precedence, attribution ceiling, and session lifecycle. `NOT_RUN` without both Hermes environment variables. |
 | `./scripts/verify integration openclaw --mode local` | Exercises the real OpenClaw checkout: hook/model runtime, three tools, source facts used by lifecycle/accounting, and host loader. `NOT_RUN` without the checkout variable. |
 | `./scripts/verify integration <host> --mode unsupported` | Deterministically proves post-tool mode stays disabled and safe capabilities remain usable. |
-| `./scripts/verify integration <host> --mode post-tool` | `NOT_RUN` by design on both current hosts because the required complete-capture/safe-replacement seam is unsupported. |
+| `./scripts/verify integration <host> --mode post-tool` | `expected_unsupported` (printed `N/A`) on both current hosts because the required complete-capture/safe-replacement seam does not exist. Not `NOT_RUN`: no checkout or credential changes the answer. |
 
 Mock adapter tests prove adapter behavior, not a live host. A host version change requires
 the local gate to be rerun and reviewed.
@@ -138,10 +152,11 @@ figure is reported too — the over-cap item alone is roughly 88% of that baseli
 crediting its counterfactual would make the headline a saving on a payload no lane can
 answer from.
 
-`./scripts/verify shadow reader` is **`NOT_RUN` unconditionally** — a decision, not a
-missing prerequisite. Scoring a model lane needs a fixed corpus, fixed thresholds and a
-fixed number of runs per item decided before the run, and `./scripts/verify eval luna` is
-the gate that owns those controls. Keying this off an environment variable would have
+`./scripts/verify shadow reader` is **`expected_unsupported` unconditionally** — a
+decision, not a missing prerequisite, which is exactly why it reports that status and not
+`NOT_RUN`. Scoring a model lane needs a fixed corpus, fixed thresholds and a fixed number
+of runs per item decided before the run, and `./scripts/verify eval luna` is the gate that
+owns those controls. Keying this off an environment variable would have
 printed a pass from the deterministic marker the moment a bridge appeared. The gates below
 are also never scored from a deterministic lane instead:
 

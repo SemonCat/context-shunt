@@ -260,9 +260,20 @@ boundary — a repository gap, not a host limitation, so closing it needs no hos
 
 Deterministic gates are implemented and require no live provider. Previously recorded
 real-host integration evidence covered 122 cases with 0 failures. The production-equivalent
-40-item Luna evaluation and provider benchmark remain `NOT_RUN`. Both post-tool gates also
-remain `NOT_RUN` because the required host seams are unsupported. `NOT_RUN` is never counted
-as a pass; see the [capability matrix](docs/capability-matrix.md) and
+40-item Luna evaluation and provider benchmark remain `NOT_RUN`: a live number is only
+reported as this project's when it comes from a route that preserves message roles,
+enforces the output cap **and** is production-equivalent, and no route in this repository
+is the third of those.
+
+The two non-pass statuses mean different things and the harness prints them differently:
+
+* `NOT_RUN` - a required gate whose prerequisite is absent *here*. Supply it and the gate
+  runs. It blocks the release, and it is never counted as a pass.
+* `expected_unsupported`, printed `N/A` - a gate that will not run *anywhere*, because the
+  seam it needs does not exist. Both post-tool gates and the shadow reader lane are this,
+  not `NOT_RUN`; no checkout or credential changes the answer, so they do not block.
+
+See the [capability matrix](docs/capability-matrix.md) and
 [acceptance gates](docs/acceptance.md).
 
 ## Shadow A/B, and what it does not prove
@@ -283,9 +294,11 @@ Five gates report `NOT_RUN`, and the harness will not score them from a lane tha
 answer the question they ask: task correctness, semantic evidence support, mechanical
 citation validity (the retrieval lane publishes no citations, so scoring it there would be
 a vacuous 100%), bounded follow-up rate, and net cost reduction — which additionally needs
-a versioned price table this repository does not have. The reader lane is `NOT_RUN`
-*unconditionally*, bridge or no bridge: scoring a model lane needs a fixed corpus and fixed
-thresholds, and [`eval luna`](docs/acceptance.md) is the gate that owns them.
+a versioned price table this repository does not have. The reader lane is
+`expected_unsupported` *unconditionally*, bridge or no bridge - a decision rather than a
+missing prerequisite, which is why it is not `NOT_RUN`: scoring a model lane needs a fixed
+corpus and fixed thresholds, and [`eval luna`](docs/acceptance.md) is the gate that owns
+them.
 
 Nothing here authorizes replacing a live compactor. The broker is additive; the rollout
 order and the evidence each step requires are in
