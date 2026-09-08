@@ -175,18 +175,19 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 
 | Category | Status |
 | --- | --- |
-| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability, store, inspect, accounting, artifact-import) | implemented; no host or provider needed; run them on the release commit for the result |
+| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability, store, inspect, accounting, artifact-import, bridge-contract) | implemented; no host or provider needed; run them on the release commit for the result |
 | `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
-| `integration <host> --mode post-tool` | NOT_RUN by design — the mode is unsupported on both hosts |
+| `integration <host> --mode post-tool` | `expected_unsupported` (printed `N/A`) — the mode is unsupported on both hosts, no environment enables it, and it does not block a release. Decided before the host prerequisite is consulted, because producing a checkout would not change the answer |
 | `shadow deterministic` | implemented — four-lane A/B over a fixed synthetic corpus; reports main-context reduction, evidence regression against the raw baseline, and model-free latency for real |
-| `shadow reader` | NOT_RUN — task correctness, semantic evidence support, mechanical citation validity and follow-up rate need live reader access; net cost reduction additionally needs a pricing table this repository does not have |
+| `shadow reader` | `expected_unsupported` (printed `N/A`) — task correctness, semantic evidence support, mechanical citation validity and follow-up rate are scored by `eval luna`, which owns the fixed corpus, thresholds and runs-per-item; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
 | `benchmark all` | includes a NOT_RUN provider half: reader latency and token cost need live Luna |
-| `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna |
+| `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna **or** without a route that preserves the system/user role split and forwards the reader's output cap (see [Acceptance](acceptance.md#reader-evaluation)) |
+| `release attest` | implemented — attests the commit, a clean tree, the corpus/prompt/scorer/route/provider-config hashes, and the per-physical-call model identities behind the live evidence; NOT_RUN while that live evidence is absent |
 | `packaging all` | builds and inspects archives; clean-installs/imports/uninstalls both npm packages, the Python wheel, and the Hermes copy bundle |
-| `release all` | runs everything; returns `NOT_RUN` while `eval luna` and the provider benchmark lack live Luna access |
+| `release all` | runs everything and finishes with the attestation; exits 0 exactly when every **required** gate passed. `expected_unsupported` gates do not block; `eval luna`, `benchmark provider` and `release attest` are required, so it returns `NOT_RUN` while they lack a live qualifying route |
 
 ## Shadow rollout, and what has to be true before anything is replaced
 

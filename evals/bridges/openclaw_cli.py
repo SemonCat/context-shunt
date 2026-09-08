@@ -117,6 +117,28 @@ DEFAULT_THINKING = "low"
 LATENCIES_MS: list[int] = []
 
 
+#: What this route can and cannot do, read by the release gates and recorded verbatim in
+#: the attestation. Both of the properties a required live gate insists on are **false**
+#: here, and neither is fixable at this surface: `openclaw infer model run` takes one
+#: `--prompt` and has no output-token flag. A gate that scored through this route would be
+#: measuring a different prompt under no ceiling and reporting it as the product's number,
+#: so the release gates report NOT_RUN with this reason instead. See
+#: `bridges.openclaw_inhost` for the route that does provide both.
+BRIDGE: dict[str, object] = {
+    "id": "openclaw_cli",
+    "host": "openclaw",
+    "route_kind": "cli_single_prompt",
+    "preserves_roles": False,
+    "enforces_output_cap": False,
+    "forwards_usage": False,
+    "production_equivalent": False,
+    "production_gap": (
+        "the CLI takes a single --prompt, so the reader's system prompt is concatenated "
+        "into the user turn and max_output_tokens is not passed to the provider at all"
+    ),
+}
+
+
 class BridgeError(RuntimeError):
     """The host could not serve the call. Carries no prompt or completion text."""
 

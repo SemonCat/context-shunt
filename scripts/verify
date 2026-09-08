@@ -3,13 +3,27 @@
 
 Exit codes are the contract:
 
-* ``0``  every selected gate passed, and each one collected at least one case.
+* ``0``  every *required* gate passed, and each one collected at least one case.
 * ``1``  an assertion failed, a corpus was empty, or a gate is not implemented.
-* ``2``  a gate needs a prerequisite that is absent (a live host, a live model). It is
-         reported as ``NOT_RUN`` - never as a pass, and never silently skipped.
+* ``2``  a required gate needs a prerequisite that is absent (a live host, a live model).
+         It is reported as ``NOT_RUN`` - never as a pass, and never silently skipped.
 
 Deterministic gates never report ``NOT_RUN``: they run from the repository alone. Opt-in
 gates (real host integration, live Luna evals, provider benchmarks) say what is missing.
+
+Required, unavailable, and unsupported are three different things
+-----------------------------------------------------------------
+``NOT_RUN`` used to cover two unlike states, and that made ``release all`` incapable of
+exiting 0 in any environment. A live reader gate with no bridge is a *required* gate whose
+prerequisite is absent - the release is not verified until it runs, so it must block. The
+oversized post-tool mode and the shadow reader lane are different: both are disabled *by
+design*, on evidence recorded in ``docs/capability-matrix.md`` and in ``run_shadow``
+respectively, and no environment will ever make them run. Waiting for them is waiting for
+something that is not coming.
+
+They are now reported as ``EXPECTED_UNSUPPORTED``, which is printed, counted and written
+to the report separately, and does not block. Every other absent prerequisite still
+blocks, so ``release all`` exits 0 exactly when every required gate passed.
 
 The ``shadow`` suite is deliberately split the same way. ``shadow deterministic`` runs
 from the repository and reports the two gates that can be measured without a provider;
@@ -24,6 +38,7 @@ path from a fixture is written there.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -43,6 +58,10 @@ PY = ROOT / ".venv" / "bin" / "python"
 NODE_BIN = ROOT / "node_modules" / ".bin"
 
 EXIT_OK, EXIT_FAIL, EXIT_NOT_RUN = 0, 1, 2
+
+#: A gate that is disabled by design and will not run in any environment. Distinct from
+#: ``not_run``, which is a required gate whose prerequisite happens to be absent here.
+STATUS_EXPECTED_UNSUPPORTED = "expected_unsupported"
 
 CORE_TS = ROOT / "packages" / "core-ts"
 OPENCLAW_ADAPTER = ROOT / "adapters" / "openclaw"
@@ -68,6 +87,10 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     # Python-only: the import boundary lives in the Python core, and the OpenClaw
     # capability report says so rather than implying a TypeScript twin exists.
     "artifact-import": ("gate_artifact_import", []),
+    # Python-only: what each *live reader route* actually does. Deterministic - it drives
+    # each bridge against a stub - and it is what makes the live gates' refusal to score
+    # through a role-collapsing route trustworthy rather than a comment.
+    "bridge-contract": ("bridge_contract", []),
 }
 
 SHADOW_GATES = ("deterministic", "reader")
@@ -88,9 +111,17 @@ class GateResult:
 
     @property
     def exit_code(self) -> int:
-        return {"pass": EXIT_OK, "fail": EXIT_FAIL, "not_run": EXIT_NOT_RUN}[
-            self.status
-        ]
+        return {
+            "pass": EXIT_OK,
+            "fail": EXIT_FAIL,
+            "not_run": EXIT_NOT_RUN,
+            STATUS_EXPECTED_UNSUPPORTED: EXIT_OK,
+        }[self.status]
+
+    @property
+    def blocks_release(self) -> bool:
+        """Whether this result stops a release. An unsupported-by-design gate does not."""
+        return self.status in ("fail", "not_run")
 
 
 # -- process helpers -------------------------------------------------------
@@ -253,6 +284,62 @@ def _openclaw_prereq() -> tuple[bool, str]:
     return True, ""
 
 
+#: Properties a route must have before a *live* number measured through it may be reported
+#: as this project's. Both are about whether the measurement describes the product: a route
+#: that folds the system prompt into the user turn is answering a different prompt, and one
+#: that drops ``max_output_tokens`` is not making the bounded call the reader budgets for.
+#: `unit bridge-contract` verifies each route against its own declaration.
+REQUIRED_BRIDGE_PROPERTIES = ("preserves_roles", "enforces_output_cap")
+
+
+def _bridge_descriptor(spec: str) -> tuple[dict | None, str]:
+    """Import ``module:callable`` the way an operator does and read its ``BRIDGE`` block."""
+    module_name = spec.partition(":")[0]
+    evals = str(ROOT / "evals")
+    if evals not in sys.path:
+        sys.path.insert(0, evals)
+    try:
+        import importlib
+
+        module = importlib.import_module(module_name)
+    except Exception as exc:  # noqa: BLE001 - the reason is reported, not raised
+        return None, f"bridge {module_name!r} could not be imported ({type(exc).__name__})"
+    descriptor = getattr(module, "BRIDGE", None)
+    if not isinstance(descriptor, dict):
+        return None, f"bridge {module_name!r} declares no BRIDGE descriptor"
+    return descriptor, ""
+
+
+def _luna_prereq() -> tuple[bool, str]:
+    """What a live reader gate needs before its number can describe this project.
+
+    Three separate things, and the third is the one that was missing. The opt-in flag says
+    an operator intends a live run; the bridge spec says which route; and the route's own
+    declaration says whether a measurement through it describes the product at all. Scoring
+    through a role-collapsing, cap-dropping route produced a number about a different prompt
+    under no ceiling, which is worse than no number.
+    """
+    if not os.environ.get("CONTEXT_SHUNT_LUNA_EVAL"):
+        return False, (
+            "set CONTEXT_SHUNT_LUNA_EVAL=1 and provide a host bridge that serves "
+            "gpt-5.6-luna; a mock is never a pass"
+        )
+    spec = os.environ.get("CONTEXT_SHUNT_LUNA_BRIDGE", "")
+    if not spec or ":" not in spec:
+        return False, "set CONTEXT_SHUNT_LUNA_BRIDGE=module:callable naming a live route"
+    descriptor, why = _bridge_descriptor(spec)
+    if descriptor is None:
+        return False, why
+    lacking = [key for key in REQUIRED_BRIDGE_PROPERTIES if not descriptor.get(key)]
+    if lacking:
+        return False, (
+            f"route {descriptor.get('id', spec)!r} lacks {', '.join(lacking)}: "
+            f"{descriptor.get('production_gap', 'no reason declared')}. A live number "
+            "measured through it would not describe this reader"
+        )
+    return True, ""
+
+
 def run_integration(host: str, mode: str) -> list[GateResult]:
     if host == "all":
         results: list[GateResult] = []
@@ -312,6 +399,29 @@ def run_integration(host: str, mode: str) -> list[GateResult]:
             )
         ]
 
+    if mode == "post-tool":
+        # Both supported hosts are proven unable to give the required capture/replacement
+        # order (docs/capability-matrix.md), so this gate will not run in any environment
+        # - it is disabled by design, not waiting on a prerequisite. Decided *before* the
+        # host prerequisite for exactly that reason: producing a checkout would not change
+        # the answer, and reporting "missing prerequisite" implied it would. The
+        # fail-closed behaviour is still gated, deterministically, by `--mode unsupported`.
+        return [
+            GateResult(
+                "integration",
+                gate,
+                STATUS_EXPECTED_UNSUPPORTED,
+                0,
+                "mode disabled on this host: capture happens after truncation "
+                "(see docs/capability-matrix.md); run --mode unsupported instead",
+                time.monotonic() - started,
+                [
+                    f"EXPECTED_UNSUPPORTED {gate}: the mode stays disabled on this host, "
+                    "and no environment enables it"
+                ],
+            )
+        ]
+
     ok, why = _hermes_prereq() if host == "hermes" else _openclaw_prereq()
     if not ok:
         return [
@@ -323,25 +433,6 @@ def run_integration(host: str, mode: str) -> list[GateResult]:
                 f"prerequisite missing: {why}",
                 time.monotonic() - started,
                 [f"NOT_RUN {gate}: {why}"],
-            )
-        ]
-
-    if mode == "post-tool":
-        # Both supported hosts are proven unable to give the required capture/replacement
-        # order (docs/capability-matrix.md). The honest result is NOT_RUN for the live
-        # gate plus a passing fail-closed gate, never a pass for an unsupported mode.
-        return [
-            GateResult(
-                "integration",
-                gate,
-                "not_run",
-                0,
-                "mode disabled on this host: capture happens after truncation "
-                "(see docs/capability-matrix.md); run --mode unsupported instead",
-                time.monotonic() - started,
-                [
-                    f"NOT_RUN {gate}: mode is unsupported on this host and stays disabled"
-                ],
             )
         ]
 
@@ -382,17 +473,17 @@ def run_eval(gate: str) -> list[GateResult]:
     if gate != "luna":
         return [GateResult("eval", gate, "fail", detail="unknown gate; known: luna")]
     started = time.monotonic()
-    if not os.environ.get("CONTEXT_SHUNT_LUNA_EVAL"):
+    ok, why = _luna_prereq()
+    if not ok:
         return [
             GateResult(
                 "eval",
                 "luna",
                 "not_run",
                 0,
-                "prerequisite missing: set CONTEXT_SHUNT_LUNA_EVAL=1 and provide a host "
-                "bridge that serves gpt-5.6-luna; a mock is never a pass",
+                f"prerequisite missing: {why}",
                 time.monotonic() - started,
-                ["NOT_RUN eval luna: live gpt-5.6-luna access is required"],
+                [f"NOT_RUN eval luna: {why}"],
             )
         ]
     status, cases, detail = _pytest("eval_luna")
@@ -427,18 +518,23 @@ def run_benchmark_provider() -> GateResult:
     This used to be hardcoded to NOT_RUN, which meant the gate could never run even where
     live access existed - the prerequisite was never actually consulted. It now checks the
     same prerequisite as ``eval luna`` and runs the measurement when it is satisfied.
+
+    That prerequisite includes the *route's* properties, and it matters more here than
+    anywhere: latency and token cost are the two numbers a role-collapsing, cap-dropping
+    route would misdescribe most directly. A completion the provider was never given a
+    ceiling for is not the bounded call this reader makes.
     """
     started = time.monotonic()
-    if not os.environ.get("CONTEXT_SHUNT_LUNA_EVAL"):
+    ok, why = _luna_prereq()
+    if not ok:
         return GateResult(
             "benchmark",
             "provider",
             "not_run",
             0,
-            "prerequisite missing: reader latency and token cost need live gpt-5.6-luna "
-            "(set CONTEXT_SHUNT_LUNA_EVAL=1 with a host bridge)",
+            f"prerequisite missing: reader latency and token cost need a live route - {why}",
             time.monotonic() - started,
-            ["NOT_RUN benchmark provider: live gpt-5.6-luna access is required"],
+            [f"NOT_RUN benchmark provider: {why}"],
         )
     status, cases, detail = _pytest("benchmark_provider")
     return GateResult(
@@ -489,7 +585,7 @@ def run_shadow(gate: str) -> list[GateResult]:
         GateResult(
             "shadow",
             "reader",
-            "not_run",
+            STATUS_EXPECTED_UNSUPPORTED,
             0,
             "not scored here by design: task correctness, semantic evidence support, "
             "mechanical citation validity and follow-up rate are the live reader eval's "
@@ -498,8 +594,10 @@ def run_shadow(gate: str) -> list[GateResult]:
             "repository does not have.",
             time.monotonic() - started,
             [
-                "NOT_RUN shadow reader: scored by `verify eval luna`, not by this harness",
-                "NOT_RUN shadow net-cost: no pricing table exists in this repository",
+                "EXPECTED_UNSUPPORTED shadow reader: scored by `verify eval luna`, "
+                "not by this harness",
+                "EXPECTED_UNSUPPORTED shadow net-cost: no pricing table exists in this "
+                "repository",
             ],
         )
     ]
@@ -1097,8 +1195,12 @@ print("OK")
 
 
 def run_release(gate: str) -> list[GateResult]:
+    if gate == "attest":
+        return [run_release_attestation()]
     if gate != "all":
-        return [GateResult("release", gate, "fail", detail="unknown gate; known: all")]
+        return [
+            GateResult("release", gate, "fail", detail="unknown gate; known: all, attest")
+        ]
     results: list[GateResult] = []
     results.extend(run_unit("all"))
     for host in INTEGRATION_HOSTS:
@@ -1109,7 +1211,246 @@ def run_release(gate: str) -> list[GateResult]:
     results.extend(run_benchmark("all"))
     results.extend(run_packaging("all"))
     results.append(_license_check())
+    # Last, because it attests the tree the gates above ran against and the evidence they
+    # wrote. Running it first would attest a tree the run had not finished with.
+    results.append(run_release_attestation())
     return results
+
+
+# -- release attestation ---------------------------------------------------
+
+
+def _git(*args: str) -> tuple[bool, str]:
+    proc = _run(["git", *args], ROOT)
+    return proc.returncode == 0, proc.stdout.strip()
+
+
+def _sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(65536), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _core_facts() -> tuple[dict | None, str]:
+    """The prompt, scorer and effective provider configuration, read from the core itself.
+
+    Computed by importing the same functions the eval gate uses rather than recomputing an
+    equivalent here: a second implementation of "hash the prompt" is a second thing to
+    drift, and a release attestation whose prompt hash disagrees with the eval report's is
+    worse than none.
+    """
+    interpreter = _python()
+    if interpreter is None:
+        return None, "python3 not found"
+    script = """
+import json
+import tests.test_eval_luna as tel
+from context_shunt.limits import DEFAULT_LIMITS as L, READER_MODEL
+from context_shunt.provenance import AttributionPolicy
+print(json.dumps({
+    "prompt_construction_sha256": tel._prompt_construction_hash(),
+    "scorer_sha256": tel._scorer_hash(),
+    "corpus_sha256": tel._corpus_hash(),
+    "acceptable_attribution_statuses": sorted(tel.ACCEPTABLE_ATTRIBUTION),
+    "effective_provider_config": {
+        "reader_model": READER_MODEL,
+        "max_output_tokens_per_call": L.max_output_tokens_per_call,
+        "max_request_input_tokens": L.max_request_input_tokens,
+        "max_transient_retries": L.max_transient_retries,
+        "max_format_retries": L.max_format_retries,
+        "max_concurrent_model_calls": L.max_concurrent_model_calls,
+        "model_call_deadline_ms": L.model_call_deadline_ms,
+        "request_deadline_ms": L.request_deadline_ms,
+        "max_answer_bytes": L.max_answer_bytes,
+        "max_citations": L.max_citations,
+        "max_claims_per_answer": L.max_claims_per_answer,
+        "default_attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED.value,
+    },
+}))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(ROOT / "packages" / "core-py" / "src"),
+            str(ROOT / "packages" / "core-py"),
+            env.get("PYTHONPATH", ""),
+        ]
+    ).strip(os.pathsep)
+    proc = subprocess.run(
+        [interpreter, "-c", script], cwd=ROOT, capture_output=True, text=True,
+        check=False, env=env,
+    )
+    if proc.returncode != 0:
+        return None, f"core facts unavailable: {_tail(proc.stderr, 3)}"
+    try:
+        return json.loads(proc.stdout), ""
+    except ValueError:
+        return None, "core facts were not JSON"
+
+
+def _bridge_facts() -> dict:
+    """Every live route in this repository, hashed, plus which one is configured.
+
+    Both routes are pinned whether or not one ran: the attestation is a statement about
+    what this tree contains, and "the route that could have been used" is part of it.
+    """
+    routes = {}
+    for path in sorted((ROOT / "evals" / "bridges").glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        descriptor, why = _bridge_descriptor(f"bridges.{path.stem}:complete")
+        routes[path.stem] = {
+            "sha256": _sha256(path),
+            "descriptor": descriptor,
+            "unreadable_reason": why or None,
+        }
+    server = ROOT / "evals" / "bridges" / "openclaw_inhost_server.mts"
+    routes["openclaw_inhost_server.mts"] = {"sha256": _sha256(server)}
+    spec = os.environ.get("CONTEXT_SHUNT_LUNA_BRIDGE", "")
+    configured = spec.partition(":")[0].partition(".")[2] if spec else None
+    return {"routes": routes, "configured_route": configured or None}
+
+
+def _live_evidence() -> tuple[dict, list[str]]:
+    """Per-call model identities from the live reports, or an explicit absence.
+
+    The point of recording identities per *physical call* is that a release claim names the
+    model that produced every measured answer. A run that reached three providers is three
+    identity observations, and a report that counted runs could not say that.
+    """
+    missing: list[str] = []
+    evidence: dict = {}
+    for name, key in (("eval-luna.json", "eval_luna"), ("benchmark-provider.json", "benchmark_provider")):
+        path = REPORTS / name
+        if not path.exists():
+            evidence[key] = None
+            missing.append(f"reports/{name} is absent: the gate that writes it has not run")
+            continue
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, ValueError):
+            evidence[key] = None
+            missing.append(f"reports/{name} is unreadable")
+            continue
+        if key == "eval_luna":
+            identity = report.get("identity")
+            evidence[key] = {
+                "report_sha256": _sha256(path),
+                "corpus_sha256": report.get("corpus_sha256"),
+                "scorer_sha256": report.get("scorer_sha256"),
+                "prompt_construction_sha256": report.get("prompt_construction_sha256"),
+                "per_call_identities": identity,
+                "observed_models": report.get("observed_models"),
+                "answer_correctness": report.get("answer_correctness"),
+                "citation_semantic_support": report.get("citation_semantic_support"),
+            }
+            if not identity:
+                missing.append(
+                    "reports/eval-luna.json carries no per-call identity block: it was "
+                    "written by an older scorer"
+                )
+        else:
+            evidence[key] = {
+                "report_sha256": _sha256(path),
+                "samples": report.get("samples"),
+                "latency_ms_p95": report.get("latency_ms_p95"),
+                "usage_exposed_by_host": report.get("usage_exposed_by_host"),
+                "attempts_started_total": report.get("attempts_started_total"),
+                "attempts_usage_complete_total": report.get("attempts_usage_complete_total"),
+            }
+    return evidence, missing
+
+
+def run_release_attestation() -> GateResult:
+    """What a reader of a release claim has to be able to check, written down.
+
+    Five things, and the gate refuses to pass without all of them:
+
+    * the exact tree - the commit, the branch, and that nothing is uncommitted;
+    * the hashes of what decides a score: corpus, prompt construction, scorer, every live
+      route and the effective provider configuration;
+    * which route was configured and what that route can do;
+    * the per-*call* model identities behind the live evidence;
+    * and the attribution statuses those identities were accepted on.
+
+    A dirty tree fails: an attestation of a tree that is not the tree is worthless. Absent
+    live evidence is ``NOT_RUN``, not a pass - an attestation missing the identities of the
+    calls it is attesting is not an attestation, and calling it one is exactly the
+    synthesized evidence this gate exists to prevent.
+    """
+    started = time.monotonic()
+    failures: list[str] = []
+    lines: list[str] = []
+
+    ok_head, head = _git("rev-parse", "HEAD")
+    ok_branch, branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    ok_status, dirt = _git("status", "--porcelain")
+    if not (ok_head and ok_status):
+        failures.append("git state unavailable")
+    tree_clean = ok_status and not dirt
+    if ok_status and not tree_clean:
+        failures.append(f"working tree is not clean ({len(dirt.splitlines())} entries)")
+
+    core, why = _core_facts()
+    if core is None:
+        failures.append(why)
+
+    static_hashes = {
+        "corpus": _sha256(ROOT / "evals" / "luna-corpus.json"),
+        "shadow_corpus": _sha256(ROOT / "evals" / "shadow" / "corpus.json"),
+        "limits_contract": _sha256(ROOT / "contracts" / "v1" / "limits.json"),
+        "status_code_pairs": _sha256(ROOT / "contracts" / "v1" / "status-code-pairs.json"),
+        "envelope_schema": _sha256(ROOT / "contracts" / "v1" / "envelope.schema.json"),
+    }
+    for name, digest in static_hashes.items():
+        if digest is None:
+            failures.append(f"could not hash {name}")
+
+    bridges = _bridge_facts()
+    evidence, missing_evidence = _live_evidence()
+
+    attestation = {
+        "attested_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tree": {"commit": head, "branch": branch, "clean": bool(tree_clean),
+                 "uncommitted_entries": len(dirt.splitlines()) if ok_status else None},
+        "hashes": {**static_hashes, **({} if core is None else {
+            "prompt_construction": core["prompt_construction_sha256"],
+            "scorer": core["scorer_sha256"],
+            "corpus_via_core": core["corpus_sha256"],
+        })},
+        "effective_provider_config": None if core is None else core["effective_provider_config"],
+        "acceptable_attribution_statuses": (
+            None if core is None else core["acceptable_attribution_statuses"]
+        ),
+        "required_bridge_properties": list(REQUIRED_BRIDGE_PROPERTIES),
+        "bridges": bridges,
+        "live_evidence": evidence,
+        "missing_evidence": missing_evidence,
+        "versions": _versions(),
+        "complete": not failures and not missing_evidence,
+    }
+    path, fd = _new_report_file("release-attestation")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(attestation, indent=2) + "\n")
+    lines.append(f"attestation: {path.relative_to(ROOT)}")
+    lines.append(f"commit {head[:12] or 'unknown'} clean={bool(tree_clean)}")
+    for reason in missing_evidence:
+        lines.append(f"NOT_RUN release attest: {reason}")
+
+    if failures:
+        status, detail = "fail", "; ".join(failures)
+    elif missing_evidence:
+        status, detail = "not_run", "; ".join(missing_evidence)
+    else:
+        status, detail = "pass", ""
+    return GateResult(
+        "release", "attestation", status, 5, detail, time.monotonic() - started, lines
+    )
 
 
 def _license_check() -> GateResult:
@@ -1242,7 +1583,9 @@ def main(argv: list[str]) -> int:
             "release",
         ],
     )
-    parser.add_argument("gate", help="gate name, host name, or 'all'")
+    parser.add_argument(
+        "gate", help="gate name, host name, 'all', or 'attest' for the release suite"
+    )
     parser.add_argument("--mode", default="local", choices=list(INTEGRATION_MODES))
     args = parser.parse_args(argv)
 
@@ -1266,10 +1609,16 @@ def main(argv: list[str]) -> int:
     total_cases = sum(r.cases for r in results)
     failed = [r for r in results if r.status == "fail"]
     not_run = [r for r in results if r.status == "not_run"]
+    unsupported = [r for r in results if r.status == STATUS_EXPECTED_UNSUPPORTED]
 
     print(f"context-shunt verify: {args.suite} {args.gate}")
     for result in results:
-        icon = {"pass": "PASS", "fail": "FAIL", "not_run": "NOT_RUN"}[result.status]
+        icon = {
+            "pass": "PASS",
+            "fail": "FAIL",
+            "not_run": "NOT_RUN",
+            STATUS_EXPECTED_UNSUPPORTED: "N/A",
+        }[result.status]
         print(
             f"  [{icon}] {result.suite} {result.gate}  cases={result.cases}  {result.duration_s:.2f}s"
         )
@@ -1287,7 +1636,8 @@ def main(argv: list[str]) -> int:
     versions = _versions()
     print(
         f"\ntotals: gates={len(results)} cases={total_cases} "
-        f"failed={len(failed)} not_run={len(not_run)} duration={elapsed:.2f}s"
+        f"failed={len(failed)} not_run={len(not_run)} "
+        f"expected_unsupported={len(unsupported)} duration={elapsed:.2f}s"
     )
     print(
         f"versions: python={versions['python']} node={versions['node']} "
@@ -1296,7 +1646,12 @@ def main(argv: list[str]) -> int:
     report = _write_report(argv, results, code, elapsed)
     print(f"report: {report.relative_to(ROOT)}")
     if code == EXIT_NOT_RUN:
-        print("\nNOT_RUN means a prerequisite is absent. It is not a pass.")
+        print("\nNOT_RUN means a required gate's prerequisite is absent. It is not a pass.")
+    if unsupported:
+        print(
+            "N/A means a gate is disabled by design and will not run in any environment; "
+            "it does not block a release. See docs/capability-matrix.md."
+        )
     return code
 
 

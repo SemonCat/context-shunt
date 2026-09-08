@@ -2,9 +2,16 @@
 
 This document defines verification gates; it is not a claim that the current checkout has
 passed every optional gate. Run `./scripts/verify <suite> <gate> [options]`. Exit 0 means
-pass, 1 means failure or an empty/unimplemented gate, and 2 means `NOT_RUN` because a live
-host/model prerequisite is absent. `NOT_RUN` is never counted as pass. Non-content reports
-are written under gitignored `reports/`.
+every *required* gate passed, 1 means failure or an empty/unimplemented gate, and 2 means
+`NOT_RUN` because a required gate's live host/model prerequisite is absent. `NOT_RUN` is
+never counted as pass. Non-content reports are written under gitignored `reports/`.
+
+A fourth status, printed as `N/A` and reported as `expected_unsupported`, is for a gate
+that is disabled **by design** and will not run in any environment: the oversized post-tool
+mode, on host-source evidence in [Capability matrix](capability-matrix.md), and the shadow
+reader lane, which `eval luna` owns. It does not block, and it is counted and reported
+separately from `NOT_RUN`. Collapsing the two made `release all` incapable of exiting 0
+anywhere, because it waited on gates that were never coming.
 
 ## Deterministic unit gates
 
@@ -26,6 +33,7 @@ cores where applicable.
 | `store` | Normative DDL, closed metadata, scope isolation, SQL expiry, crash recovery, dedupe/refcounts, concurrency, quotas, disclosure transaction, and cross-language access. |
 | `inspect` | Exact deterministic line/byte/literal-search extraction, UTF-8 safety, cursors, scan/page/disclosure limits, and zero model calls. |
 | `accounting` | Signed formulas, one-time credit, exact/estimated/null usage, all physical attempts, truncated/full baselines, final egress measurement, safe labels, and bounded session stats. |
+| `bridge-contract` | What each live reader route actually does, driven against a stub: separate system/user roles, the reader's `max_output_tokens` forwarded to the host, reported usage forwarded only when complete, a host refusal carrying no prompt text, and the reader driven end to end over the protocol. Also verifies the *negative* claims in the CLI route's descriptor, so the release gates' refusal to score through it rests on observed behaviour rather than a comment. Python core only. |
 | `artifact-import` | Every manifest field and path treated as untrusted: traversal, symlinked manifest and artifact, outside-root, non-regular, hardlinked, missing, secret-named, credential-bearing, binary, invalid-JSON, unsupported media type, unknown/unallowlisted/undeclared manifest schema, oversize manifest, declared size and digest mismatch, post-manifest rewrite, post-authorization swap, and a manifest pointing at the private cache. Plus: zero model calls, no handle left behind by a refusal, no path or payload in any envelope, and the imported handle flowing through read, inspect (lines/bytes/search), stats, provenance, citation verification and TTL. Python core only. |
 
 ## Host integration gates
@@ -46,6 +54,22 @@ the local gate to be rerun and reviewed.
 cross-chunk questions, no-answer/partial cases, and prompt injection. Each item runs three
 times. The gate requires live `gpt-5.6-luna`; without it the result is `NOT_RUN`, never a
 mock pass.
+
+It also requires a **qualifying route**. A live number describes the route it was measured
+on, and two properties decide whether it describes this product: the reader's fixed
+instruction must be sent as a *system* message separate from the excerpt, and the reader's
+`max_output_tokens` must reach the provider. Each bridge in [`evals/bridges/`](../evals/bridges/)
+declares both in a `BRIDGE` descriptor, `unit bridge-contract` verifies the declaration
+against observed behaviour, and `eval luna` and `benchmark provider` report `NOT_RUN` -
+naming the missing property - rather than scoring through a route that lacks either.
+
+`bridges.openclaw_cli` does lack both, and cannot be fixed: `openclaw infer model run`
+takes a single `--prompt` and has no output-token flag. `bridges.openclaw_inhost` provides
+both by driving the host's own completion runtime with `systemPrompt` and `maxTokens` set
+from the reader's ceiling, and forwards the host's `usage` block, which is what makes the
+token half of the provider benchmark measurable. Neither is *production-equivalent* - the
+shipped adapter reaches the model through the isolated agent runtime - and neither claims
+to be; the gap is a field in the descriptor that the release attestation records verbatim.
 
 Acceptance requires 100% mechanical citation validity; at least 95% task correctness and
 semantic citation support; no false completeness on no-answer/partial cases; and zero
@@ -161,6 +185,17 @@ the example configuration with the real loader, scans release artifacts for disa
 content, and checks teardown cleanup.
 
 `./scripts/verify release all` runs unit, both hosts and all modes, eval, shadow, benchmark,
-packaging, license, and dependency checks. It returns `NOT_RUN` while a required live
-prerequisite is absent. A safe unsupported optional post-tool mode is not a failure, but it
-must remain visibly unsupported and its live post-tool gate must not be presented as pass.
+packaging, license, and dependency checks, and finishes with the release attestation. It
+exits 0 exactly when every required gate passed; it returns `NOT_RUN` while a required live
+prerequisite is absent. A safe unsupported optional post-tool mode is not a failure - it is
+reported as `expected_unsupported` and does not block - but it must remain visibly
+unsupported and its live post-tool gate must not be presented as pass.
+
+`./scripts/verify release attest` writes the attestation on its own. It records the exact
+tree (commit, branch, and that nothing is uncommitted), the hashes that decide a score
+(corpus, prompt construction, scorer, every live route and its descriptor, the effective
+provider configuration and the limits contract), which route was configured, the
+**per-physical-call** model identities behind the live evidence, and the attribution
+statuses those identities were accepted on. A dirty tree **fails** it: an attestation of a
+tree that is not the tree is worthless. Absent live evidence is `NOT_RUN`, not a pass - an
+attestation missing the identities of the calls it attests is not an attestation.
