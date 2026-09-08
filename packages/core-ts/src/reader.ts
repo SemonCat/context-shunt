@@ -605,6 +605,13 @@ export class Reader {
     ];
     const allowed = prioritized.slice(0, this.limits.maxCitations);
     for (const citation of prioritized.slice(this.limits.maxCitations)) {
+      // Only a *referenced* citation losing its place costs the answer anything. An
+      // unreferenced one is already discarded further down - the envelope publishes
+      // `usedIds` and nothing else - so reporting its overflow as material dropped would
+      // make identical answers differ by which side of the ceiling their unused evidence
+      // happened to land on, and would let an answer that never existed come back as one
+      // a ceiling emptied.
+      if (!wanted.has(citation.id)) continue;
       capDropped += 1;
       coverage.omitOnce(
         String(citation.source_id ?? ""),

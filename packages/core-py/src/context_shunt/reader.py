@@ -615,6 +615,14 @@ class Reader:
         prioritized = sorted(verified, key=lambda c: c["id"] not in wanted)
         allowed = prioritized[: self._limits.max_citations]
         for citation in prioritized[self._limits.max_citations :]:
+            # Only a *referenced* citation losing its place costs the answer anything. An
+            # unreferenced one is already discarded further down - the envelope publishes
+            # `used_ids` and nothing else - so reporting its overflow as material dropped
+            # would make identical answers differ by which side of the ceiling their
+            # unused evidence happened to land on, and would let an answer that never
+            # existed come back as one a ceiling emptied.
+            if citation["id"] not in wanted:
+                continue
             cap_dropped += 1
             coverage.omit_once(
                 str(citation.get("source_id", "")),

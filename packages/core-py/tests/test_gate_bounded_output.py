@@ -426,8 +426,11 @@ def test_the_citation_cap_keeps_the_citations_the_claims_actually_reference(tmp_
     Twenty citations verify and the ceiling is sixteen. The four claims in this reply cite
     the *last* four. Truncating in emission order dropped exactly those four citations,
     and then every claim that referenced them, so a request whose answer would have fitted
-    published nothing at all. The cap now takes the referenced citations first, and says
-    what it dropped.
+    published nothing at all. Taking the referenced citations first makes the whole answer
+    fit, and because only unreferenced evidence overflowed, nothing was lost - so the
+    envelope says `complete`, not `partial`. Reporting the unused overflow as dropped
+    material would make two identical answers differ by which side of the ceiling their
+    *unread* evidence happened to land on.
     """
     registry, entry = _cap_fixture(tmp_path)
     citations = [
@@ -447,11 +450,62 @@ def test_the_citation_cap_keeps_the_citations_the_claims_actually_reference(tmp_
     for i in range(17, 21):
         assert f"value{i:02d}" in env["answer"]
     assert {c["id"] for c in env["citations"]} == {f"c{i}" for i in range(17, 21)}
-    # Four verified citations did not fit, and the caller is told so rather than being
-    # handed `complete: true`.
+    assert env["status"] == "ok" and env["coverage"]["complete"] is True
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+
+
+def test_the_citation_cap_reports_the_referenced_citations_it_could_not_keep(tmp_path):
+    """When the overflow *is* referenced, material really is lost and must be declared.
+
+    Twenty claims each cite their own citation, so prioritization cannot save anything:
+    four referenced citations pass the ceiling, the four claims resting on them go with
+    them, and the answer is genuinely short of what the source supports. That is the case
+    `complete: false` exists for - and the discriminator between this test and the one
+    above is whether a claim referenced the citation, not how many verified.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 21)
+    ]
+    claims = [
+        {"text": f"Key {i} is set to value{i:02d}.", "citation_ids": [f"c{i}"]}
+        for i in range(1, 21)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED"
+    assert len(env["citations"]) == L.max_citations
     assert env["status"] == "partial" and env["coverage"]["complete"] is False
     dropped = [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
     assert len(dropped) == 20 - L.max_citations
+    # The claims that rested on the dropped citations are gone from the answer too.
+    for i in range(L.max_citations + 1, 21):
+        assert f"value{i:02d}" not in env["answer"]
+
+
+def test_unread_citations_over_the_cap_cannot_invent_an_answer_a_cap_emptied(tmp_path):
+    """A reply with no usable claims is `NO_MATCH`, however much evidence it attached.
+
+    The first cut of the cap fix counted *every* overflowing citation as dropped material,
+    so twenty citations and no surviving claim came back `LIMIT_EXCEEDED/ANSWER_OVER_CAP`:
+    a ceiling was blamed for emptying an answer that had never existed. The reply below
+    cites nothing from its claims, so there is no answer material for a cap to lose.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 21)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply([], citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
 
 
 def test_the_claims_cap_records_what_it_dropped(tmp_path):

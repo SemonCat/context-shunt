@@ -1395,25 +1395,33 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(env.answer ?? "").toBe("");
   });
 
-  // Twenty citations verify and the ceiling is sixteen. The four claims cite the *last*
-  // four, so truncating in emission order dropped exactly those citations - and then every
-  // claim that referenced them, publishing nothing for a request whose answer would fit.
-  it("keeps the citations the claims actually reference, and says what it dropped", async () => {
-    const { registry, entry } = capFixture();
-    const citations = Array.from({ length: 20 }, (_v, i) => ({
+  const capCitations = () =>
+    Array.from({ length: 20 }, (_v, i) => ({
       id: `c${i + 1}`,
       line_start: i + 1,
       line_end: i + 1,
       quote: key(i + 1),
     }));
-    const claims = [17, 18, 19, 20].map((i) => ({
-      text: `Key ${i} is set to value${String(i).padStart(2, "0")}.`,
-      citation_ids: [`c${i}`],
-    }));
-    const env = await new Reader(registry, new FakeLuna([claimsJson(claims, citations)])).answer(
-      "sess",
-      capRequest(entry),
-    );
+
+  const capClaim = (i: number) => ({
+    text: `Key ${i} is set to value${String(i).padStart(2, "0")}.`,
+    citation_ids: [`c${i}`],
+  });
+
+  // Twenty citations verify and the ceiling is sixteen. The four claims cite the *last*
+  // four, so truncating in emission order dropped exactly those citations - and then every
+  // claim that referenced them, publishing nothing for a request whose answer would fit.
+  // Taking the referenced ones first makes the whole answer fit, and only *unreferenced*
+  // evidence overflows - which the envelope already discards, so nothing was lost and the
+  // coverage stays `complete`. Counting unread overflow as dropped material would make two
+  // identical answers differ by where their unused evidence fell against the ceiling.
+  it("keeps the citations the claims actually reference, losing nothing", async () => {
+    const { registry, entry } = capFixture();
+    const claims = [17, 18, 19, 20].map(capClaim);
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, capCitations())]),
+    ).answer("sess", capRequest(entry));
     expect(env.code).toBe("ANSWERED");
     for (const i of [17, 18, 19, 20]) {
       expect(env.answer).toContain(`value${String(i).padStart(2, "0")}`);
@@ -1421,10 +1429,41 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(new Set((env.citations ?? []).map((c) => c.id))).toEqual(
       new Set(["c17", "c18", "c19", "c20"]),
     );
+    expect(env.status).toBe("ok");
+    expect(env.coverage?.complete).toBe(true);
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
+  });
+
+  // When the overflow *is* referenced, material really is lost and must be declared.
+  it("reports the referenced citations the ceiling could not keep", async () => {
+    const { registry, entry } = capFixture();
+    const claims = Array.from({ length: 20 }, (_v, i) => capClaim(i + 1));
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, capCitations())]),
+    ).answer("sess", capRequest(entry));
+    expect(env.code).toBe("ANSWERED");
+    expect((env.citations ?? []).length).toBe(L.maxCitations);
     expect(env.status).toBe("partial");
     expect(env.coverage?.complete).toBe(false);
     const dropped = (env.coverage?.omitted ?? []).filter((o) => o.reason === "BUDGET_EXCEEDED");
     expect(dropped.length).toBe(20 - L.maxCitations);
+    for (let i = L.maxCitations + 1; i <= 20; i += 1) {
+      expect(env.answer).not.toContain(`value${String(i).padStart(2, "0")}`);
+    }
+  });
+
+  // The first cut of the cap fix counted every overflowing citation as dropped material,
+  // so twenty citations and no surviving claim came back `LIMIT_EXCEEDED/ANSWER_OVER_CAP`:
+  // a ceiling blamed for emptying an answer that had never existed.
+  it("does not let unread overflow invent an answer a cap emptied", async () => {
+    const { registry, entry } = capFixture();
+    const env = await new Reader(registry, new FakeLuna([claimsJson([], capCitations())])).answer(
+      "sess",
+      capRequest(entry),
+    );
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
   });
 
   it("records the claims the per-answer ceiling dropped", async () => {
