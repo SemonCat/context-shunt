@@ -35,6 +35,30 @@ release attestation records verbatim, so no report can imply the harness path wa
 exercised. Role preservation and cap enforcement are the two properties the release gates
 require and the two this route actually provides.
 
+What can stop it, and what that is not
+--------------------------------------
+This route needs the host to resolve a credential for it, and on a host where it cannot,
+the honest result is that the *live* gate does not run. Two blockers were observed while
+this route was written, both recorded here so an operator recognises them rather than
+reading a NOT_RUN as a defect in this repository:
+
+* ``Auth lookup failed for provider "sub2api-openai": No API key found ... Auth store:
+  ~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite``. The simple-completion runtime
+  resolves credentials from the *per-agent* auth store. Where the provider's configured
+  ``apiKey`` is a secret **reference** (``{source, provider, id}``) rather than a stored
+  key, only the host's own secret provider can resolve it - the same reason the CLI bridge
+  does not call the gateway endpoint directly. Extracting that reference would be
+  credential exfiltration, so this route reports the failure instead of working around it.
+* ``prepare failed: Auth lookup failed for provider "openai": Unable to materialize
+  openai/gpt-5.6-luna for its prepared subscription route``, preceded by the host's own
+  ``openai failed to load from .../dist/extensions/openai/index.js``. The alternative
+  route's provider extension does not load in that checkout, so auth materialization fails
+  before any call. That is a host-checkout problem, and fixing it is not this
+  repository's to do.
+
+Neither is a reason to fall back to a route that would misdescribe the product. The gate
+reports NOT_RUN and names the blocker.
+
 Secrets
 -------
 Nothing here reads, stores, logs or forwards a credential. The server resolves auth inside

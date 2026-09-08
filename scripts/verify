@@ -1316,7 +1316,14 @@ def _bridge_facts() -> dict:
     return {"routes": routes, "configured_route": configured or None}
 
 
-def _live_evidence() -> tuple[dict, list[str]]:
+#: Hashes a live report must agree with before its numbers describe *this* tree. A report
+#: is a measurement of a corpus, a prompt and a scorer, and a stale one from before any of
+#: them changed is not weaker evidence about this release - it is evidence about a different
+#: one, and attesting it would be the same error as attesting a dirty tree.
+_EVIDENCE_BINDINGS = ("corpus_sha256", "scorer_sha256", "prompt_construction_sha256")
+
+
+def _live_evidence(core: dict | None) -> tuple[dict, list[str]]:
     """Per-call model identities from the live reports, or an explicit absence.
 
     The point of recording identities per *physical call* is that a release claim names the
@@ -1353,6 +1360,26 @@ def _live_evidence() -> tuple[dict, list[str]]:
                 missing.append(
                     "reports/eval-luna.json carries no per-call identity block: it was "
                     "written by an older scorer"
+                )
+            stale = []
+            if core is not None:
+                current = {
+                    "corpus_sha256": core["corpus_sha256"],
+                    "scorer_sha256": core["scorer_sha256"],
+                    "prompt_construction_sha256": core["prompt_construction_sha256"],
+                }
+                stale = [
+                    key
+                    for key in _EVIDENCE_BINDINGS
+                    if report.get(key) != current[key]
+                ]
+            evidence[key]["binds_to_this_tree"] = not stale
+            evidence[key]["stale_bindings"] = stale
+            if stale:
+                missing.append(
+                    "reports/eval-luna.json was produced against a different "
+                    f"{', '.join(s.removesuffix('_sha256') for s in stale)}: its numbers "
+                    "describe another tree"
                 )
         else:
             evidence[key] = {
@@ -1412,7 +1439,7 @@ def run_release_attestation() -> GateResult:
             failures.append(f"could not hash {name}")
 
     bridges = _bridge_facts()
-    evidence, missing_evidence = _live_evidence()
+    evidence, missing_evidence = _live_evidence(core)
 
     attestation = {
         "attested_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
