@@ -87,6 +87,20 @@ this replaced accepted a fact and its own denial in one sentence: for a source r
 line, and scored correct and supported. `expected_facts` is retained as the diagnostic
 breakdown a failing run is attributed with, and no longer decides correctness.
 
+What the deterministic tests do **not** establish is how that rule behaves on live
+phrasing. `test_a_compliant_answer_satisfies_every_answerable_corpus_item` constructs each
+answer as `"<subject> is <value>"`, so it proves the verbatim form scores - it is
+tautological with respect to wording. Subject matching is literal, plus whatever
+`subject_alternatives` an entry declares: `record_thresholds` names the subject `p95_ms`,
+so an answer reading "the p95 latency threshold is 250" scores a miss even though it is
+correct. That direction is deliberate - the reader prompt requires verbatim identifiers,
+and a scorer that guessed at paraphrase would be the thing deciding correctness - but it
+means a correctness drop on the *first* live run has to be attributed between a model
+regression and scorer strictness before either is believed; the report's `expected_facts`
+breakdown is what that attribution is done from. The 0.95 threshold does not move in
+either direction, and the corpus is not loosened on speculation about phrasing that has
+not been observed.
+
 Model identity is accounted per **physical call**, not per run: every call the provider was
 asked to serve must be named as the requested model on an attribution status strong enough
 to mean it (`actual` or `resolved`). `unverified` does not qualify - it means the host

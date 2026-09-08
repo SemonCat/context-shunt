@@ -1369,13 +1369,22 @@ def _live_evidence(core: dict | None) -> tuple[dict, list[str]]:
                     "prompt_construction_sha256": core["prompt_construction_sha256"],
                 }
                 stale = [
-                    key
-                    for key in _EVIDENCE_BINDINGS
-                    if report.get(key) != current[key]
+                    binding
+                    for binding in _EVIDENCE_BINDINGS
+                    if report.get(binding) != current[binding]
                 ]
             evidence[key]["binds_to_this_tree"] = not stale
             evidence[key]["stale_bindings"] = stale
             if stale:
+                # A number in a field named `answer_correctness` is the thing a skimmer
+                # lifts, so a score that measures another tree is *removed*, not merely
+                # flagged beside it. The report's own hash stays, so the discarded run
+                # remains identifiable.
+                for scored in ("answer_correctness", "citation_semantic_support"):
+                    evidence[key][scored] = None
+                evidence[key]["scores_withheld"] = (
+                    "stale bindings: the scores this report carries measure another tree"
+                )
                 missing.append(
                     "reports/eval-luna.json was produced against a different "
                     f"{', '.join(s.removesuffix('_sha256') for s in stale)}: its numbers "

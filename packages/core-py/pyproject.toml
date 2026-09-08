@@ -42,6 +42,7 @@ markers = [
   "gate_permissions", "gate_no_writes", "gate_capability",
   "gate_store", "gate_inspect", "gate_accounting",
   "integration_hermes", "eval_luna", "benchmark", "benchmark_provider",
+  "bridge_contract", "shadow_ab",
 ]
 filterwarnings = ["error::DeprecationWarning:context_shunt.*"]
 
