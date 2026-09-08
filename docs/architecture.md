@@ -15,6 +15,17 @@ Revision 1.1 added deterministic `inspect`, session `stats`, the hybrid snapshot
 recovery guidance, model provenance, and signed token accounting. It also made the reader
 model/provider configurable while retaining `gpt-5.6-luna` as the default.
 
+Revision 1.1 additionally carries the `IMPORTED` code and the optional `import_receipt`
+block for the external-artifact boundary. Both are additive: a 1.0 envelope still validates
+unchanged, and a 1.0 envelope carrying `import_receipt` is refused rather than accepted with
+the block ignored. `IMPORTED` is deliberately not `SPILLED`. `SPILLED` belongs to the
+capability-gated post-tool mode that no supported host enables, so reusing it for an import
+would read as a claim of post-tool interception. The **store** schema is unchanged: DDL
+revision 2, no migration. `handles.kind` records the capture category and is shared with
+the local spill path because [`contracts/store/v1.sql`](../contracts/store/v1.sql)
+deliberately stores no producer identity; the producer distinction lives in the envelope
+receipt and in the `capture` accounting kind, which was already legal in the DDL and unused.
+
 ## Components and trust boundaries
 
 ```text
@@ -40,6 +51,80 @@ Source files and tool payloads are untrusted data. The reader gets a fixed instr
 the caller's question, and one authorized excerpt at a time. It receives no host history,
 shell, network, writer, or other tools. Model output cannot grant permissions or create a
 valid citation.
+
+## The two intake paths
+
+There are two ways content becomes a snapshot, and they answer different problems.
+
+```text
+  primary: an oversized TOOL RESULT              secondary: an oversized FILE READ
+  a producer already persisted                   the agent is about to make
+             |                                              |
+   manifest + artifact file                        host read request
+             |                                              |
+   artifact import boundary                          pre-read gate
+   (allowlisted roots, re-proven claims)      (blocked before execution)
+             |                                              |
+             +----------------> immutable snapshot <---------+
+                                        |
+                       opaque handle, internal or ordinary
+                                        |
+            +---------------------------+---------------------------+
+            |                           |                           |
+   deterministic inspect        question-aware reader        session accounting
+   (zero model calls)           (citation-verified)          (signed, bounded)
+```
+
+The primary path exists because the oversized context that actually costs a session is a
+tool result - a log query page, a cloud journal page, an issue tracker export, a wiki page -
+not a source file. Holding one of those out of the context requires intercepting the result
+before the host truncates and persists it, and neither supported host provides that
+ordering; `suma_post_tool` is reported unsupported for that reason and stays off.
+
+What a host *can* be handed is an artifact somebody else already wrote down. A compactor or
+spooler that persists an oversized tool result and describes it with a manifest has already
+performed the capture. The import boundary adopts that artifact, and from then on it is an
+ordinary handle.
+
+The secondary path is the original pre-read gate, unchanged. It remains the answer for an
+oversized *file* read, and it is the only path that can act before an operation runs.
+
+## Artifact import boundary
+
+`context_shunt_import` takes a manifest path and returns a pointer envelope. It never
+returns the artifact's bytes, and it makes no model call.
+
+**Every manifest field and every path inside it is untrusted.** The manifest is a set of
+claims, and nothing in it is believed until it has been re-proven:
+
+| Claim | How it is proven |
+| --- | --- |
+| the manifest is a manifest | authorized through the same path policy as the artifact, then read with the same bounded reader, capped at 64 KiB, and parsed as JSON. An unauthorized `open` here would follow a symlink out of the import roots before any artifact check ran. |
+| the declared shape | validated against [`artifact-import.schema.json`](../contracts/v1/artifact-import.schema.json). A shape with no registered translation profile is refused before its fields are read; a shape this deployment has not allowlisted is refused before its translator runs. |
+| the artifact path | canonicalized; must resolve inside a configured import root; must be a regular, non-symlinked, un-hardlinked file; must survive the secret-path and administrator denylist. |
+| the artifact bytes | read through a pinned descriptor with `O_NOFOLLOW` and a stat identity re-check on both sides of the read, so a swap mid-read fails closed instead of mixing versions. |
+| the declared size and digest | compared against the bytes *actually read*. A disagreement is `SOURCE_CHANGED` rather than trusting either side. |
+| the content | UTF-8 text or parseable JSON, and subject to the same content secret policy as any capture. |
+
+None of that logic is re-implemented. The boundary is a sequencer over `paths.authorize`,
+`snapshot.snapshot_file` and the store; its own contribution is the manifest contract, the
+producer-profile translation, and the ordering guarantee that nothing is published until
+every check has passed. A refusal leaves no handle and no orphaned blob.
+
+The contract is producer-agnostic. `context_shunt.artifact_import.v1` is the only shape the
+core owns; a foreign manifest reaches it through a translation profile in a lookup table of
+*data*, so no particular producer's identifiers appear in the core API or in any signature.
+A profile is a translator, never an authorization: registering one teaches the core to read
+a shape, and `artifact_import.accepted_manifest_schemas` decides whether it may.
+
+An imported handle is published `internal`, the same store-verified recursion guard the
+spill engine uses, and its baseline is `host_truncated_observed` when the manifest declares
+upstream truncation - a payload a producer already shortened can only be credited at its
+observed size.
+
+There is no free-text field anywhere in the manifest contract, so nothing an untrusted
+producer writes can ride into an envelope, a log line or a metric label. The receipt carries
+bounded tokens only, and its digest is the one derived from the bytes read.
 
 ## Pre-read gate
 

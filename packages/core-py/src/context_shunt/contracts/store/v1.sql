@@ -79,10 +79,19 @@ CREATE TABLE IF NOT EXISTS blobs (
     CHECK (length(hash) = 64)
 ) STRICT;
 
--- One row per authorized handle. `kind` records how the payload was captured so a
+-- One row per authorized handle. `kind` records the payload's capture *category* so a
 -- legacy artifact can never be promoted into an authorized handle:
 --   'shunted_read'  a read the gate blocked, captured because it was blocked
---   'spilled_tool'  an eligible oversized post-tool candidate (capability-gated)
+--   'spilled_tool'  an oversized post-tool payload withheld from the context. This covers
+--                   two producers and deliberately does not distinguish them: the
+--                   capability-gated local spill engine, and an external artifact adopted
+--                   through the import boundary. So a `spilled_tool` row is NOT evidence
+--                   that the post-tool spill mode ran - that mode is unsupported on every
+--                   current host, and an imported artifact is by far the likelier source.
+--                   Which producer it was is deliberately not stored here: this table
+--                   holds no producer identity by design, so that fact travels in the
+--                   envelope's `import_receipt` and in the `capture` accounting kind
+--                   instead of adding a column no query could trust anyway.
 -- `baseline_credited` makes the withheld-source baseline a one-time credit: the first
 -- withholding operation credits it, every later operation over the same snapshot records
 -- a zero credit and still records its own overhead.

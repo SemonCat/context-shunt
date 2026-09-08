@@ -156,7 +156,9 @@ def make_registry(
     return SourceRegistry(store, identity, config.limits)
 
 
-def make_capability(*, suma: bool = False, adapter: str = "test") -> CapabilityReport:
+def make_capability(
+    *, suma: bool = False, artifact_import: bool = False, adapter: str = "test"
+) -> CapabilityReport:
     from context_shunt.capability import DisabledReason
 
     return CapabilityReport(
@@ -173,6 +175,9 @@ def make_capability(*, suma: bool = False, adapter: str = "test") -> CapabilityR
             supported("suma_post_tool")
             if suma
             else unsupported("suma_post_tool", DisabledReason.ORDERING_UNPROVEN),
+            supported("artifact_import")
+            if artifact_import
+            else unsupported("artifact_import", DisabledReason.IMPORT_UNIMPLEMENTED),
         ],
         tested_fixture_id="gate-cases.json",
     )

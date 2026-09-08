@@ -22,12 +22,45 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
 | `suma_post_tool.enabled` | boolean | `false` | Requests the optional oversized post-tool path. Both current adapters report it unsupported, so it is not activated. |
+| `artifact_import.enabled` | boolean | `false` | Requests the external-artifact import boundary. Supported on Hermes; the OpenClaw core has no import implementation and reports the mode unsupported with `IMPORT_UNIMPLEMENTED`. |
+| `artifact_import.roots` | string array, at most 8 | `[]` | Canonical directories a producer's artifact and manifest may live under. A separate allowlist from `workspace_roots`; a root that contains `cache_dir` is refused with `CACHE_INSIDE_IMPORT_ROOT`. |
+| `artifact_import.accepted_manifest_schemas` | string array | `[]` | Producer manifest schemas this deployment authorizes. A manifest declaring a schema outside this list is refused with `MANIFEST_SCHEMA_NOT_ALLOWED` even when a translation profile exists for it. |
 | `limits` | integer map | values below | Narrows contract caps. Unknown, negative, invalid-zero, or wider values are refused. |
 
 Compatibility inputs `writer.enabled: true` and an `operations` array containing
 `propose_patch` are explicitly refused with `WRITER_UNSUPPORTED_CONFIGURATION`. There is no
 writer tool. Both public core loaders reject unknown top-level keys, nested keys, limit
 names, and invalid types. The OpenClaw manifest adds a separate host validation boundary.
+
+## Artifact import
+
+`artifact_import` is off by default with no roots and no accepted schemas, and enabling it
+requires stating what it trusts. `enabled: true` with an empty `roots` **or** an empty
+`accepted_manifest_schemas` is refused at load with `BAD_CONFIGURATION`, because an enabled
+boundary that names nothing in particular would be an allow-all in everything but name.
+
+The two allowlists answer different questions:
+
+* `roots` — *where* an artifact may live. Canonicalized at load. A path that resolves
+  outside every root is `UNSAFE_SOURCE / OUTSIDE_WORKSPACE_ROOT`, and the built-in secret
+  policy plus the administrator `denylist` apply inside a root exactly as they do to a
+  workspace root.
+* `accepted_manifest_schemas` — *whose* manifests may be read. The core owns
+  `context_shunt.artifact_import.v1`; any other accepted value names a foreign producer
+  schema that a translation profile normalizes into it. Registering a profile is not an
+  authorization, so a shape the core knows how to read is still refused until it is listed
+  here.
+
+A root that contains `cache_dir` is refused: a manifest could otherwise name one of the
+core's own immutable blobs as if it were a producer artifact.
+
+The manifest itself is capped at `artifact_import.max_manifest_bytes` (64 KiB) from
+[`contracts/v1/limits.json`](../contracts/v1/limits.json). That cap is normative and is not
+in the narrowable `limits` map.
+
+This section is Hermes-only. The OpenClaw plugin config schema is a closed key set, so
+adding `artifact_import` to `openclaw.json` is refused at load rather than accepted and
+ignored — which matches the capability report rather than contradicting it.
 
 ## Model selection and fallback
 

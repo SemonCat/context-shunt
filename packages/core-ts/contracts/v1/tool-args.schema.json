@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/context-shunt/contracts/v1/tool-args.schema.json",
-  "title": "context-shunt v1.1 escape-hatch tool arguments",
-  "description": "The three read-only tools an agent may call, validated identically by both cores so the two hosts cannot drift. Paths appear here and nowhere else: they are authorized and discarded at capture time, and never enter request.schema.json, the envelope, the store or a metric label. Every disclosure is capped per page and charged against cumulative per-source and per-session budgets, so a large payload cannot be reassembled through these tools; a source small enough to fit those budgets can still be returned in full by the inspector.",
+  "title": "context-shunt v1.1 read-only tool arguments",
+  "description": "The read-only tools an agent may call, validated identically by both cores so the two hosts cannot drift. context_shunt_import is registered only where a deployment configured the artifact_import boundary and the host capability probe supports it; it is validated here regardless so the contract does not depend on which modes a given deployment turned on. Paths appear here and nowhere else: they are authorized and discarded at capture time, and never enter request.schema.json, the envelope, the store or a metric label. Every disclosure is capped per page and charged against cumulative per-source and per-session budgets, so a large payload cannot be reassembled through these tools; a source small enough to fit those budgets can still be returned in full by the inspector.",
   "oneOf": [
     { "$ref": "#/$defs/readArgs" },
     { "$ref": "#/$defs/inspectArgs" },
-    { "$ref": "#/$defs/statsArgs" }
+    { "$ref": "#/$defs/statsArgs" },
+    { "$ref": "#/$defs/importArgs" }
   ],
   "$defs": {
     "sourceId": { "type": "string", "minLength": 4, "maxLength": 64, "pattern": "^src_[A-Za-z0-9]{4,58}$" },
@@ -86,6 +87,16 @@
         { "additionalProperties": false, "required": ["kind", "needle", "max_matches"],
           "properties": { "kind": { "const": "search" }, "needle": { "type": "string", "minLength": 1, "maxLength": 512 }, "max_matches": { "type": "integer", "minimum": 1, "maximum": 200 }, "context_lines": { "type": "integer", "minimum": 0, "maximum": 4 } } }
       ]
+    },
+    "importArgs": {
+      "description": "context_shunt_import. Zero model calls. Adopts an oversized tool-result artifact an external producer already persisted, named by the path of that producer's manifest. The manifest and the artifact it points at are both untrusted: the path is authorized against the configured artifact_import roots, and every claim the manifest makes about size, digest, media type and content is re-proven against the bytes actually read before a handle exists. Returns a handle and bounded metadata, never the artifact's contents.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "manifest_path"],
+      "properties": {
+        "tool": { "const": "context_shunt_import" },
+        "manifest_path": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "\\S" }
+      }
     },
     "statsArgs": {
       "description": "context_shunt_stats. Read-only. It cannot reset a counter, change retention, name another session, reveal content, or accept a caller-supplied label of any kind.",

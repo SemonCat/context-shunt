@@ -4,13 +4,20 @@ A mode is enabled only when the adapter can *prove* the host gives it what the m
 needs. Where the proof does not exist the mode is reported ``unsupported`` with a fixed
 reason and stays off - never faked, never "probably fine".
 
-For the optional Suma post-tool mode the required proof is two-part:
+For the optional post-tool spill mode the required proof is two-part:
 
 * complete capture of the result **before** any host truncation, and
 * safe replacement **before** persistence and context insertion.
 
 Neither supported host provides both today; see ``docs/capability-matrix.md`` for the
 file-and-line evidence behind each ``DisabledReason``.
+
+The ``artifact_import`` mode needs much less, which is the point of it: an artifact an
+external producer already persisted has already been captured, so all the host has to
+supply is a way to invoke the import. A host whose adapter can register a tool, and whose
+core implements the boundary, supports it. That is a strictly weaker requirement than
+post-tool interception, and the two modes are reported separately so enabling one never
+implies the other.
 """
 
 from __future__ import annotations
@@ -37,6 +44,9 @@ class DisabledReason(str, Enum):
     UNSAFE_TRACING = "UNSAFE_TRACING"
     HOST_VERSION_UNVERIFIED = "HOST_VERSION_UNVERIFIED"
     CONFIG_DISABLED = "CONFIG_DISABLED"
+    #: The adapter's language core has no implementation of the mode. Distinct from a
+    #: host limitation: nothing about the host prevents it.
+    IMPORT_UNIMPLEMENTED = "IMPORT_UNIMPLEMENTED"
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,34 @@
+{
+  "note": "the import receipt is a 1.1 block; attaching it while still declaring 1.0 is a version lie, not a compatible extension",
+  "document": {
+    "schema_version": "1.0",
+    "request_id": "req_import_03",
+    "status": "ok",
+    "code": "SPILLED",
+    "answer": "",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "pointer": {
+      "source_id": "src_01ab",
+      "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "bytes": 1048576,
+      "expires_at": "2026-09-07T12:00:00Z",
+      "internal": true
+    },
+    "import_receipt": {
+      "producer": "example-compactor",
+      "manifest_schema": "context_shunt.artifact_import.v1",
+      "artifact_sha256": "2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "bytes": 1048576,
+      "upstream_truncated": false
+    }
+  }
+}

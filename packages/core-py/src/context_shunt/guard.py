@@ -59,6 +59,7 @@ _ALLOWED_KEYS = frozenset(
         "extraction",
         "stats",
         "recovery",
+        "import_receipt",
     }
 )
 _ALLOWED_SOURCE_KEYS = frozenset({"source_id", "snapshot_id", "media_type", "bytes", "expires_at"})
@@ -145,7 +146,7 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
         ):
             raise OutputGuardError("source bytes over cap")
 
-    if code in ("SPILLED", "EXTRACTED", "STATS") and (answer or citations):
+    if code in ("SPILLED", "EXTRACTED", "STATS", "IMPORTED") and (answer or citations):
         raise OutputGuardError(f"{code} must not carry an answer")
 
     _check_extraction(envelope, limits)
@@ -165,7 +166,7 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
     published under a version string that understates what it contains.
     """
     present_v11 = {key for key in _ALLOWED_KEYS if key in envelope} & (
-        _REQUIRED_V11_KEYS | {"extraction", "stats", "recovery"}
+        _REQUIRED_V11_KEYS | {"extraction", "stats", "recovery", "import_receipt"}
     )
     if version == "1.0":
         if present_v11:

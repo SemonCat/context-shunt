@@ -23,6 +23,7 @@ export const SAFE_MESSAGES: Record<string, string> = {
   PROVENANCE_UNAVAILABLE:
     "reader provenance could not be established under the configured policy",
   EXTRACTED: "deterministic extraction returned exact snapshot bytes",
+  IMPORTED: "external producer artifact adopted as an immutable snapshot handle",
   STATS: "session accounting returned",
   HOST_UNSAFE: "host cannot guarantee the required interception order",
   CANCELLED: "request cancelled",

@@ -265,8 +265,13 @@ def test_host_module_imports_and_exposes_pre_tool_call(host_result):
 def test_adapter_registers_the_pre_execution_gate_and_no_writer(host_result):
     assert "pre_tool_call" in host_result["registered_hooks"], host_result["errors"]
     tools = host_result["registered_tools"]
-    # Three read-only escape hatches, accepted by the host's own tool registry.
+    # The read-only escape hatches, accepted by the host's own tool registry. This
+    # harness's config leaves `artifact_import` unset, and the adapter deliberately does
+    # not register `context_shunt_import` for a deployment that never authorized it -
+    # putting a permanently-refusing surface in front of the model would be worse than
+    # offering none. So its absence here is the behaviour under test, not a stale list.
     assert tools == ["context_shunt_inspect", "context_shunt_read", "context_shunt_stats"]
+    assert "context_shunt_import" not in tools
     assert not any("writ" in name or "patch" in name for name in tools)
 
 

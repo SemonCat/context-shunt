@@ -6,9 +6,11 @@ two hosts cannot drift apart on semantics.
 
 Capture scope
 -------------
-Only content that is *actually being withheld* is captured: a read the gate blocked, or an
-explicitly eligible oversized post-tool candidate. Short results and ordinary file reads
-are never pre-stored, so the store never becomes a shadow copy of the workspace.
+Only content that is *actually being withheld* is captured: a read the gate blocked, an
+explicitly eligible oversized post-tool candidate, or an external artifact a producer
+already persisted and a deployment explicitly authorized this session to adopt. Short
+results and ordinary file reads are never pre-stored, so the store never becomes a shadow
+copy of the workspace.
 
 Storage failure never becomes passthrough
 -----------------------------------------
@@ -41,6 +43,7 @@ from .accounting import (
     new_operation_id,
     totals_to_dict,
 )
+from .artifacts import ArtifactImporter, ArtifactManifest
 from .binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from .capability import CapabilityReport
 from .clock import Clock, MonotonicClock
@@ -122,6 +125,22 @@ class ShuntSession:
         self._inspector = Inspector(config.limits)
         suma_enabled = config.suma_post_tool.enabled and capability.enabled("suma_post_tool")
         self._spill = SpillEngine(self._registry, limits=config.limits, enabled=suma_enabled)
+        # The import boundary is built only when configuration *and* the capability probe
+        # agree. A deployment that enabled it without roots never reaches here: the
+        # config loader refuses that combination rather than defaulting to allow-all.
+        self._import_enabled = config.artifact_import.enabled and capability.enabled(
+            "artifact_import"
+        )
+        self._importer = (
+            ArtifactImporter(
+                self._registry,
+                policy=config.import_path_policy(),
+                accepted_schemas=config.artifact_import.accepted_manifest_schemas,
+                limits=config.limits,
+            )
+            if self._import_enabled
+            else None
+        )
 
     # -- accessors ---------------------------------------------------------
     @property
@@ -143,6 +162,10 @@ class ShuntSession:
     @property
     def suma_enabled(self) -> bool:
         return self._spill.enabled
+
+    @property
+    def artifact_import_enabled(self) -> bool:
+        return self._importer is not None
 
     # -- gate --------------------------------------------------------------
     def evaluate_tool_call(self, tool: str, args: dict[str, Any]) -> GateDecision:
@@ -603,6 +626,111 @@ class ShuntSession:
             reader=ReaderCost.none(),
             boundary=DeliveryBoundary.ENVELOPE,
         )
+        return published
+
+    # -- external artifact import -----------------------------------------
+    def import_artifact(
+        self,
+        request_id: str,
+        *,
+        manifest_path: str | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Adopt one external producer artifact and return a pointer envelope.
+
+        Exactly one manifest form: a path to a manifest file inside an import root, or a
+        document the caller already parsed. Both are equally untrusted; the path form
+        additionally has to survive the path policy before it can be read at all.
+
+        Failure is always a bounded envelope with no handle and no payload. There is no
+        code path here that returns the artifact's bytes to the caller - reaching them is
+        the reader's or the inspector's job, through the handle this returns.
+        """
+        if self._importer is None:
+            exc = ShuntError("INVALID_REQUEST", "ARTIFACT_IMPORT_DISABLED", retryable=False)
+            return self._publish_failure(request_id, exc, OperationKind.CAPTURE)
+        if (manifest_path is None) == (manifest is None):
+            exc = ShuntError("INVALID_REQUEST", "MANIFEST_SOURCE_AMBIGUOUS", retryable=False)
+            return self._publish_failure(request_id, exc, OperationKind.CAPTURE)
+
+        operation_id = new_operation_id()
+        try:
+            normalized: ArtifactManifest = (
+                self._importer.read_manifest_file(manifest_path)
+                if manifest_path is not None
+                else self._importer.normalize(manifest)
+            )
+            outcome = self._importer.adopt(self.session_id, normalized)
+        except ShuntError as exc:
+            self._metrics.count(
+                "artifact_import", {"result": "refused", "code": exc.code}
+            )
+            return self._publish_failure(
+                request_id, exc, OperationKind.CAPTURE, operation_id=operation_id
+            )
+        except Exception:
+            # Anything unclassified is reported as a store failure with no detail, for
+            # the same reason the spill path does: an unexpected exception must not
+            # become a channel for text the caller never validated.
+            safe = ShuntError("STORE_FAILED", "IMPORT_FAILED", retryable=False)
+            self._metrics.count("artifact_import", {"result": "refused", "code": safe.code})
+            return self._publish_failure(
+                request_id, safe, OperationKind.CAPTURE, operation_id=operation_id
+            )
+
+        entry = outcome.source
+        expires_at = E.iso_expiry(entry.expires_at_epoch)
+        env = E.build(
+            request_id=request_id,
+            status="ok",
+            code="IMPORTED",
+            coverage=E.Coverage(upstream_truncated=normalized.upstream_truncated),
+            sources=[
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "media_type": entry.snapshot.media_type,
+                    "bytes": outcome.byte_count,
+                    "expires_at": expires_at,
+                }
+            ],
+            retryable=False,
+            pointer={
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "bytes": outcome.byte_count,
+                "expires_at": expires_at,
+                "internal": True,
+            },
+            import_receipt=outcome.receipt,
+            result_kind=ResultKind.POINTER,
+            provenance=deterministic(ProvenanceLabel.POINTER_ONLY),
+            accounting_id=operation_id,
+            guidance=(
+                "A large tool-result artifact was adopted without entering this "
+                "conversation. Ask the context-shunt reader a question about this handle "
+                "for a cited answer, or use context_shunt_inspect for exact lines."
+            ),
+        )
+        published = enforce_or_fixed(env, self.config.limits)
+        baseline = (
+            # A producer that already shortened the payload only lets us observe the
+            # shortened size; crediting the full artifact there would be invented.
+            Baseline.host_truncated(outcome.byte_count, limits=self.config.limits)
+            if normalized.upstream_truncated
+            else Baseline.withheld_payload(outcome.byte_count, limits=self.config.limits)
+        )
+        credited = self._store.credit_baseline(self._identity, entry.source_id)
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.CAPTURE,
+            envelope=published,
+            baseline=baseline,
+            baseline_credited=credited,
+            reader=ReaderCost.none(),
+            boundary=DeliveryBoundary.POINTER,
+        )
+        self._metrics.count("artifact_import", {"result": "imported", "code": "IMPORTED"})
         return published
 
     # -- optional Suma post-tool ------------------------------------------

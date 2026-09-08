@@ -1,0 +1,198 @@
+{
+  "schema_version": "1.1",
+  "description": "Shadow A/B corpus for the artifact-broker path. Every artifact is generated deterministically from the `body` spec below - no real tool output, no real producer content, and nothing that came from an operational system. Bodies are shaped like the oversized tool results that actually cost a session (log query pages, cloud journal pages, issue tracker exports, wiki pages) because shape drives how each lane behaves: line-oriented text compacts differently from a JSON document, and a needle near the middle survives head/tail truncation differently from one near the end.",
+  "runs_per_item": 1,
+  "lanes": {
+    "raw_baseline": "the whole artifact into the main context. The counterfactual every reduction figure is measured against, and the evidence ceiling: recall is 1.0 by construction because nothing was dropped.",
+    "legacy_compact": "a reference emulation of a heuristic head/tail compactor with an elision marker, capped at the tool-result byte cap. Deterministic, no model. This is the incumbent being compared against, not product code.",
+    "deterministic_retrieval": "import the artifact, then answer with a literal search through the zero-model inspector. No provider, so this lane always runs.",
+    "reader": "import the artifact, then ask the question-aware reader. Never scored here, even with a live bridge: scoring a model lane needs a fixed corpus, fixed thresholds and a fixed number of runs per item decided before the run, and `scripts/verify eval luna` is the gate that owns those controls. This lane is reported NOT_RUN unconditionally, and so are the five gates that depend on it."
+  },
+  "gates": {
+    "task_correctness": {
+      "threshold": 0.95,
+      "requires": "reader",
+      "description": "Answered the asked question correctly. Needs a lane that answers questions, so the retrieval lane's evidence recall is reported separately rather than substituted for this."
+    },
+    "semantic_evidence_support": {
+      "threshold": 0.95,
+      "requires": "reader",
+      "description": "The published evidence actually supports the claim. Semantic, so it needs the reader's own citations."
+    },
+    "mechanical_citation_validity": {
+      "threshold": 1.0,
+      "requires": "reader",
+      "description": "Every published citation verifies byte-for-byte at its locator. The retrieval lane publishes exact extracts and no citations at all, so scoring this from it would be a vacuous 1.0."
+    },
+    "no_evidence_regression_vs_raw": {
+      "threshold": 1.0,
+      "requires": "deterministic",
+      "description": "Evidence recall must not fall below the raw baseline. Averaged over the items that have an expectation to recall - a refused item has no expected_quote, because the corpus cannot ask a lane to find evidence in a payload the core will not read - and both lanes use the identical denominator, so the lane-to-lane comparison is sound. Measurable without a provider: the raw baseline's recall is 1.0, so this is a direct comparison."
+    },
+    "main_context_reduction": {
+      "threshold": 0.6,
+      "requires": "deterministic",
+      "description": "Main-context tokens saved against the raw baseline, measured over the items the broker actually brokered. Refused items are excluded from the denominator on purpose: the over-cap item alone is ~88% of the whole-corpus raw baseline, so crediting its counterfactual would make the headline a saving on a payload no lane can answer from. Their raw bytes are reported separately in `refused_raw_bytes`, and the whole-corpus figure is reported too - it is just not what the gate measures."
+    },
+    "net_cost_reduction": {
+      "threshold": 0.3,
+      "requires": "reader_and_pricing",
+      "description": "Net total cost including reader input/output and every retry. There is no pricing table in this repository, and inventing one would fake the number, so this stays NOT_RUN even with a live reader until pricing exists."
+    },
+    "bounded_latency": {
+      "threshold_ms": 2000,
+      "requires": "deterministic",
+      "description": "Per-item wall clock for the deterministic retrieval lane - the only model-free lane that does real work; the raw and legacy lanes are byte arithmetic and would make the bound meaningless. The reader's latency is a provider measurement and belongs to the provider benchmark."
+    },
+    "bounded_follow_up_rate": {
+      "threshold": 0.25,
+      "requires": "reader",
+      "description": "How often an answer sends the agent back for another question. Only an answering lane has a follow-up rate."
+    }
+  },
+  "legacy_compactor": {
+    "description": "The incumbent's shape, fixed here so the comparison cannot drift: keep the first `head_lines`, keep the last `tail_lines`, replace the middle with one elision marker, and stop at `max_bytes`.",
+    "head_lines": 60,
+    "tail_lines": 20,
+    "max_bytes": 16384,
+    "elision_marker": "... [{count} lines elided by the compactor] ..."
+  },
+  "items": [
+    {
+      "id": "log_page_mid_error",
+      "shape": "log_json_lines",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "Which downstream dependency did the checkout service report as unavailable, and how many attempts did it make?",
+      "expected_quote": "\"msg\":\"dependency unavailable: inventory-api\",\"attempts\":7",
+      "expected_facts": ["inventory-api", "7"],
+      "search_needle": "dependency unavailable",
+      "body": { "lines": 1400, "needle_line": 812 }
+    },
+    {
+      "id": "log_page_tail_error",
+      "shape": "log_json_lines",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "What was the last error the service logged before it stopped?",
+      "expected_quote": "\"msg\":\"shutting down after repeated failures\",\"code\":\"EXHAUSTED\"",
+      "expected_facts": ["EXHAUSTED"],
+      "search_needle": "shutting down after repeated failures",
+      "body": { "lines": 1400, "needle_line": 1396 }
+    },
+    {
+      "id": "journal_mid_oom",
+      "shape": "journal_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "Which process was killed and what limit did it exceed?",
+      "expected_quote": "kernel: oom-kill process=order-worker limit=2048MiB",
+      "expected_facts": ["order-worker", "2048MiB"],
+      "search_needle": "oom-kill",
+      "body": { "lines": 2000, "needle_line": 1104 }
+    },
+    {
+      "id": "journal_early_config",
+      "shape": "journal_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "What connection pool size did the service start with?",
+      "expected_quote": "startup: connection pool size=48 acquire_timeout=5s",
+      "expected_facts": ["48"],
+      "search_needle": "connection pool size",
+      "body": { "lines": 2000, "needle_line": 12 }
+    },
+    {
+      "id": "tracker_export_priority",
+      "shape": "tracker_json",
+      "media_type": "application/json",
+      "answerable": true,
+      "question": "Which exported issue is blocking the release, and who owns it?",
+      "expected_quote": "\"blocking_release\":true,\"assignee\":\"team-payments\"",
+      "expected_facts": ["team-payments"],
+      "search_needle": "\"blocking_release\":true",
+      "body": { "lines": 700, "needle_line": 431 }
+    },
+    {
+      "id": "tracker_export_duplicate",
+      "shape": "tracker_json",
+      "media_type": "application/json",
+      "answerable": true,
+      "question": "Which issue in the export was closed as a duplicate, and of what?",
+      "expected_quote": "\"resolution\":\"duplicate\",\"duplicate_of\":\"PROJ-1042\"",
+      "expected_facts": ["PROJ-1042"],
+      "search_needle": "\"resolution\":\"duplicate\"",
+      "body": { "lines": 700, "needle_line": 233 }
+    },
+    {
+      "id": "wiki_page_runbook_step",
+      "shape": "wiki_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "What does the runbook say to do before restarting the queue consumer?",
+      "expected_quote": "Before restarting the consumer, drain the in-flight batch and record the offset.",
+      "expected_facts": ["drain", "offset"],
+      "search_needle": "Before restarting the consumer",
+      "body": { "lines": 900, "needle_line": 522 }
+    },
+    {
+      "id": "wiki_page_owner",
+      "shape": "wiki_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "question": "Which team is listed as the escalation owner for this component?",
+      "expected_quote": "Escalation owner: team-platform-reliability (rotation shared with team-orders).",
+      "expected_facts": ["team-platform-reliability"],
+      "search_needle": "Escalation owner:",
+      "body": { "lines": 900, "needle_line": 77 }
+    },
+    {
+      "id": "log_page_no_answer",
+      "shape": "log_json_lines",
+      "media_type": "text/plain",
+      "answerable": false,
+      "question": "What was the database migration version applied during this window?",
+      "expected_quote": null,
+      "expected_facts": [],
+      "search_needle": "migration version",
+      "body": { "lines": 1400, "needle_line": null }
+    },
+    {
+      "id": "journal_no_answer",
+      "shape": "journal_text",
+      "media_type": "text/plain",
+      "answerable": false,
+      "question": "Which TLS certificate expired during this window?",
+      "expected_quote": null,
+      "expected_facts": [],
+      "search_needle": "certificate expired",
+      "body": { "lines": 2000, "needle_line": null }
+    },
+    {
+      "id": "artifact_with_credential_marker",
+      "shape": "journal_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "refusal_expected": "UNSAFE_SOURCE",
+      "question": "What credential did the worker load at startup?",
+      "expected_quote": null,
+      "expected_facts": [],
+      "search_needle": "startup",
+      "body": { "lines": 400, "needle_line": 200, "inject_secret_marker": true },
+      "note": "A realistic cloud journal page can contain a credential marker, and the core refuses to snapshot one at all. That refusal is the designed defence and the strongest available outcome, but it is scored as zero in a denominator that still counts the item - a refusal is a different fact from an answer, reported in its own field."
+    },
+    {
+      "id": "artifact_over_source_cap",
+      "shape": "journal_text",
+      "media_type": "text/plain",
+      "answerable": true,
+      "refusal_expected": "INVALID_REQUEST",
+      "question": "What does this oversized journal page say about retries?",
+      "expected_quote": null,
+      "expected_facts": [],
+      "search_needle": "retry",
+      "body": { "lines": 0, "needle_line": null, "over_source_cap": true },
+      "note": "Larger than max_source_bytes. A manifest cannot even declare a size that large - the import contract caps artifact.bytes at the same value - so the refusal is INVALID_REQUEST at the contract boundary rather than a limit hit after reading 8 MiB. The item has no lane that can answer it and scores zero in a counted denominator."
+    }
+  ]
+}

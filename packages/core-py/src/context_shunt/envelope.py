@@ -139,6 +139,7 @@ def build(
     extraction: dict[str, Any] | None = None,
     stats: dict[str, Any] | None = None,
     recovery: dict[str, Any] | None = None,
+    import_receipt: dict[str, Any] | None = None,
     schema_version: str = EMITTED_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     if not legal_pair(status, code):
@@ -161,6 +162,13 @@ def build(
             raise ValueError("STATS must carry no answer and no citations")
         if stats is None:
             raise ValueError("STATS requires a stats block")
+    if code == "IMPORTED":
+        if answer or citations:
+            raise ValueError("IMPORTED must carry no answer and no citations")
+        if pointer is None or import_receipt is None:
+            # A pointer with no receipt is indistinguishable from one this core spilled
+            # itself, which is exactly the claim the separate code exists to avoid.
+            raise ValueError("IMPORTED requires a pointer and an import receipt")
 
     env: dict[str, Any] = {
         "schema_version": schema_version,
@@ -196,6 +204,8 @@ def build(
         env["stats"] = stats
     if recovery is not None:
         env["recovery"] = _validated_recovery(recovery)
+    if import_receipt is not None:
+        env["import_receipt"] = import_receipt
     return env
 
 
@@ -209,7 +219,7 @@ def _default_result_kind(code: str) -> ResultKind:
         return ResultKind.DETERMINISTIC_EXTRACTION
     if code == "STATS":
         return ResultKind.STATS
-    if code == "SPILLED":
+    if code in ("SPILLED", "IMPORTED"):
         return ResultKind.POINTER
     if code in ("LARGE_READ", "UNCLASSIFIABLE_READ"):
         return ResultKind.GATE_DECISION

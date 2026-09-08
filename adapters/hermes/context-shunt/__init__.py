@@ -7,9 +7,10 @@ Wiring, verified against the hermes-agent checkout named by
   *before* the tool's handler, and returning ``{"action": "block", "message": ...}``
   short-circuits the call. That is what makes the large-read gate a pre-execution gate:
   a blocked read never runs.
-* ``ctx.register_tool(name, toolset, schema, handler, ...)`` exposes the three read-only
-  escape hatches. No writer tool is registered, and no ``override=`` is passed - these add
-  a surface, they never replace a built-in.
+* ``ctx.register_tool(name, toolset, schema, handler, ...)`` exposes the read-only escape
+  hatches and, where a deployment authorized it, the external-artifact import route. No
+  writer tool is registered, and no ``override=`` is passed - these add a surface, they
+  never replace a built-in.
 * ``ctx.register_auxiliary_task("context_shunt_reader", ...)`` declares the reader as a
   first-class auxiliary task, so it appears in ``hermes model -> Configure auxiliary
   models`` and gets its own ``auxiliary.context_shunt_reader`` config block.
@@ -51,11 +52,21 @@ never claims ``provider_confirms_generation``: attribution comes back ``unverifi
 ``mismatch`` when the value contradicts the request), never ``actual``. Capture, inspect
 and stats do not depend on the reader and stay fully usable either way.
 
-The optional Suma post-tool mode is not wired. ``transform_tool_result`` hands the plugin
+The optional post-tool spill mode is not wired. ``transform_tool_result`` hands the plugin
 a result that is already post-truncation, and the host wraps the hook in try/except so a
 raising handler leaves the original result in place. Neither "complete capture before
 truncation" nor "no raw fallback" can be shown, so the mode is reported unsupported and
 stays off. See docs/capability-matrix.md.
+
+What *is* wired for oversized tool results
+------------------------------------------
+The artifact import route, which needs no interception at all. A compactor or spooler that
+already persisted an oversized tool result to a file, plus a manifest describing it, can
+hand that artifact over through ``context_shunt_import``; the core proves the file matches
+the manifest and returns an opaque handle. This is not post-tool interception and the
+adapter never reports it as such: ``suma_post_tool`` stays ``unsupported`` and
+``artifact_import`` is a separate mode, off unless a deployment configures import roots and
+allowlists a producer manifest schema.
 """
 
 from __future__ import annotations
@@ -186,6 +197,25 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
         )
         if aux
         else unsupported("reader_task_config", DisabledReason.HOOK_MISSING)
+    )
+
+    # External artifact import. Needs no interception ordering, only a tool surface and
+    # a core implementation - both of which exist here. Whether it *runs* is still a
+    # configuration decision: with no import roots and no allowlisted producer schema the
+    # session refuses every import.
+    register_tool = callable(getattr(ctx, "register_tool", None))
+    modes.append(
+        supported(
+            "artifact_import",
+            evidence=(
+                "ctx.register_tool exposes context_shunt_import; the import boundary is "
+                "implemented in context_shunt.artifacts",
+                "an already-persisted artifact needs no pre-truncation capture, so this "
+                "mode makes no claim about post-tool interception",
+            ),
+        )
+        if register_tool
+        else unsupported("artifact_import", DisabledReason.HOOK_MISSING)
     )
 
     # Suma post-tool: refused on evidence, not on absence of effort.
@@ -674,6 +704,43 @@ def context_shunt_stats(args: dict[str, Any] | None = None, **kwargs) -> str:
         return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
 
 
+def context_shunt_import(args: dict[str, Any] | None = None, **kwargs) -> str:
+    """Adopt an external producer's already-persisted tool-result artifact.
+
+    Takes a manifest path, not a payload: the agent never has to hold the artifact, and
+    the core re-proves every claim the manifest makes before a handle exists. Returns a
+    pointer envelope - never the artifact's bytes.
+    """
+    params = {**(args or {}), **kwargs}
+    session = _session(
+        str(params.get("task_id") or ""), str(params.get("session_id") or "")
+    )
+    request_id = _request_id(params)
+    try:
+        tool_args = validate_tool_args(
+            {
+                "tool": "context_shunt_import",
+                **{
+                    key: params[key]
+                    for key in ("manifest_path",)
+                    if params.get(key) is not None
+                },
+            }
+        )
+    except ShuntError as exc:
+        return _error(request_id, exc)
+    try:
+        return _block_message(
+            session.import_artifact(
+                request_id, manifest_path=str(tool_args["manifest_path"]).strip()
+            )
+        )
+    except ShuntError as exc:
+        return _error(request_id, exc)
+    except Exception:
+        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
+
+
 def _error(request_id: str, exc: ShuntError) -> str:
     from context_shunt import envelope as E
 
@@ -785,10 +852,36 @@ STATS_TOOL_SCHEMA = {
     },
 }
 
+IMPORT_TOOL_SCHEMA = {
+    "name": "context_shunt_import",
+    "description": (
+        "Adopt a large tool-result artifact that a producer already wrote to disk, so it "
+        "never enters this conversation. Takes the path of the producer's manifest, "
+        "inside a configured import root; the manifest's size and digest claims are "
+        "re-proven against the file before anything is accepted. Returns an opaque handle "
+        "and metadata - never the artifact's contents. Read it afterwards with "
+        "context_shunt_read for a cited answer, or context_shunt_inspect for exact lines."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "manifest_path": {
+                "type": "string",
+                "description": (
+                    "Absolute path of the producer manifest, inside a configured "
+                    "artifact_import root."
+                ),
+            },
+        },
+        "required": ["manifest_path"],
+    },
+}
+
 TOOLS = (
     (READER_TOOL_SCHEMA, context_shunt_read, "reader"),
     (INSPECT_TOOL_SCHEMA, context_shunt_inspect, "deterministic_inspect"),
     (STATS_TOOL_SCHEMA, context_shunt_stats, "session_stats"),
+    (IMPORT_TOOL_SCHEMA, context_shunt_import, "artifact_import"),
 )
 
 
@@ -854,6 +947,10 @@ def register(ctx: Any) -> None:
             if mode == "deterministic_inspect" and not _config.tools.inspect_enabled:
                 continue
             if mode == "session_stats" and not _config.tools.stats_enabled:
+                continue
+            if mode == "artifact_import" and not _config.artifact_import.enabled:
+                # Registering an import tool a deployment never authorized would put a
+                # permanently-refusing surface in front of the model.
                 continue
             # Hermes' PluginContext.register_tool takes (name, toolset, schema, handler, ...).
             # No override= is passed: these add a surface, they never replace a built-in.

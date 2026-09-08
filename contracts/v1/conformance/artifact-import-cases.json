@@ -1,0 +1,222 @@
+{
+  "schema_version": "1.1",
+  "description": "External artifact import contract. Every manifest field and every path in it is untrusted input. A case's `setup` describes a filesystem the gate builds under a temporary import root; `expect` is the outcome the core must produce. The import either yields one immutable snapshot handle whose digest was re-derived from the bytes actually read, or it is refused with a bounded code - there is no partial import, no refusal returns the payload, and a refusal never leaves a handle behind.",
+  "invariants": {
+    "model_calls_for_import": 0,
+    "heuristic_summary_allowed": false,
+    "handle_published_only_after_hash_and_policy_proven": true,
+    "raw_returned_on_any_failure": false,
+    "manifest_read_through_the_same_path_policy_as_the_artifact": true,
+    "producer_supplied_size_and_digest_are_claims_not_facts": true,
+    "translation_profile_grants_no_authorization": true
+  },
+  "cases": [
+    {
+      "id": "happy_text_import",
+      "setup": { "artifact": { "content": "line one\nline two\nline three\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "import", "code": "IMPORTED", "internal": true, "baseline_kind": "full_payload_counterfactual" }
+    },
+    {
+      "id": "happy_json_import",
+      "setup": { "artifact": { "content": "{\"events\":[{\"level\":\"error\",\"count\":42}]}", "media_type": "application/json" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "import", "code": "IMPORTED", "internal": true }
+    },
+    {
+      "id": "happy_foreign_profile_import",
+      "setup": { "artifact": { "content": "ts=1 msg=ok\nts=2 msg=ok\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "foreign_tool_result_artifact" },
+      "expect": { "action": "import", "code": "IMPORTED", "internal": true }
+    },
+    {
+      "id": "happy_foreign_profile_file_uri_import",
+      "setup": { "artifact": { "content": "uri addressed body\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "foreign_tool_result_artifact", "path_mode": "file_uri" },
+      "expect": { "action": "import", "code": "IMPORTED", "internal": true }
+    },
+    {
+      "id": "upstream_truncated_import_uses_observed_baseline",
+      "setup": { "artifact": { "content": "partial journal\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "upstream_truncated": true },
+      "expect": { "action": "import", "code": "IMPORTED", "baseline_kind": "host_truncated_observed" }
+    },
+    {
+      "id": "unknown_import_contract_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override": { "import_contract": "context_shunt.artifact_import.v2" } },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_UNKNOWN" }
+    },
+    {
+      "id": "manifest_schema_undeclared_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "drop": ["import_contract"] },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_UNDECLARED" }
+    },
+    {
+      "id": "manifest_schema_not_in_allowlist_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "foreign_tool_result_artifact" },
+      "config": { "accepted_manifest_schemas": ["context_shunt.artifact_import.v1"] },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_NOT_ALLOWED" }
+    },
+    {
+      "id": "manifest_extra_field_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override": { "notes": "free text a producer must not be able to inject" } },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_VIOLATION" }
+    },
+    {
+      "id": "manifest_not_json_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "manifest_body": "not json at all" },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_NOT_JSON" }
+    },
+    {
+      "id": "manifest_over_byte_cap_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "manifest_padding_bytes": 131072 },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "LIMIT_EXCEEDED", "detail": "MANIFEST_OVER_BYTE_CAP" }
+    },
+    {
+      "id": "symlinked_manifest_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "manifest_symlink": true },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "SYMLINK" }
+    },
+    {
+      "id": "manifest_outside_import_root_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "manifest_outside": true },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "OUTSIDE_WORKSPACE_ROOT" }
+    },
+    {
+      "id": "relative_artifact_path_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "path_mode": "relative" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "RELATIVE_PATH" }
+    },
+    {
+      "id": "traversal_out_of_import_root_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "outside": { "content": "neighbour body\n" } },
+      "manifest": { "profile": "native", "path_mode": "traversal_to_outside" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "OUTSIDE_WORKSPACE_ROOT" }
+    },
+    {
+      "id": "absolute_path_outside_import_root_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "outside": { "content": "outside body\n" } },
+      "manifest": { "profile": "native", "path_mode": "outside" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "OUTSIDE_WORKSPACE_ROOT" }
+    },
+    {
+      "id": "non_file_uri_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "foreign_tool_result_artifact", "path_mode": "https_uri" },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_UNSUPPORTED_URI" }
+    },
+    {
+      "id": "symlinked_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "symlink": true },
+      "manifest": { "profile": "native", "path_mode": "symlink" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "SYMLINK" }
+    },
+    {
+      "id": "directory_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "directory": true },
+      "manifest": { "profile": "native", "path_mode": "directory" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "NOT_REGULAR_FILE" }
+    },
+    {
+      "id": "fifo_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "fifo": true },
+      "manifest": { "profile": "native", "path_mode": "fifo" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "NOT_REGULAR_FILE" }
+    },
+    {
+      "id": "hardlinked_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "hardlink": true },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "HARDLINKED" }
+    },
+    {
+      "id": "missing_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" }, "unlink_artifact": true },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "NOT_FOUND" }
+    },
+    {
+      "id": "secret_named_artifact_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain", "name": ".env" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "SECRET_PATH" }
+    },
+    {
+      "id": "artifact_with_credential_marker_refused",
+      "setup": { "artifact": { "content": "journal line\naws_secret_access_key = value\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "SECRET_IN_SOURCE" }
+    },
+    {
+      "id": "binary_artifact_refused",
+      "setup": { "artifact": { "content_base64": "AAECA/8A", "media_type": "text/plain" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "BINARY_UNSUPPORTED" }
+    },
+    {
+      "id": "unsupported_media_type_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override_artifact": { "media_type": "application/pdf" } },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_VIOLATION" }
+    },
+    {
+      "id": "invalid_json_body_for_json_media_type_refused",
+      "setup": { "artifact": { "content": "{not json", "media_type": "application/json" } },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "INVALID_JSON" }
+    },
+    {
+      "id": "declared_bytes_over_source_cap_refused",
+      "setup": { "artifact": { "content": "small body\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override_artifact": { "bytes": 8388609 } },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "MANIFEST_SCHEMA_VIOLATION" }
+    },
+    {
+      "id": "size_mismatch_refused",
+      "setup": { "artifact": { "content": "actual body\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override_artifact": { "bytes": 4 } },
+      "expect": { "action": "error", "code": "SOURCE_CHANGED", "detail": "ARTIFACT_SIZE_MISMATCH" }
+    },
+    {
+      "id": "hash_mismatch_refused",
+      "setup": { "artifact": { "content": "actual body\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "override_artifact": { "sha256": "0000000000000000000000000000000000000000000000000000000000000000" } },
+      "expect": { "action": "error", "code": "SOURCE_CHANGED", "detail": "ARTIFACT_HASH_MISMATCH" }
+    },
+    {
+      "id": "artifact_rewritten_after_manifest_refused",
+      "setup": { "artifact": { "content": "original body\n", "media_type": "text/plain" }, "rewrite_after_manifest": "tampered body\n" },
+      "manifest": { "profile": "native" },
+      "expect": { "action": "error", "code": "SOURCE_CHANGED", "detail": "ARTIFACT_HASH_MISMATCH" }
+    },
+    {
+      "id": "manifest_pointing_at_the_private_cache_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native", "path_mode": "cache_root" },
+      "expect": { "action": "error", "code": "UNSAFE_SOURCE", "detail": "OUTSIDE_WORKSPACE_ROOT" }
+    },
+    {
+      "id": "import_disabled_by_config_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native" },
+      "config": { "enabled": false },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "ARTIFACT_IMPORT_DISABLED" }
+    },
+    {
+      "id": "import_unsupported_by_capability_refused",
+      "setup": { "artifact": { "content": "x\n", "media_type": "text/plain" } },
+      "manifest": { "profile": "native" },
+      "config": { "capability_supported": false },
+      "expect": { "action": "error", "code": "INVALID_REQUEST", "detail": "ARTIFACT_IMPORT_DISABLED" }
+    }
+  ]
+}

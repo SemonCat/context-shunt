@@ -33,6 +33,7 @@ SAFE_MESSAGES: dict[str, str] = {
     "UNCLASSIFIABLE_READ": "read-like command could not be proven bounded and safe",
     "UPSTREAM_TRUNCATED": "upstream result was already truncated",
     "EXTRACTED": "deterministic extraction returned exact snapshot bytes",
+    "IMPORTED": "external producer artifact adopted as an immutable snapshot handle",
     "STATS": "session accounting returned",
 }
 

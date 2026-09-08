@@ -26,7 +26,10 @@ contain that string anywhere in the database or its WAL.
 
 **Only withheld content is captured.** An ordinary small read that the gate lets through is
 never stored. The optional post-tool mode captures only results that serialize above
-`max_tool_result_bytes`. The store does not become a shadow copy of the workspace.
+`max_tool_result_bytes`. An external artifact is captured only when a deployment has
+authorized the import boundary and a caller explicitly asks for that artifact. The store
+does not become a shadow copy of the workspace, and it does not become a mirror of a
+producer's artifact directory.
 
 ## Permissions
 
@@ -36,7 +39,48 @@ directory or device where a blob belongs is treated as a path-replacement attemp
 closed rather than being followed. A hardlinked payload file is refused for the same
 reason.
 
-The cache root is refused if it resolves inside any configured workspace root.
+The cache root is refused if it resolves inside any configured workspace root, and also if
+it resolves inside any configured `artifact_import.roots` entry — a manifest could
+otherwise name one of the core's own immutable blobs as if it were a producer artifact.
+
+## The external-artifact trust boundary
+
+The import boundary is the only place where a *third party* decides what this system reads,
+so it is worth being explicit about what is trusted there. The answer is nothing.
+
+A manifest is a set of claims. Each one is re-proven before a handle exists:
+
+| The manifest claims | What is actually checked | Refusal |
+| --- | --- | --- |
+| its own shape | a registered translation profile exists for the declared schema, and this deployment allowlisted that schema | `MANIFEST_SCHEMA_UNKNOWN`, `MANIFEST_SCHEMA_NOT_ALLOWED` |
+| its own structure | validated against the import contract, which has `additionalProperties: false` and no free-text field anywhere | `MANIFEST_SCHEMA_VIOLATION` |
+| where the artifact is | absolute, canonicalized, inside an import root, regular file, not a symlink, not hardlinked, not a FIFO/directory/device, not secret-named, not denylisted | `RELATIVE_PATH`, `OUTSIDE_WORKSPACE_ROOT`, `SYMLINK`, `HARDLINKED`, `NOT_REGULAR_FILE`, `SECRET_PATH`, `NOT_FOUND` |
+| how big it is | compared against the pinned stat *and* against the bytes actually read | `ARTIFACT_SIZE_MISMATCH` |
+| its digest | recomputed from the bytes actually read | `ARTIFACT_HASH_MISMATCH` |
+| its media type | one of the two the snapshot layer can index, and valid JSON when it says JSON | `MANIFEST_SCHEMA_VIOLATION`, `INVALID_JSON` |
+| nothing about its content | the same UTF-8 and content secret policy as any capture | `BINARY_UNSUPPORTED`, `SECRET_IN_SOURCE` |
+
+Two details are load-bearing rather than incidental:
+
+* **The manifest file itself goes through the path policy.** Reading it with a plain `open`
+  would follow a symlink out of the import roots and read whatever it pointed at, before a
+  single artifact check ran. It is authorized, then read through the same bounded reader,
+  capped at 64 KiB.
+* **The bytes are read through a pinned descriptor.** `O_NOFOLLOW`, with a stat identity
+  re-check on both sides of the read. A file swapped between authorization and the read is
+  `SOURCE_CHANGED`, not a snapshot of the substitute. The digest check cannot see that race
+  on its own, which is why both exist.
+
+Validation runs entirely before publication, so a refused import leaves no handle and no
+orphaned blob. No refusal returns the artifact's bytes, and no refusal carries the manifest,
+the path, or any producer-supplied text: the receipt in a *successful* envelope carries
+bounded tokens only, and its digest is the one derived from the bytes read.
+
+What this boundary does **not** do: it does not vouch for the producer. An authorized
+producer that writes a misleading artifact gets a faithfully imported misleading artifact.
+The defences that still apply are the ones that always apply — the reader sees one excerpt
+and a fixed instruction, citations are verified against the snapshot, and the content secret
+policy runs on the payload regardless of who wrote it.
 
 ## Retention and deletion
 

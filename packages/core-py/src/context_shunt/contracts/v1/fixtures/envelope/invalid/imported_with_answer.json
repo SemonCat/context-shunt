@@ -1,0 +1,46 @@
+{
+  "note": "an import is a pointer, never prose: IMPORTED with answer text would mean the payload had been summarized on the way in",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_import_04",
+    "status": "ok",
+    "code": "IMPORTED",
+    "answer": "The journal shows 42 retries.",
+    "citations": [],
+    "coverage": {
+      "complete": true,
+      "processed_chunks": 0,
+      "planned_chunks": 0,
+      "omitted": [],
+      "upstream_truncated": false
+    },
+    "sources": [],
+    "retryable": false,
+    "pointer": {
+      "source_id": "src_01ab",
+      "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "bytes": 1048576,
+      "expires_at": "2026-09-07T12:00:00Z",
+      "internal": true
+    },
+    "result_kind": "pointer",
+    "provenance": {
+      "derived": false,
+      "label": "pointer_only",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 0,
+      "usage_complete": true,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_1111222233334444",
+    "import_receipt": {
+      "producer": "example-compactor",
+      "manifest_schema": "context_shunt.artifact_import.v1",
+      "artifact_sha256": "2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "bytes": 1048576,
+      "upstream_truncated": false
+    }
+  }
+}

@@ -26,7 +26,43 @@ adding fake keys to either plugin `config` block.
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
 | `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill request. Both adapters report it unsupported, so `true` does not activate the mode. |
+| `artifact_import.enabled` | `false` | Adopt an oversized tool-result artifact an external producer already persisted. Supported on Hermes; the OpenClaw core has no import boundary and reports the mode unsupported. |
+| `artifact_import.roots` | `[]` | Allowlist of canonical directories an artifact and its manifest may live under. Separate from `workspace_roots`, and refused if a root contains the private cache. |
+| `artifact_import.accepted_manifest_schemas` | `[]` | Allowlist of producer manifest schemas. A manifest declaring a schema outside it is refused even when a translation profile for that schema exists. |
 | `limits` | `{}` | Deployment caps. **May only be narrowed** — a wider value is refused at load. |
+
+## `artifact_import`
+
+The import boundary is the deployable answer to oversized *tool results*, and it is
+deliberately not the same thing as `suma_post_tool`. That mode needs the host to hand a
+plugin the complete result before truncation and accept a replacement before persistence,
+which neither supported host does. An artifact a producer already wrote to disk needs
+neither: the capture already happened, so all the host has to supply is a way to invoke
+the import.
+
+Enabling it is two decisions, and neither has a permissive default:
+
+```yaml
+artifact_import:
+  enabled: true
+  roots:
+    - /var/lib/your-compactor/artifacts
+  accepted_manifest_schemas:
+    - context_shunt.artifact_import.v1
+```
+
+`enabled: true` with no roots, or with no accepted schema, is a configuration error rather
+than an allow-all. A root that contains `cache_dir` is refused too — otherwise a manifest
+could name one of the core's own immutable blobs as if it were a producer artifact.
+
+The `config` block shown above is Hermes-only. The OpenClaw plugin's config schema is a
+closed key set and its core has no import boundary, so adding `artifact_import` there is
+refused at load; its capability report says `artifact_import: unsupported` with reason
+`IMPORT_UNIMPLEMENTED`, which names a core gap rather than a host limitation.
+
+Everything a manifest claims is re-proven before a handle exists — see
+[`docs/security.md`](../../docs/security.md) for the checks and
+[`docs/architecture.md`](../../docs/architecture.md) for where the boundary sits.
 
 ## `attribution_policy`
 

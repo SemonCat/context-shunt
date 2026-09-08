@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/context-shunt/contracts/v1/artifact-import.schema.json",
+  "title": "context-shunt v1 external artifact import contract",
+  "description": "The normalized form of an external producer's manifest. A producer that already persists an oversized tool result to a file can hand that result to context-shunt without the host having to intercept the result itself. Every field here is untrusted input: it is validated against this schema, then re-proven against the filesystem and the artifact's own bytes before any handle exists. The contract is deliberately producer-agnostic - `producer.manifest_schema` names the foreign schema a profile translated from, so no particular producer's identifiers appear in the core API. There is no free-text field anywhere in this document: every string is a bounded token, so nothing from an untrusted manifest can ride into an envelope, a log line or a metric label.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["import_contract", "producer", "artifact"],
+  "properties": {
+    "import_contract": {
+      "description": "The revision of this contract the document declares. A document declaring an unknown revision is refused rather than read on a best-effort basis.",
+      "const": "context_shunt.artifact_import.v1"
+    },
+    "producer": { "$ref": "#/$defs/producer" },
+    "artifact": { "$ref": "#/$defs/artifact" },
+    "origin": { "$ref": "#/$defs/origin" },
+    "created_at": {
+      "description": "When the producer wrote the artifact. Advisory only: TTL is owned by the store and is measured from import, never from this value.",
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 32
+    }
+  },
+  "$defs": {
+    "producer": {
+      "description": "Who produced the artifact, as bounded opaque tokens. `id` distinguishes one producer deployment from another in the import allowlist; `manifest_schema` is the foreign schema identifier a profile normalized from, kept so an import receipt can say what shape it came from without the core owning that shape.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "manifest_schema"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+        "manifest_schema": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+      }
+    },
+    "artifact": {
+      "description": "Where the raw payload is and what it is claimed to be. `path` must canonicalize inside a configured import root, be a regular non-symlinked file, and survive the same source policy an ordinary capture does. `bytes` and `sha256` are claims: both are re-derived from the bytes actually read and a disagreement refuses the import rather than trusting either side.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256", "media_type"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 8388608 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "media_type": { "enum": ["text/plain", "application/json"] }
+      }
+    },
+    "origin": {
+      "description": "What produced the payload upstream. `tool` is a bounded token used only for operator-facing attribution; `upstream_truncated` decides which accounting baseline applies, because a payload the producer already shortened can only be credited at its observed size.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool"],
+      "properties": {
+        "tool": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$" },
+        "upstream_truncated": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -79,6 +79,25 @@ plugins:
         suma_post_tool:
           enabled: false
 
+        # The external-artifact import boundary: adopt an oversized tool result a
+        # compactor or spooler already persisted, without the host having to intercept
+        # the result. This is the deployable path for oversized *tool output*, and it is
+        # not post-tool interception - the mode above stays unsupported either way.
+        #
+        # Off by default, and enabling it requires saying what it trusts: at least one
+        # import root and at least one allowlisted producer manifest schema. An enabled
+        # boundary with neither is refused at load rather than defaulting to allow-all.
+        # Import roots are a separate allowlist from workspace_roots, canonicalized, and
+        # refused if they contain the private cache. Every manifest claim - path, size,
+        # digest, media type - is re-proven against the file before a handle exists.
+        #
+        # artifact_import:
+        #   enabled: true
+        #   roots:
+        #     - /var/lib/your-compactor/artifacts
+        #   accepted_manifest_schemas:
+        #     - context_shunt.artifact_import.v1
+
         # Caps may only be narrowed. A wider value is refused at load.
         # limits:
         #   full_read_max_lines: 200

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.1",
-  "description": "Normative caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these. Revision 1.1 adds the contract/inspect/disclosure/store/accounting blocks and leaves every 1.0 value unchanged.",
+  "description": "Normative caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these. Revision 1.1 adds the contract/inspect/disclosure/store/accounting/artifact_import blocks and leaves every 1.0 value unchanged.",
   "reader_model": "gpt-5.6-luna",
   "contract": {
     "emitted_version": "1.1",
@@ -65,6 +65,10 @@
     "max_scan_bytes": 8388608,
     "max_search_matches": 200,
     "max_needle_bytes": 512
+  },
+  "artifact_import": {
+    "max_manifest_bytes": 65536,
+    "max_import_roots": 8
   },
   "disclosure": {
     "max_per_source_bytes": 262144,

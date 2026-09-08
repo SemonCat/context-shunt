@@ -212,7 +212,7 @@ export interface BuildOptions {
 function defaultResultKind(code: string): ResultKind {
   if (code === "EXTRACTED") return "deterministic_extraction";
   if (code === "STATS") return "stats";
-  if (code === "SPILLED") return "pointer";
+  if (code === "SPILLED" || code === "IMPORTED") return "pointer";
   if (code === "LARGE_READ" || code === "UNCLASSIFIABLE_READ") return "gate_decision";
   if (code === "ANSWERED" || code === "NO_MATCH") return "model_derived";
   return "failure";

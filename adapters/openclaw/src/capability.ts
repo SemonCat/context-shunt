@@ -21,6 +21,12 @@
  *
  * Because the required order cannot be shown, the mode is reported `unsupported` and stays
  * off. `HOST_UNSAFE` is what a caller gets if it tries to force it on.
+ *
+ * `artifact_import` - adopting an oversized tool result a producer already persisted - is
+ * reported `unsupported` here for a different and narrower reason: nothing about this host
+ * prevents it, but the TypeScript core has no import boundary yet. That is a repository
+ * fact, not a host fact, so it carries its own `IMPORT_UNIMPLEMENTED` reason rather than
+ * borrowing a host limitation it does not have.
  */
 import {
   type CapabilityReport,
@@ -123,6 +129,13 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
       ["CAPTURE_AFTER_TRUNCATION", "OBSERVE_ONLY_HOOK", "HOST_FAIL_OPEN"],
       SUMA_EVIDENCE,
     ),
+  );
+
+  modes.push(
+    unsupported("artifact_import", ["IMPORT_UNIMPLEMENTED"], [
+      "the import boundary exists only in the Python core (context_shunt.artifacts); this adapter has nothing to call",
+      "not a host limitation: OpenClaw can register the tool, so this becomes supportable without any host change",
+    ]),
   );
 
   return {

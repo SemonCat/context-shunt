@@ -16,7 +16,13 @@ today's code.
 - Query-aware reader orchestration, bounded concurrency/retry/deadlines, availability
   fallback, mechanical citation verification, partial coverage, and output guards.
 - Deterministic line/byte/literal-search inspection and read-only session stats.
-- Hermes and OpenClaw adapters registering three read-only tools and no writer.
+- An external-artifact import boundary (Python core, Hermes adapter): a versioned
+  producer-agnostic manifest contract, producer translation profiles, allowlisted import
+  roots, and re-proof of every manifest claim against the bytes actually read.
+- A deterministic shadow A/B harness over a fixed synthetic corpus, with the
+  provider-dependent gates reported `NOT_RUN`.
+- Hermes and OpenClaw adapters registering read-only tools and no writer: three on both,
+  plus `context_shunt_import` on Hermes where a deployment configured it.
 - Deterministic unit, unsupported-mode, core benchmark, packaging, live-host, live-model,
   and aggregate release gate entry points.
 
@@ -28,6 +34,13 @@ available on the current checkout; consult the most recent verification output.
 - `suma_post_tool` is unsupported on Hermes and OpenClaw because neither exposes the
   required complete-capture and safe-replacement seam. The core engine exists behind the
   capability gate, but the host feature is off and its live post-tool tests are `NOT_RUN`.
+- `artifact_import` is unsupported on OpenClaw: the TypeScript core has no import
+  boundary. That is a repository gap rather than a host limitation, so closing it needs no
+  host change.
+- The shadow A/B's task-correctness, semantic-support, mechanical-citation-validity,
+  follow-up-rate and net-cost gates are `NOT_RUN`. The first four need live reader access;
+  net cost additionally needs a versioned price table that does not exist here. No live
+  compactor is replaced on deterministic evidence alone.
 - Writer / `propose_patch` is not implemented and is refused at configuration/contract
   boundaries.
 - No supported adapter can prove provider-authoritative `actual` model identity. Hermes

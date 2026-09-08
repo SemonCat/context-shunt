@@ -7,6 +7,12 @@ Rules that matter more than the rest:
 * ``suma_post_tool.enabled`` defaults to ``false`` and, even when set, only takes effect
   if the adapter's capability probe proves a safe capture/replacement order. On both
   supported hosts that proof does not exist, so the mode stays off.
+* ``artifact_import`` defaults to disabled with no roots. Enabling it needs at least one
+  explicit import root *and* an explicitly allowlisted manifest schema: an artifact
+  producer is a trust decision, so neither the roots nor the accepted producer shapes have
+  a permissive default. Import roots are canonicalized, refused when they contain the
+  private cache, and are a separate allowlist from ``workspace_roots`` - a deployment can
+  broker external artifacts without widening what the pre-read gate may capture.
 * A cap may be narrowed, never widened.
 
 Changed in 1.1: reader model and provider are configurable
@@ -54,6 +60,7 @@ _NARROWABLE = frozenset(
 )
 _CONFIG_KEYS = {
     "workspace_roots",
+    "artifact_import",
     "spill_dir",
     "cache_dir",
     "denylist",
@@ -67,6 +74,7 @@ _CONFIG_KEYS = {
     "limits",
 }
 _READER_KEYS = {"enabled", "model", "provider", "attribution_policy", "fallback_chain"}
+_ARTIFACT_IMPORT_KEYS = {"enabled", "roots", "accepted_manifest_schemas"}
 _ENABLED_SECTION_KEYS = {"enabled"}
 _MAX_FALLBACK_ENTRIES = 4
 _MAX_MODEL_REF_BYTES = 128
@@ -75,6 +83,27 @@ _MAX_MODEL_REF_BYTES = 128
 @dataclass(frozen=True)
 class SumaConfig:
     enabled: bool = False
+
+
+@dataclass(frozen=True)
+class ArtifactImportConfig:
+    """The external-artifact import boundary.
+
+    ``roots`` is an allowlist of canonical directories an artifact may live under, held
+    separately from ``workspace_roots`` so brokering a producer's artifacts never widens
+    what an ordinary read may capture. ``accepted_manifest_schemas`` is an allowlist of
+    producer manifest shapes: a manifest declaring a schema outside it is refused even
+    when a translation profile for that schema exists, because knowing how to read a
+    producer's manifest is not the same as being authorized to.
+    """
+
+    enabled: bool = False
+    roots: tuple[str, ...] = ()
+    accepted_manifest_schemas: tuple[str, ...] = ()
+
+    def path_policy(self, denylist: tuple[str, ...] = ()) -> PathPolicy:
+        """The import-root policy. Reuses the same canonicalization the gate uses."""
+        return PathPolicy.from_config(list(self.roots), list(denylist))
 
 
 @dataclass(frozen=True)
@@ -111,6 +140,7 @@ class Config:
     reader: ReaderConfig = field(default_factory=ReaderConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
     suma_post_tool: SumaConfig = field(default_factory=SumaConfig)
+    artifact_import: ArtifactImportConfig = field(default_factory=ArtifactImportConfig)
     limits: Limits = DEFAULT_LIMITS
 
     @property
@@ -121,6 +151,10 @@ class Config:
     def path_policy(self) -> PathPolicy:
         return PathPolicy.from_config(list(self.workspace_roots), list(self.denylist))
 
+    def import_path_policy(self) -> PathPolicy:
+        """The import-root policy, sharing this deployment's administrator denylist."""
+        return self.artifact_import.path_policy(self.denylist)
+
 
 def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     if raw is not None and not isinstance(raw, dict):
@@ -129,7 +163,15 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     if set(raw) - _CONFIG_KEYS:
         raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
 
-    for key in ("reader", "inspect", "stats", "suma_post_tool", "writer", "limits"):
+    for key in (
+        "reader",
+        "inspect",
+        "stats",
+        "suma_post_tool",
+        "artifact_import",
+        "writer",
+        "limits",
+    ):
         if key in raw and not isinstance(raw[key], dict):
             raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     operations = raw.get("operations")
@@ -143,12 +185,16 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     for key in ("inspect", "stats", "suma_post_tool", "writer"):
         if set(raw.get(key) or {}) - _ENABLED_SECTION_KEYS:
             raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    import_raw = raw.get("artifact_import") or {}
+    if set(import_raw) - _ARTIFACT_IMPORT_KEYS:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     for value in (
         raw.get("gate_enabled"),
         reader_raw.get("enabled"),
         (raw.get("inspect") or {}).get("enabled"),
         (raw.get("stats") or {}).get("enabled"),
         (raw.get("suma_post_tool") or {}).get("enabled"),
+        import_raw.get("enabled"),
         (raw.get("writer") or {}).get("enabled"),
     ):
         if value is not None and not isinstance(value, bool):
@@ -176,10 +222,16 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
 
     reader = _read_reader(reader_raw)
     limits = _read_limits(raw.get("limits") or {})
+    artifact_import = _read_artifact_import(import_raw, limits)
 
     spill_dir = Path(spill_value or default_spill_dir).expanduser().resolve(strict=False)
     if any(spill_dir == Path(root) or Path(root) in spill_dir.parents for root in roots):
         raise ShuntError("UNSAFE_SOURCE", "SPILL_INSIDE_WORKSPACE", retryable=False)
+    for root in artifact_import.roots:
+        # An import root containing the private cache would let a manifest name one of
+        # our own immutable blobs as if it were a producer artifact.
+        if spill_dir == Path(root) or Path(root) in spill_dir.parents:
+            raise ShuntError("UNSAFE_SOURCE", "CACHE_INSIDE_IMPORT_ROOT", retryable=False)
 
     return Config(
         workspace_roots=roots,
@@ -192,6 +244,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
             stats_enabled=(raw.get("stats") or {}).get("enabled", True),
         ),
         suma_post_tool=SumaConfig(enabled=(raw.get("suma_post_tool") or {}).get("enabled", False)),
+        artifact_import=artifact_import,
         limits=limits,
     )
 
@@ -238,6 +291,62 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
         attribution_policy=AttributionPolicy(policy_raw),
         fallback_chain=tuple(chain),
     )
+
+
+#: The one manifest shape this core owns. Any other accepted value names a *foreign*
+#: producer schema that a translation profile normalizes into it; the profile table lives
+#: in ``artifacts.py`` as data, so no producer's identifiers appear in the core API.
+NATIVE_IMPORT_CONTRACT = "context_shunt.artifact_import.v1"
+_MAX_MANIFEST_SCHEMA_BYTES = 128
+
+
+def _read_artifact_import(raw_import: dict[str, Any], limits: Limits) -> ArtifactImportConfig:
+    """Read the import boundary. Disabled with no roots unless a deployment says otherwise."""
+    enabled = bool(raw_import.get("enabled", False))
+
+    roots_raw = raw_import.get("roots", [])
+    if (
+        not isinstance(roots_raw, list)
+        or len(roots_raw) > _import_root_cap(limits)
+        or any(not isinstance(root, str) or not root.strip() for root in roots_raw)
+    ):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    roots = tuple(str(Path(root).expanduser().resolve(strict=False)) for root in roots_raw)
+
+    schemas_raw = raw_import.get("accepted_manifest_schemas", [])
+    if not isinstance(schemas_raw, list):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    schemas: list[str] = []
+    for entry in schemas_raw:
+        if (
+            not isinstance(entry, str)
+            or not entry.strip()
+            or len(entry.encode("utf-8")) > _MAX_MANIFEST_SCHEMA_BYTES
+        ):
+            raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+        schemas.append(entry.strip())
+
+    if enabled and (not roots or not schemas):
+        # Enabling the boundary without saying what it trusts would be an allow-all in
+        # everything but name, so it is a configuration error rather than a wide default.
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+
+    return ArtifactImportConfig(
+        enabled=enabled,
+        roots=roots,
+        accepted_manifest_schemas=tuple(dict.fromkeys(schemas)),
+    )
+
+
+def _import_root_cap(limits: Limits) -> int:
+    del limits  # the cap is normative, not narrowable per deployment
+    return int(raw_import_limits()["max_import_roots"])
+
+
+def raw_import_limits() -> dict[str, Any]:
+    from .limits import raw_limits
+
+    return dict(raw_limits()["artifact_import"])
 
 
 def _read_limits(raw_limits: dict[str, Any]) -> Limits:

@@ -558,14 +558,15 @@ def test_the_manifest_declares_every_tool_the_adapter_registers():
     """A tool the host cannot see declared is a tool an operator cannot audit.
 
     The manifest listed only `context_shunt_read` while the adapter registers three
-    tools. The OpenClaw manifest already declares all three in `contracts.tools`, so this
-    was also a cross-adapter inconsistency.
+    tools. The manifest is the audit surface, so it lists every tool the adapter *can*
+    register - including `context_shunt_import`, which a given deployment may leave off.
     """
     module = _load_adapter()
     registered = [schema["name"] for schema, _handler, _mode in module.TOOLS]
     assert sorted(_declared_tools()) == sorted(registered)
-    assert len(registered) == 3
-    # Read-only: nothing that writes is registered or declared.
+    assert len(registered) == 4
+    # Read-only: nothing that writes is registered or declared. The import tool adopts an
+    # artifact someone else wrote; it never writes to a source of its own.
     assert not any("write" in name or "patch" in name for name in registered)
 
 
@@ -576,12 +577,40 @@ def test_the_manifest_version_tracks_the_core_it_ships_with():
     assert f'version: "{core_version}"' in _manifest_text()
 
 
-def test_the_manifest_and_the_openclaw_plugin_declare_the_same_tools():
-    """Both adapters expose the same three read-only tools, by name."""
+#: Tools only one adapter can offer, with the reason. A name may sit here only while the
+#: capability report says the same thing - the two must not be able to disagree.
+_ADAPTER_ONLY_TOOLS = {
+    "context_shunt_import": "the import boundary exists only in the Python core",
+}
+
+
+def test_the_manifest_and_the_openclaw_plugin_declare_the_same_read_only_tools():
+    """Both adapters expose the same read-only tools, except where one truthfully cannot.
+
+    This used to be a flat equality, which would have forced the OpenClaw manifest to
+    declare an import tool its core cannot implement - the manifest would have been the
+    lie instead of the divergence. The exception list is explicit and is cross-checked
+    against the OpenClaw capability report below, so a tool cannot be quietly dropped
+    from one adapter while both reports claim parity.
+    """
     openclaw = json.loads(
         (REPO / "adapters" / "openclaw" / "openclaw.plugin.json").read_text(encoding="utf-8")
     )
-    assert sorted(openclaw["contracts"]["tools"]) == sorted(_declared_tools())
+    hermes = set(_declared_tools())
+    assert set(openclaw["contracts"]["tools"]) == hermes - set(_ADAPTER_ONLY_TOOLS)
+
+
+def test_the_openclaw_capability_source_reports_the_tool_it_does_not_declare():
+    """The manifest exception has to be backed by an unsupported mode, not a comment.
+
+    A tool absent from the OpenClaw manifest is only honest if the adapter also reports
+    the mode behind it as unsupported, with a reason that names a core gap rather than a
+    host limitation it does not have.
+    """
+    source = (
+        REPO / "adapters" / "openclaw" / "src" / "capability.ts"
+    ).read_text(encoding="utf-8")
+    assert 'unsupported("artifact_import", ["IMPORT_UNIMPLEMENTED"]' in source
 
 
 # -- the documented fallback chain is actually wired ------------------------

@@ -22,7 +22,9 @@ export type DisabledReason =
   | "MODEL_UNAVAILABLE"
   | "UNSAFE_TRACING"
   | "HOST_VERSION_UNVERIFIED"
-  | "CONFIG_DISABLED";
+  | "CONFIG_DISABLED"
+  /** The adapter's language core has no implementation of the mode - not a host limit. */
+  | "IMPORT_UNIMPLEMENTED";
 
 export interface ModeCapability {
   readonly mode: string;

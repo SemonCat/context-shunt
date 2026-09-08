@@ -24,11 +24,37 @@ integration result. An upgrade is unverified until the gate is rerun and reviewe
 | `session_stats` — this session's own token accounting | **supported** | **supported** | on |
 | `session_lifecycle` — handles survive a per-turn boundary, revoked on a real one | **supported** | **supported** | on |
 | `reader_task_config` — reader appears in host model configuration | **supported** | n/a (plugin config schema) | on |
+| `artifact_import` — adopt an oversized tool-result artifact a producer already persisted | **supported** | **unsupported** (`IMPORT_UNIMPLEMENTED`) | off |
 | `suma_post_tool` — oversized tool/MCP result spill + pointer | **unsupported** | **unsupported** | off |
 | writer / `propose_patch` | **not implemented** | **not implemented** | refused at load |
 
 `deterministic_inspect` and `session_stats` need no provider at all, so they stay supported
 even where the model bridge is absent or the reader is disabled.
+
+`artifact_import` is supported and **off by default**: the mode being available is a host
+fact, and whether it runs is a configuration decision that requires an explicit import root
+and an explicitly allowlisted producer manifest schema.
+
+## Why `artifact_import` is supported where `suma_post_tool` is not
+
+These two modes answer the same problem — an oversized tool result — and they are reported
+separately because they need different things from the host, by a wide margin.
+
+`suma_post_tool` needs the host to hand a plugin the **complete** result *before*
+truncation and to accept a **replacement** *before* persistence and context insertion.
+Neither supported host does both; the evidence is below.
+
+`artifact_import` needs neither. The producer already captured the result and wrote it to a
+file, so there is no interception to get right. All the host has to supply is a way to
+invoke the import, which on Hermes is `ctx.register_tool`.
+
+| Host | `artifact_import` | Evidence |
+| --- | --- | --- |
+| Hermes | **supported** | `ctx.register_tool` exposes `context_shunt_import`, and the boundary is implemented in `context_shunt.artifacts`. No hook ordering is involved. |
+| OpenClaw | **unsupported**, reason `IMPORT_UNIMPLEMENTED` | The import boundary exists only in the Python core. This is a repository gap, not a host limitation — OpenClaw can register the tool, so the mode becomes supportable without any host change. The reason is named separately so it is not read as a host constraint OpenClaw does not have. |
+
+Enabling `artifact_import` says nothing about `suma_post_tool`, and the envelope keeps the
+two apart at the wire level too: an import publishes `IMPORTED`, never `SPILLED`.
 
 ## Why `local_gate` and `reader` are supported
 
@@ -135,7 +161,12 @@ needs comprehensive protection must disable uncontrolled read tools at the host.
 | Hermes | `read_file` | `search_files` | `terminal` |
 | OpenClaw | `read` | none | `exec` |
 
-The three context-shunt tools themselves are registered on both hosts, but their advertised
+Tool *coverage* is about the host's own read tools. The import boundary is not a gate over
+a host tool: it is a tool of its own that a deployment opts into, so it does not appear
+here.
+
+The three core read-only context-shunt tools are registered on both hosts (Hermes adds
+`context_shunt_import` where a deployment configured it), but their advertised
 parameter schema is currently the portable subset described in
 [`limitations.md`](limitations.md): optional read selectors and per-call inspect budget
 overrides exist in the internal contract but are not uniformly exposed by host registration.
@@ -144,19 +175,47 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 
 | Category | Status |
 | --- | --- |
-| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability, store, inspect, accounting) | implemented; no host or provider needed; run them on the release commit for the result |
+| Deterministic unit gates (contract, pre-read, reader, citations, no-raw-leak, bounded-output, cancellation, permissions, no-writes, capability, store, inspect, accounting, artifact-import) | implemented; no host or provider needed; run them on the release commit for the result |
 | `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
 | `integration <host> --mode post-tool` | NOT_RUN by design — the mode is unsupported on both hosts |
+| `shadow deterministic` | implemented — four-lane A/B over a fixed synthetic corpus; reports main-context reduction, evidence regression against the raw baseline, and model-free latency for real |
+| `shadow reader` | NOT_RUN — task correctness, semantic evidence support, mechanical citation validity and follow-up rate need live reader access; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
 | `benchmark all` | includes a NOT_RUN provider half: reader latency and token cost need live Luna |
 | `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna |
 | `packaging all` | builds and inspects archives; clean-installs/imports/uninstalls both npm packages, the Python wheel, and the Hermes copy bundle |
 | `release all` | runs everything; returns `NOT_RUN` while `eval luna` and the provider benchmark lack live Luna access |
 
+## Shadow rollout, and what has to be true before anything is replaced
+
+The artifact broker is additive. Nothing about it removes or disables an existing
+compactor, and it must not: a broker that displaced the incumbent on deterministic evidence
+alone would be trading a measured quality claim for an unmeasured one.
+
+The order is fixed:
+
+1. **Shadow.** Run the broker alongside the incumbent. `./scripts/verify shadow all` gives
+   the deterministic half today: main-context reduction, evidence recall against the raw
+   baseline, and model-free latency.
+2. **Score the reader half.** Task correctness, semantic evidence support, mechanical
+   citation validity and follow-up rate all need live reader access. They are `NOT_RUN`
+   until then, and a mock number is never a substitute.
+3. **Price the reader.** Net cost reduction including retries needs a versioned price
+   table. This repository has none, so the gate stays `NOT_RUN` even with a live reader —
+   deriving currency from token counts is exactly the inference this project refuses.
+4. **Only then consider replacement**, and only for the traffic the shadow actually
+   covered.
+
+Until every one of those gates has a real result, the honest statement is that the broker
+is deployable and unproven at production equivalence — not that it is better.
+
 ## Future work, stated plainly
 
+- A TypeScript import boundary, so `artifact_import` becomes supportable on OpenClaw. The
+  reason it is unsupported there names a core gap rather than a host limitation precisely
+  because closing it needs no host change.
 - A live runtime sentinel measurement of capture/truncation/persistence/context-insertion
   order inside a running gateway, for either host. The current gate verifies the ordering
   from host source, which is enough to keep the mode off but is not a runtime measurement.

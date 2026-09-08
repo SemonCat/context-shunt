@@ -101,6 +101,18 @@ token/attempt fields. `kind` is one of `gate_block`, `capture`, `read`, `refined
 `inspect`, `stats`, or `spill`. A page contains at most eight records and only the caller's
 current session; the tool accepts no foreign session id or arbitrary label.
 
+`capture` is the kind an external-artifact import records, and that is where the producer
+distinction lives. It reads apart from `spill` on purpose: `spill` means this core moved an
+oversized result out of the context itself, and `capture` means it adopted one a producer
+had already persisted. The store deliberately holds no producer identity, so which producer
+it was appears in the envelope's `import_receipt`, never in a metric.
+
+An import credits `full_payload_counterfactual` for the whole artifact, unless the manifest
+declares `origin.upstream_truncated`, in which case the baseline is
+`host_truncated_observed` at the size actually read. A producer that already shortened the
+payload only lets us observe the shortened size; crediting the full artifact there would be
+invented.
+
 Stats records contain no source path, question, answer, quote, payload, provider error,
 model name, or provider name. They are bounded non-content metadata.
 
@@ -111,6 +123,38 @@ host supplies one. Allowed label keys are the closed set `adapter`, `mode`, `rea
 `status`, `code`, `form`, `decision`, `result`, and `stage`, with bounded token values.
 Paths, request/source ids, model/provider names, questions, answers, quotes, and payloads
 are forbidden as labels.
+
+### The shadow A/B report
+
+`./scripts/verify shadow all` writes `reports/shadow-ab-latest.json` (gitignored) alongside
+the ordinary verify report. It compares four lanes over the fixed synthetic corpus in
+[`evals/shadow/corpus.json`](../evals/shadow/corpus.json): the raw baseline, a reference
+emulation of the incumbent heuristic compactor, deterministic retrieval through the import
+boundary plus `inspect`, and the question-aware reader.
+
+Three of its eight gates measure from the repository alone — main-context reduction, no
+evidence regression against the raw baseline, and bounded latency for the deterministic
+retrieval lane. The reduction is measured over the items the broker actually brokered, and
+the refused items' raw bytes are reported separately in `refused_raw_bytes`: the over-cap
+item alone is roughly 88% of the whole-corpus baseline, so crediting its counterfactual
+would make the headline a saving on a payload no lane can answer from. The whole-corpus
+figure is reported alongside it.
+
+The other five report `NOT_RUN`, and the harness will not score them from a lane that cannot
+answer the question they ask:
+
+| Gate | Why it is `NOT_RUN` |
+| --- | --- |
+| `task_correctness`, `semantic_evidence_support` | need a scored model lane. `scripts/verify eval luna` owns the fixed corpus, thresholds and runs-per-item that a score requires, so this harness never scores the reader — with or without a bridge configured. |
+| `mechanical_citation_validity` | the retrieval lane publishes exact extracts and no citations, so scoring it there is a vacuous 1.0. |
+| `net_cost_reduction` | needs reader tokens *and* a pricing table. There is no versioned price table in this repository, so this stays `NOT_RUN` even with a live reader. |
+| `bounded_follow_up_rate` | only an answering lane has a follow-up rate. |
+
+The report carries no artifact content, no question text and no repository path — it is
+evidence about a run, not a copy of what the run read. Two corpus items are refused by the
+core outright (a credential marker in the payload, and an artifact over the source cap);
+both are scored zero in a denominator that still counts them, because a refusal is a
+different fact from an answer and is reported in its own field.
 
 Session stats do not store wall-clock latency, provider request ids, price schedules, or
 currency cost. `benchmark core` measures deterministic latency, envelope size, context

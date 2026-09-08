@@ -11,6 +11,11 @@ Exit codes are the contract:
 Deterministic gates never report ``NOT_RUN``: they run from the repository alone. Opt-in
 gates (real host integration, live Luna evals, provider benchmarks) say what is missing.
 
+The ``shadow`` suite is deliberately split the same way. ``shadow deterministic`` runs
+from the repository and reports the two gates that can be measured without a provider;
+``shadow reader`` needs a live reader bridge and reports ``NOT_RUN`` without one, so the
+provider-dependent gates are never scored from a lane that cannot answer a question.
+
 Every run appends a non-sensitive report to ``reports/`` (gitignored): suite, gate,
 counts, exit code, duration and tool versions. No source content, question, answer or
 path from a fixture is written there.
@@ -60,7 +65,12 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "store": ("gate_store", [(CORE_TS, "test/store.test.ts")]),
     "inspect": ("gate_inspect", [(CORE_TS, "test/inspect.test.ts")]),
     "accounting": ("gate_accounting", [(CORE_TS, "test/accounting.test.ts")]),
+    # Python-only: the import boundary lives in the Python core, and the OpenClaw
+    # capability report says so rather than implying a TypeScript twin exists.
+    "artifact-import": ("gate_artifact_import", []),
 }
+
+SHADOW_GATES = ("deterministic", "reader")
 
 INTEGRATION_HOSTS = ("hermes", "openclaw")
 INTEGRATION_MODES = ("local", "post-tool", "unsupported")
@@ -434,6 +444,86 @@ def run_benchmark_provider() -> GateResult:
     return GateResult(
         "benchmark", "provider", status, cases, detail, time.monotonic() - started
     )
+
+
+def run_shadow(gate: str) -> list[GateResult]:
+    """The shadow A/B comparison, split by what can honestly be measured here."""
+    if gate == "all":
+        results: list[GateResult] = []
+        for name in SHADOW_GATES:
+            results.extend(run_shadow(name))
+        return results
+    if gate not in SHADOW_GATES:
+        return [
+            GateResult(
+                "shadow",
+                gate,
+                "fail",
+                detail=f"unknown gate; known: {', '.join(SHADOW_GATES)}, all",
+            )
+        ]
+
+    started = time.monotonic()
+    if gate == "deterministic":
+        status, cases, detail = _pytest("shadow_ab")
+        lines = _shadow_report_lines()
+        return [
+            GateResult(
+                "shadow",
+                gate,
+                status,
+                cases,
+                detail,
+                time.monotonic() - started,
+                lines,
+            )
+        ]
+
+    # The reader half is *unconditionally* NOT_RUN, and that is a decision rather than a
+    # missing prerequisite. Scoring a model lane needs a fixed corpus, fixed thresholds
+    # and a fixed number of runs per item, decided before the run; `eval luna` is the gate
+    # that owns those controls. Keying this off an environment variable instead would have
+    # printed PASS from the deterministic marker the moment a bridge appeared - the same
+    # false pass `run_benchmark_provider` was fixed for, in the opposite direction.
+    return [
+        GateResult(
+            "shadow",
+            "reader",
+            "not_run",
+            0,
+            "not scored here by design: task correctness, semantic evidence support, "
+            "mechanical citation validity and follow-up rate are the live reader eval's "
+            "gates (scripts/verify eval luna owns the fixed corpus and thresholds). Net "
+            "cost reduction additionally needs a versioned pricing table, which this "
+            "repository does not have.",
+            time.monotonic() - started,
+            [
+                "NOT_RUN shadow reader: scored by `verify eval luna`, not by this harness",
+                "NOT_RUN shadow net-cost: no pricing table exists in this repository",
+            ],
+        )
+    ]
+
+
+def _shadow_report_lines() -> list[str]:
+    """Summarize the report the shadow run wrote, without restating any of its content."""
+    path = REPORTS / "shadow-ab-latest.json"
+    if not path.exists():
+        return []
+    try:
+        report = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ["shadow report unreadable"]
+    lines: list[str] = []
+    for name, gate in (report.get("gates") or {}).items():
+        state = str(gate.get("status", "unknown")).lower()
+        if state == "not_run":
+            lines.append(f"NOT_RUN {name}: needs {gate.get('missing', 'a prerequisite')}")
+            continue
+        measured = gate.get("measured", gate.get("measured_ms"))
+        threshold = gate.get("threshold", gate.get("threshold_ms"))
+        lines.append(f"{state.upper():7s} {name}: {measured} (threshold {threshold})")
+    return lines
 
 
 def run_packaging(gate: str) -> list[GateResult]:
@@ -830,9 +920,11 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
             )
             # The manifest is the only thing an operator can audit before loading the
             # plugin, so the installed copy must agree with the code it ships beside:
-            # the same three tools the adapter registers, and the version of the core it
-            # was built against. Checking only the plugin name let a manifest that
-            # declared one of three tools, at the wrong version, install cleanly.
+            # every tool the adapter can register, and the version of the core it was
+            # built against. Checking only the plugin name let a manifest that declared
+            # one of three tools, at the wrong version, install cleanly. The count is
+            # read from the adapter rather than hardcoded, so adding a tool cannot fail
+            # this check for the wrong reason - what matters is that the two agree.
             probe_script = (
                 "import importlib.util, pathlib; "
                 f"p=pathlib.Path({str(hermes_install / '__init__.py')!r}); "
@@ -848,7 +940,7 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                 "declared=sorted(l.strip()[2:].strip() for l in manifest.splitlines() "
                 "  if l.startswith('  - ')); "
                 "assert declared == registered, (declared, registered); "
-                "assert len(registered) == 3; "
+                "assert len(registered) >= 3; "
                 "assert not any('write' in n or 'patch' in n for n in registered)"
             )
             probe = _run([str(python), "-c", probe_script], ROOT)
@@ -1013,6 +1105,7 @@ def run_release(gate: str) -> list[GateResult]:
         for mode in INTEGRATION_MODES:
             results.extend(run_integration(host, mode))
     results.extend(run_eval("luna"))
+    results.extend(run_shadow("all"))
     results.extend(run_benchmark("all"))
     results.extend(run_packaging("all"))
     results.append(_license_check())
@@ -1118,7 +1211,15 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="scripts/verify", add_help=True)
     parser.add_argument(
         "suite",
-        choices=["unit", "integration", "eval", "benchmark", "packaging", "release"],
+        choices=[
+            "unit",
+            "integration",
+            "eval",
+            "shadow",
+            "benchmark",
+            "packaging",
+            "release",
+        ],
     )
     parser.add_argument("gate", help="gate name, host name, or 'all'")
     parser.add_argument("--mode", default="local", choices=list(INTEGRATION_MODES))
@@ -1131,6 +1232,8 @@ def main(argv: list[str]) -> int:
         results = run_integration(args.gate, args.mode)
     elif args.suite == "eval":
         results = run_eval(args.gate)
+    elif args.suite == "shadow":
+        results = run_shadow(args.gate)
     elif args.suite == "benchmark":
         results = run_benchmark(args.gate)
     elif args.suite == "packaging":

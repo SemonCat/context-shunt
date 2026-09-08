@@ -8,7 +8,11 @@ attribution ceiling on this host, the session-lifecycle rule, and why the option
 oversized post-tool mode is disabled — is in
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
-This adapter registers three read-only tools and no writer:
+This adapter registers three read-only tools and no writer. It does **not** register
+`context_shunt_import`: the external-artifact boundary exists only in the Python core, so
+the capability report says `artifact_import: unsupported` with reason
+`IMPORT_UNIMPLEMENTED`. That names a core gap rather than a host limitation — nothing about
+OpenClaw prevents the mode.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |

@@ -26,8 +26,15 @@ reassembled, and that every disclosed byte is counted.
 """
 
 from .accounting import Baseline, DeliveryBoundary, Egress, OperationKind, ReaderCost
+from .artifacts import (
+    NATIVE_IMPORT_CONTRACT,
+    ArtifactImporter,
+    ArtifactManifest,
+    ImportOutcome,
+    normalize_manifest,
+)
 from .capability import CapabilityReport, DisabledReason, ModeCapability, Support
-from .config import Config, ProviderRef, ReaderConfig, ToolConfig
+from .config import ArtifactImportConfig, Config, ProviderRef, ReaderConfig, ToolConfig
 from .config import load as load_config
 from .errors import ShuntError
 from .gate import Decision, GateDecision, PreReadGate, ProbeResult, guidance_for
@@ -63,6 +70,9 @@ from .store import Capture, OperationRecord, PublishedHandle, ScopeIdentity, Sna
 __version__ = "1.1.0"
 
 __all__ = [
+    "ArtifactImportConfig",
+    "ArtifactImporter",
+    "ArtifactManifest",
     "Attribution",
     "AttributionPolicy",
     "BASELINE_ESTIMATE_METHOD",
@@ -80,10 +90,12 @@ __all__ = [
     "FallbackChainProvider",
     "GateDecision",
     "HostBridgeProvider",
+    "ImportOutcome",
     "Inspector",
     "Limits",
     "ModeCapability",
     "ModelIdentity",
+    "NATIVE_IMPORT_CONTRACT",
     "OperationKind",
     "OperationRecord",
     "PreReadGate",
@@ -119,5 +131,6 @@ __all__ = [
     "encode_cursor",
     "guidance_for",
     "load_config",
+    "normalize_manifest",
     "store_ddl",
 ]

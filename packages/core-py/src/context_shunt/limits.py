@@ -62,7 +62,15 @@ SCHEMA_VERSION: str = EMITTED_SCHEMA_VERSION
 V11_ONLY_REQUEST_FIELDS: frozenset[str] = frozenset({"refined"})
 V11_ONLY_OPERATIONS: frozenset[str] = frozenset({"inspect", "stats"})
 V11_ONLY_ENVELOPE_FIELDS: frozenset[str] = frozenset(
-    {"result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery"}
+    {
+        "result_kind",
+        "provenance",
+        "accounting_id",
+        "extraction",
+        "stats",
+        "recovery",
+        "import_receipt",
+    }
 )
 
 

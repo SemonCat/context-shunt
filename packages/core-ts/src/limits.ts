@@ -207,6 +207,7 @@ export const V11_ONLY_REQUEST_FIELDS: ReadonlySet<string> = new Set(["refined"])
 export const V11_ONLY_OPERATIONS: ReadonlySet<string> = new Set(["inspect", "stats"]);
 export const V11_ONLY_ENVELOPE_FIELDS: ReadonlySet<string> = new Set([
   "result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery",
+  "import_receipt",
 ]);
 
 /** Deterministic estimator name recorded whenever provider usage is unavailable. */

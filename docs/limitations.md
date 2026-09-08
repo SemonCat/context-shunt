@@ -32,6 +32,76 @@ host-facing examples therefore use full-source reader selection and configured i
 limits. Aligning the registered schemas with the shared contract remains an adapter release
 task, not a capability this documentation assumes.
 
+## The artifact broker depends on a producer, and only imports one shape of thing
+
+The primary path for oversized tool results is an *import*, not an interception. That
+choice buys deployability and costs coverage, and the costs are worth naming.
+
+- **Something else has to persist the artifact first.** If no compactor or spooler is
+  writing artifacts and manifests, there is nothing to import, and this path does nothing
+  for you. The broker does not produce artifacts and does not reach out to fetch one.
+- **It cannot act before a result reaches the context.** By the time an artifact exists,
+  the host has already done whatever it does with the original result. The import keeps the
+  *full* payload reachable out of context; it does not undo a truncation the host already
+  performed and wrote into the transcript. Where a manifest declares
+  `origin.upstream_truncated`, the accounting says so and credits only the observed size.
+- **It does not vouch for the producer.** Every claim a manifest makes is re-proven against
+  the file, but an authorized producer that writes a misleading artifact gets a faithfully
+  imported misleading artifact.
+- **Text and JSON only.** Anything the snapshot layer cannot index — binary, an unsupported
+  media type, invalid JSON — is refused rather than partially handled.
+- **A realistic artifact can trip the secret policy.** A cloud journal page or a startup log
+  containing `aws_secret_access_key`, `AKIA`, or a PEM header is refused outright with
+  `SECRET_IN_SOURCE`. That refusal is the designed defence and the strongest available
+  outcome — the credential never reaches a provider — but it is also a real coverage gap on
+  the primary path, not a theoretical one. The shadow corpus includes such an item and
+  scores it zero in a denominator that still counts it.
+- **Over 8 MiB is refused, not chunked.** The import contract caps `artifact.bytes` at
+  `max_source_bytes`, so an oversized artifact is refused at the contract boundary. A
+  producer that wants very large results brokered has to page them itself.
+
+## The import boundary exists in one core only
+
+`artifact_import` is implemented in the Python core and supported on Hermes. The TypeScript
+core has no import boundary, so OpenClaw reports the mode `unsupported` with reason
+`IMPORT_UNIMPLEMENTED`.
+
+That reason is named separately on purpose. It is a repository gap, not a host limitation:
+OpenClaw can register the tool, so closing it needs no host change. The OpenClaw plugin
+config schema is a closed key set, so `artifact_import` in `openclaw.json` is refused at
+load rather than accepted and ignored — the config surface and the capability report agree.
+
+## The shadow A/B is real for three gates and `NOT_RUN` for five
+
+`./scripts/verify shadow all` compares the broker against a raw baseline and against a
+reference emulation of the incumbent heuristic compactor. What it proves and what it does
+not:
+
+**Measured from the repository alone:** main-context reduction against the raw baseline, no
+evidence regression against that baseline, and latency for the deterministic retrieval
+lane. The reduction is measured over the items the broker actually brokered; the item it
+refuses for exceeding the source cap is roughly 88% of the whole-corpus baseline, and
+crediting that counterfactual would turn the headline into a saving on a payload no lane
+can answer from. Both figures are reported, and the gate uses the brokered one.
+
+**`NOT_RUN`, and not scored from a substitute:**
+
+- *task correctness* and *semantic evidence support* need a *scored* model lane, and
+  scoring one needs a fixed corpus, fixed thresholds and a fixed number of runs per item
+  decided before the run. `scripts/verify eval luna` owns those controls, so this harness
+  reports the reader lane `NOT_RUN` unconditionally rather than producing a number that
+  would look like a score;
+- *mechanical citation validity* would be a vacuous 1.0 against the retrieval lane, which
+  publishes exact extracts and no citations at all;
+- *net cost reduction including retries* needs reader tokens **and** a versioned price
+  table. This repository has no price table, so this gate stays `NOT_RUN` even with a live
+  reader — deriving currency from token counts is the inference this project refuses;
+- *follow-up rate* only exists for an answering lane.
+
+So the honest claim is: the broker is deployable, it holds evidence the incumbent drops on
+a fixed synthetic corpus, and it is **unproven at production equivalence**. Nothing here
+replaces a live compactor, and the deterministic result is not a licence to.
+
 ## The oversized post-tool mode is off on both hosts
 
 The engine is implemented and tested. It stays disabled because neither supported host can
