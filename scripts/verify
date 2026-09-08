@@ -1175,35 +1175,56 @@ def _versions() -> dict[str, str]:
     }
 
 
+#: How many exclusive-create attempts before a name collision is treated as a real fault.
+_REPORT_NAME_ATTEMPTS = 64
+
+
+def _new_report_file(prefix: str) -> tuple[Path, int]:
+    """A report path this process exclusively created, plus its open descriptor.
+
+    A one-second timestamp is not a unique name. Two runs finishing inside the same second
+    produced the same path and the second silently overwrote the first, so a verification
+    report - the record of what was and was not measured - could be replaced by a later,
+    different run. Three things fix it together: nanoseconds and the pid in the name, and
+    ``O_EXCL`` on the create, so a collision *fails* rather than being resolved by
+    overwriting. The descriptor is returned open, because a check-then-write would put the
+    race straight back in.
+    """
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(_REPORT_NAME_ATTEMPTS):
+        now_ns = time.time_ns()
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now_ns // 1_000_000_000))
+        path = REPORTS / f"{prefix}-{stamp}-{now_ns % 1_000_000_000:09d}-{os.getpid()}.json"
+        try:
+            return path, os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"could not create a unique {prefix} report after retries")
+
+
 def _write_report(
     argv: list[str], results: list[GateResult], code: int, elapsed: float
 ) -> Path:
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    path = REPORTS / f"verify-{stamp}.json"
-    path.write_text(
-        json.dumps(
+    payload = {
+        "argv": argv,
+        "exit_code": code,
+        "duration_s": round(elapsed, 3),
+        "versions": _versions(),
+        "gates": [
             {
-                "argv": argv,
-                "exit_code": code,
-                "duration_s": round(elapsed, 3),
-                "versions": _versions(),
-                "gates": [
-                    {
-                        "suite": r.suite,
-                        "gate": r.gate,
-                        "status": r.status,
-                        "cases": r.cases,
-                        "detail": r.detail[:400],
-                        "duration_s": round(r.duration_s, 3),
-                    }
-                    for r in results
-                ],
-            },
-            indent=2,
-        )
-        + "\n"
-    )
+                "suite": r.suite,
+                "gate": r.gate,
+                "status": r.status,
+                "cases": r.cases,
+                "detail": r.detail[:400],
+                "duration_s": round(r.duration_s, 3),
+            }
+            for r in results
+        ],
+    }
+    path, fd = _new_report_file("verify")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2) + "\n")
     return path
 
 

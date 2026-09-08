@@ -45,6 +45,7 @@ import hashlib
 import importlib
 import json
 import os
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,8 +217,9 @@ def _supports(
 
 
 #: The shortest run of source text whose appearance in an answer is worth treating as a
-#: leak. Short enough to catch a single lifted token - the shape a real leak takes - and
-#: long enough that ordinary words shared by a question and its source do not trip it.
+#: leak, measured in UTF-8 bytes. Short enough to catch a single lifted token - the shape a
+#: real leak takes - and long enough that ordinary words shared by a question and its
+#: source do not trip it. Bytes, not characters: see :func:`_leaked_source_regions`.
 LEAK_WINDOW_BYTES = 8
 
 
@@ -245,6 +247,15 @@ def _leaked_source_regions(
     answer proves nothing about source leakage. Excluding it is generic (any fragment the
     question already supplied, for any item), never a special case for one word or item;
     a fragment the question does *not* supply is still caught exactly as before.
+
+    The window is measured in **bytes**, which is what the constant has always said and
+    what the slicing did not do. A fixed slice of ``LEAK_WINDOW_BYTES`` *characters* is
+    eight bytes only for ASCII: eight CJK characters are twenty-four, so the loop refused
+    to examine any line shorter than eight characters and a lifted nine-byte CJK token -
+    three characters - produced no window at all and no match. Windows now grow from one
+    character until they carry at least ``LEAK_WINDOW_BYTES`` bytes, so a leak in a
+    multi-byte script is caught at the same byte length as an ASCII one, and no window
+    ever splits a character or separates a combining mark from the character it decorates.
     """
     published = " \u241f ".join(str(c.get("quote", "")) for c in citations)
     if not answer.strip():
@@ -262,18 +273,47 @@ def _leaked_source_regions(
     for line in source.splitlines():
         stripped = line.strip()
         index = 0
-        while index + LEAK_WINDOW_BYTES <= len(stripped):
-            if not lifted(stripped[index : index + LEAK_WINDOW_BYTES]):
+        while index < len(stripped):
+            if unicodedata.combining(stripped[index]):
+                # A combining mark belongs to the character before it. Starting a window
+                # on one would compare a fragment no reader could have "lifted" on its own.
+                index += 1
+                continue
+            end = _byte_window_end(stripped, index, LEAK_WINDOW_BYTES)
+            if end is None:
+                # What is left of this line cannot fill a window, so it cannot be a leak
+                # at this threshold.
+                break
+            if not lifted(stripped[index:end]):
                 index += 1
                 continue
             # Extend to the longest run that is still lifted, so one copied span counts
             # once however many windows happen to sit inside it.
-            end = index + LEAK_WINDOW_BYTES
             while end < len(stripped) and lifted(stripped[index : end + 1]):
                 end += 1
             leaks += 1
             index = end
     return leaks
+
+
+def _byte_window_end(text: str, start: int, minimum_bytes: int) -> int | None:
+    """End index of the shortest slice from ``start`` carrying ``minimum_bytes`` bytes.
+
+    ``None`` when the remainder of ``text`` is shorter than that. The slice always ends on
+    a character boundary - Python string slicing cannot split a code point - and never
+    between a character and a combining mark that decorates it, so a window is always a
+    fragment a reader could actually have copied.
+    """
+    end = start
+    measured = 0
+    while measured < minimum_bytes:
+        if end >= len(text):
+            return None
+        measured += len(text[end].encode("utf-8"))
+        end += 1
+    while end < len(text) and unicodedata.combining(text[end]):
+        end += 1
+    return end
 
 
 def _fact_satisfied(fact: str | list[str], answer_lower: str) -> bool:
@@ -1255,3 +1295,70 @@ def test_score_run_no_longer_misses_the_two_live_eval_findings():
     }
     score = _score_run(fact_db_item, fact_db_wrong_envelope, _StubVerifier())
     assert score.located is False and score.correct is False
+
+
+def test_the_leak_window_is_bytes_not_characters():
+    """A nine-byte CJK leak used to produce no window at all.
+
+    ``LEAK_WINDOW_BYTES`` has always said bytes, and the slicing counted characters. Eight
+    CJK characters are twenty-four bytes, so any line shorter than eight characters was
+    never examined and a lifted three-character token - nine bytes, above the threshold -
+    was invisible. The window now grows until it carries the threshold in bytes.
+    """
+    source = "資料庫引擎\ninternal_id: xk29fz881q\n"
+    # Three CJK characters: nine UTF-8 bytes, above the eight-byte threshold, and only
+    # three characters, so the pre-fix eight-character window never formed.
+    assert len("資料庫".encode()) == 9
+    assert _leaked_source_regions(source, "The engine is 資料庫.", []) >= 1
+    # Inside a published quote it is not a leak, exactly as for ASCII.
+    quoted = [{"quote": "資料庫引擎"}]
+    assert _leaked_source_regions(source, "The engine is 資料庫引擎.", quoted) == 0
+    # And question vocabulary is still excluded generically.
+    assert _leaked_source_regions(source, "The engine is 資料庫.", [], "Which 資料庫 is used?") == 0
+    # A two-character CJK fragment is six bytes - below the threshold - and stays below it,
+    # so the fix raises sensitivity to the documented byte length and no further.
+    assert _leaked_source_regions("資料\n", "The value is 資料.", []) == 0
+
+
+def test_the_leak_window_never_splits_a_combining_sequence():
+    """A window boundary must not separate a character from a mark that decorates it.
+
+    The mark belongs to the character before it, so a fragment starting or ending inside
+    such a pair is not a run of source text any reader could have copied. The detector is
+    still sensitive to the whole cluster being lifted.
+    """
+    # Base characters plus COMBINING ACUTE ACCENT, written as escapes so the test is about
+    # decomposed sequences rather than whatever normalization this file happens to carry.
+    decorated = "e\u0301l\u0301e\u0301m\u0301"
+    assert [unicodedata.combining(c) != 0 for c in decorated] == [False, True] * 4
+    line = f"token: {decorated}"
+    source = f"{line}\n"
+    answer = f"The token is {decorated}."
+    assert _leaked_source_regions(source, answer, []) >= 1
+    # Every window this detector forms is a whole-cluster fragment: none of them ends on a
+    # base character whose combining mark was left outside the window, and none starts on
+    # a mark whose base was left outside it.
+    index = 0
+    windows = 0
+    while index < len(line):
+        if unicodedata.combining(line[index]):
+            index += 1
+            continue
+        end = _byte_window_end(line, index, LEAK_WINDOW_BYTES)
+        if end is None:
+            break
+        windows += 1
+        assert end == len(line) or not unicodedata.combining(line[end])
+        index += 1
+    assert windows > 0
+    # The citation that quotes the line covers it, so nothing is reported as lifted.
+    assert _leaked_source_regions(source, answer, [{"quote": line}]) == 0
+
+
+def test_ascii_leak_detection_is_unchanged_by_the_byte_window():
+    """The ASCII behaviour the previous revision established still holds exactly."""
+    source = "alpha config line that is long\nbeta config line that is long\n"
+    quoted = [{"quote": "alpha config line that is long"}]
+    assert _leaked_source_regions(source, "alpha config line that is long", quoted) == 0
+    assert _leaked_source_regions(source, "beta config line that is long", quoted) == 1
+    assert _leaked_source_regions("ab\ncd\n", "ab cd", []) == 0
