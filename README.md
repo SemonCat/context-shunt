@@ -3,12 +3,13 @@
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
 Keep oversized files and tool results out of the main model's context. context-shunt stores
-an immutable snapshot, returns an opaque handle, and lets the main model ask a cheaper
-reader an explicit question. Answers include evidence, coverage, and mechanically verified citations.
+an immutable snapshot and returns an opaque handle. The main model then sends the handle
+and an explicit question to a cheaper reader. Answers include evidence, coverage, and
+mechanically verified citations.
 
 > **Pre-release, read-only.** The operator-reported Hermes deployment uses
 > `tool_result_capture` and the internal legacy fallback after an atomic cutover; the
-> standalone `oversize-tool-result-compactor` plugin is disabled and no longer needed there.
+> standalone `oversize-tool-result-compactor` plugin is disabled.
 > Capture remains off by default for new installations and requires verified host ordering.
 > OpenClaw supports local pre-read protection, but not tool-result capture.
 > Live reader evaluation and provider benchmark gates remain `NOT_RUN`.
@@ -18,26 +19,25 @@ reader an explicit question. Answers include evidence, coverage, and mechanicall
 ### Local files: gate before reading
 
 The pre-read gate and question-aware reader flow are inspired by Spotify Portal/Shunt
-([design provenance](THIRD_PARTY_NOTICES.md)). A full text read passes only within the default
-350 physical lines and 16 KiB limits. Oversized or unprovably bounded reads are blocked
+([design provenance](THIRD_PARTY_NOTICES.md)). By default, a full text read must fit both limits:
+350 physical lines and 16 KiB. Oversized or unprovably bounded reads are blocked
 before execution; safe sources are captured for a question-aware read. Small or provably
 bounded reads can use the original host tool.
 
-Coverage is explicit: Hermes gates `read_file`, `search_files`, and `terminal`; OpenClaw
+Hermes gates `read_file`, `search_files`, and `terminal`; OpenClaw
 covers `read` and `exec`, with no search tool registered for gating. This is not blanket
 protection for every possible read tool; disable uncontrolled tools if complete coverage is required.
 
 ### Hermes tool results: capture first, ask afterward
 
-The product-neutral `tool_result_capture` capability intercepts eligible oversized MCP/tool
+`tool_result_capture` intercepts eligible oversized MCP/tool
 results at `transform_tool_result`, before they enter the main-model context. It stores the
 full content received as an immutable artifact and replaces the result with a bounded opaque
 handle/pointer and metadata. Capture makes **zero model calls** and produces no heuristic summary.
 
-The hook **does not receive the user's question**. It cannot automatically ask Luna to
-summarize every large result. The main model must call `context_shunt_read` with an explicit
-question and the artifact handle. The reader uses `gpt-5.6-luna` in the deployed example;
-users can configure the model and provider.
+The hook **does not receive the user's question**. Reading is a separate step: the main
+model must call `context_shunt_read` with an explicit question and the artifact handle.
+The reader uses `gpt-5.6-luna` in the deployed example; users can configure the model and provider.
 
 ```text
 eligible oversized tool result          oversized local read
@@ -120,16 +120,17 @@ provenance-policy refusals do not qualify. This is a deterministic heuristic sum
 first requested source, using signal lines, head/tail sampling, repetition collapsing, and
 JSON shaping—not a Luna answer or an exact source range.
 
-The envelope explicitly reports `status: partial`, `code: LEGACY_COMPACTED`,
+The response envelope reports `status: partial`, `code: LEGACY_COMPACTED`,
 `result_kind: legacy_compaction`, and `provenance.derived: false`. Its summary lives in
 `legacy_compaction`, with empty `answer` and `citations`; coverage stays partial and failed
-model attempts remain in accounting. The standalone legacy plugin is unnecessary after the
-Hermes cutover because this fallback is internal.
+model attempts remain in accounting. This internal fallback replaces the standalone legacy
+plugin after the Hermes cutover.
 
 If compaction is disabled or cannot safely return output, a wholly unavailable reader may
-use the secondary, guarded exact-prefix extraction tier when enabled. If safe fallback also
-fails, only a bounded pointer/failure and recovery guidance remain—never raw oversized
-content. Reuse a valid handle with a narrower question or inspect a bounded range.
+use the secondary, guarded exact-prefix extraction tier when enabled. If neither tier can
+safely return output, the response contains only a bounded pointer/failure and recovery
+guidance, never raw oversized content. Reuse a valid handle with a narrower question or
+inspect a bounded range.
 TypeScript/OpenClaw supports the exact-extraction tier, but has not ported legacy compaction.
 See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
 
@@ -154,7 +155,7 @@ cp -R adapters/hermes/context-shunt ~/.hermes/plugins/context-shunt
 Merge the [Hermes example](examples/config/hermes.config.yaml) into `~/.hermes/config.yaml`,
 set `workspace_roots`, authorize the reader model/provider in the plugin `llm` policy, and
 restart Hermes. `auxiliary.context_shunt_reader` overrides plugin reader defaults; `auto`
-means inherit. The example deliberately leaves capture off until local ordering is attested.
+means inherit. The example leaves capture off until you verify local hook ordering.
 For migration, follow the atomic cutover procedure linked above so capture is active when
 the standalone compactor is disabled.
 
@@ -191,16 +192,16 @@ MCP/tool outputs. See [installation and cleanup](docs/install.md).
 | Writer / `propose_patch` | Not implemented | Not implemented |
 
 Neither adapter proves provider-authoritative `actual` model identity. Requested models,
-resolved routes, and provider-confirmed identities are distinct; provenance does not turn
-a request echo into proof. Model/provider configuration and availability fallbacks are
+resolved routes, and provider-confirmed identities are distinct; a request echo is not
+proof of model identity. Model/provider configuration and availability fallbacks are
 explicit, and a model mismatch is refused.
 
 Token accounting separates main-context savings from reader input/output, marks exact
 versus estimated counts, and includes retries and fallback attempts. Token reductions are
 not currency savings. Spotify's reported savings are inspiration, **not this project's
 measured guarantee**. The deterministic shadow corpus measures a limited retrieval lane;
-production-equivalent Luna evaluation and provider benchmarks remain `NOT_RUN`. A deployed
-capture path does not turn those missing results into passes. See [metrics](docs/metrics.md),
+production-equivalent Luna evaluation and provider benchmarks remain `NOT_RUN`. The deployed
+capture path has not satisfied those gates. See [metrics](docs/metrics.md),
 [capability matrix](docs/capability-matrix.md), and [acceptance gates](docs/acceptance.md).
 
 ## Documentation and contributing
