@@ -279,6 +279,25 @@ export class Inspector {
     // The range is entirely past the end of the snapshot: an empty exact answer.
     if (start > end) return out;
 
+    // A physical line is normally the atomic unit of a line selector. Tool results are
+    // often one-line JSON documents, though, and a single record can be larger than the
+    // envelope wire budget. Refusing that line forever made the ordinary default inspect
+    // path return LIMIT_EXCEEDED even though bounded byte extraction could make progress.
+    // Once a cursor carries an intra-line offset, continue through the same line with
+    // byte segments. The cursor remains bound to the original selector, while the
+    // segment kind and offsets make the fallback's exact byte semantics explicit.
+    const lineOffset = Math.max(0, state.offset ?? 0);
+    if (lineOffset > 0) {
+      return this.lineChunk(
+        index,
+        start,
+        end,
+        lineOffset,
+        budget,
+        wireBudget,
+      );
+    }
+
     const emitted: string[] = [];
     let used = 0;
     // The whole page is one segment, so its structural cost is paid once. It is measured
@@ -297,9 +316,17 @@ export class Inspector {
       }
       const chunk = emitted.length === 0 ? line : `\n${line}`;
       const size = utf8Length(chunk);
-      if (used + size > budget) break;
+      if (used + size > budget) {
+        if (emitted.length === 0) {
+          return this.lineChunk(index, ordinal, end, 0, budget, wireBudget);
+        }
+        break;
+      }
       const wireSize = escapedJsonCost(chunk);
       if (wireUsed + wireSize > wireBudget) {
+        if (emitted.length === 0) {
+          return this.lineChunk(index, ordinal, end, 0, budget, wireBudget);
+        }
         stoppedOnWire = true;
         break;
       }
@@ -320,6 +347,102 @@ export class Inspector {
       out.nextCursorState = { line: ordinal };
       out.stalled = ordinal === start && emitted.length === 0;
       if (out.stalled && stoppedOnWire) out.stallReason = "wire";
+    }
+    return out;
+  }
+
+  /**
+   * Return a bounded exact byte page for one line that cannot fit atomically.
+   *
+   * The line selector stays in force for cursor authentication and coverage, but the
+   * emitted segment uses byte offsets because a line cannot be split into two line
+   * segments without inventing a newline between pages. `offset` is relative to the
+   * selected physical line and is only produced by this method.
+   */
+  private lineChunk(
+    index: LineIndex,
+    ordinal: number,
+    requestedEnd: number,
+    offset: number,
+    budget: number,
+    wireBudget: number,
+  ): Extraction {
+    const raw = index.lineBytes(ordinal);
+    const clampedOffset = Math.min(Math.max(0, offset), raw.length);
+    const out = emptyExtraction("bytes");
+    if (clampedOffset >= raw.length) {
+      if (ordinal < requestedEnd) {
+        out.complete = false;
+        out.nextCursorState = { line: ordinal + 1 };
+      }
+      return out;
+    }
+
+    const absoluteStart = index.lineStart(ordinal) + clampedOffset;
+    // Use the widest possible byte end for the structural cost. The actual end is no wider,
+    // so a page accepted here cannot exceed the wire budget after composition.
+    const overhead = segmentWireOverhead("bytes", absoluteStart, index.lineStart(ordinal) + raw.length);
+    const contentBudget = Math.min(
+      budget,
+      this.limits.inspectMaxBytesPerPage,
+      raw.length - clampedOffset,
+    );
+    const wireContentBudget = wireBudget - overhead;
+    if (contentBudget <= 0 || wireContentBudget <= 0) {
+      out.complete = false;
+      out.nextCursorState = { line: ordinal, offset: clampedOffset };
+      out.stalled = true;
+      out.stallReason = "wire";
+      return out;
+    }
+
+    // Decode only the bounded candidate window. A spilled tool result can be several
+    // megabytes on one physical line; decoding the whole suffix on every cursor page
+    // would make pagination itself an avoidable O(n²) operation.
+    const candidateEnd = backToBoundary(
+      raw,
+      clampedOffset,
+      Math.min(raw.length, clampedOffset + contentBudget),
+    );
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(clampedOffset, candidateEnd));
+    let kept = "";
+    let used = 0;
+    let wireUsed = 0;
+    let stoppedOnWire = false;
+    for (const char of text) {
+      const charBytes = utf8Length(char);
+      const charWire = escapedJsonCost(char);
+      if (used + charBytes > contentBudget) break;
+      if (wireUsed + charWire > wireContentBudget) {
+        stoppedOnWire = true;
+        break;
+      }
+      kept += char;
+      used += charBytes;
+      wireUsed += charWire;
+    }
+
+    if (kept.length === 0) {
+      // A caller with deliberately tiny wire headroom still gets the old explicit refusal;
+      // default inspection has ample room and takes the progress path above.
+      out.complete = false;
+      out.nextCursorState = { line: ordinal, offset: clampedOffset };
+      out.stalled = true;
+      out.stallReason = stoppedOnWire ? "wire" : "content";
+      return out;
+    }
+
+    const absoluteEnd = absoluteStart + used;
+    out.segments.push({ kind: "bytes", start: absoluteStart, end: absoluteEnd, text: kept });
+    out.resultBytes = used;
+    out.linesScanned = 1;
+    const nextOffset = clampedOffset + used;
+    if (nextOffset < raw.length) {
+      out.complete = false;
+      out.nextCursorState = { line: ordinal, offset: nextOffset };
+    } else if (ordinal < requestedEnd) {
+      out.complete = false;
+      out.nextCursorState = { line: ordinal + 1 };
     }
     return out;
   }
@@ -452,6 +575,21 @@ export class Inspector {
           overWire ||
           out.segments.length >= this.limits.inspectMaxSegments
         ) {
+          if (out.segments.length === 0 && out.segments.length < this.limits.inspectMaxSegments) {
+            // A matching tool-result line can be one huge JSON document. Keep search useful
+            // by returning a bounded byte window containing the literal hit; the segment
+            // kind makes the reduced context explicit.
+            return this.searchMatchChunk(
+              index,
+              ordinal,
+              needle,
+              already,
+              budget,
+              wireBudget,
+              maxMatches,
+              out.linesScanned,
+            );
+          }
           out.complete = false;
           out.nextCursorState = { line: ordinal, matches: already + (out.matchesFound ?? 0) };
           out.resultBytes = used;
@@ -486,6 +624,27 @@ export class Inspector {
     }
     return out;
   }
+
+  /** Return a partial exact window; never claim full matching-line coverage. */
+  private searchMatchChunk(
+    index: LineIndex, ordinal: number, needle: string, already: number,
+    budget: number, wireBudget: number, maxMatches: number, linesScanned: number,
+  ): Extraction {
+    const match = findBytes(index.lineBytes(ordinal), new TextEncoder().encode(needle));
+    if (match < 0) throw new ShuntError("STORE_FAILED", "SEARCH_INDEX_MISMATCH", false);
+    const out = this.lineChunk(index, ordinal, ordinal, match, budget, wireBudget);
+    out.mode = "search";
+    out.matchesFound = out.stalled ? 0 : 1;
+    out.linesScanned = linesScanned;
+    // Later pages visit later hits; surrounding context is explicitly omitted and can be
+    // requested with a byte selector. A window never covers the full matching line.
+    out.complete = false;
+    out.nextCursorState = out.stalled ? { line: ordinal, matches: already }
+      : ordinal < index.lineCount && already + 1 < maxMatches
+        ? { line: ordinal + 1, matches: already + 1 } : undefined;
+    return out;
+  }
+
 }
 
 /** Advance to the next UTF-8 character start at or after `offset`. */
@@ -518,4 +677,15 @@ function backToBoundary(data: Uint8Array, begin: number, offset: number): number
     position -= 1;
   }
   return position;
+}
+
+function findBytes(haystack: Uint8Array, needle: Uint8Array): number {
+  if (needle.length === 0) return 0;
+  outer: for (let start = 0; start + needle.length <= haystack.length; start += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (haystack[start + index] !== needle[index]) continue outer;
+    }
+    return start;
+  }
+  return -1;
 }

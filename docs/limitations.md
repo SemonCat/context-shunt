@@ -6,13 +6,11 @@ host, the evidence is in [`capability-matrix.md`](capability-matrix.md).
 
 ## It is not a shell sandbox
 
-The gate classifies read-like shell commands and refuses the ones it cannot prove bounded.
-It does not claim to understand every custom script, wrapper or interpreter. A command that
-reads a file through a path it cannot analyse gets `UNCLASSIFIABLE_READ` — refused, not
-allowed — but a deployment that needs a total guarantee has to disable uncontrolled shell
-access at the host, not rely on this.
-
-Non-read commands are none of its business and are left to the host's own policy.
+The gate blocks only a positively established large unbounded read on an allowed source.
+Unknown tools, custom scripts, unclassifiable shell combinations, and search calls pass
+through unchanged. Probe/authorization uncertainty also passes through with diagnostic
+telemetry; it is not converted to a tool error. Source registration and inspection retain
+strict authorization, integrity, and disclosure checks. The host owns execution policy.
 
 ## It only protects the tools it names
 
@@ -102,64 +100,13 @@ So the honest claim is: the broker is deployable, it holds evidence the incumben
 a fixed synthetic corpus, and it is **unproven at production equivalence**. Nothing here
 replaces a live compactor, and the deterministic result is not a licence to.
 
-## OpenClaw capture has an ingress and eligibility boundary
+## OpenClaw automatic capture is unsupported
 
-OpenClaw 2026.9.3 / `773b6d8` supports optional capture through
-`api.registerAgentToolResultMiddleware(handler, { runtimes: ["openclaw", "codex"] })`.
-The manifest declares both runtimes in `contracts.agentToolResultMiddleware`; the installed
-plugin must be explicitly enabled. Capture defaults off. The adapter checks the API and
-verified host version, and registers once only when enabled; revalidate host upgrades.
-The old Hermes `host_ordering_verified_locally` field is accepted but ignored on OpenClaw.
-
-| Surface | Replacement coverage |
-| --- | --- |
-| Embedded OpenClaw tool results | Eligible read-only text/JSON, before model delivery |
-| OpenClaw-owned dynamic tools in the Codex harness | Same middleware coverage |
-| Codex-native PostToolUse tools | Observe-only; replacement unsupported |
-| Unknown/mutating tools, messaging, `sessions_spawn`, termination/side-effect controls | Excluded; original host semantics retained |
-
-Default eligible IDs are `read`, `web_fetch`, and `web_search`. Add exact MCP IDs through
-`tool_result_capture.read_only_tools` only after verifying the producer is read-only.
-A name is an operator declaration, not proof of a tool's behavior. Messaging/session and
-known mutating names cannot be opted in. Results with control details or extra top-level
-control fields are excluded. Captured error results retain bounded status/ok/isError/exitCode/signal
-facts; a context-shunt capture error does not relabel the tool's own outcome.
-Non-text/image/unknown blocks on an eligible tool are withheld with a bounded refusal.
-
-The shared TypeScript spill engine deterministically serializes the middleware-visible
-result (content and JSON details), measures UTF-8 bytes against `max_tool_result_bytes`,
-and publishes an immutable artifact through the existing store/session identity before
-returning a bounded envelope and handle. Short eligible results pass unchanged. Capture
-makes no Luna call. The model supplies a real question to `context_shunt_read` with the
-handle; exhausted availability or citation verification failure uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
-Serialization, store, or handler failure never returns the original eligible oversized text.
-The host runner independently fails closed to its bounded middleware error and preserves
-its special successful-delivery fallback.
-
-**Ingress ceiling:** `src/agents/harness/tool-result-middleware.ts` sanitizes before the
-first handler: 200 content blocks, 100,000 UTF-16 characters per text aggregation,
-100,000 details bytes, and 5,000,000 image data characters. The adapter refuses text at
-99,999 characters or above (safe-surrogate truncation can leave 99,999), 200 blocks or
-more, details at 100,000 bytes or above, and the host's `truncated: true` details marker.
-No handle or complete snapshot is published for those inputs; the bounded 100k raw text
-is withheld. Coercion can also merge/drop blocks or sanitize details without a marker.
-Thus even below detectable ceilings the immutable artifact is the complete **middleware-visible
-representation**, never a promise of the original producer bytes. `coverage.complete=false`
-and `upstream_truncated=null`; earlier producer/reducer loss is unknown.
-Recovering complete originals above host ingress caps requires an upstream host seam/change
-or producer-side bounded queries; this plugin does not patch OpenClaw.
-
-**Ordering:** `src/plugins/agent-tool-result-middleware.ts` enumerates registry order and
-`agent-tool-result-middleware-loader.ts` appends lazy-loaded handlers. The official options
-have no priority field. Disable Tokenjuice and every competing result reducer in the **same
-configuration transaction** that enables context-shunt capture. A reducer running first can
-make complete capture impossible. This is an operator cutover prerequisite, not an ordering
-claim inferred from plugin names or the ignored Hermes attestation field.
-
-The deterministic host integration gate uses the real installed loader and runner, checks
-manifest entitlement/explicit-enablement source guards, and exercises both runtimes,
-oversized sentinels, ingress clipping, and host exception/invalid-output/delivery fallbacks.
-It does not claim live gateway, provider, Codex-native replacement, or production cutover results.
+The retired live canary contradicted the middleware-only tests: accounting claimed a pointer
+but the model could not use a handle and raw producer content remained visible. Automatic
+capture is disabled at this host seam, even if configured. Results pass through, with no
+pointer-delivery or savings claim. A future host seam needs end-to-end replacement proof;
+see the [capability matrix](capability-matrix.md#openclaw).
 
 ## Model attribution has a ceiling, and it is not `actual`
 
@@ -215,12 +162,15 @@ character one and six. A page therefore stops at whichever bound it reaches firs
 quote-dense file — any code, any JSON — yields pages well under 16 KiB. Paging continues
 normally; only the page size changes.
 
-One case is a hard stop rather than a smaller page. A `lines` selector cannot split a line,
-so a *single* line whose escaped width exceeds the envelope headroom cannot be returned at
-all: that is `LIMIT_EXCEEDED` with detail `UNIT_OVER_WIRE_BUDGET`, and nothing is charged
-against the disclosure ceiling for it. The same bytes are reachable with a `bytes` selector,
-which may split anywhere. This is deliberately not reported as `DISCLOSURE_EXHAUSTED` —
-that would point at waiting for allowance, which never helps here.
+Oversized physical lines (including single-line JSON receipts) now page as exact byte
+segments with an authenticated continuation bound to the original selector. The segment's
+`kind`, `start`, and `end` identify byte offsets; do not treat a partial line as a complete
+record. UTF-8 characters are never split. Oversized search hits may instead return an exact byte
+window around the literal hit, with partial coverage and omitted context. Use the returned
+byte offsets with a bytes selector for surrounding evidence; a search cursor visits later
+hits, not the omitted context. Deliberately tiny budgets that cannot fit one
+character or envelope metadata can still fail; exhausted cumulative allowance remains
+`DISCLOSURE_EXHAUSTED`, and failed delivery consumes no disclosure bytes.
 
 ## An answer may lose evidence to fit the envelope
 

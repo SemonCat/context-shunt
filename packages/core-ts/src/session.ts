@@ -80,8 +80,9 @@ import { ScopeIdentity, SnapshotStore } from "./store.js";
  * cursor of exactly this length so a real one can never overshoot the budget it set.
  */
 const MAX_CURSOR_CHARS = 512;
-/** Terminal citation failures and exhausted availability may use the legacy fallback. */
-const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT", "CITATION_INVALID"]);
+const SEARCH_WINDOW_GUIDANCE = 'Oversized search hit: exact byte window only; surrounding context is omitted. Use context_shunt_inspect with a bytes selector and the retained source_id/snapshot_id to read a specific range.';
+/** Only exhausted availability may use the legacy fallback; citation failures retain evidence. */
+const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT"]);
 
 export class ShuntSession {
   private readonly gate: PreReadGate;
@@ -107,7 +108,7 @@ export class ShuntSession {
       metrics?: MetricsSink;
       store?: SnapshotStore;
       identity?: ScopeIdentity;
-      /** Enable labelled compaction for exhausted availability or rejected/empty citations. */
+      /** Enable non-semantic compaction for exhausted availability only. */
       legacyCompaction?: boolean;
       /** Character ceiling handed to the deterministic compactor before byte capping. */
       legacyCompactionMaxChars?: number;
@@ -266,9 +267,8 @@ export class ShuntSession {
       this.legacyCompactionEnabled
       && !signal?.aborted
       && result.envelope.status === "error"
-      && (result.envelope.code === "CITATION_INVALID"
-        || (result.availabilityFailure !== undefined
-          && result.envelope.code === result.availabilityFailure))
+      && result.availabilityFailure !== undefined
+      && result.envelope.code === result.availabilityFailure
       && result.envelope.provenance?.attribution_status !== "mismatch"
     ) {
       legacyAttempted = true;
@@ -294,6 +294,25 @@ export class ShuntSession {
           candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
         }
       }
+    }
+    if (candidate.code === "CITATION_INVALID") {
+      // Preserve evidence and cost instead of substituting a heuristic answer.
+      try {
+        for (const handle of candidate.sources) {
+          const entry = this.registry.resolve(this.sessionId, handle.source_id);
+          if (entry.snapshot.snapshotId !== handle.snapshot_id) {
+            throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
+          }
+        }
+      } catch (err) {
+        if (!isShuntError(err)) throw err;
+        candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
+      }
+      candidate = { ...candidate, guidance:
+        "Semantic answer unavailable; evidence needs verification. "
+        + "Use context_shunt_inspect with a retained source_id and snapshot_id: "
+        + "select lines/bytes for a bounded read range, or search with a literal needle; "
+        + "follow next_cursor for more evidence. No heuristic summary was substituted." };
     }
     const published = enforceOrFixed(candidate, this.config.limits);
     const refined = Boolean(
@@ -635,7 +654,8 @@ export class ShuntSession {
             + ". Selection: byte prefix of first requested source, independent of question "
             + "and reader selectors; other sources and unreturned bytes omitted.",
           recovery: recoveryFor(fallback.availabilityFailure!),
-        } : {}),
+        } : selector["kind"] === "search" && extraction.segments.some((segment) => segment.kind === "bytes")
+          ? { guidance: SEARCH_WINDOW_GUIDANCE } : {}),
         accountingId: operationId,
         extraction: block,
       });
@@ -715,6 +735,7 @@ export class ShuntSession {
       coverage,
       sources: handles,
       retryable: false,
+      ...(selector["kind"] === "search" ? { guidance: SEARCH_WINDOW_GUIDANCE } : {}),
       resultKind: "deterministic_extraction",
       provenance: deterministicProvenance("deterministic_extraction"),
       accountingId: operationId,
@@ -884,15 +905,24 @@ export class ShuntSession {
     }
     let guarded: SpillOutcome = outcome;
     if (outcome.envelope) {
-      const envelope = enforceOrFixed(outcome.envelope, this.config.limits);
-      guarded = { ...outcome, envelope };
+      let envelope = enforceOrFixed(outcome.envelope, this.config.limits);
+      const pointerDelivered = outcome.action === "spill" && envelope.code === "SPILLED"
+        && Boolean(envelope.pointer)
+        && envelope.sources.some((handle) => handle.source_id === outcome.sourceId);
+      // Guard rejection cannot retain a spill action or consume an undelivered handle's credit.
+      if (outcome.action === "spill" && !pointerDelivered && envelope.code === "SPILLED") {
+        envelope = fixedError(requestId, "SPILL_FAILED");
+      }
+      guarded = outcome.action === "spill" && !pointerDelivered
+        ? { action: "error", envelope, code: envelope.code, bytesMeasured: outcome.bytesMeasured }
+        : { ...outcome, envelope };
       const baseline = opts.upstreamTruncated
         // A host that already truncated the upstream result only lets us observe the
         // truncated size; crediting the full payload there would be invented.
         ? hostTruncatedBaseline(outcome.bytesMeasured, this.config.limits)
         : withheldPayloadBaseline(outcome.bytesMeasured, this.config.limits);
       const credited = Boolean(
-        outcome.sourceId && this.store.creditBaseline(this.identity, outcome.sourceId),
+        guarded.sourceId && this.store.creditBaseline(this.identity, guarded.sourceId),
       );
       this.record({
         operationId,
@@ -901,7 +931,7 @@ export class ShuntSession {
         baseline,
         baselineCredited: credited,
         reader: noReaderCost(),
-        boundary: outcome.action === "spill" ? "pointer" : "envelope",
+        boundary: pointerDelivered ? "pointer" : "envelope",
       });
     }
     this.metrics.count("tool_result_capture_outcome", { result: guarded.action });

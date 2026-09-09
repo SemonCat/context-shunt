@@ -1183,3 +1183,16 @@ describe("every physical attempt is accounted for once, on every path", () => {
     expect(cost.outputTokens).toBeGreaterThan(L.maxOutputTokensPerCall);
   });
 });
+
+it("cannot claim spill delivery after the pointer envelope is rejected", () => {
+  const s = new ShuntSession("sess", makeConfig(tmp(), {
+    tool_result_capture: { enabled: true, host_ordering_verified_locally: true },
+  }), makeCapability(true));
+  const outcome = s.postToolResult("r".repeat(20000), "synthetic receipt\n".repeat(3000))!;
+  expect(outcome.action).toBe("error");
+  expect(outcome.envelope!.code).not.toBe("SPILLED");
+  expect(outcome.sourceId).toBeUndefined();
+  const row = stats(s).stats!.records.find((r) => r.kind === "spill")!;
+  expect(row.delivery_boundary).toBe("envelope");
+  expect(row.baseline_credit_tokens).toBe(0);
+});

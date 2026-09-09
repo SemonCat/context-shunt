@@ -480,21 +480,64 @@ def test_pre_tool_call_allows_the_threshold_and_bounded_reads(tmp_path):
     )
 
 
-def test_pre_tool_call_blocks_unprovable_shell_and_passes_others(tmp_path):
+def test_pre_tool_call_passes_unclassifiable_shell_and_other_tools(tmp_path):
     module = _load_adapter()
     module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
-    blocked = module.pre_tool_call(
+    passed = module.pre_tool_call(
         tool_name="terminal",
         args={"command": f"cat {_planted(tmp_path, 400)} | grep x"},
         task_id="t1",
     )
-    assert json.loads(blocked["message"])["code"] == "UNCLASSIFIABLE_READ"
+    assert passed is None
     assert (
         module.pre_tool_call(tool_name="terminal", args={"command": "npm test"}, task_id="t1")
         is None
     )
     assert (
         module.pre_tool_call(tool_name="delegate_task", args={"prompt": "x"}, task_id="t1") is None
+    )
+
+
+def test_pre_tool_call_passes_hermes_file_search_without_gate_error(tmp_path):
+    """Hermes' target=files search is a host-owned bounded file search."""
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    result = module.pre_tool_call(
+        tool_name="search_files",
+        args={
+            "pattern": "*.py",
+            "target": "files",
+            "path": str(tmp_path),
+            "limit": 50,
+            "offset": 0,
+        },
+        task_id="t-search-files",
+    )
+    assert result is None
+
+
+def test_pre_tool_call_fails_open_when_gate_session_cannot_be_created(tmp_path, monkeypatch):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+
+    def broken_session(*_args, **_kwargs):
+        raise RuntimeError("synthetic gate setup failure")
+
+    monkeypatch.setattr(module, "_session", broken_session)
+    assert (
+        module.pre_tool_call(
+            tool_name="read_file", args={"path": str(_planted(tmp_path, 351))}, task_id="t-gate"
+        )
+        is None
+    )
+
+
+def test_pre_tool_call_fails_open_on_malformed_host_arguments(tmp_path):
+    """Normalization errors stay with Hermes' host dispatcher."""
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    assert (
+        module.pre_tool_call(tool_name="read_file", args="not-a-mapping", task_id="t-bad") is None
     )
 
 
@@ -774,3 +817,15 @@ def test_hermes_automatic_extract_config_reaches_delivery(tmp_path, enabled, leg
     if enabled and not legacy:
         assert out["extraction"]["result_bytes"] <= 64
         assert out["provenance"]["derived"] is False
+
+
+def test_openclaw_post_tool_release_gate_cannot_certify_a_retired_seam(monkeypatch):
+    from tests.test_gate_bridge_contract import _verify_module
+
+    verify = _verify_module()
+    monkeypatch.setattr(verify, "_openclaw_prereq", lambda: (True, ""))
+    monkeypatch.setattr(verify, "_vitest", lambda *_: ("pass", 10, ""))
+    result = verify.run_integration("openclaw", "post-tool")[0]
+    assert result.status == verify.STATUS_EXPECTED_UNSUPPORTED
+    assert result.cases == 0
+    assert "effective" in result.detail

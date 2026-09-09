@@ -1,5 +1,12 @@
 # Acceptance gates
 
+> Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
+> Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
+> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
+> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> See [current capabilities](capability-matrix.md#openclaw).
+
+
 This document defines verification gates; it is not a claim that the current checkout has
 passed every optional gate. Run `./scripts/verify <suite> <gate> [options]`. Exit 0 means
 every *required* gate passed, 1 means failure or an empty/unimplemented gate, and 2 means

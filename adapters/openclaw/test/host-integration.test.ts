@@ -58,7 +58,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(hostFile("src/plugins/agent-tool-result-middleware-types.ts")).not.toContain("priority");
   });
 
-  it("reports capture supported only with enabled official registration", () => {
+  it("reports capture unsupported until the official seam proves effective delivery", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     const report = buildCapabilityReport({
       hooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
@@ -67,7 +67,10 @@ describe.skipIf(!available)("openclaw host integration", () => {
       hasToolResultMiddleware: true, captureEnabled: true,
     });
     expect(report.hostVersion).toBe(String(pkg.version));
-    expect(modeEnabled(report, "tool_result_capture")).toBe(true);
+    const capture = report.modes.find((mode) => mode.mode === "tool_result_capture")!;
+    expect(modeEnabled(report, "tool_result_capture")).toBe(false);
+    expect(capture.reasons).toContain("ORDERING_UNPROVEN");
+    expect(capture.evidence.join("\n")).toContain("producer raw receipt remained effective");
     expect(modeEnabled(report, "local_gate")).toBe(true);
     expect(modeEnabled(report, "reader")).toBe(true);
     // The two paths that need no provider at all.
@@ -148,27 +151,14 @@ describe.skipIf(!available)("openclaw host integration", () => {
       }, { emitDiagnostics: false });
       const result = await wrapped.execute("tc-host", { path: source });
       const middlewares = registry.agentToolResultMiddlewares.filter((entry) => entry.pluginId === "context-shunt");
-      const captureEvent = { toolCallId: "tc-capture", toolName: "mcp__logs__query", args: {},
-        result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_".repeat(2500) }] } };
-      const runtimeResults = [];
-      for (const runtime of ["openclaw", "codex"]) {
-        const runner = harness.createAgentToolResultMiddlewareRunner({ runtime, sessionKey: "agent:main:shunt", sessionId: "shunt" }, middlewares.map((entry) => entry.handler));
-        const captured = await runner.applyToolResultMiddleware(captureEvent);
-        const capped = await runner.applyToolResultMiddleware({ ...captureEvent,
-          result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_".repeat(6000) }] } });
-        const failures = [];
-        for (const handler of [() => { throw Error("RAW_CAPTURE_SENTINEL_"); }, () => ({ result: { content: null } })]) {
-          const failedRunner = harness.createAgentToolResultMiddlewareRunner({ runtime }, [handler]);
-          failures.push(await failedRunner.applyToolResultMiddleware(captureEvent));
-          failures.push(await failedRunner.applyToolResultMiddleware({ ...captureEvent, toolName: "message", args: { action: "send", target: "test" },
-            result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_" }], details: { messageDelivery: { status: "settled" }, ok: true, messageId: "receipt" } } }));
-        }
-        runtimeResults.push({ runtime, captured, capped, failures });
-      }
-      console.log(JSON.stringify({ middlewareCount: middlewares.length, runtimeResults, status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
+      console.log(JSON.stringify({ middlewareCount: middlewares.length, status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
         hooks: registry.typedHooks.map((entry) => entry.hookName), reader: reader?.name,
         toolNames,
-        executions, blocked: result?.details?.status, envelope: JSON.parse(result.content[0].text) }));
+        executions, blocked: result?.details?.status,
+        resultContent: result?.content,
+        envelope: typeof result?.content?.[0]?.text === "string"
+          ? result.content[0].text
+          : null }));
     `;
     const stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
       encoding: "utf8",
@@ -183,16 +173,10 @@ describe.skipIf(!available)("openclaw host integration", () => {
       },
     });
     const result = JSON.parse(stdout.trim().split("\n").at(-1)!);
-    expect(result.middlewareCount).toBe(1);
-    for (const runtime of result.runtimeResults) {
-      expect(JSON.parse(runtime.captured.content[0].text).code).toBe("SPILLED");
-      expect(JSON.parse(runtime.capped.content[0].text).code).toBe("HOST_UNSAFE");
-      expect(JSON.stringify(runtime)).not.toContain("RAW_CAPTURE_SENTINEL_");
-      expect(runtime.failures[0].details).toEqual({ status: "error", middlewareError: true });
-      expect(runtime.failures[1].details).toMatchObject({ ok: true, deliveryStatus: "sent" });
-      expect(runtime.failures[2].details).toEqual({ status: "error", middlewareError: true });
-      expect(runtime.failures[3].details).toMatchObject({ ok: true, deliveryStatus: "sent" });
-    }
+    // The host API exists, but the canary demonstrated that a callback return alone cannot
+    // prove effective model-visible replacement. The adapter must therefore leave capture
+    // unregistered and preserve the ordinary host pass-through behavior.
+    expect(result.middlewareCount).toBe(0);
     expect(result.status).toBe("loaded");
     expect(result.errors).toEqual([]);
     expect(result.hooks).toContain("before_tool_call");
@@ -206,7 +190,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
     ]);
     expect(result.executions).toBe(0);
     expect(result.blocked).toBe("blocked");
-    expect(result.envelope.code).toBe("LARGE_READ");
+    expect(JSON.parse(result.envelope).code).toBe("LARGE_READ");
   }, 70_000);
 });
 

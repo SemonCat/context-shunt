@@ -81,13 +81,14 @@ from .store import ScopeIdentity, SnapshotStore
 
 _INSPECT_OPERATIONS = frozenset({"inspect"})
 _STATS_OPERATIONS = frozenset({"stats"})
-#: Legacy compaction runs first for terminal availability and citation failures.
+#: Legacy compaction runs first for terminal availability failures.
 #: Malformed output published as NO_MATCH and provenance-policy refusals are excluded.
 #: A reported-model mismatch is excluded separately even when its code is MODEL_ERROR.
-_LEGACY_COMPACTION_TRIGGER_CODES = frozenset({"MODEL_ERROR", "TIMEOUT", "CITATION_INVALID"})
+_LEGACY_COMPACTION_TRIGGER_CODES = frozenset({"MODEL_ERROR", "TIMEOUT"})
 #: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
 #: a cursor of exactly this length so a real one can never overshoot the budget it set.
 _MAX_CURSOR_CHARS = 512
+_SEARCH_WINDOW_GUIDANCE = "Oversized search hit: exact byte window only; surrounding context is omitted. Use context_shunt_inspect with a bytes selector and the retained source_id/snapshot_id to read a specific range."
 
 
 class ShuntSession:
@@ -307,6 +308,25 @@ class ShuntSession:
                         **candidate,
                         "recovery": E.recovery_for(exc.code, handles_valid=False),
                     }
+        if candidate.get("code") == "CITATION_INVALID":
+            # A failed citation is not a semantic answer. Keep evidence handles and
+            # reader cost intact; let the caller choose an exact bounded selector.
+            try:
+                for handle in candidate.get("sources", []):
+                    entry = self._registry.resolve(self.session_id, handle["source_id"])
+                    if entry.snapshot.snapshot_id != handle["snapshot_id"]:
+                        raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+            except ShuntError as exc:
+                candidate = {**candidate, "recovery": E.recovery_for(exc.code, handles_valid=False)}
+            candidate = {
+                **candidate,
+                "guidance": (
+                    "Semantic answer unavailable; evidence needs verification. "
+                    "Use context_shunt_inspect with a retained source_id and snapshot_id: "
+                    "select lines/bytes for a bounded read range, or search with a literal needle; "
+                    "follow next_cursor for more evidence. No heuristic summary was substituted."
+                ),
+            }
         published = enforce_or_fixed(candidate, self.config.limits)
         refined = bool((request or {}).get("refined"))
         try:
@@ -405,7 +425,7 @@ class ShuntSession:
         original_failure = str(result.envelope.get("code") or "")
         if original_failure not in _LEGACY_COMPACTION_TRIGGER_CODES:
             # Should be unreachable given the caller's own guard, but the block's own
-            # contract only accepts these four tokens - refuse rather than publish an
+            # runtime policy only accepts availability failures - refuse rather than publish an
             # invented one.
             raise ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN")
 
@@ -640,6 +660,9 @@ class ShuntSession:
                     "and reader selectors; other sources and unreturned bytes omitted."
                 )
                 if fallback
+                else _SEARCH_WINDOW_GUIDANCE
+                if selector.get("kind") == "search"
+                and any(s.kind == "bytes" for s in extraction.segments)
                 else None,
                 recovery=E.recovery_for(fallback.availability_failure) if fallback else None,
                 accounting_id=operation_id,
@@ -724,6 +747,7 @@ class ShuntSession:
             coverage=coverage,
             sources=handles,
             retryable=False,
+            guidance=_SEARCH_WINDOW_GUIDANCE if selector.get("kind") == "search" else None,
             result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
             provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
             accounting_id=operation_id,
@@ -989,12 +1013,23 @@ class ShuntSession:
         )
         if outcome.envelope is not None:
             envelope = enforce_or_fixed(outcome.envelope, self.config.limits)
+            pointer_delivered = (
+                outcome.action == "spill"
+                and envelope.get("code") == "SPILLED"
+                and bool(envelope.get("pointer"))
+                and any(h["source_id"] == outcome.source_id for h in envelope.get("sources", []))
+            )
+            # Guard rejection is an error envelope, never a delivered pointer. Keep the
+            # stored artifact intact, but do not expose its handle or consume its credit.
+            rejected_pointer = outcome.action == "spill" and not pointer_delivered
+            if rejected_pointer and envelope.get("code") == "SPILLED":
+                envelope = fixed_error(request_id, "SPILL_FAILED")
             outcome = type(outcome)(
-                action=outcome.action,
+                action="error" if rejected_pointer else outcome.action,
                 envelope=envelope,
-                code=outcome.code,
+                code=envelope["code"],
                 bytes_measured=outcome.bytes_measured,
-                source_id=outcome.source_id,
+                source_id=None if rejected_pointer else outcome.source_id,
             )
             baseline = (
                 # A host that already truncated the upstream result only lets us observe

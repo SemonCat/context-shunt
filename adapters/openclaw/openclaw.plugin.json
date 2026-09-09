@@ -137,12 +137,12 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Capture eligible read-only text/JSON via the official OpenClaw 2026.9.3 middleware before model delivery. Disable Tokenjuice and other result reducers atomically when enabling."
+            "description": "Deprecated compatibility setting. OpenClaw tool-result capture is retired and remains pass-through until the host proves effective replacement before model context."
           },
           "host_ordering_verified_locally": {
             "type": "boolean",
             "default": false,
-            "description": "Deprecated compatibility field; ignored by OpenClaw. Official middleware contract evidence gates capture."
+            "description": "Deprecated compatibility field; ignored by OpenClaw. It cannot prove effective model-visible replacement."
           },
           "read_only_tools": {
             "type": "array",
@@ -151,7 +151,7 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             },
-            "description": "Exact additional tool IDs whose producer contract is read-only. Defaults cover read, web_fetch, web_search. Unknown/mutating/control tools are not covered."
+            "description": "Retained for configuration compatibility and validation only. OpenClaw capture is retired; IDs do not enable it."
           }
         }
       },

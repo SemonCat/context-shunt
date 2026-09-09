@@ -2,14 +2,15 @@
  * Classification of read-like shell commands.
  *
  * This is not a shell sandbox and does not claim to understand arbitrary scripts. It
- * recognises a small, explicitly enumerated set of provably bounded forms and refuses
- * everything else that touches a file: an unrecognised read-like command is
- * `UNCLASSIFIABLE_READ`, not "probably fine".
+ * recognises a small, explicitly enumerated set of provably bounded forms and reports
+ * everything else that touches a file as unclassifiable. The gate decides what to do
+ * with that classification; uncertain commands pass through so the host remains in
+ * charge.
  *
  * A string regex is not the defence. The command is scanned into words with quote state
  * tracked, and any shell metacharacter (pipe, list, redirect, substitution, expansion,
  * glob, tilde) makes the command non-simple; a non-simple command that reads a file is
- * refused rather than parsed further.
+ * reported as unclassifiable rather than parsed further.
  *
  * Kept semantically identical to `packages/core-py/src/context_shunt/shell.py`; both are
  * pinned by `contracts/v1/conformance/gate-cases.json`.

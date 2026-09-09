@@ -420,22 +420,23 @@ def run_integration(host: str, mode: str) -> list[GateResult]:
             )
         ]
 
-    if mode == "post-tool" and host == "hermes":
-        # Hermes still needs its deployment-specific ordering attestation. OpenClaw's
-        # official middleware is exercised below against the real host loader/runner.
+    if mode == "post-tool":
+        # Local host-runner tests do not prove the effective model-input replacement.
+        # OpenClaw's retired seam cannot be certified merely because a checkout exists.
+        reason = (
+            "effective model-visible replacement unproven; OpenClaw capture is retired"
+            if host == "openclaw"
+            else "capture ordering requires a deployment-specific Hermes attestation"
+        )
         return [
             GateResult(
                 "integration",
                 gate,
                 STATUS_EXPECTED_UNSUPPORTED,
                 0,
-                "mode disabled on this host: capture happens after truncation "
-                "(see docs/capability-matrix.md); run --mode unsupported instead",
+                reason + "; run --mode unsupported instead",
                 time.monotonic() - started,
-                [
-                    f"EXPECTED_UNSUPPORTED {gate}: the mode stays disabled on this host, "
-                    "and no environment enables it"
-                ],
+                [f"EXPECTED_UNSUPPORTED {gate}: {reason}"],
             )
         ]
 

@@ -24,11 +24,12 @@ export const SHELL_TOOLS: Record<string, "shell"> = {
 
 export const TOOL_RESULT_CAPTURE_EVIDENCE: readonly string[] = [
   "OpenClaw 2026.9.3 / 773b6d8: registerAgentToolResultMiddleware with manifest contracts.agentToolResultMiddleware=[openclaw,codex] and explicit plugin enablement",
-  "Embedded OpenClaw and OpenClaw-owned Codex dynamic tools: replacement before model delivery when registered; Codex-native PostToolUse is observe-only, replacement unsupported",
+  "The middleware callback is a candidate replacement seam, not a receipt that the effective model-visible history was replaced",
+  "Retirement canary: accounting reported SPILLED/pointer with no usable handle, the reader was never called, and the producer raw receipt remained effective in run history",
+  "OpenClaw-owned Codex dynamic tools share this unverified seam; Codex-native PostToolUse is observe-only, replacement unsupported",
   "src/agents/harness/tool-result-middleware.ts: host fails closed on throws/invalid output and preserves delivered-message fallback",
   "Ingress sanitizes before first handler: 200 blocks, 100000 UTF-16 chars per text aggregation, 100000 details bytes, 5000000 image chars; detectable boundaries refused, original completeness unknown even below caps",
-  "src/plugins/agent-tool-result-middleware.ts and loader: registry order, no priority; disable Tokenjuice and other result reducers atomically when enabling capture",
-  "Snapshots contain deterministic middleware-visible text/JSON only; upstream_truncated=null, never a complete-original claim; explicitly configured read-only tools only",
+  "Capture stays unregistered until a host seam proves the replacement envelope is effective before model context, contains a usable handle, and leaves raw bytes absent",
 ];
 
 /** Deprecated alias. `suma_post_tool` was never a product name. */
@@ -106,13 +107,17 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
   if (input.hostVersion !== "2026.9.3") captureReasons.push("HOST_VERSION_UNVERIFIED");
   if (input.captureEnabled !== true) captureReasons.push("CONFIG_DISABLED");
   if (input.unsafeTracing) captureReasons.push("UNSAFE_TRACING");
+  // The callback's return value is not enough to prove what the model actually receives.
+  // The retirement canary observed the raw producer receipt in effective run history while
+  // accounting claimed a pointer with no handle. Until OpenClaw exposes a proof-bearing seam
+  // (or this adapter can inspect the final model-visible message), ordering stays unproven and
+  // capture remains disabled.
+  captureReasons.push("ORDERING_UNPROVEN");
   modes.push(
-    captureReasons.length === 0
-      ? supported("tool_result_capture", TOOL_RESULT_CAPTURE_EVIDENCE)
-      : unsupported("tool_result_capture", captureReasons, [
-          ...TOOL_RESULT_CAPTURE_EVIDENCE,
-          "Not registered: requires enabled capture, official API and the verified 2026.9.3 contract; revalidate host upgrades",
-        ]),
+    unsupported("tool_result_capture", captureReasons, [
+      ...TOOL_RESULT_CAPTURE_EVIDENCE,
+      "Not registered: the official callback is available but effective replacement is unverified; configured capture remains pass-through",
+    ]),
   );
 
   modes.push(

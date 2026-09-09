@@ -392,7 +392,7 @@ describe("the wire budget", () => {
       'a "quoted" phrase',
       "back\\slash",
       "tab\there\nnewline",
-      " ",
+      "\u0000\u0001\u001f",
       "héllo wörld",
       "✓ ✗ ∑",
       "\u{1d11e} emoji \u{1f3af}",
@@ -451,25 +451,79 @@ describe("the wire budget", () => {
     expect(env.extraction!.result_bytes).toBe(16384);
   });
 
-  it("names the envelope, not the allowance, when one line is too wide", () => {
-    // A `lines` selector cannot split a line, so this refusal is terminal and must be
-    // named. Reporting DISCLOSURE_EXHAUSTED would point the caller at waiting for
-    // allowance, which never helps; the honest remedy is a `bytes` selector.
+  it("pages a one-line tool result as bytes instead of failing default inspect", () => {
+    // The Hermes retirement evidence contained many large one-line results. Previously a
+    // normal `lines` inspection of one of those records stalled and became a bare
+    // `LIMIT_EXCEEDED` even though a bounded byte selector could make progress.
+    const dir = tmp();
+    const s = session(dir);
+    const body = JSON.stringify({
+      records: Array.from({ length: 320 }, (_, i) => ({ id: i, value: "x".repeat(96) })),
+    });
+    const entry = captured(dir, s, body + "\n");
+    const req = request(entry, { kind: "lines", start: 1, end: 1 });
+    const recovered: string[] = [];
+    let env = s.inspect({ ...req });
+    for (let page = 0; page < 32; page += 1) {
+      expect(env.code).toBe("EXTRACTED");
+      expect(env.extraction!.result_bytes).toBeGreaterThan(0);
+      expect(env.extraction!.mode).toBe("bytes");
+      expect(env.extraction!.segments[0]!.kind).toBe("bytes");
+      recovered.push(env.extraction!.segments[0]!.text);
+      if (env.extraction!.complete) break;
+      req["cursor"] = env.extraction!.next_cursor;
+      env = s.inspect({ ...req });
+    }
+    expect(recovered.join("")).toBe(body);
+    expect(env.status).toBe("ok");
+  });
+
+  it("names a real refusal when inspect has no wire headroom", () => {
     const dir = tmp();
     const s = session(dir);
     const entry = captured(dir, s, '"'.repeat(30000) + "\n");
-    const env = s.inspect(request(entry, { kind: "lines", start: 1, end: 1 }));
-    expect(env.status).toBe("error");
-    expect(env.code).toBe("LIMIT_EXCEEDED");
-    // Nothing was charged for a page that returned nothing.
-    const allowance = s.store.disclosureAllowance(s.identity, entry.sourceId);
-    expect(allowance.perSourceRemaining).toBe(L.disclosureMaxPerSourceBytes);
-    // ... and the same bytes are reachable through a selector that can split.
-    const same = s.inspect(
-      request(entry, { kind: "bytes", start: 0, end: 30000 }, { maxScanLines: 1 }),
+    const result = new Inspector().extract(
+      entry.snapshot.data,
+      new LineIndex(entry.snapshot.data),
+      { kind: "lines", start: 1, end: 1 },
+      { maxResultBytes: L.inspectMaxResultBytes, maxScanLines: L.inspectMaxScanLines, maxWireBytes: 1 },
     );
-    expect(same.code).toBe("EXTRACTED");
-    expect(same.extraction!.result_bytes).toBeGreaterThan(0);
+    expect(result.stalled).toBe(true);
+    expect(result.stallReason).toBe("wire");
+  });
+
+  it("returns a bounded hit when searching a large one-line tool result", () => {
+    const dir = tmp();
+    const s = session(dir);
+    const body = JSON.stringify({
+      records: Array.from({ length: 320 }, (_, i) => ({ id: i, value: "x".repeat(96) })),
+      needle: "target",
+    });
+    const entry = captured(dir, s, body + "\n");
+    const env = s.inspect(request(entry, { kind: "search", needle: "target", max_matches: 1 }));
+    expect(env.code).toBe("EXTRACTED");
+    expect(env.extraction!.mode).toBe("search");
+    expect(env.extraction!.segments[0]!.kind).toBe("bytes");
+    expect(env.extraction!.segments[0]!.text).toContain("target");
+    expect(env.extraction!.complete).toBe(false);
+    expect(env.status).toBe("partial");
+    expect(env.guidance).toContain("bytes selector");
+  });
+
+  it("reports disclosure exhaustion when one byte remains for a multibyte line", () => {
+    const dir = tmp();
+    const s = session(dir, {
+      overrides: {
+        limits: {
+          disclosure_max_per_source_bytes: 1,
+          disclosure_max_per_session_bytes: 1,
+        },
+      },
+    });
+    const entry = captured(dir, s, "é");
+    const env = s.inspect(request(entry, { kind: "lines", start: 1, end: 1 }));
+    expect(env.code).toBe("DISCLOSURE_EXHAUSTED");
+    expect(env.extraction!.result_bytes).toBe(0);
   });
 });
 
@@ -516,4 +570,18 @@ describe("utf-8 boundaries on a byte page", () => {
       expect(env.extraction.segments.map((seg) => seg.text).join("")).toBe(expected);
     }
   });
+});
+
+
+it("never claims full matching-line coverage for an oversized search window", () => {
+  const dir = tmp();
+  const s = session(dir);
+  const entry = captured(dir, s, "prefix target " + "tail ".repeat(10000));
+  const env = s.inspect(request(entry, { kind: "search", needle: "target", max_matches: 1 }));
+  expect(env.code).toBe("EXTRACTED");
+  expect(env.status).toBe("partial");
+  expect(env.coverage.complete).toBe(false);
+  expect(env.coverage.omitted.length).toBeGreaterThan(0);
+  expect(env.extraction!.complete).toBe(false);
+  expect(env.guidance).toContain("bytes selector");
 });

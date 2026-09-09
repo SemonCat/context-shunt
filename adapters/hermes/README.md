@@ -8,6 +8,10 @@ attribution ceiling on this host, the session-lifecycle rule, and what `tool_res
 does and does not require — is in
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
+Both live canaries were retired on 2026-09-10. This repair does not re-enable Hermes.
+The pre-read gate passes unknown/unclassifiable calls and searches unchanged; it only blocks
+positively established large unbounded reads on allowed sources.
+
 This adapter registers up to four read-only tools, no writer, and — only with an explicit
 operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) — one
 `transform_tool_result` hook that captures an eligible oversized tool result and replaces it
@@ -48,7 +52,7 @@ provider-authoritative `actual`. See the checked
 The automatic exact-text escape hatch defaults on (`reader.automatic_extract: true`,
 `reader.fallback_max_bytes: 2048`, range 1–4096). Disabling inspect also disables it.
 It is secondary to guarded legacy compaction for exhausted MODEL_ERROR/TIMEOUT;
-legacy compaction also handles terminal CITATION_INVALID, while policy refusals remain excluded.
+citation failure preserves CITATION_INVALID with source handles and bounded inspect/search recovery; it never substitutes legacy compaction. Policy refusals remain excluded.
 It selects the first source's byte prefix, independently of the question, with all handles,
 locators, omissions and disclosure accounting retained. It is never an LLM summary.
 See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)

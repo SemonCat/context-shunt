@@ -21,7 +21,7 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
 | `reader.automatic_extract` | boolean | `true` | Secondary exact extraction after wholly exhausted availability when legacy compaction is disabled or unsafe; also requires `inspect.enabled`. |
 | `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
-| `reader.legacy_compaction` | boolean | `true` | Python/Hermes: prefer bounded deterministic compaction for terminal `MODEL_ERROR`, `TIMEOUT`, and `CITATION_INVALID`, before automatic extraction. Model-identity and provenance-policy refusals remain excluded. |
+| `reader.legacy_compaction` | boolean | `true` | Python/Hermes: prefer bounded deterministic compaction for terminal `MODEL_ERROR` and `TIMEOUT`, before automatic extraction. Model-identity and provenance-policy refusals remain excluded. |
 | `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
@@ -100,23 +100,16 @@ supported attribution remains `unverified`.
 
 ### OpenClaw capture configuration
 
-`tool_result_capture.read_only_tools` is an OpenClaw adapter-only list of exact additional
-read-only tool IDs (at most 100, each 1–128 characters). Defaults already cover `read`,
-`web_fetch`, and `web_search`. For example: `{"enabled": true, "read_only_tools": ["mcp__logs__query"]}`.
-Verify the actual producer contract before adding an ID. Unknown/mutating/control tools are
-excluded. The old `host_ordering_verified_locally` key is ignored on OpenClaw.
-OpenClaw always selects legacy compaction for exhausted availability or citation verification failure. The older
-`reader.automatic_extract` and `reader.fallback_max_bytes` remain accepted but do not control
-this fallback; unsafe compaction preserves the bounded reader failure, never an exact prefix.
-The adapter removes its allowlist before invoking the shared core config loader; there is
-no parallel artifact schema or store. Both `openclaw` and `codex` middleware runtimes are
-selected; Codex-native tools remain observe-only. Version 2026.9.3 and a callable official
-registration API are required. No guessed hook or host-version fallback enables capture.
+OpenClaw automatic capture is unsupported after the retired canary disproved effective
+model-visible replacement. `enabled`, exact `read_only_tools` IDs (including `mcp__`
+prefixes), and legacy ordering fields remain validated for configuration compatibility,
+but cannot enable capture. No middleware handler is installed and raw results pass through
+without pointer accounting. See [current evidence](capability-matrix.md#openclaw).
 
-Disable Tokenjuice and other reducers in the same transaction as enabling capture; see
-[cutover and acceptance](acceptance.md#openclaw-middleware-cutover).
-The shared `limits.max_tool_result_bytes` controls spill bytes; host ingress ceilings are
-independent and cannot be raised by this plugin. [Coverage/limits](capability-matrix.md#openclaw).
+OpenClaw selects non-semantic legacy compaction only after exhausted availability.
+Citation failures always preserve `CITATION_INVALID`, usable source handles, and deterministic
+inspection guidance. The older `reader.automatic_extract` and `reader.fallback_max_bytes`
+remain accepted but do not control this adapter fallback.
 
 ### OpenClaw reader fallback precedence (1.2.1)
 
@@ -125,8 +118,7 @@ reply with no verifiable citations now fails with `CITATION_INVALID`, including 
 `answer`/`claims` with an empty citation array. A deterministic search with no hits and no
 model call still returns `NO_MATCH`.
 
-1. OpenClaw enables the session's legacy tier. A terminal `CITATION_INVALID`, or an
-   availability-exhausted `MODEL_ERROR`/`TIMEOUT`, attempts bounded legacy compaction.
+1. OpenClaw enables the session's legacy tier. An availability-exhausted `MODEL_ERROR`/`TIMEOUT` attempts bounded legacy compaction.
    Citation failure is not provider unavailability and does not advance the model chain.
 2. Revalidate every source handle, compact the first source, and publish
    `partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`, `derived: false`,
@@ -138,10 +130,9 @@ model call still returns `NO_MATCH`.
    tier run, subject to its config and inspect gates. It never covers citation failures.
 
 Cancellation, attribution mismatch/policy refusal, malformed JSON, and unrelated source or
-budget errors are not new legacy triggers. With legacy disabled (generic TypeScript default),
-citation failures remain bounded `CITATION_INVALID` errors. This fixes 1.2.0's availability-only
-legacy guard, which skipped `CITATION_INVALID`; empty evidence could also incorrectly report
-`NO_MATCH`. No mechanical verifier or citation acceptance rule was relaxed.
+budget errors are not new legacy triggers. Citation failures always remain bounded `CITATION_INVALID` errors with retained
+handles and inspection guidance, regardless of legacy configuration. No mechanical verifier
+or citation acceptance rule was relaxed.
 
 ### OpenClaw host keys
 
@@ -300,7 +291,7 @@ If handle validation fails, recovery truthfully marks handles invalid and reques
 
 On Python/Hermes, `reader.legacy_compaction` (default `true`) is the first bounded
 fallback tier after the reader has exhausted retries and its model fallback chain.
-A terminal `status: error` with `MODEL_ERROR`, `TIMEOUT`, or `CITATION_INVALID` qualifies,
+A terminal `status: error` with `MODEL_ERROR` or `TIMEOUT` qualifies,
 including wholly unavailable readers. A reported-model mismatch and
 `PROVENANCE_UNAVAILABLE` remain excluded. Malformed output published as `NO_MATCH`
 is not reclassified as an availability error.
@@ -309,7 +300,7 @@ If compaction is disabled, raises, or fails the output guard, a wholly unavailab
 read may use the secondary `automatic_extract` tier if enabled together with inspect.
 If neither tier can safely deliver, the original bounded failure remains; raw source
 is never used as a fail-open result. This precedence change is scoped to Python/Hermes;
-OpenClaw selects the TypeScript legacy compactor on exhausted availability or citation verification failure. The Python-only legacy configuration keys and additional failure triggers described here do not expand OpenClaw triggers; generic TypeScript sessions keep the prior automatic-extraction default.
+OpenClaw selects the TypeScript legacy compactor on exhausted availability. The Python-only legacy configuration keys and additional failure triggers described here do not expand OpenClaw triggers; generic TypeScript sessions keep the prior automatic-extraction default.
 
 Unlike automatic extraction, this is not an exact byte prefix — it is
 `legacy_compact.compact_tool_result`, a ported, deterministic heuristic summary of the

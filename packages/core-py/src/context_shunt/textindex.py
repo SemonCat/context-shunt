@@ -37,7 +37,8 @@ class BoundedCount:
 def count_lines_bounded(stream: Iterator[bytes], *, max_lines: int, max_bytes: int) -> BoundedCount:
     """Count lines while streaming, stopping at ``max_lines`` or ``max_bytes``.
 
-    An inexact result is treated as "unknown scale" by the gate, which blocks.
+    An inexact result is a lower bound. The full-read gate may block only if that lower
+    bound proves the source exceeds a configured cap; bounded callers pass it through.
     """
     lines = 0
     total = 0
@@ -110,6 +111,10 @@ class LineIndex:
         start = self._line_start(ordinal)
         end = self._data.find(_LF, start)
         return self._data[start : len(self._data) if end == -1 else end]
+
+    def line_start(self, ordinal: int) -> int:
+        """Absolute byte offset of the first byte in a 1-based physical line."""
+        return self._line_start(ordinal)
 
     def line_text(self, ordinal: int) -> str:
         return self.line_bytes(ordinal).decode("utf-8", errors="strict")

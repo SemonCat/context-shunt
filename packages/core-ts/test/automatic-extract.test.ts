@@ -367,3 +367,50 @@ it("secret guard refusal neither leaks nor charges", async () => {
     expect(session.store.disclosureAllowance(session.identity, entry.sourceId)).toEqual(before);
   } finally { spy.mockRestore(); }
 });
+
+it("retired canary citation failure preserves evidence without a question-independent prefix", async () => {
+  const provider = new FakeLuna([], JSON.stringify({ answer: "UNVERIFIED_SENTINEL", citations: [] }));
+  const { session, entry, request, body } = setup(provider, {}, { legacyCompaction: true });
+  const env = await session.read(request);
+  expect(env.code).toBe("CITATION_INVALID");
+  expect(env.status).toBe("error");
+  expect(env.answer).toBe("");
+  expect(env.citations).toEqual([]);
+  expect(env.legacy_compaction).toBeUndefined();
+  expect(env.extraction).toBeUndefined();
+  expect(env.sources[0]!.source_id).toBe(entry.sourceId);
+  expect(env.recovery!.handles_valid).toBe(true);
+  expect(env.recovery!.actions).toContain("INSPECT_HANDLE");
+  expect(env.guidance).toContain("needs verification");
+  expect(JSON.stringify(env)).not.toContain(body);
+  expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");
+  const inspected = session.inspect({ schema_version: "1.1", request_id: "verify_evidence",
+    operation: "inspect", source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId,
+    budgets: { max_result_bytes: 1024, max_scan_lines: 100 },
+    selector: { kind: "lines", start: 1, end: 1 } });
+  expect(inspected.code).toBe("EXTRACTED");
+  expect(JSON.stringify(inspected.extraction)).toContain("prefix");
+  const record = stats(session).find((r) => r.operation_id === env.accounting_id)!;
+  expect(record.code).toBe("CITATION_INVALID");
+  expect(record.delivery_boundary).toBe("envelope");
+  expect(record.attempts_started).toBeGreaterThan(0);
+
+});
+
+
+it("revalidates citation recovery handles after the provider wait", async () => {
+  const provider = new FakeLuna([], JSON.stringify({ answer: "unverified", citations: [] }));
+  const { session, request } = setup(provider, {}, { legacyCompaction: true });
+  const original = session.registry.resolve.bind(session.registry);
+  let calls = 0;
+  vi.spyOn(session.registry, "resolve").mockImplementation((...args) => {
+    if (++calls > 1) throw new ShuntError("SOURCE_EXPIRED");
+    return original(...args);
+  });
+  const env = await session.read(request);
+  expect(env.code).toBe("CITATION_INVALID");
+  expect(env.recovery!.handles_valid).toBe(false);
+  expect(env.recovery!.actions).toContain("RECAPTURE_SOURCE");
+  expect(env.legacy_compaction).toBeUndefined();
+  expect(env.extraction).toBeUndefined();
+});

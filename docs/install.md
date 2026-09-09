@@ -1,5 +1,12 @@
 # Install, verify, uninstall
 
+> Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
+> Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
+> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
+> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> See [current capabilities](capability-matrix.md#openclaw).
+
+
 Two adapters, one shared contract. Pick the host you run; both cores are checked for
 contract parity against the same fixtures in
 [`contracts/v1`](../contracts/v1).

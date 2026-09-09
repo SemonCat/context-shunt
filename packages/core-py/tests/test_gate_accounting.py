@@ -1271,3 +1271,20 @@ def test_a_failed_request_still_accounts_for_every_call_it_made(tmp_path):
     assert len(records) == result.cost.attempts_started
     assert result.cost.attempts_started >= 2
     assert all(r.observed_model == "" for r in records)
+
+
+def test_rejected_pointer_envelope_cannot_claim_spill_delivery(tmp_path):
+    config = make_config(
+        tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
+    )
+    s = ShuntSession("sess", config, make_capability(tool_result_capture=True))
+    outcome = s.post_tool_result("r" * 20000, "synthetic receipt\n" * 3000)
+    assert outcome.action == "error"
+    assert outcome.envelope["code"] != "SPILLED"
+    assert outcome.source_id is None
+    rows = s.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})["stats"][
+        "records"
+    ]
+    row = next(r for r in rows if r["kind"] == "spill")
+    assert row["delivery_boundary"] == "envelope"
+    assert row["baseline_credit_tokens"] == 0

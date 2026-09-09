@@ -139,7 +139,12 @@ describe("capability probe", () => {
     });
     const mode = report.modes.find((m) => m.mode === "tool_result_capture")!;
     expect(mode.support).toBe("unsupported");
-    expect([...mode.reasons]).toEqual(["HOOK_MISSING", "HOST_VERSION_UNVERIFIED", "CONFIG_DISABLED"]);
+    expect([...mode.reasons]).toEqual([
+      "HOOK_MISSING",
+      "HOST_VERSION_UNVERIFIED",
+      "CONFIG_DISABLED",
+      "ORDERING_UNPROVEN",
+    ]);
     expect(mode.evidence).toEqual(expect.arrayContaining([...TOOL_RESULT_CAPTURE_EVIDENCE]));
     expect(mode.evidence.length).toBeGreaterThan(0);
   });
@@ -258,6 +263,29 @@ describe("registration", () => {
     // Configuration alone cannot enable it: the session refuses to run the mode.
     expect(p.capabilityJson()["modes"]).toBeDefined();
   });
+
+  it("does not register a pointer seam that cannot prove effective model delivery", () => {
+    const dir = workspace();
+    const registered: unknown[] = [];
+    const { api } = configured(dir, { tool_result_capture: { enabled: true } });
+    api.runtime.version = "2026.9.3";
+    api.registerAgentToolResultMiddleware = (...args: unknown[]) => registered.push(args);
+    const p = new ContextShuntPlugin(api);
+    p.register();
+
+    const mode = p.capability.modes.find((m) => m.mode === "tool_result_capture")!;
+    expect(mode.support).toBe("unsupported");
+    expect(mode.reasons).toContain("ORDERING_UNPROVEN");
+    expect(registered).toHaveLength(0);
+
+    // A configured capture request therefore remains an ordinary host result. No adapter
+    // operation can claim SPILLED/pointer accounting without a usable handle and a verified
+    // replacement before model context.
+    const session = (p as any).session("s1");
+    expect(session.postToolResult("req_canary", "RAW_PRODUCER_RECEIPT".repeat(5000))).toBeNull();
+    const stats = JSON.parse(p.onStatsTool({}, { sessionKey: "s1" }));
+    expect(stats.stats.records.some((record: Record<string, unknown>) => record.kind === "spill")).toBe(false);
+  });
 });
 
 describe("before_tool_call gate", () => {
@@ -292,13 +320,24 @@ describe("before_tool_call gate", () => {
     ).toBeUndefined();
   });
 
-  it("denies an unprovable read-like shell command and passes other commands through", () => {
+  it("passes an unclassifiable read-like shell command and other commands through", () => {
     const dir = workspace();
     const { api } = configured(dir);
     const p = new ContextShuntPlugin(api);
-    const denied = p.onBeforeToolCall({ toolName: "exec", params: { command: `cat ${planted(dir, 400)} | grep x` } });
-    expect(JSON.parse(String(denied?.blockReason)).code).toBe("UNCLASSIFIABLE_READ");
+    expect(p.onBeforeToolCall({ toolName: "exec", params: { command: `cat ${planted(dir, 400)} | grep x` } })).toBeUndefined();
     expect(p.onBeforeToolCall({ toolName: "exec", params: { command: "npm test" } })).toBeUndefined();
+  });
+
+  it("passes a known read through when the adapter gate itself fails", () => {
+    const dir = workspace();
+    const { api } = configured(dir);
+    const p = new ContextShuntPlugin(api);
+    vi.spyOn(p as any, "session").mockImplementation(() => {
+      throw new Error("synthetic gate failure");
+    });
+    expect(
+      p.onBeforeToolCall({ toolName: "read", params: { file_path: join(dir, "ws", "unknown.txt") } }),
+    ).toBeUndefined();
   });
 
   it("passes uncovered tools straight through", () => {
@@ -795,7 +834,7 @@ describe("legacy fallback and exact-extraction config compatibility", () => {
 });
 
 
-describe("citation failure legacy fallback", () => {
+describe("citation failure preserves the bounded error and handles", () => {
   const replies = [
     { name: "invalid quote", body: { answer: "UNVERIFIED_MODEL_SENTINEL [c1].", citations: [
       { id: "c1", line_start: 1, line_end: 1, quote: "FABRICATED_QUOTE_SENTINEL" },
@@ -805,7 +844,7 @@ describe("citation failure legacy fallback", () => {
     { name: "empty claims and citations", body: { claims: [], citations: [] } },
   ];
   describe.each(["paths", "handles"] as const)("%s", (sourceForm) => {
-    it.each(replies)("compacts $name with the original failure, handles and cost", async ({ body }) => {
+    it.each(replies)("returns $name as an explicit failure with handles and cost", async ({ body }) => {
       const dir = workspace();
       const path = join(dir, "ws", "README.md");
       const source = "# Reader contract\n" + "Documented source detail.\n".repeat(1500);
@@ -828,18 +867,14 @@ describe("citation failure legacy fallback", () => {
       expect(original.envelope.code).toBe("CITATION_INVALID");
       expect(original.availabilityFailure).toBeUndefined();
       expect(original.envelope.recovery?.handles_valid).toBe(true);
-      expect(out.code).toBe("LEGACY_COMPACTED");
+      expect(out.code).toBe("CITATION_INVALID");
       validateEnvelope(out);
-      expect(out.status).toBe("partial");
-      expect(out.result_kind).toBe("legacy_compaction");
-      expect(out.legacy_compaction.original_failure).toBe("CITATION_INVALID");
+      expect(out.status).toBe("error");
+      expect(out.result_kind).toBe("failure");
       expect(out.sources).toEqual(original.envelope.sources);
-      expect(out.legacy_compaction.source_id).toBe(out.sources[0].source_id);
-      expect(out.legacy_compaction.snapshot_id).toBe(out.sources[0].snapshot_id);
       expect(out.recovery.handles_valid).toBe(true);
       expect(out.coverage.complete).toBe(false);
-      expect(out.coverage.omitted.map((item: any) => item.source_id)).toContain(out.sources[0].source_id);
-      expect(out.provenance).toMatchObject({ derived: false, label: "legacy_compaction",
+      expect(out.provenance).toMatchObject({ derived: false, label: "no_model_output",
         attempts_started: complete.mock.calls.length, usage_complete: true });
       expect(out.answer).toBe("");
       expect(out.citations).toEqual([]);
@@ -847,13 +882,12 @@ describe("citation failure legacy fallback", () => {
       expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(p.config.limits.maxEnvelopeBytes);
       expect(JSON.stringify(out)).not.toContain("UNVERIFIED_MODEL_SENTINEL");
       expect(JSON.stringify(out)).not.toContain("FABRICATED_QUOTE_SENTINEL");
-      expect(out.legacy_compaction.summary).not.toBe(source);
       const records = JSON.parse(p.onStatsTool({}, { sessionKey: "s1" })).stats.records;
       const record = records.filter((row: any) => row.operation_id === out.accounting_id);
       expect(record).toHaveLength(1);
       expect(record[0]).toMatchObject({ attempts_started: complete.mock.calls.length,
         reader_input_tokens: complete.mock.calls.length * 12,
-        reader_output_tokens: complete.mock.calls.length * 8, delivery_boundary: "extraction" });
+        reader_output_tokens: complete.mock.calls.length * 8, delivery_boundary: "envelope" });
     });
   });
 });

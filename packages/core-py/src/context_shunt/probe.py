@@ -2,8 +2,9 @@
 
 Scanning stops at 351 lines or the byte cap, whichever comes first, so probing a
 multi-gigabyte file costs the same as probing a small one. A probe that stopped early is
-``exact=False``, which the gate treats as unknown scale and blocks. Nothing is executed
-and the file is never buffered.
+``exact=False`` and carries only the lower bound observed so far; the full-read gate
+blocks only when that bound proves the source exceeds a limit. Probe failures remain
+fail-open. Nothing is executed and the file is never buffered.
 """
 
 from __future__ import annotations

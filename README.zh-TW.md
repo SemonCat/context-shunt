@@ -6,10 +6,10 @@
 handle。主模型再將 handle 與明確問題傳給成本較低的 reader。答案附有證據、涵蓋範圍與
 經程式驗證的引用。
 
-> **預發行、唯讀。** 依操作人員回報，Hermes 部署已完成原子切換，啟用 `tool_result_capture`
-> 與內建 legacy fallback；獨立的 `oversize-tool-result-compactor` plugin 已停用。
-> 新安裝預設仍關閉 capture，必須先確認 host 的執行順序。OpenClaw 2026.9.3 支援本機讀取前防護與有條件的工具結果擷取，
-> reader 實測與 provider 基準測試的驗收關卡仍為 `NOT_RUN`。
+> **2026-09-10 live canary 已退役，尚未正式發布。** 兩個 context-shunt plugin
+> 均維持停用；Hermes 已回復原有 compactor。本次修復不部署或重新啟用。
+> OpenClaw middleware 無法證明模型實際收到替換結果，因此自動擷取不支援、原樣放行。
+> Live reader 評估與 provider benchmark 仍為 `NOT_RUN`。
 
 ## 運作方式
 
@@ -17,8 +17,8 @@ handle。主模型再將 handle 與明確問題傳給成本較低的 reader。�
 
 讀取前閘門與帶著問題閱讀的流程，設計靈感來自 Spotify Portal/Shunt
 （[設計來源](THIRD_PARTY_NOTICES.md)）。預設情況下，完整文字讀取必須同時符合兩項上限：
-350 個實體行與 16 KiB。過大或無法證明範圍受限的讀取會在執行前遭攔截；安全的來源會保存下來，供 reader
-依問題閱讀。小型或可證明範圍受限的讀取可繼續使用 host 原有工具。
+350 個實體行與 16 KiB。僅在可確認來源獲允許、讀取無界且超過上限時攔截。未知／無法分類的命令、搜尋與安全有界讀取均原樣放行。
+閘門用於減少上下文，不取代 host 的權限政策。
 
 Hermes 攔截 `read_file`、`search_files` 與 `terminal`；OpenClaw 涵蓋
 `read` 與 `exec`，未註冊搜尋工具供閘門攔截。這不代表所有讀取工具都受保護；若需要完整防護，
@@ -103,8 +103,13 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 
 ## Reader 失敗時
 
+兩個核心遇到 `CITATION_INVALID` 都明確回傳錯誤，不用啟發式摘要或固定前綴代替答案。
+保留的 `source_id`／`snapshot_id` 可供 `context_shunt_inspect` 以 lines／bytes 範圍或 search
+選擇器查證；依 `next_cursor` 接續，仍受 TTL 與累計揭露上限約束。預設 inspect 會縮小頁面並提供接續資訊，
+不會只因剩餘資料較多而回傳 `LIMIT_EXCEEDED`。
+
 在 Python／Hermes 上，reader 重試與模型備援耗盡後，符合條件的 `MODEL_ERROR`、`TIMEOUT`
-或 `CITATION_INVALID` 會觸發 **context-shunt 內部**移植的有界 legacy compactor
+會觸發 **context-shunt 內部**移植的有界 legacy compactor
 （`reader.legacy_compaction` 預設為 `true`）。模型身分不符與 provenance 政策拒絕不適用。
 它會針對請求中的第一個來源，以訊號行、頭尾取樣、合併重複行與整理 JSON 產生決定性啟發式摘要，
 不是 Luna 的答案，也不是精確來源範圍。
@@ -112,12 +117,12 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 回應的 envelope 標示 `status: partial`、`code: LEGACY_COMPACTED`、
 `result_kind: legacy_compaction` 與 `provenance.derived: false`。摘要放在
 `legacy_compaction`，`answer` 與 `citations` 留空；涵蓋範圍仍標為部分，失敗的模型嘗試
-仍列入統計。Hermes 切換後，由此內建備援取代獨立 legacy plugin。
+仍列入統計。這是非語意備援，不計為成功的語意摘要。
 
 若 compaction 停用或無法安全回傳，而 reader 完全無法使用，可在相關設定啟用時，
 改用第二層受防護的精確前綴擷取。若兩層都無法安全回傳，回應只包含有界 pointer／失敗訊息
 與復原指引，絕不放行過大的原始內容。可用有效 handle 縮小問題重問，或檢視有界範圍。
-OpenClaw 已使用 TypeScript 移植的 legacy compactor，在模型可用性重試耗盡或引用無效／缺失後回傳有界且清楚標示的備援。
+OpenClaw 已使用 TypeScript 移植的 legacy compactor，在模型可用性重試耗盡後回傳有界且清楚標示的備援。
 詳見[備援語意與限制](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)。
 
 ## 快速開始
@@ -159,21 +164,16 @@ openclaw plugins enable context-shunt
 openclaw plugins inspect context-shunt --runtime --json
 ```
 
-OpenClaw 2026.9.3 透過官方 `api.registerAgentToolResultMiddleware` 擷取符合條件的唯讀文字／JSON
-結果，涵蓋 embedded 工具與 OpenClaw 管理的 Codex dynamic 工具；Codex-native 工具只能觀察，無法替換。
-預設關閉；額外 MCP 工具需列出確切唯讀 ID，啟用時必須在同一設定交易停用 Tokenjuice 與其他 reducer。
-Host 在 middleware 前已有 200 blocks／每段聚合文字 100,000 字元／details 100,000 bytes 等限制。
-邊界不明的結果會被攔下、不提供 handle；低於上限也只保證 middleware 可見內容的不可變快照，
-不宣稱原始 producer 輸出完整。擷取時不呼叫 Luna；模型以實際問題讀取 handle，可用性耗盡或引用驗證失敗則回傳
-標示 `LEGACY_COMPACTED`／`legacy_compaction` 的有界備援。未知、寫入與控制工具不在涵蓋範圍內。
-參見[能力與限制](docs/capability-matrix.md#openclaw)及[原子切換](docs/acceptance.md#openclaw-middleware-cutover)。
+OpenClaw 自動工具結果擷取不支援，即使設定啟用仍原樣放行。
+退役 canary 曾記錄 pointer，但原始結果仍可見且模型沒有可用 handle；註冊 middleware 不代表替換已生效。
+明確的本機擷取、reader、inspect 與 stats 仍可使用。參見[能力矩陣](docs/capability-matrix.md#openclaw)。
 
 ## Host 支援與如實統計
 
 | 能力 | Hermes | OpenClaw 2026.9.3 |
 | --- | --- | --- |
 | 本機 pre-read gate、reader、精確 inspect、session stats／生命週期 | 支援（相容性基準為 0.18.2） | 支援 |
-| 工具結果擷取 | 回報的 0.21.1 部署已啟用；預設關閉，需操作人員聲明已確認本機順序 | 啟用後支援符合條件的 middleware 可見結果 |
+| 工具結果擷取 | 需驗證 host 順序；live 部署已退役 | 不支援；原樣放行 |
 | 外部 artifact 匯入 | 支援；設定前關閉 | 不支援（`IMPORT_UNIMPLEMENTED`） |
 | 內建 legacy compaction | 支援，為預設 reader 失敗備援 | 支援模型可用性耗盡後的備援 |
 | Reader 歸屬證據上限 | `unverified` | `resolved` |

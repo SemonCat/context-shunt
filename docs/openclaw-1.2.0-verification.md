@@ -1,5 +1,12 @@
 # OpenClaw 1.2.0 verification
 
+> Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
+> Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
+> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
+> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> See [current capabilities](capability-matrix.md#openclaw).
+
+
 Verified on 2026-09-10 (Asia/Taipei), on `feat/openclaw-tool-result-middleware` from clean
 `main` at `7883a04`. TypeScript core and OpenClaw package versions are 1.2.0; contract
 revision remains 1.1. Python/Hermes source, tests, and package version are unchanged.

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "description": "Pre-read gate contract. Outcomes are tri-state: passthrough (not read-like; host policy owns it), allow (read-like AND provably bounded/small), blocked (LARGE_READ or UNCLASSIFIABLE_READ). Every blocked case MUST result in zero underlying tool invocations. The probe table stands in for the filesystem so both cores decide identically.",
+  "description": "Pre-read gate contract. Outcomes are tri-state: passthrough (the host owns calls the gate cannot positively classify as a safe intervention), allow (read-like AND provably within a configured bounded form), blocked (only a provably oversized unbounded full read of a regular file). Every blocked case MUST result in zero underlying tool invocations. The probe table stands in for the filesystem so both cores decide identically.",
   "probe_table": {
     "/ws/small349.txt": {
       "lines": 349,
@@ -130,7 +130,7 @@
       }
     },
     {
-      "id": "read_directory_blocked",
+      "id": "read_directory_passthrough",
       "input": {
         "tool": "read",
         "args": {
@@ -138,13 +138,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNSAFE_SOURCE",
+        "decision": "passthrough",
         "form": "unsafe"
       }
     },
     {
-      "id": "read_fifo_blocked",
+      "id": "read_fifo_passthrough",
       "input": {
         "tool": "read",
         "args": {
@@ -152,8 +151,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNSAFE_SOURCE",
+        "decision": "passthrough",
         "form": "unsafe"
       }
     },
@@ -211,9 +209,8 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
-        "form": "full_read"
+        "decision": "passthrough",
+        "form": "bounded_lines"
       }
     },
     {
@@ -231,7 +228,7 @@
       }
     },
     {
-      "id": "read_negative_limit_blocked",
+      "id": "read_negative_limit_passthrough",
       "input": {
         "tool": "read",
         "args": {
@@ -241,8 +238,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -262,7 +258,7 @@
       }
     },
     {
-      "id": "search_unbounded_blocked",
+      "id": "search_unbounded_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -271,13 +267,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "search_over_match_cap_blocked",
+      "id": "search_over_match_cap_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -287,8 +282,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -440,7 +434,7 @@
       }
     },
     {
-      "id": "shell_head_over_cap_blocked",
+      "id": "shell_head_over_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -448,8 +442,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_lines"
       }
     },
@@ -467,7 +460,7 @@
       }
     },
     {
-      "id": "shell_head_bytes_flag_unclassifiable",
+      "id": "shell_head_bytes_flag_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -475,8 +468,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -494,7 +486,7 @@
       }
     },
     {
-      "id": "shell_sed_range_over_cap_blocked",
+      "id": "shell_sed_range_over_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -502,13 +494,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_lines"
       }
     },
     {
-      "id": "shell_sed_inplace_unclassifiable",
+      "id": "shell_sed_inplace_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -516,8 +507,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -535,7 +525,7 @@
       }
     },
     {
-      "id": "shell_grep_unbounded_blocked",
+      "id": "shell_grep_unbounded_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -543,8 +533,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -562,7 +551,7 @@
       }
     },
     {
-      "id": "shell_awk_unclassifiable",
+      "id": "shell_awk_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -570,13 +559,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_strings_unclassifiable",
+      "id": "shell_strings_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -584,8 +572,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -604,7 +591,7 @@
       }
     },
     {
-      "id": "shell_pipeline_with_file_read_unclassifiable",
+      "id": "shell_pipeline_with_file_read_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -612,13 +599,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_pipeline_bounded_tail_still_unclassifiable",
+      "id": "shell_pipeline_bounded_tail_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -626,8 +612,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -645,7 +630,7 @@
       }
     },
     {
-      "id": "shell_redirect_read_unclassifiable",
+      "id": "shell_redirect_read_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -653,13 +638,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_stdin_redirect_unclassifiable",
+      "id": "shell_stdin_redirect_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -667,13 +651,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_command_substitution_unclassifiable",
+      "id": "shell_command_substitution_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -681,13 +664,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_backtick_substitution_unclassifiable",
+      "id": "shell_backtick_substitution_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -695,13 +677,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_variable_path_unclassifiable",
+      "id": "shell_variable_path_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -709,13 +690,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_brace_variable_unclassifiable",
+      "id": "shell_brace_variable_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -723,13 +703,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_glob_unclassifiable",
+      "id": "shell_glob_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -737,13 +716,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_tilde_unclassifiable",
+      "id": "shell_tilde_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -751,13 +729,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_sequence_unclassifiable",
+      "id": "shell_sequence_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -765,13 +742,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_semicolon_unclassifiable",
+      "id": "shell_semicolon_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -779,13 +755,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_newline_unclassifiable",
+      "id": "shell_newline_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -793,13 +768,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_relative_path_unclassifiable",
+      "id": "shell_relative_path_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -807,13 +781,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_unterminated_quote_unclassifiable",
+      "id": "shell_unterminated_quote_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -821,8 +794,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -840,7 +812,7 @@
       }
     },
     {
-      "id": "shell_cat_directory_blocked",
+      "id": "shell_cat_directory_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -848,13 +820,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNSAFE_SOURCE",
+        "decision": "passthrough",
         "form": "unsafe"
       }
     },
     {
-      "id": "shell_cat_fifo_blocked",
+      "id": "shell_cat_fifo_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -862,8 +833,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNSAFE_SOURCE",
+        "decision": "passthrough",
         "form": "unsafe"
       }
     },
@@ -933,7 +903,7 @@
       }
     },
     {
-      "id": "shell_grep_over_match_cap_blocked",
+      "id": "shell_grep_over_match_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -941,9 +911,8 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
-        "form": "unclassifiable"
+        "decision": "passthrough",
+        "form": "bounded_search"
       }
     },
     {
@@ -973,7 +942,7 @@
       }
     },
     {
-      "id": "read_bool_limit_blocked",
+      "id": "read_bool_limit_passthrough",
       "input": {
         "tool": "read",
         "args": {
@@ -982,13 +951,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "search_zero_matches_blocked",
+      "id": "search_zero_matches_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -998,13 +966,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "search_empty_pattern_blocked",
+      "id": "search_empty_pattern_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -1014,13 +981,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "read_targeted_longline_over_byte_cap_blocked",
+      "id": "read_targeted_longline_over_byte_cap_passthrough",
       "input": {
         "tool": "read",
         "args": {
@@ -1030,13 +996,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_lines"
       }
     },
     {
-      "id": "search_longline_over_byte_cap_blocked",
+      "id": "search_longline_over_byte_cap_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -1046,13 +1011,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_search"
       }
     },
     {
-      "id": "shell_head_longline_over_byte_cap_blocked",
+      "id": "shell_head_longline_over_byte_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1060,13 +1024,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_lines"
       }
     },
     {
-      "id": "shell_tail_longline_over_byte_cap_blocked",
+      "id": "shell_tail_longline_over_byte_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1074,13 +1037,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_lines"
       }
     },
     {
-      "id": "shell_grep_longline_over_byte_cap_blocked",
+      "id": "shell_grep_longline_over_byte_cap_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1088,13 +1050,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "LARGE_READ",
+        "decision": "passthrough",
         "form": "bounded_search"
       }
     },
     {
-      "id": "shell_grep_context_amplification_blocked",
+      "id": "shell_grep_context_amplification_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1102,13 +1063,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_command_wrapper_cat_blocked",
+      "id": "shell_command_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1122,7 +1082,7 @@
       }
     },
     {
-      "id": "shell_env_wrapper_cat_blocked",
+      "id": "shell_env_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1136,7 +1096,7 @@
       }
     },
     {
-      "id": "shell_assignment_wrapper_cat_unclassifiable",
+      "id": "shell_assignment_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1144,13 +1104,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_interpreter_wrapper_cat_unclassifiable",
+      "id": "shell_interpreter_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1158,8 +1117,7 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
@@ -1178,7 +1136,7 @@
       }
     },
     {
-      "id": "search_context_amplification_blocked",
+      "id": "search_context_amplification_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -1189,13 +1147,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "search_non_content_target_blocked",
+      "id": "search_non_content_target_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -1206,13 +1163,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "search_alternate_output_mode_blocked",
+      "id": "search_alternate_output_mode_passthrough",
       "input": {
         "tool": "search",
         "args": {
@@ -1223,13 +1179,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_time_wrapper_cat_blocked",
+      "id": "shell_time_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1237,13 +1192,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_if_wrapper_cat_blocked",
+      "id": "shell_if_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1251,13 +1205,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_source_file_blocked",
+      "id": "shell_source_file_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1265,13 +1218,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_file_list_flag_blocked",
+      "id": "shell_file_list_flag_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1279,13 +1231,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_full_reader_unknown_flag_blocked",
+      "id": "shell_full_reader_unknown_flag_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1293,13 +1244,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_command_substitution_cat_blocked",
+      "id": "shell_command_substitution_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1307,13 +1257,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_command_substitution_implicit_cat_blocked",
+      "id": "shell_command_substitution_implicit_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1321,13 +1270,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_input_redirection_blocked",
+      "id": "shell_input_redirection_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1335,13 +1283,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_eval_wrapper_cat_blocked",
+      "id": "shell_eval_wrapper_cat_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1349,13 +1296,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_copy_to_stdout_blocked",
+      "id": "shell_copy_to_stdout_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1363,13 +1309,12 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
       }
     },
     {
-      "id": "shell_wc_file_list_flag_blocked",
+      "id": "shell_wc_file_list_flag_passthrough",
       "input": {
         "tool": "shell",
         "args": {
@@ -1377,9 +1322,46 @@
         }
       },
       "expect": {
-        "decision": "blocked",
-        "code": "UNCLASSIFIABLE_READ",
+        "decision": "passthrough",
         "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "hermes_search_files_name_search_passthrough",
+      "input": {
+        "tool": "search",
+        "args": {
+          "pattern": "*.py",
+          "target": "files",
+          "path": "/ws",
+          "limit": 50,
+          "offset": 0,
+          "output_mode": "content",
+          "context": 0
+        }
+      },
+      "expect": {
+        "decision": "passthrough",
+        "form": "unclassifiable"
+      }
+    },
+    {
+      "id": "hermes_search_files_content_search_bounded",
+      "input": {
+        "tool": "search",
+        "args": {
+          "pattern": "retry",
+          "target": "content",
+          "path": "/ws/huge.txt",
+          "max_matches": 50,
+          "offset": 0,
+          "output_mode": "content",
+          "context": 0
+        }
+      },
+      "expect": {
+        "decision": "allow",
+        "form": "bounded_search"
       }
     }
   ]

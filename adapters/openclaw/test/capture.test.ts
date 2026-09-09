@@ -2,9 +2,9 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { modeEnabled, validateEnvelope } from "@context-shunt/core";
+import { modeEnabled, ScopeIdentity, ShuntSession, validateEnvelope } from "@context-shunt/core";
 import { ContextShuntPlugin } from "../index.js";
-import { type AgentToolResult, type AgentToolResultMiddleware, type ToolResultEvent } from "../src/capture.js";
+import { captureToolResult, type AgentToolResult, type AgentToolResultMiddleware, type ToolResultEvent } from "../src/capture.js";
 
 const SENTINEL = "RAW_CAPTURE_SENTINEL_";
 const text = (value = SENTINEL.repeat(2500)): AgentToolResult => ({ content: [{ type: "text", text: value }] });
@@ -25,11 +25,44 @@ function setup(options: { enabled?: boolean; seam?: boolean; version?: string; t
       tool_result_capture: { enabled: options.enabled ?? true, read_only_tools: options.tools ?? ["mcp__logs__query"] } },
   });
   p.register();
+  // The OpenClaw adapter intentionally does not register this host seam after the retirement
+  // canary. Keep the capture engine coverage isolated behind an explicitly synthetic
+  // capability so these tests cannot accidentally prove live host delivery.
+  const proven = {
+    ...p.capability,
+    modes: p.capability.modes.map((m) =>
+      m.mode === "tool_result_capture"
+        ? { ...m, support: "supported" as const, reasons: [] }
+        : m,
+    ),
+  };
+  const engineSession = new ShuntSession("s1", p.config, proven, {
+    provider: (p as any).provider(),
+    legacyCompaction: true,
+    store: (p as any).store,
+    identity: new ScopeIdentity({
+      host: "openclaw",
+      profile: "context-shunt",
+      principal: "local",
+      session: "s1",
+      generation: 1,
+    }),
+  });
+  const engineHandler: AgentToolResultMiddleware = (event, context) => captureToolResult(
+    event,
+    context,
+    new Set(["read", "web_fetch", "web_search", ...(options.tools ?? ["mcp__logs__query"])]),
+    () => {
+      if (!context.sessionKey) throw new Error("Capture requires session identity");
+      return engineSession;
+    },
+    p.config.limits,
+  );
   const call = (result = text(), name = "mcp__logs__query", extra: Partial<ToolResultEvent> = {}) => {
     const event = { toolCallId: "tc1", toolName: name, args: {}, result, ...extra };
-    return handlers[0]!(event, ctx)?.result ?? result;
+    return engineHandler(event, { ...ctx })?.result ?? result;
   };
-  return { p, handlers, registrations, complete, call };
+  return { p, handlers, registrations, complete, call, engineHandler, engineSession };
 }
 function envelope(result: AgentToolResult) {
   const value = JSON.parse(result.content[0]!.text!);
@@ -37,24 +70,26 @@ function envelope(result: AgentToolResult) {
   return value;
 }
 
-describe("official tool-result capture", () => {
-  it("registers exactly once for both entitled runtimes without Hermes attestation", () => {
+describe("capture engine (synthetic capability only)", () => {
+  it("does not register the unverified official seam even when enabled", () => {
     const f = setup(); f.p.register();
-    expect(f.handlers).toHaveLength(1);
-    expect(f.registrations).toEqual([{ runtimes: ["openclaw", "codex"] }]);
+    expect(f.handlers).toHaveLength(0);
+    expect(f.registrations).toHaveLength(0);
+    expect(modeEnabled(f.p.capability, "tool_result_capture")).toBe(false);
+    expect(f.p.capability.modes.find((m) => m.mode === "tool_result_capture")?.reasons)
+      .toContain("ORDERING_UNPROVEN");
     const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
     expect(manifest.contracts.agentToolResultMiddleware).toEqual(["openclaw", "codex"]);
-    expect(modeEnabled(f.p.capability, "tool_result_capture")).toBe(true);
-    expect(JSON.stringify(f.p.capability)).toContain("Codex-native PostToolUse is observe-only");
+    expect(JSON.stringify(f.p.capability)).toContain("effective model-visible history");
   });
   it.each([{ enabled: false }, { seam: false }, { version: "2026.9.2" }, { version: "2026.9.4" }])("does not register without proven capability: %j", (options) => {
     const f = setup(options);
     expect(f.handlers).toHaveLength(0);
     expect(modeEnabled(f.p.capability, "tool_result_capture")).toBe(false);
   });
-  it.each(["openclaw", "codex"] as const)("spills eligible text before model delivery in %s with no model call", (runtime) => {
+  it.each(["openclaw", "codex"] as const)("spills eligible text for %s with no model call", (runtime) => {
     const f = setup(); const original = text();
-    const result = f.handlers[0]!({ toolCallId: "tc", toolName: "mcp__logs__query", args: {}, result: original }, { ...ctx, runtime })!.result;
+    const result = f.engineHandler!({ toolCallId: "tc", toolName: "mcp__logs__query", args: {}, result: original }, { ...ctx, runtime })!.result;
     const env = envelope(result);
     expect(env.code).toBe("SPILLED");
     expect(env.pointer.snapshot_id).toMatch(/^sha256:/);
@@ -169,11 +204,11 @@ describe("official tool-result capture", () => {
   });
   it.each(["store", "middleware", "invalid-outcome", "serialization"])("never raw fail-opens after %s failure", (kind) => {
     const f = setup();
-    const session = (f.p as any).session("s1");
+    const session = f.engineSession;
     let input = text();
     if (kind === "store") vi.spyOn(session.registry, "register").mockImplementation(() => { throw new Error(SENTINEL); });
     if (kind === "middleware") vi.spyOn(session, "postToolResult").mockImplementation(() => { throw new Error(SENTINEL); });
-    if (kind === "invalid-outcome") vi.spyOn(session, "postToolResult").mockReturnValue({ action: "spill" });
+    if (kind === "invalid-outcome") vi.spyOn(session, "postToolResult").mockReturnValue({ action: "spill", bytesMeasured: 0 });
     if (kind === "serialization") { const cyclic: any = { raw: SENTINEL }; cyclic.self = cyclic; input = { ...input, details: cyclic }; }
     const output = f.call(input);
     expect(envelope(output).pointer).toBeUndefined();
@@ -193,7 +228,7 @@ describe("official tool-result capture", () => {
   });
   it("refuses missing session identity instead of publishing cross-session handles", () => {
     const f = setup();
-    const output = f.handlers[0]!({ toolCallId: "tc", toolName: "read", args: {}, result: text() }, { runtime: "codex" })!.result;
+    const output = f.engineHandler!({ toolCallId: "tc", toolName: "read", args: {}, result: text() }, { runtime: "codex" })!.result;
     expect(envelope(output).code).toBe("SPILL_FAILED");
     expect(JSON.stringify(output)).not.toContain(SENTINEL);
   });

@@ -76,6 +76,33 @@ def test_conformance_corpus_is_not_empty_and_covers_all_outcomes(gate_cases):
     assert outcomes == {"allow", "blocked", "passthrough"}
 
 
+def test_unclassifiable_shell_read_is_passed_to_the_host(gate_cases):
+    """A classifier miss must not turn an otherwise valid host call into an error."""
+    gate = PreReadGate(_table_prober(gate_cases["probe_table"]))
+    decision = gate.evaluate("shell", {"command": "awk '{print}' /ws/huge.txt"})
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.form.value == "unclassifiable"
+    assert decision.reason == "OPAQUE_READ"
+    assert decision.code is None
+
+
+def test_bounded_read_that_cannot_be_sized_is_passed_unchanged(gate_cases):
+    """An explicit bound is enough to keep the gate from vetoing the host tool."""
+    gate = PreReadGate(_table_prober(gate_cases["probe_table"]))
+    decision = gate.evaluate("read", {"file_path": "/ws/longline.txt", "offset": 1, "limit": 1})
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.form.value == "bounded_lines"
+    assert decision.code is None
+
+
+def test_unknown_tool_is_passed_without_a_gate_error(gate_cases):
+    gate = PreReadGate(_table_prober(gate_cases["probe_table"]))
+    decision = gate.evaluate("future_read_tool", {"path": "/ws/huge.txt"})
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.form.value == "not_read_like"
+    assert decision.code is None
+
+
 # -- real filesystem behaviour, not the probe table -------------------------
 
 
@@ -119,7 +146,7 @@ def test_single_long_line_over_byte_cap_is_blocked(tmp_path):
     assert decision.reason == "OVER_BYTE_THRESHOLD"
 
 
-def test_selected_long_line_over_byte_cap_is_blocked_for_every_bounded_form(tmp_path):
+def test_selected_long_line_over_byte_cap_is_passed_for_every_bounded_form(tmp_path):
     path = _write(tmp_path, "selected-long.txt", b"A" * 20_000 + b"\n")
     gate = PreReadGate(FileProber())
     calls = (
@@ -131,7 +158,8 @@ def test_selected_long_line_over_byte_cap_is_blocked_for_every_bounded_form(tmp_
     )
     for tool, args in calls:
         decision = gate.evaluate(tool, args)
-        assert decision.blocked and decision.code == "LARGE_READ"
+        assert decision.decision is Decision.PASSTHROUGH
+        assert decision.code is None
 
 
 def test_probe_scans_at_most_the_threshold_plus_one(tmp_path):
@@ -148,12 +176,12 @@ def test_full_probe_stops_at_the_output_byte_threshold(tmp_path):
     assert probe.bytes == DEFAULT_LIMITS.max_targeted_read_bytes + 1
 
 
-def test_bounded_metadata_amplification_blocks_before_probing(gate_cases):
+def test_bounded_metadata_amplification_passes_to_the_host(gate_cases):
     files = ["/ws/a.txt"] * 300
     gate = PreReadGate(_table_prober(gate_cases["probe_table"]))
     decision = gate.evaluate("shell", {"command": "wc " + " ".join(files)})
-    assert decision.blocked
-    assert decision.code == "LARGE_READ"
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.code is None
     assert decision.form.value == "bounded_metadata"
 
 
@@ -174,11 +202,13 @@ def test_probe_rejects_a_symlink_swap_between_lstat_and_open(tmp_path, monkeypat
     monkeypatch.setattr(probe_module.os, "open", swap_then_open)
     decision = PreReadGate(FileProber()).evaluate("read", {"file_path": str(victim)})
     assert swapped
-    assert decision.blocked and decision.code == "UNSAFE_SOURCE"
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.form.value == "unsafe"
+    assert decision.code is None
 
 
-def test_probe_timeout_blocks_instead_of_executing():
-    """A probe that burns the 1s budget mid-command blocks; it never falls through to allow."""
+def test_probe_timeout_passes_through_without_a_gate_error():
+    """An incomplete probe cannot prove a large read, so the host owns the call."""
     clock = FakeClock()
 
     def slow_probe(_path: str, _selection=None) -> ProbeResult:
@@ -187,20 +217,33 @@ def test_probe_timeout_blocks_instead_of_executing():
 
     gate = PreReadGate(slow_probe, clock=clock)
     decision = gate.evaluate("shell", {"command": "cat /ws/a.txt /ws/b.txt"})
-    assert decision.blocked and decision.reason == "PROBE_TIMEOUT"
-    assert decision.code == "LARGE_READ"
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.reason == "PROBE_TIMEOUT"
+    assert decision.code is None
 
 
-def test_blocked_decision_never_invokes_the_underlying_tool(tmp_path):
-    """The gate is the only thing that runs: it takes no executor and has none to call."""
+def test_probe_failure_passes_through_without_a_gate_error():
+    def broken_probe(_path: str, _selection=None) -> ProbeResult:
+        raise RuntimeError("probe unavailable")
+
+    decision = PreReadGate(broken_probe).evaluate("read", {"file_path": "/ws/a.txt"})
+    assert decision.decision is Decision.PASSTHROUGH
+    assert decision.reason == "PROBE_FAILED"
+    assert decision.code is None
+
+
+def test_unclassifiable_decisions_never_create_a_gate_error(tmp_path):
+    """The gate reports its uncertainty while leaving execution to the host."""
     invocations = []
 
     def counting_probe(path: str, _selection=None) -> ProbeResult:
         return ProbeResult(exists=True, kind="file", lines=9000, bytes=90000)
 
     gate = PreReadGate(counting_probe)
-    for command in ("cat /ws/x.txt", "less /ws/x.txt", "awk '{print}' /ws/x.txt"):
-        assert gate.evaluate("shell", {"command": command}).blocked
+    for command in ("awk '{print}' /ws/x.txt", "cat $FILE"):
+        decision = gate.evaluate("shell", {"command": command})
+        assert decision.decision is Decision.PASSTHROUGH
+        assert decision.code is None
     assert invocations == []
 
 

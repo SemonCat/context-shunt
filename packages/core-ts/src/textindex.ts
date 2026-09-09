@@ -22,7 +22,7 @@ export interface BoundedCount {
   readonly exact: boolean;
 }
 
-/** Count while streaming, stopping at `maxLines` or `maxBytes`. Inexact means "unknown scale". */
+/** Count while streaming; an inexact result is a lower bound for the full-read gate. */
 export function countLinesBounded(
   blocks: Iterable<Uint8Array>,
   opts: { maxLines: number; maxBytes: number },
@@ -106,7 +106,8 @@ export class LineIndex {
     return decodeStrict(this.rangeBytes(start, end));
   }
 
-  private lineStart(ordinal: number): number {
+  /** Absolute byte offset of the first byte in a 1-based physical line. */
+  lineStart(ordinal: number): number {
     const block = Math.floor((ordinal - 1) / LineIndex.STRIDE);
     const baseOrdinal = block * LineIndex.STRIDE + 1;
     let offset = this.checkpoints[block] as number;

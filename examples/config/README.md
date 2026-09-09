@@ -17,7 +17,7 @@ adding fake keys to either plugin `config` block.
 | `workspace_roots` | *(required)* | The only roots that may become sources. Everything else is `UNSAFE_SOURCE`. |
 | `cache_dir` | `~/.cache/context-shunt` | Private cache: SQLite authorization metadata plus content-addressed payload files. Refused if it resolves inside a workspace root. `spill_dir` is accepted as a pre-1.1 alias. |
 | `denylist` | `[]` | Extra administrator denials, relative globs inside a root. The built-in secret policy applies regardless. |
-| `gate_enabled` | `true` | Block oversized and unprovable reads before they run. |
+| `gate_enabled` | `true` | Block only proven large unbounded reads on allowed sources; uncertainty passes through. |
 | `reader.enabled` | `true` | Controls reader execution; `false` refuses without a model call even if an adapter still registers the tool. |
 | `reader.model` | `gpt-5.6-luna` | Configurable since contract revision 1.1. What keeps a substitution from going unnoticed is the envelope's provenance block, not a hardcoded value. |
 | `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
@@ -29,7 +29,7 @@ adding fake keys to either plugin `config` block.
 | `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core only, same caveat as above. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
-| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw 2026.9.3 supports eligible read-only middleware-visible results. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
+| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw automatic capture is unsupported, even when requested. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
 | `artifact_import.enabled` | `false` | Adopt an oversized tool-result artifact an external producer already persisted. Supported on Hermes; the OpenClaw core has no import boundary and reports the mode unsupported. |
 | `artifact_import.roots` | `[]` | Allowlist of canonical directories an artifact and its manifest may live under. Separate from `workspace_roots`, and refused if a root contains the private cache. |
 | `artifact_import.accepted_manifest_schemas` | `[]` | Allowlist of producer manifest schemas. A manifest declaring a schema outside it is refused even when a translation profile for that schema exists. |
@@ -40,7 +40,7 @@ adding fake keys to either plugin `config` block.
 The import boundary is one of two deployable answers to oversized *tool results*, and it is
 deliberately not the same thing as `tool_result_capture`. That mode needs the host to hand a
 plugin the complete result before truncation and accept a replacement before persistence -
-OpenClaw captures only the middleware-visible view, and Hermes is off by default pending an explicit operator
+OpenClaw cannot prove effective replacement and capture is unsupported; Hermes is off by default pending an explicit operator
 attestation (see `docs/capability-matrix.md`). An artifact a producer already wrote to disk
 needs neither: the capture already happened, so all the host has to supply is a way to
 invoke the import.
@@ -117,9 +117,7 @@ deadline, store, TTL, JSON, inspect, disclosure, and stats limits, is in
 [`docs/metrics.md`](../../docs/metrics.md).
 
 
-OpenClaw 1.2.0 targets the official 2026.9.3 middleware in both embedded and OpenClaw-owned
-Codex dynamic tools. The example stages capture off. Before enabling, disable Tokenjuice
-and other reducers in the same config transaction. Add verified read-only MCP IDs to
-`tool_result_capture.read_only_tools`, for example `["mcp__logs__query"]`; unknown and
-mutating tools stay excluded. The Hermes ordering attestation is ignored on OpenClaw.
-See [runtime and ingress limits](../../docs/capability-matrix.md#openclaw).
+OpenClaw automatic capture remains off and unsupported after the retired canary.
+Exact MCP IDs retain their `mcp__` prefixes in validated configuration, but neither the
+allowlist nor the Hermes ordering attestation can enable OpenClaw capture.
+See [current capabilities](../../docs/capability-matrix.md#openclaw).

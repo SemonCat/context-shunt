@@ -92,19 +92,16 @@ it with a manifest; the import boundary re-proves every claim the manifest makes
 it as an ordinary handle. It needs no interception ordering at all, which is why it is
 supported wherever a host can register the tool.
 
-**`tool_result_capture`** uses each host's supported replacement seam. OpenClaw 2026.9.3
-uses the official runtime-neutral middleware for eligible read-only text/JSON in embedded
-and OpenClaw-owned Codex dynamic tools. It captures the immutable middleware-visible
-representation, not necessarily complete producer output: the host sanitizes before the
-handler. Ambiguous cap boundaries are withheld and refused. Codex-native results are
-observe-only. Hermes still requires its existing local operator attestation.
-See [capability evidence](capability-matrix.md#openclaw).
+**`tool_result_capture`** requires a proven replacement seam. Hermes retains its supported
+locally attested transform path. OpenClaw automatic capture is unsupported after the live
+canary disproved the effective pointer boundary; no handler is installed and raw results
+pass through without capture savings claims. See [capability evidence](capability-matrix.md#openclaw).
 
-The secondary path is the original pre-read gate, unchanged. It remains the answer for an
-oversized *file* read, and it is the only path that can act before an operation runs. A
-full read that gets past it uses the question-aware reader exactly like a captured tool
-result does; a reader failure on either kind of source uses the same automatic-extraction
-and legacy-compaction fallback tiers described below.
+The pre-read gate blocks only known large unbounded reads on allowed sources. Unknown,
+unclassifiable, search, and safe bounded calls pass through. Strict source authorization
+still applies when a source is explicitly registered for the question-aware reader.
+Citation-invalid results retain the error and evidence handles; availability-only recovery
+may provide explicitly non-semantic compaction or exact extraction.
 
 ## Artifact import boundary
 
@@ -240,7 +237,7 @@ for exact triggers, selector-independent prefix selection, limits and compatibil
 ## Legacy-compaction fallback
 
 On Python/Hermes, `reader.legacy_compaction` (default on) is tried before automatic
-extraction for terminal `CITATION_INVALID`, `MODEL_ERROR`, and `TIMEOUT`, including
+extraction for terminal `MODEL_ERROR` and `TIMEOUT`, including
 wholly unavailable readers after retries and model fallback. It publishes a deterministic, ported heuristic summary of the
 first requested source - signal lines, head/tail sampling, repeated-line collapsing, JSON
 structure, secret redaction - never exact bytes and never model output, as
@@ -250,7 +247,7 @@ structure, secret redaction - never exact bytes and never model output, as
 excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
 heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
 extraction; otherwise the original bounded failure remains, never raw. Coverage and
-failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability or citation verification failure; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
+failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
 [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
 for the exact trigger set, caps and wire shape.
 

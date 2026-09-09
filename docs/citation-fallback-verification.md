@@ -1,5 +1,12 @@
 # OpenClaw citation fallback fix — 1.2.1
 
+> Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
+> Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
+> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
+> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> See [current capabilities](capability-matrix.md#openclaw).
+
+
 Verified 2026-09-10, reusing the current clean `main` checkout at `3279b78` (the merged
 middleware implementation). The TypeScript core and OpenClaw packages are now 1.2.1;
 contract schema and Python/Hermes implementation are unchanged.

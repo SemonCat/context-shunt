@@ -1,14 +1,14 @@
 """Classification of read-like shell commands.
 
 This is not a shell sandbox and does not claim to understand arbitrary scripts. It
-recognises a small, explicitly enumerated set of *provably* bounded forms and refuses
-everything else that touches a file, which is the only safe direction: an unrecognised
-read-like command is ``UNCLASSIFIABLE_READ``, not "probably fine".
+recognises a small, explicitly enumerated set of *provably* bounded forms and reports
+everything else that touches a file as unclassifiable. The gate decides what to do with
+that classification; uncertain commands pass through so the host remains in charge.
 
 A string regex is not the defence. The command is scanned into words with quote state
 tracked, and any shell metacharacter (pipe, list, redirect, substitution, expansion,
 glob, tilde) makes the command non-simple; a non-simple command that reads a file is
-refused rather than parsed further.
+reported as unclassifiable rather than parsed further.
 """
 
 from __future__ import annotations
@@ -37,9 +37,10 @@ _LINE_BOUNDED_CMDS = frozenset({"head", "tail"})
 _SEARCH_CMDS = frozenset({"grep", "egrep", "fgrep", "rg"})
 # ``file`` and ``stat`` have file-selecting / user-formatting flag surfaces. Only the
 # small, enumerated ``wc`` metadata form is accepted; the others remain read-like but
-# opaque and therefore fail closed.
+# opaque and therefore are reported as unclassifiable.
 _METADATA_CMDS = frozenset({"wc"})
-# Read-like but not provably bounded in lines: refused whenever a file operand is present.
+# Read-like but not provably bounded in lines: reported as unclassifiable when a file
+# operand is present.
 _OPAQUE_READ_CMDS = frozenset(
     {
         "awk",
@@ -92,7 +93,8 @@ READ_LIKE_CMDS = (
     _FULL_READ_CMDS | _LINE_BOUNDED_CMDS | _SEARCH_CMDS | _METADATA_CMDS | _OPAQUE_READ_CMDS
 )
 
-# Flags accepted on the provably-safe forms. An unknown flag is a refusal, not a guess.
+# Flags accepted on the provably-safe forms. An unknown flag is an unclassifiable result,
+# not a guess about command behavior.
 _CAT_FLAGS = frozenset({"-n", "-b", "-s", "-E", "-T", "-v", "-e", "-t", "-A", "-u"})
 _HEAD_TAIL_VALUE_FLAGS = frozenset({"-n"})
 _HEAD_TAIL_REJECT_FLAGS = frozenset({"-c", "-f", "-F", "--bytes", "--follow"})

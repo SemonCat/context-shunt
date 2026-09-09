@@ -454,26 +454,81 @@ def test_a_quote_free_page_is_unchanged_by_the_wire_budget(tmp_path):
     assert env["extraction"]["result_bytes"] == 16384
 
 
-def test_a_single_line_too_wide_for_the_envelope_says_so_rather_than_blaming_disclosure(tmp_path):
-    """A `lines` selector cannot split a line, so this refusal is terminal and must be named.
+def test_a_single_line_tool_result_pages_as_bytes_instead_of_failing_default_inspect(tmp_path):
+    """One-line JSON tool results remain inspectable through an authenticated cursor.
 
-    Reporting DISCLOSURE_EXHAUSTED here would point the caller at waiting for allowance,
-    which never helps; the honest remedy is a `bytes` selector.
+    The Hermes retirement evidence contained many large one-line results. Previously a
+    normal ``lines`` inspection of one of those records stalled and became a bare
+    ``LIMIT_EXCEEDED`` even though a bounded byte selector could make progress.
     """
     session = _session(tmp_path)
-    # One line whose escaped width alone exceeds any envelope's headroom.
+    # Keep the shape representative of a serialized tool result without copying private
+    # content from the archived logs.
+    body = json.dumps({"records": [{"id": i, "value": "x" * 96} for i in range(320)]})
+    entry = _captured(tmp_path, session, body + "\n")
+    request = _request(entry, {"kind": "lines", "start": 1, "end": 1})
+    recovered = bytearray()
+    for _ in range(32):
+        env = session.inspect(dict(request))
+        assert env["code"] == "EXTRACTED"
+        extraction = env["extraction"]
+        assert extraction["result_bytes"] > 0
+        assert extraction["mode"] == "bytes"
+        assert extraction["segments"][0]["kind"] == "bytes"
+        recovered.extend(extraction["segments"][0]["text"].encode("utf-8"))
+        if extraction["complete"]:
+            break
+        request["cursor"] = extraction["next_cursor"]
+    assert bytes(recovered) == body.encode("utf-8")
+    assert env["status"] == "ok"
+
+
+def test_an_inspect_page_with_tiny_wire_headroom_still_names_a_real_refusal(tmp_path):
+    """The progress fallback does not hide a genuinely impossible envelope."""
+    session = _session(tmp_path)
     entry = _captured(tmp_path, session, '"' * 30000 + "\n")
-    env = session.inspect(_request(entry, {"kind": "lines", "start": 1, "end": 1}))
-    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
-    assert '"""' not in json.dumps(env)
-    # Nothing was charged for a page that returned nothing.
-    allowance = session.store.disclosure_allowance(session.identity, entry.source_id)
-    assert allowance.per_source_remaining == L.disclosure_max_per_source_bytes
-    # ... and the same bytes are reachable through a selector that can split.
-    same = session.inspect(
-        _request(entry, {"kind": "bytes", "start": 0, "end": 30000}, max_scan_lines=1)
+    inspector = Inspector()
+    result = inspector.extract(
+        entry.snapshot.data,
+        entry.snapshot.line_index,
+        {"kind": "lines", "start": 1, "end": 1},
+        max_result_bytes=L.inspect_max_result_bytes,
+        max_scan_lines=L.inspect_max_scan_lines,
+        max_wire_bytes=1,
     )
-    assert same["code"] == "EXTRACTED" and same["extraction"]["result_bytes"] > 0
+    assert result.stalled and result.stall_reason == "wire"
+
+
+def test_search_on_a_large_one_line_tool_result_returns_a_bounded_hit(tmp_path):
+    """A matching JSON record must not turn the search escape hatch into a hard error."""
+    session = _session(tmp_path)
+    body = json.dumps(
+        {"records": [{"id": i, "value": "x" * 96} for i in range(320)], "needle": "target"}
+    )
+    entry = _captured(tmp_path, session, body + "\n")
+    env = session.inspect(_request(entry, {"kind": "search", "needle": "target", "max_matches": 1}))
+    assert env["code"] == "EXTRACTED"
+    assert env["extraction"]["mode"] == "search"
+    assert env["extraction"]["segments"][0]["kind"] == "bytes"
+    assert "target" in env["extraction"]["segments"][0]["text"]
+    assert env["extraction"]["complete"] is False
+    assert env["status"] == "partial"
+    assert "bytes selector" in env["guidance"]
+
+
+def test_a_multibyte_line_with_one_byte_left_reports_disclosure_exhaustion(tmp_path):
+    """A short remaining allowance is not an envelope failure."""
+    session = _session(
+        tmp_path,
+        limits={
+            "disclosure_max_per_source_bytes": 1,
+            "disclosure_max_per_session_bytes": 1,
+        },
+    )
+    entry = _captured(tmp_path, session, "é")
+    env = session.inspect(_request(entry, {"kind": "lines", "start": 1, "end": 1}))
+    assert env["code"] == "DISCLOSURE_EXHAUSTED"
+    assert env["extraction"]["result_bytes"] == 0
 
 
 # -- UTF-8 boundary handling on an exact byte page --------------------------
@@ -640,3 +695,14 @@ def test_no_shippable_surface_claims_a_source_can_never_be_returned_whole():
     assert not offenders, (
         "surfaces still claim a source can never be returned whole:\n" + "\n".join(offenders)
     )
+
+
+def test_oversized_search_window_never_claims_full_matching_line_coverage(tmp_path):
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, "prefix target " + "tail " * 10000)
+    env = session.inspect(_request(entry, {"kind": "search", "needle": "target", "max_matches": 1}))
+    assert env["code"] == "EXTRACTED"
+    assert env["status"] == "partial"
+    assert not env["coverage"]["complete"]
+    assert env["coverage"]["omitted"]
+    assert not env["extraction"]["complete"]

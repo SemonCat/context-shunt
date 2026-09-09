@@ -4,15 +4,15 @@
  * Runs before the underlying tool executes, so a blocked decision means the host tool was
  * never invoked and no oversized payload ever existed. The decision is tri-state:
  *
- * - `passthrough` - not read-like (or the file does not exist); host policy owns it
- * - `allow`       - read-like and provably small or provably bounded
- * - `blocked`     - `LARGE_READ` / `UNCLASSIFIABLE_READ` / `UNSAFE_SOURCE`
+ * - `passthrough` - the host owns the call; the gate could not prove a safe intervention
+ * - `allow`       - read-like and provably within a configured bounded form
+ * - `blocked`     - an unbounded read of a regular file is provably over the full-read cap
  *
  * Sizing comes from a bounded probe that stops at 351 lines or the byte cap and carries
- * its own 1s deadline; an inexact probe is "unknown scale", which blocks.
+ * its own 1s deadline. A probe can only block a full read when its observed lower bound
+ * proves that the source is over a configured cap; uncertainty passes through to the host.
  */
 import { Clock, Deadline, monotonicClock } from "./clock.js";
-import { isShuntError } from "./errors.js";
 import { DEFAULT_LIMITS, Limits } from "./limits.js";
 import { Classification, classifyCommand } from "./shell.js";
 
@@ -62,6 +62,14 @@ function blocked(code: string, form: GateForm, reason: string, extra: Partial<Ga
   return { decision: "blocked", form, code, reason, ...extra };
 }
 
+function passthrough(
+  form: GateForm = "not_read_like",
+  reason = "",
+  extra: Partial<GateDecision> = {},
+): GateDecision {
+  return { decision: "passthrough", form, reason, ...extra };
+}
+
 function allow(form: GateForm): GateDecision {
   return { decision: "allow", form, reason: "" };
 }
@@ -80,40 +88,52 @@ export class PreReadGate {
   ) {}
 
   evaluate(tool: string, args: ToolArgs): GateDecision {
-    const deadline = Deadline.start(this.clock, this.limits.gateProbeDeadlineMs);
     try {
+      const deadline = Deadline.start(this.clock, this.limits.gateProbeDeadlineMs);
       if (tool === "read") return this.evaluateRead(args, deadline);
       if (tool === "search") return this.evaluateSearch(args, deadline);
       if (tool === "shell") return this.evaluateShell(String(args["command"] ?? ""), deadline);
       return PASSTHROUGH;
     } catch (err) {
-      if (isShuntError(err) && (err.code === "TIMEOUT" || err.code === "CANCELLED")) {
-        // An unfinished probe means unknown scale, which blocks rather than executes.
-        return blocked("LARGE_READ", "full_read", "PROBE_TIMEOUT");
+      // An unfinished probe does not establish a large source. Fail open and let the
+      // host report its own bounded tool result or error.
+      if (err instanceof Error && (err as { code?: string }).code === "TIMEOUT") {
+        return passthrough("unclassifiable", "PROBE_TIMEOUT");
       }
-      throw err;
+      if (err instanceof Error && (err as { code?: string }).code === "CANCELLED") {
+        return passthrough("unclassifiable", "PROBE_CANCELLED");
+      }
+      // The gate is an advisory context-cost control. A probe or malformed adapter
+      // input must never turn an otherwise valid host call into a synthetic error.
+      return passthrough("unclassifiable", "PROBE_FAILED");
     }
   }
 
   private evaluateRead(args: ToolArgs, deadline: Deadline): GateDecision {
     const path = args["file_path"] ?? args["path"];
-    if (typeof path !== "string" || path.length === 0) return PASSTHROUGH;
+    if (typeof path !== "string" || path.length === 0) return passthrough("unclassifiable", "BAD_PATH");
 
     const limit = args["limit"];
     const offset = args["offset"];
     for (const [name, value] of [["LIMIT", limit], ["OFFSET", offset]] as const) {
       if (value !== undefined && value !== null && (typeof value !== "number" || !Number.isInteger(value))) {
-        return blocked("UNCLASSIFIABLE_READ", "unclassifiable", `BAD_${name}`);
+        return passthrough("unclassifiable", `BAD_${name}`);
       }
     }
     if (typeof limit === "number" && limit < 1) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "BAD_LIMIT");
+      return passthrough("unclassifiable", "BAD_LIMIT");
     }
     if (typeof offset === "number" && offset < 0) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "BAD_OFFSET");
+      return passthrough("unclassifiable", "BAD_OFFSET");
     }
 
-    const bounded = typeof limit === "number" && limit <= this.limits.targetedReadMaxLines;
+    // Any explicit limit is a bounded host call. A limit above our preferred page
+    // size is still finite; the gate must not reinterpret it as an unbounded read.
+    if (typeof limit === "number" && limit > this.limits.targetedReadMaxLines) {
+      return passthrough("bounded_lines", "BOUND_OVER_CAP");
+    }
+
+    const bounded = typeof limit === "number";
     if (bounded) {
       const start = typeof offset === "number" ? Math.max(1, offset) : 1;
       // Cover both 0- and 1-based host offset conventions. The extra line is used only
@@ -140,7 +160,7 @@ export class PreReadGate {
       || (args["output_mode"] ?? "content") !== "content"
       || (args["context"] ?? 0) !== 0
     ) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "OUTPUT_AMPLIFICATION");
+      return passthrough("unclassifiable", "OUTPUT_AMPLIFICATION");
     }
     const maxMatches = args["max_matches"];
     if (
@@ -149,15 +169,15 @@ export class PreReadGate {
       maxMatches < 1 ||
       maxMatches > this.limits.targetedSearchMaxMatches
     ) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "UNBOUNDED_SEARCH");
+      return passthrough("unclassifiable", "UNBOUNDED_SEARCH");
     }
     const pattern = args["pattern"];
     if (typeof pattern !== "string" || pattern.length === 0) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "BAD_PATTERN");
+      return passthrough("unclassifiable", "BAD_PATTERN");
     }
     const path = args["path"] ?? args["file_path"];
     if (typeof path !== "string" || path.length === 0) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "UNRESOLVED_PATH");
+      return passthrough("unclassifiable", "UNRESOLVED_PATH");
     }
     const probed = this.probeSafe(path, deadline, { mode: "search", maxMatches });
     if (probed === null) return PASSTHROUGH;
@@ -169,7 +189,7 @@ export class PreReadGate {
     const c: Classification = classifyCommand(command);
     if (c.form === "not_read_like") return PASSTHROUGH;
     if (c.form === "unclassifiable") {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", c.reason || "UNPROVABLE");
+      return passthrough("unclassifiable", c.reason || "UNPROVABLE");
     }
 
     const probes: SizedProbe[] = [];
@@ -178,7 +198,7 @@ export class PreReadGate {
     if (c.form === "bounded_metadata") selection = { mode: "metadata" };
     if (c.form === "bounded_search") {
       if ((c.boundMatches ?? 0) > this.limits.targetedSearchMaxMatches) {
-        return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "UNBOUNDED_SEARCH");
+        return passthrough("bounded_search", "BOUND_OVER_CAP");
       }
       selection = { mode: "search", maxMatches: c.boundMatches ?? 0 };
     }
@@ -186,7 +206,7 @@ export class PreReadGate {
       const bound = c.boundLines ?? 0;
       boundedLines = bound * c.files.length + (c.files.length > 1 ? c.files.length * 2 : 0);
       if (bound < 1 || boundedLines > this.limits.targetedReadMaxLines) {
-        return blocked("LARGE_READ", "bounded_lines", "BOUND_OVER_CAP", {
+        return passthrough("bounded_lines", "BOUND_OVER_CAP", {
           observedLines: boundedLines,
         });
       }
@@ -203,7 +223,7 @@ export class PreReadGate {
           c.files.length > this.limits.targetedReadMaxLines
           || projectedBytes > this.limits.maxTargetedReadBytes
         ) {
-          return blocked("LARGE_READ", "bounded_metadata", "OUTPUT_OVER_CAP", {
+          return passthrough("bounded_metadata", "OUTPUT_OVER_CAP", {
             observedLines: c.files.length,
             observedBytes: projectedBytes,
           });
@@ -239,12 +259,11 @@ export class PreReadGate {
   ): SizedProbe | GateDecision | null {
     deadline.check("PROBE");
     const probe = this.probe(path, selection);
-    // Checked again after the scan: a probe that overran the budget leaves the overall
-    // scale unknown, and unknown scale blocks.
+    // Checked again after the scan: an over-budget probe cannot justify a veto.
     deadline.check("PROBE");
     if (!probe.exists) return null;
     if ((probe.kind ?? "file") !== "file") {
-      return blocked("UNSAFE_SOURCE", "unsafe", "NOT_REGULAR_FILE");
+      return passthrough("unsafe", "NOT_REGULAR_FILE");
     }
     const lines = probe.lines ?? 0;
     const bytes = probe.bytes ?? 0;
@@ -254,7 +273,7 @@ export class PreReadGate {
       || !Number.isSafeInteger(bytes) || bytes < 0
       || typeof exact !== "boolean"
     ) {
-      return blocked("UNCLASSIFIABLE_READ", "unclassifiable", "INVALID_PROBE");
+      return passthrough("unclassifiable", "INVALID_PROBE");
     }
     return { lines, bytes, exact };
   }
@@ -267,10 +286,10 @@ export class PreReadGate {
   ): GateDecision {
     const totalBytes = probes.reduce((sum, p) => sum + p.bytes, extraBytes);
     if (probes.some((p) => !p.exact)) {
-      return blocked("LARGE_READ", form, "UNKNOWN_SCALE");
+      return passthrough(form, "UNKNOWN_SCALE", { observedLines: outputLines });
     }
     if (totalBytes > this.limits.maxTargetedReadBytes) {
-      return blocked("LARGE_READ", form, "OVER_BYTE_THRESHOLD", {
+      return passthrough(form, "OVER_BYTE_THRESHOLD", {
         observedLines: outputLines,
         observedBytes: totalBytes,
       });
@@ -289,12 +308,17 @@ export class PreReadGate {
       });
     }
     if (inexact || totalLines > this.limits.fullReadMaxLines) {
-      return blocked(
-        "LARGE_READ",
-        "full_read",
-        inexact ? "UNKNOWN_SCALE" : "OVER_LINE_THRESHOLD",
-        inexact ? {} : { observedLines: totalLines, observedBytes: totalBytes },
-      );
+      if (totalLines > this.limits.fullReadMaxLines) {
+        return blocked("LARGE_READ", "full_read", "OVER_LINE_THRESHOLD", {
+          observedLines: totalLines,
+          observedBytes: totalBytes,
+        });
+      }
+      // An inexact result with no lower-bound evidence is uncertainty, not a veto.
+      return passthrough("full_read", "UNKNOWN_SCALE", {
+        observedLines: totalLines,
+        observedBytes: totalBytes,
+      });
     }
     return allow("full_read");
   }

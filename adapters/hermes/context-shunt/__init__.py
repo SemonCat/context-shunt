@@ -542,25 +542,35 @@ def pre_tool_call(
     session_id: str = "",
     **kwargs,
 ):
-    """Veto an oversized or unprovable read before the tool runs."""
+    """Veto only a provably oversized unbounded read before the tool runs.
+
+    The gate is advisory. Any classification, probe or session failure leaves the
+    original host call in charge, so a plugin defect cannot become a synthetic tool error.
+    """
     if _config is None or not _config.gate_enabled:
         return None
-    tool, normalized = normalize_tool_call(tool_name, args or {})
-    if tool == "other":
-        return None
     try:
+        # Normalization is part of the advisory boundary too. Hermes can hand plugins
+        # malformed values, and such a value must stay a host-owned call rather than
+        # becoming a plugin exception/error.
+        tool, normalized = normalize_tool_call(tool_name, args or {})
+        if tool == "other":
+            return None
         session = _session(task_id, session_id)
         decision = session.evaluate_tool_call(tool, normalized)
     except Exception:
-        # Fail closed for a read-like call we could not evaluate.
-        return {
-            "action": "block",
-            "message": _block_message(fixed_error("req_gate", "HOST_UNSAFE")),
-        }
+        # The gate must never manufacture an error when it cannot evaluate a call. The
+        # host tool owns malformed arguments, unavailable paths, and its own failures.
+        return None
     if not decision.blocked:
         return None
-    envelope = session.block_envelope(_request_id(kwargs), decision)
-    return {"action": "block", "message": _block_message(envelope)}
+    try:
+        envelope = session.block_envelope(_request_id(kwargs), decision)
+        return {"action": "block", "message": _block_message(envelope)}
+    except Exception:
+        # A positive gate decision is useful only if its bounded block envelope can be
+        # published. Keep the host call in charge when this final advisory step fails.
+        return None
 
 
 def _request_id(kwargs: dict[str, Any]) -> str:

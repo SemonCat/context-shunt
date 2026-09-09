@@ -7,11 +7,10 @@ an immutable snapshot and returns an opaque handle. The main model then sends th
 and an explicit question to a cheaper reader. Answers include evidence, coverage, and
 mechanically verified citations.
 
-> **Pre-release, read-only.** The operator-reported Hermes deployment uses
-> `tool_result_capture` and the internal legacy fallback after an atomic cutover; the
-> standalone `oversize-tool-result-compactor` plugin is disabled.
-> Capture remains off by default for new installations and requires verified host ordering.
-> OpenClaw 2026.9.3 supports optional read-only tool-result capture through its official middleware, with ingress and runtime limits.
+> **Retired live canary (2026-09-10), pre-release.** Both context-shunt plugins remain
+> disabled. Hermes was rolled back to its incumbent compactor. This repair does not
+> re-enable or deploy either plugin. OpenClaw automatic tool-result capture is unsupported:
+> the tested middleware did not prove effective model-visible replacement.
 > Live reader evaluation and provider benchmark gates remain `NOT_RUN`.
 
 ## How it works
@@ -20,9 +19,9 @@ mechanically verified citations.
 
 The pre-read gate and question-aware reader flow are inspired by Spotify Portal/Shunt
 ([design provenance](THIRD_PARTY_NOTICES.md)). By default, a full text read must fit both limits:
-350 physical lines and 16 KiB. Oversized or unprovably bounded reads are blocked
-before execution; safe sources are captured for a question-aware read. Small or provably
-bounded reads can use the original host tool.
+350 physical lines and 16 KiB. Only positively identified, large unbounded reads on allowed sources are blocked
+before execution. Unknown commands, unclassifiable tools, searches, and safe bounded reads
+pass through unchanged; the gate is a context optimization, not an authorization boundary.
 
 Hermes gates `read_file`, `search_files`, and `terminal`; OpenClaw
 covers `read` and `exec`, with no search tool registered for gating. This is not blanket
@@ -113,8 +112,14 @@ cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/too
 
 ## When the reader fails
 
-On Python/Hermes, exhausted reader retries/model fallbacks ending in eligible `MODEL_ERROR`,
-`TIMEOUT`, or `CITATION_INVALID` trigger the ported bounded legacy compactor **inside
+`CITATION_INVALID` remains an explicit error in both cores, even with legacy compaction
+enabled. No heuristic or byte prefix substitutes for an answer. Retained `source_id` and
+`snapshot_id` handles support `context_shunt_inspect` with lines/bytes or search selectors;
+follow `next_cursor` within TTL and disclosure limits. Evidence still needs verification.
+Normal inspection clamps pages to the available envelope budget and returns continuation.
+
+On Python/Hermes, exhausted reader retries/model fallbacks ending in eligible `MODEL_ERROR` or
+`TIMEOUT` trigger the ported bounded legacy compactor **inside
 context-shunt** (`reader.legacy_compaction: true` by default). Model-identity mismatches and
 provenance-policy refusals do not qualify. This is a deterministic heuristic summary of the
 first requested source, using signal lines, head/tail sampling, repetition collapsing, and
@@ -123,15 +128,14 @@ JSON shaping—not a Luna answer or an exact source range.
 The response envelope reports `status: partial`, `code: LEGACY_COMPACTED`,
 `result_kind: legacy_compaction`, and `provenance.derived: false`. Its summary lives in
 `legacy_compaction`, with empty `answer` and `citations`; coverage stays partial and failed
-model attempts remain in accounting. This internal fallback replaces the standalone legacy
-plugin after the Hermes cutover.
+model attempts remain in accounting. This is non-semantic output, never successful semantic summarization.
 
 If compaction is disabled or cannot safely return output, a wholly unavailable reader may
 use the secondary, guarded exact-prefix extraction tier when enabled. If neither tier can
 safely return output, the response contains only a bounded pointer/failure and recovery
 guidance, never raw oversized content. Reuse a valid handle with a narrower question or
 inspect a bounded range.
-OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability or citation verification failure; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
+OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
 See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
 
 ## Quick start
@@ -175,24 +179,20 @@ the Gateway and inspect the loaded plugin:
 openclaw plugins inspect context-shunt --runtime --json
 ```
 
-OpenClaw 2026.9.3 uses `api.registerAgentToolResultMiddleware` for eligible read-only text/JSON
-in embedded tools and OpenClaw-owned Codex dynamic tools. Codex-native results are observe-only.
-Capture is off by default; configure exact read-only MCP IDs and disable Tokenjuice/other reducers
-atomically when enabling. Host ingress sanitization happens first: ambiguous text/block/details
-ceilings are withheld without a handle; snapshots claim only middleware-visible content, never
-complete producer bytes. No Luna call occurs at capture. Handles feed the question-aware reader,
-with labelled `LEGACY_COMPACTED` fallback after exhausted availability or citation verification failure.
-See [coverage and limits](docs/capability-matrix.md#openclaw), [cutover](docs/acceptance.md#openclaw-middleware-cutover),
-and [installation and cleanup](docs/install.md).
+OpenClaw automatic capture is unsupported, even when configured. The retired live canary
+showed a pointer accounting record while raw tool content remained visible and the model
+had no usable handle. Middleware registration alone is insufficient proof of replacement.
+Explicit local capture, reader, inspect, and stats remain available.
+See [capability evidence](docs/capability-matrix.md#openclaw).
 
 ## Host support and honest accounting
 
 | Capability | Hermes | OpenClaw 2026.9.3 |
 | --- | --- | --- |
 | Local pre-read gate, reader, exact inspect, session stats/lifecycle | Supported (compatibility baseline 0.18.2) | Supported |
-| Tool-result capture | Enabled in the reported 0.21.1 deployment; off by default, requires local attestation | Supported when enabled; eligible middleware-visible results only |
+| Tool-result capture | Supported with verified host ordering; live deployment retired | Unsupported; pass-through |
 | External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`) |
-| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability or citation verification failure |
+| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability |
 | Reader attribution ceiling | `unverified` | `resolved` |
 | Writer / `propose_patch` | Not implemented | Not implemented |
 

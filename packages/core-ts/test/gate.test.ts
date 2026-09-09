@@ -102,10 +102,45 @@ describe("pre-read gate conformance", () => {
       expect(got).toEqual(want);
     });
   }
+
+  it("passes an unclassifiable shell read through with truthful telemetry", () => {
+    const decision = gate.evaluate("shell", { command: "awk '{print}' /ws/huge.txt" });
+    expect(decision).toMatchObject({
+      decision: "passthrough",
+      form: "unclassifiable",
+      reason: "OPAQUE_READ",
+    });
+    expect(decision.code).toBeUndefined();
+  });
+
+  it("passes an explicitly bounded read when selected bytes exceed the probe cap", () => {
+    const decision = gate.evaluate("read", {
+      file_path: "/ws/longline.txt",
+      offset: 1,
+      limit: 1,
+    });
+    expect(decision).toMatchObject({ decision: "passthrough", form: "bounded_lines" });
+    expect(decision.code).toBeUndefined();
+  });
+
+  it("passes an unknown tool through without manufacturing a gate error", () => {
+    const decision = gate.evaluate("future_read_tool", { path: "/ws/huge.txt" });
+    expect(decision).toMatchObject({ decision: "passthrough", form: "not_read_like" });
+    expect(decision.code).toBeUndefined();
+  });
+
+  it("passes a probe failure through without manufacturing a gate error", () => {
+    const failing = new PreReadGate(() => {
+      throw new Error("probe unavailable");
+    });
+    const decision = failing.evaluate("read", { file_path: "/ws/a.txt" });
+    expect(decision).toMatchObject({ decision: "passthrough", reason: "PROBE_FAILED" });
+    expect(decision.code).toBeUndefined();
+  });
 });
 
 describe("real selected-output byte proofs", () => {
-  it("blocks one oversized selected line for read, head, tail, and grep", () => {
+  it("passes one oversized selected line for read, head, tail, and grep", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-gate-"));
     const path = join(dir, "long.txt");
     writeFileSync(path, "A".repeat(20_000) + "\n");
@@ -117,8 +152,8 @@ describe("real selected-output byte proofs", () => {
       ["shell", { command: `grep -m 1 A ${path}` }],
     ] as const) {
       const decision = gate.evaluate(tool, args);
-      expect(decision.decision).toBe("blocked");
-      expect(decision.code).toBe("LARGE_READ");
+      expect(decision.decision).toBe("passthrough");
+      expect(decision.code).toBeUndefined();
     }
   });
 
@@ -131,14 +166,11 @@ describe("real selected-output byte proofs", () => {
     expect(probe.bytes).toBe(DEFAULT_LIMITS.maxTargetedReadBytes + 1);
   });
 
-  it("blocks bounded-metadata output amplification before probing", () => {
+  it("passes bounded-metadata output amplification to the host", () => {
     const files = Array.from({ length: 300 }, () => "/ws/a.txt");
     const gate = new PreReadGate(tableProber(gateCases.probe_table));
     const decision = gate.evaluate("shell", { command: `wc ${files.join(" ")}` });
-    expect(decision).toMatchObject({
-      decision: "blocked",
-      code: "LARGE_READ",
-      form: "bounded_metadata",
-    });
+    expect(decision).toMatchObject({ decision: "passthrough", form: "bounded_metadata" });
+    expect(decision.code).toBeUndefined();
   });
 });

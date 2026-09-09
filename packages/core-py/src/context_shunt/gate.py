@@ -3,12 +3,13 @@
 Runs *before* the underlying tool executes, so a blocked decision means the host tool
 was never invoked and no oversized payload ever existed. The decision is tri-state:
 
-``passthrough``  the call is not read-like (or the file does not exist); host policy owns it
-``allow``        read-like and provably small or provably bounded
-``blocked``      ``LARGE_READ`` / ``UNCLASSIFIABLE_READ`` / ``UNSAFE_SOURCE``
+``passthrough``  the host owns the call; the gate could not prove a safe intervention
+``allow``        read-like and provably within a configured bounded form
+``blocked``      an unbounded read of a regular file is provably over the full-read cap
 
 Sizing comes from a bounded probe that stops at 351 lines or the byte cap and carries
-its own 1s deadline; an inexact probe is "unknown scale", which blocks.
+its own 1s deadline. A probe can only block a full read when its observed lower bound
+proves that the source is over a configured cap; uncertainty passes through to the host.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from .clock import Clock, Deadline, MonotonicClock
-from .errors import DeadlineExceeded
+from .errors import CancelledError, DeadlineExceeded
 from .limits import DEFAULT_LIMITS, Limits
 from .shell import Classification, ShellForm, classify_command
 
@@ -82,6 +83,13 @@ def _blocked(code: str, form: GateForm, reason: str, **kw: Any) -> GateDecision:
     return GateDecision(Decision.BLOCKED, form, code=code, reason=reason, **kw)
 
 
+def _passthrough(
+    form: GateForm = GateForm.NOT_READ_LIKE, reason: str = "", **kw: Any
+) -> GateDecision:
+    """Leave an uncertain call to the host without manufacturing a tool error."""
+    return GateDecision(Decision.PASSTHROUGH, form, reason=reason, **kw)
+
+
 class PreReadGate:
     def __init__(
         self,
@@ -95,8 +103,8 @@ class PreReadGate:
 
     # -- public ------------------------------------------------------------
     def evaluate(self, tool: str, args: dict[str, Any]) -> GateDecision:
-        deadline = Deadline.start(self._clock, self._limits.gate_probe_deadline_ms)
         try:
+            deadline = Deadline.start(self._clock, self._limits.gate_probe_deadline_ms)
             if tool == "read":
                 return self._evaluate_read(args, deadline)
             if tool == "search":
@@ -104,28 +112,38 @@ class PreReadGate:
             if tool == "shell":
                 return self._evaluate_shell(str(args.get("command") or ""), deadline)
             return _ALLOW_NOT_READ
+        except CancelledError:
+            return _passthrough(GateForm.UNCLASSIFIABLE, "PROBE_CANCELLED")
         except DeadlineExceeded:
-            # An unfinished probe means unknown scale, which blocks rather than executes.
-            return _blocked("LARGE_READ", GateForm.FULL_READ, "PROBE_TIMEOUT")
+            # An unfinished probe does not establish a large source. Fail open and let
+            # the host report its own bounded tool result or error.
+            return _passthrough(GateForm.UNCLASSIFIABLE, "PROBE_TIMEOUT")
+        except Exception:
+            # The gate is an advisory context-cost control. A probe or malformed adapter
+            # input must never turn an otherwise valid host call into a synthetic error.
+            return _passthrough(GateForm.UNCLASSIFIABLE, "PROBE_FAILED")
 
     # -- read tool ---------------------------------------------------------
     def _evaluate_read(self, args: dict[str, Any], deadline: Deadline) -> GateDecision:
         path = args.get("file_path") or args.get("path")
         if not path or not isinstance(path, str):
-            return _ALLOW_NOT_READ
+            return _passthrough(GateForm.UNCLASSIFIABLE, "BAD_PATH")
         limit = args.get("limit")
         offset = args.get("offset")
         for name, value in (("limit", limit), ("offset", offset)):
             if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
-                return _blocked(
-                    "UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, f"BAD_{name.upper()}"
-                )
+                return _passthrough(GateForm.UNCLASSIFIABLE, f"BAD_{name.upper()}")
         if limit is not None and limit < 1:
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "BAD_LIMIT")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "BAD_LIMIT")
         if offset is not None and offset < 0:
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "BAD_OFFSET")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "BAD_OFFSET")
 
-        bounded = limit is not None and limit <= self._limits.targeted_read_max_lines
+        # Any explicit limit is a bounded host call. A limit above our preferred page
+        # size is still finite; the gate must not reinterpret it as an unbounded read.
+        if limit is not None and limit > self._limits.targeted_read_max_lines:
+            return _passthrough(GateForm.BOUNDED_LINES, "BOUND_OVER_CAP")
+
+        bounded = limit is not None
         if bounded:
             start = max(1, offset) if offset is not None else 1
             # Cover both host offset conventions for byte sizing.
@@ -156,7 +174,7 @@ class PreReadGate:
             or type(context) is not int
             or context != 0
         ):
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "OUTPUT_AMPLIFICATION")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "OUTPUT_AMPLIFICATION")
         max_matches = args.get("max_matches")
         if (
             max_matches is None
@@ -165,13 +183,13 @@ class PreReadGate:
             or max_matches < 1
             or max_matches > self._limits.targeted_search_max_matches
         ):
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "UNBOUNDED_SEARCH")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "UNBOUNDED_SEARCH")
         pattern = args.get("pattern")
         if not isinstance(pattern, str) or not pattern:
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "BAD_PATTERN")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "BAD_PATTERN")
         path = args.get("path") or args.get("file_path")
         if not isinstance(path, str) or not path:
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "UNRESOLVED_PATH")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "UNRESOLVED_PATH")
         probe = self._probe_safe(
             path, deadline, ProbeSelection(mode="search", max_matches=max_matches)
         )
@@ -187,9 +205,7 @@ class PreReadGate:
         if c.form is ShellForm.NOT_READ_LIKE:
             return _ALLOW_NOT_READ
         if c.form is ShellForm.UNCLASSIFIABLE:
-            return _blocked(
-                "UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, c.reason or "UNPROVABLE"
-            )
+            return _passthrough(GateForm.UNCLASSIFIABLE, c.reason or "UNPROVABLE")
 
         probes: list[ProbeResult] = []
         selection = ProbeSelection()
@@ -198,14 +214,13 @@ class PreReadGate:
             selection = ProbeSelection(mode="metadata")
         elif c.form is ShellForm.BOUNDED_SEARCH:
             if (c.bound_matches or 0) > self._limits.targeted_search_max_matches:
-                return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "UNBOUNDED_SEARCH")
+                return _passthrough(GateForm.BOUNDED_SEARCH, "BOUND_OVER_CAP")
             selection = ProbeSelection(mode="search", max_matches=c.bound_matches or 0)
         elif c.form is ShellForm.BOUNDED_LINES:
             bound = c.bound_lines or 0
             bounded_lines = bound * len(c.files) + (2 * len(c.files) if len(c.files) > 1 else 0)
             if bound < 1 or bounded_lines > self._limits.targeted_read_max_lines:
-                return _blocked(
-                    "LARGE_READ",
+                return _passthrough(
                     GateForm.BOUNDED_LINES,
                     "BOUND_OVER_CAP",
                     observed_lines=bounded_lines,
@@ -224,8 +239,7 @@ class PreReadGate:
                     len(c.files) > self._limits.targeted_read_max_lines
                     or projected_bytes > self._limits.max_targeted_read_bytes
                 ):
-                    return _blocked(
-                        "LARGE_READ",
+                    return _passthrough(
                         GateForm.BOUNDED_METADATA,
                         "OUTPUT_OVER_CAP",
                         observed_lines=len(c.files),
@@ -271,13 +285,12 @@ class PreReadGate:
         """Probe one path. ``None`` means "let the host handle it" (missing file)."""
         deadline.check("PROBE")
         probe = self._probe(path, selection or ProbeSelection())
-        # Checked again after the scan: a probe that overran the budget leaves the
-        # overall scale unknown, and unknown scale blocks.
+        # Checked again after the scan: an over-budget probe cannot justify a veto.
         deadline.check("PROBE")
         if not probe.exists:
             return None
         if probe.kind != "file":
-            return _blocked("UNSAFE_SOURCE", GateForm.UNSAFE, "NOT_REGULAR_FILE")
+            return _passthrough(GateForm.UNSAFE, "NOT_REGULAR_FILE")
         if (
             type(probe.lines) is not int
             or probe.lines < 0
@@ -285,7 +298,7 @@ class PreReadGate:
             or probe.bytes < 0
             or type(probe.exact) is not bool
         ):
-            return _blocked("UNCLASSIFIABLE_READ", GateForm.UNCLASSIFIABLE, "INVALID_PROBE")
+            return _passthrough(GateForm.UNCLASSIFIABLE, "INVALID_PROBE")
         return probe
 
     def _size_bounded(
@@ -298,10 +311,9 @@ class PreReadGate:
     ) -> GateDecision:
         total_bytes = extra_bytes + sum(probe.bytes for probe in probes)
         if any(not probe.exact for probe in probes):
-            return _blocked("LARGE_READ", form, "UNKNOWN_SCALE")
+            return _passthrough(form, "UNKNOWN_SCALE", observed_lines=output_lines)
         if total_bytes > self._limits.max_targeted_read_bytes:
-            return _blocked(
-                "LARGE_READ",
+            return _passthrough(
                 form,
                 "OVER_BYTE_THRESHOLD",
                 observed_lines=output_lines,
@@ -322,12 +334,20 @@ class PreReadGate:
                 observed_bytes=total_bytes,
             )
         if inexact or total_lines > self._limits.full_read_max_lines:
-            return _blocked(
-                "LARGE_READ",
+            if total_lines > self._limits.full_read_max_lines:
+                return _blocked(
+                    "LARGE_READ",
+                    GateForm.FULL_READ,
+                    "OVER_LINE_THRESHOLD",
+                    observed_lines=total_lines,
+                    observed_bytes=total_bytes,
+                )
+            # An inexact result with no lower-bound evidence is uncertainty, not a veto.
+            return _passthrough(
                 GateForm.FULL_READ,
-                "OVER_LINE_THRESHOLD" if not inexact else "UNKNOWN_SCALE",
-                observed_lines=None if inexact else total_lines,
-                observed_bytes=None if inexact else total_bytes,
+                "UNKNOWN_SCALE",
+                observed_lines=total_lines,
+                observed_bytes=total_bytes,
             )
         return GateDecision(Decision.ALLOW, GateForm.FULL_READ)
 

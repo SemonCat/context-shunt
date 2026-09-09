@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from context_shunt.errors import ShuntError
 from context_shunt.guard import enforce
 from context_shunt.session import ShuntSession
 from tests.support import FakeLuna, claims_json, make_capability, make_config
@@ -55,28 +56,6 @@ def _no_evidence_luna(quote: str = "ERROR: connection refused") -> FakeLuna:
     return FakeLuna(replies=[reply])
 
 
-def test_citation_invalid_no_evidence_triggers_legacy_compaction(tmp_path):
-    session, entry, request, body = setup(tmp_path, _no_evidence_luna())
-    env = session.read(request)
-    enforce(env)
-    assert env["code"] == "LEGACY_COMPACTED"
-    assert env["status"] == "partial"
-    assert env["result_kind"] == "legacy_compaction"
-    assert env["provenance"]["derived"] is False
-    assert env["provenance"]["label"] == "legacy_compaction"
-    assert env["answer"] == "" and env["citations"] == []
-    block = env["legacy_compaction"]
-    assert block["original_failure"] == "CITATION_INVALID"
-    assert block["source_id"] == entry.source_id
-    assert block["snapshot_id"] == entry.snapshot.snapshot_id
-    assert "ERROR: connection refused" in block["summary"]
-    assert block["summary_bytes"] == len(block["summary"].encode("utf-8"))
-    assert block["original_bytes"] == len(body.encode("utf-8"))
-    assert env["recovery"]["handles_valid"] is True
-    assert "ported from the incumbent" in env["guidance"]
-    assert "not model-derived" in env["guidance"]
-
-
 def test_legacy_compaction_disabled_by_config_keeps_bare_failure(tmp_path):
     session, _, request, _ = setup(
         tmp_path, _no_evidence_luna(), **{"reader": {"legacy_compaction": False}}
@@ -112,7 +91,7 @@ def test_summary_never_exceeds_the_extraction_byte_cap_even_with_multibyte_text(
     wide_body = "日本語のログ行 ERROR: 失敗しました\n" * 5000
     session, entry, request, _ = setup(
         tmp_path,
-        _no_evidence_luna(quote="NONEXISTENT_QUOTE_TEXT_ABC123"),
+        FakeLuna(default_reply=ShuntError("MODEL_ERROR")),
         body=wide_body,
         **{"reader": {"legacy_compaction_max_chars": 60_000}},
     )
@@ -127,7 +106,7 @@ def test_summary_never_exceeds_the_extraction_byte_cap_even_with_multibyte_text(
 
 
 def test_legacy_compaction_only_covers_the_first_requested_source(tmp_path):
-    session, entry, request, _ = setup(tmp_path, _no_evidence_luna())
+    session, entry, request, _ = setup(tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR")))
     second_path = tmp_path / "ws" / "second.txt"
     second_path.write_text("second source body\n" * 50)
     second_entry = session.register_path(str(second_path))
@@ -224,4 +203,57 @@ def test_both_fallbacks_disabled_preserve_failure(tmp_path, failure_code):
     )
     env = session.read(request)
     assert env["code"] == failure_code
+    assert "legacy_compaction" not in env and "extraction" not in env
+
+
+def test_retired_canary_citation_failure_preserves_evidence_not_a_prefix(tmp_path):
+    session, entry, request, body = setup(tmp_path, _no_evidence_luna())
+    env = session.read(request)
+    assert env["code"] == "CITATION_INVALID"
+    assert env["status"] == "error"
+    assert env["answer"] == "" and env["citations"] == []
+    assert "legacy_compaction" not in env and "extraction" not in env
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert env["recovery"]["handles_valid"] is True
+    assert "INSPECT_HANDLE" in env["recovery"]["actions"]
+    assert "needs verification" in env["guidance"]
+    assert body not in json.dumps(env)
+
+    inspected = session.inspect(
+        {
+            "schema_version": "1.1",
+            "request_id": "verify_evidence",
+            "budgets": {"max_result_bytes": 1024, "max_scan_lines": 100},
+            "operation": "inspect",
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "lines", "start": 1, "end": 1},
+        }
+    )
+    assert inspected["code"] == "EXTRACTED"
+    assert "connection refused" in json.dumps(inspected["extraction"])
+    rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
+    record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
+    assert record["code"] == "CITATION_INVALID"
+    assert record["delivery_boundary"] == "envelope"
+    assert record["attempts_started"] > 0
+
+
+def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, monkeypatch):
+    session, _, request, _ = setup(tmp_path, _no_evidence_luna())
+    original = session._registry.resolve
+    calls = 0
+
+    def resolve(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise ShuntError("SOURCE_EXPIRED")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session._registry, "resolve", resolve)
+    env = session.read(request)
+    assert env["code"] == "CITATION_INVALID"
+    assert env["recovery"]["handles_valid"] is False
+    assert "RECAPTURE_SOURCE" in env["recovery"]["actions"]
     assert "legacy_compaction" not in env and "extraction" not in env

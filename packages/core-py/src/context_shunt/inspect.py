@@ -257,6 +257,24 @@ class Inspector:
             # The range is entirely past the end of the snapshot: an empty exact answer.
             return out
 
+        # A physical line is normally the atomic unit of a line selector. Tool results are
+        # often one-line JSON documents, though, and a single record can be larger than the
+        # envelope wire budget. Refusing that line forever made the ordinary default inspect
+        # path return LIMIT_EXCEEDED even though bounded byte extraction could make progress.
+        # Once a cursor carries an intra-line offset, continue through the same line with
+        # byte segments. The cursor remains bound to the original selector, while the
+        # segment kind and offsets make the fallback's exact byte semantics explicit.
+        line_offset = max(0, int(state.get("offset", 0)))
+        if line_offset:
+            return self._line_chunk(
+                index,
+                ordinal=start,
+                requested_end=end,
+                offset=line_offset,
+                budget=budget,
+                wire_budget=wire_budget,
+            )
+
         emitted: list[str] = []
         used = 0
         # The whole page is one segment, so its structural cost is paid once. It is
@@ -274,9 +292,27 @@ class Inspector:
             chunk = line if not emitted else "\n" + line
             size = len(chunk.encode("utf-8"))
             if used + size > budget:
+                if not emitted:
+                    return self._line_chunk(
+                        index,
+                        ordinal=ordinal,
+                        requested_end=end,
+                        offset=0,
+                        budget=budget,
+                        wire_budget=wire_budget,
+                    )
                 break
             wire_size = escaped_json_cost(chunk)
             if wire_used + wire_size > wire_budget:
+                if not emitted:
+                    return self._line_chunk(
+                        index,
+                        ordinal=ordinal,
+                        requested_end=end,
+                        offset=0,
+                        budget=budget,
+                        wire_budget=wire_budget,
+                    )
                 stopped_on_wire = True
                 break
             emitted.append(line)
@@ -297,6 +333,93 @@ class Inspector:
             out.stalled = ordinal == start and not emitted
             if out.stalled and stopped_on_wire:
                 out.stall_reason = "wire"
+        return out
+
+    def _line_chunk(
+        self,
+        index: LineIndex,
+        *,
+        ordinal: int,
+        requested_end: int,
+        offset: int,
+        budget: int,
+        wire_budget: int,
+    ) -> Extraction:
+        """Return a bounded exact byte page for one line that cannot fit atomically.
+
+        The line selector stays in force for cursor authentication and coverage, but the
+        emitted segment uses byte offsets because a line cannot be split into two line
+        segments without inventing a newline between pages. ``offset`` is relative to the
+        selected physical line and is only produced by this method.
+        """
+        raw = index.line_bytes(ordinal)
+        offset = min(max(0, offset), len(raw))
+        out = Extraction(mode="bytes")
+        if offset >= len(raw):
+            if ordinal < requested_end:
+                out.complete = False
+                out.next_cursor_state = {"line": ordinal + 1}
+            return out
+
+        absolute_start = index.line_start(ordinal) + offset
+        # Use the widest possible byte end for the structural cost. The actual end is no
+        # wider, so a page accepted here cannot exceed the wire budget after composition.
+        overhead = Segment.wire_overhead(
+            "bytes", absolute_start, index.line_start(ordinal) + len(raw)
+        )
+        content_budget = min(budget, self._limits.inspect_max_bytes_per_page, len(raw) - offset)
+        wire_content_budget = wire_budget - overhead
+        if content_budget <= 0 or wire_content_budget <= 0:
+            out.complete = False
+            out.next_cursor_state = {"line": ordinal, "offset": offset}
+            out.stalled = True
+            out.stall_reason = "wire"
+            return out
+
+        # Decode only the bounded candidate window. A spilled tool result can be several
+        # megabytes on one physical line; decoding the whole suffix on every cursor page
+        # would make pagination itself an avoidable O(n²) operation.
+        candidate_end = _back_to_boundary(raw, offset, offset + content_budget)
+        text = raw[offset:candidate_end].decode("utf-8", errors="strict")
+        kept: list[str] = []
+        used = 0
+        wire_used = 0
+        stopped_on_wire = False
+        for char in text:
+            char_bytes = len(char.encode("utf-8"))
+            char_wire = escaped_json_cost(char)
+            if used + char_bytes > content_budget:
+                break
+            if wire_used + char_wire > wire_content_budget:
+                stopped_on_wire = True
+                break
+            kept.append(char)
+            used += char_bytes
+            wire_used += char_wire
+
+        if not kept:
+            # A caller with deliberately tiny wire headroom still gets the old explicit
+            # refusal; default inspection has ample room and takes the progress path above.
+            out.complete = False
+            out.next_cursor_state = {"line": ordinal, "offset": offset}
+            out.stalled = True
+            out.stall_reason = "wire" if stopped_on_wire else "content"
+            return out
+
+        text = "".join(kept)
+        next_offset = offset + used
+        absolute_end = absolute_start + used
+        out.segments.append(
+            Segment(kind="bytes", start=absolute_start, end=absolute_end, text=text)
+        )
+        out.result_bytes = used
+        out.lines_scanned = 1
+        if next_offset < len(raw):
+            out.complete = False
+            out.next_cursor_state = {"line": ordinal, "offset": next_offset}
+        elif ordinal < requested_end:
+            out.complete = False
+            out.next_cursor_state = {"line": ordinal + 1}
         return out
 
     # -- bytes -------------------------------------------------------------
@@ -418,6 +541,20 @@ class Inspector:
                     or over_wire
                     or len(out.segments) >= self._limits.inspect_max_segments
                 ):
+                    if not out.segments and len(out.segments) < self._limits.inspect_max_segments:
+                        # A matching tool-result line can be one huge JSON document. Keep
+                        # search useful by returning a bounded byte window containing the
+                        # literal hit; the segment kind makes the reduced context explicit.
+                        return self._search_match_chunk(
+                            index,
+                            ordinal=ordinal,
+                            needle=needle,
+                            already=already,
+                            budget=budget,
+                            wire_budget=wire_budget,
+                            max_matches=max_matches,
+                            lines_scanned=out.lines_scanned,
+                        )
                     out.complete = False
                     out.next_cursor_state = {
                         "line": ordinal,
@@ -451,6 +588,45 @@ class Inspector:
                 "line": ordinal,
                 "matches": already + (out.matches_found or 0),
             }
+        return out
+
+    def _search_match_chunk(
+        self,
+        index: LineIndex,
+        *,
+        ordinal: int,
+        needle: str,
+        already: int,
+        budget: int,
+        wire_budget: int,
+        max_matches: int,
+        lines_scanned: int,
+    ) -> Extraction:
+        """Return a partial exact window; never claim full matching-line coverage."""
+        match = index.line_bytes(ordinal).find(needle.encode("utf-8"))
+        if match < 0:
+            raise ShuntError("STORE_FAILED", "SEARCH_INDEX_MISMATCH", retryable=False)
+        out = self._line_chunk(
+            index,
+            ordinal=ordinal,
+            requested_end=ordinal,
+            offset=match,
+            budget=budget,
+            wire_budget=wire_budget,
+        )
+        out.mode = "search"
+        out.matches_found = 0 if out.stalled else 1
+        out.lines_scanned = lines_scanned
+        # Search windows deliberately omit surrounding context. A subsequent search page
+        # visits later matches; exact surrounding bytes remain available through inspect.
+        out.complete = False
+        out.next_cursor_state = (
+            {"line": ordinal, "matches": already}
+            if out.stalled
+            else {"line": ordinal + 1, "matches": already + 1}
+            if ordinal < index.line_count and already + 1 < max_matches
+            else None
+        )
         return out
 
 
