@@ -243,7 +243,9 @@ describe("reader gate", () => {
     const body = Array.from({ length: 5000 }, (_, i) => `line ${i} value`).join("\n") + "\n";
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(body)));
-    const luna = new FakeLuna([], answerJson("", []));
+    const luna = new FakeLuna([], answerJson("The first value is documented [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "line 0 value" },
+    ]));
     const env = await new Reader(registry, luna).answer(
       "sess",
       request(entry, { budgets: { max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000 } }),
@@ -1170,7 +1172,7 @@ describe("structured claims contract", () => {
     );
     const env = await new Reader(registry, new FakeLuna([reply]))
       .answer("sess", multiRequest(entries));
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.code).toBe("CITATION_INVALID");
     expect(env.answer).toBe("");
   });
 
@@ -1528,14 +1530,14 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(env.recovery?.handles_valid).toBe(true);
   });
 
-  it("still reports NO_MATCH when nothing was dropped", async () => {
+  it("rejects citation-empty model output even when nothing was dropped", async () => {
     const { registry, entry } = capFixture();
     const env = await new Reader(registry, new FakeLuna([claimsJson([], [])])).answer(
       "sess",
       capRequest(entry),
     );
-    expect(env.status).toBe("ok");
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("CITATION_INVALID");
   });
 
   // Every candidate re-sends the whole prompt, so a chain of three transmitted three

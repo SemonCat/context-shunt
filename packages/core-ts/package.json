@@ -1,6 +1,6 @@
 {
   "name": "@context-shunt/core",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Read-only context shunt core: pre-read gate, question-driven reader with truthful provenance, deterministic exact extraction under a disclosure ceiling, a hybrid SQLite/content-addressed snapshot store, signed token accounting and bounded envelopes.",
   "license": "Apache-2.0",
   "type": "module",

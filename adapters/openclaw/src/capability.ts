@@ -8,7 +8,7 @@ import {
 } from "@context-shunt/core";
 
 export const ADAPTER = "openclaw";
-export const ADAPTER_VERSION = "1.2.0";
+export const ADAPTER_VERSION = "1.2.1";
 
 /**
  * OpenClaw tool ids this adapter claims to cover. A read tool outside this list is not

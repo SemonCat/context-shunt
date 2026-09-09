@@ -216,7 +216,7 @@ result (content and JSON details), measures UTF-8 bytes against `max_tool_result
 and publishes an immutable artifact through the existing store/session identity before
 returning a bounded envelope and handle. Short eligible results pass unchanged. Capture
 makes no Luna call. The model supplies a real question to `context_shunt_read` with the
-handle; exhausted availability uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
+handle; exhausted availability or citation verification failure uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
 Serialization, store, or handler failure never returns the original eligible oversized text.
 The host runner independently fails closed to its bounded middleware error and preserves
 its special successful-delivery fallback.
@@ -270,7 +270,7 @@ it needs the reader's snapshot store, not a host hook. After retries and the mod
 chain are exhausted, `context_shunt_read` tries it first for terminal `MODEL_ERROR`,
 `TIMEOUT`, or `CITATION_INVALID`, including wholly unavailable readers. If disabled or
 unsafe, the narrower availability-only `automatic_extract` tier may run next; otherwise
-the original bounded failure remains. TypeScript ports the same algorithm; OpenClaw selects it on exhausted reader availability. The Python configuration/extra trigger codes below remain Hermes-specific.
+the original bounded failure remains. TypeScript ports the same algorithm; OpenClaw selects it on exhausted reader availability or citation verification failure. The Python configuration/extra trigger codes below remain Hermes-specific.
 It is a direct, function-for-function port of the text/JSON-shaping
 half of the incumbent `oversize-tool-result-compactor` plugin (v0.3.0, read read-only from
 the same live host on 2026-09-09; see `packages/core-py/src/context_shunt/legacy_compact.py`'s

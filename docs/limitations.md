@@ -131,7 +131,7 @@ result (content and JSON details), measures UTF-8 bytes against `max_tool_result
 and publishes an immutable artifact through the existing store/session identity before
 returning a bounded envelope and handle. Short eligible results pass unchanged. Capture
 makes no Luna call. The model supplies a real question to `context_shunt_read` with the
-handle; exhausted availability uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
+handle; exhausted availability or citation verification failure uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
 Serialization, store, or handler failure never returns the original eligible oversized text.
 The host runner independently fails closed to its bounded middleware error and preserves
 its special successful-delivery fallback.

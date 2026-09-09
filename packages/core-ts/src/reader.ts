@@ -875,6 +875,20 @@ export class Reader {
           sourceIds,
         };
       }
+      // A delivered, parsed model reply with no verifiable citations is missing
+      // evidence, not proof that the source has no answer. Keep deterministic no-hit
+      // searches (which made no model call) and cap/format failures distinct.
+      if (verified.length === 0 && outcomes.some((o) => o.responsesSeen > 0 && !o.failedReason)) {
+        const failure = new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
+        const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
+        return {
+          envelope: errorEnvelope(requestId, failure, {
+            provenance: failed, sources: handles, handlesValid: true,
+            ...(accountingId !== undefined ? { accountingId } : {}),
+          }),
+          provenance: failed, cost, sourceIds,
+        };
+      }
       coverage.complete = complete;
       return {
         envelope: buildEnvelope({

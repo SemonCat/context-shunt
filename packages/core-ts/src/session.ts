@@ -80,8 +80,8 @@ import { ScopeIdentity, SnapshotStore } from "./store.js";
  * cursor of exactly this length so a real one can never overshoot the budget it set.
  */
 const MAX_CURSOR_CHARS = 512;
-/** Availability failures may use the deterministic legacy fallback when explicitly enabled. */
-const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT"]);
+/** Terminal citation failures and exhausted availability may use the legacy fallback. */
+const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT", "CITATION_INVALID"]);
 
 export class ShuntSession {
   private readonly gate: PreReadGate;
@@ -107,7 +107,7 @@ export class ShuntSession {
       metrics?: MetricsSink;
       store?: SnapshotStore;
       identity?: ScopeIdentity;
-      /** Enable the labelled deterministic fallback for exhausted reader availability. */
+      /** Enable labelled compaction for exhausted availability or rejected/empty citations. */
       legacyCompaction?: boolean;
       /** Character ceiling handed to the deterministic compactor before byte capping. */
       legacyCompactionMaxChars?: number;
@@ -264,11 +264,11 @@ export class ShuntSession {
     let legacyAttempted = false;
     if (
       this.legacyCompactionEnabled
-      && result.availabilityFailure !== undefined
       && !signal?.aborted
       && result.envelope.status === "error"
-      && LEGACY_COMPACTION_TRIGGER_CODES.has(result.availabilityFailure)
-      && result.envelope.code === result.availabilityFailure
+      && (result.envelope.code === "CITATION_INVALID"
+        || (result.availabilityFailure !== undefined
+          && result.envelope.code === result.availabilityFailure))
       && result.envelope.provenance?.attribution_status !== "mismatch"
     ) {
       legacyAttempted = true;
@@ -422,7 +422,7 @@ export class ShuntSession {
         summary_bytes: new TextEncoder().encode(summary).length,
         original_bytes: entry.snapshot.bytesLen,
         hard_cap_chars: this.legacyCompactionMaxChars,
-        original_failure: originalFailure as "MODEL_ERROR" | "TIMEOUT",
+        original_failure: originalFailure as "MODEL_ERROR" | "TIMEOUT" | "CITATION_INVALID",
       },
     });
 

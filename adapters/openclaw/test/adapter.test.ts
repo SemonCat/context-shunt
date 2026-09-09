@@ -10,9 +10,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { READER_MODEL, ShuntSession, modeEnabled } from "@context-shunt/core";
+import { READER_MODEL, ShuntSession, modeEnabled, validateEnvelope } from "@context-shunt/core";
 
 import {
   ContextShuntPlugin,
@@ -791,5 +791,69 @@ describe("legacy fallback and exact-extraction config compatibility", () => {
     expect(out.result_kind).toBe("legacy_compaction");
     expect(out.provenance.derived).toBe(false);
     expect(out.legacy_compaction.summary_bytes).toBeLessThanOrEqual(16384);
+  });
+});
+
+
+describe("citation failure legacy fallback", () => {
+  const replies = [
+    { name: "invalid quote", body: { answer: "UNVERIFIED_MODEL_SENTINEL [c1].", citations: [
+      { id: "c1", line_start: 1, line_end: 1, quote: "FABRICATED_QUOTE_SENTINEL" },
+    ] } },
+    { name: "empty citations", body: { answer: "UNVERIFIED_MODEL_SENTINEL", citations: [] } },
+    { name: "empty answer and citations", body: { answer: "", citations: [] } },
+    { name: "empty claims and citations", body: { claims: [], citations: [] } },
+  ];
+  describe.each(["paths", "handles"] as const)("%s", (sourceForm) => {
+    it.each(replies)("compacts $name with the original failure, handles and cost", async ({ body }) => {
+      const dir = workspace();
+      const path = join(dir, "ws", "README.md");
+      const source = "# Reader contract\n" + "Documented source detail.\n".repeat(1500);
+      writeFileSync(path, source);
+      const f = configured(dir);
+      const complete = vi.fn(async () => ({ text: JSON.stringify(body), provider: "openai",
+        model: READER_MODEL, usage: { inputTokens: 12, outputTokens: 8 } }));
+      f.api.runtime.llm.complete = complete;
+      const p = new ContextShuntPlugin(f.api);
+      const session = (p as any).session("s1") as ShuntSession;
+      const reader = vi.spyOn((session as any).reader, "answerDetailed");
+      const entry = sourceForm === "handles" ? session.registerPath(path) : undefined;
+      const args = entry
+        ? { handles: [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId }] }
+        : { paths: [path] };
+      const out = JSON.parse(await p.onReaderTool({ question: "Explain the reader contract.", ...args },
+        { sessionKey: "s1", toolCallId: "citation-regression" }));
+      const original = await reader.mock.results[0]!.value;
+      // Verification must reject the model output before fallback; no availability spoofing.
+      expect(original.envelope.code).toBe("CITATION_INVALID");
+      expect(original.availabilityFailure).toBeUndefined();
+      expect(original.envelope.recovery?.handles_valid).toBe(true);
+      expect(out.code).toBe("LEGACY_COMPACTED");
+      validateEnvelope(out);
+      expect(out.status).toBe("partial");
+      expect(out.result_kind).toBe("legacy_compaction");
+      expect(out.legacy_compaction.original_failure).toBe("CITATION_INVALID");
+      expect(out.sources).toEqual(original.envelope.sources);
+      expect(out.legacy_compaction.source_id).toBe(out.sources[0].source_id);
+      expect(out.legacy_compaction.snapshot_id).toBe(out.sources[0].snapshot_id);
+      expect(out.recovery.handles_valid).toBe(true);
+      expect(out.coverage.complete).toBe(false);
+      expect(out.coverage.omitted.map((item: any) => item.source_id)).toContain(out.sources[0].source_id);
+      expect(out.provenance).toMatchObject({ derived: false, label: "legacy_compaction",
+        attempts_started: complete.mock.calls.length, usage_complete: true });
+      expect(out.answer).toBe("");
+      expect(out.citations).toEqual([]);
+      expect(out.extraction).toBeUndefined();
+      expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(p.config.limits.maxEnvelopeBytes);
+      expect(JSON.stringify(out)).not.toContain("UNVERIFIED_MODEL_SENTINEL");
+      expect(JSON.stringify(out)).not.toContain("FABRICATED_QUOTE_SENTINEL");
+      expect(out.legacy_compaction.summary).not.toBe(source);
+      const records = JSON.parse(p.onStatsTool({}, { sessionKey: "s1" })).stats.records;
+      const record = records.filter((row: any) => row.operation_id === out.accounting_id);
+      expect(record).toHaveLength(1);
+      expect(record[0]).toMatchObject({ attempts_started: complete.mock.calls.length,
+        reader_input_tokens: complete.mock.calls.length * 12,
+        reader_output_tokens: complete.mock.calls.length * 8, delivery_boundary: "extraction" });
+    });
   });
 });

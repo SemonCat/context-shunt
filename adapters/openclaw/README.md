@@ -15,7 +15,7 @@ OpenClaw prevents the mode.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
-| `context_shunt_read` | a cited answer, or labelled bounded legacy compaction after exhausted availability | at least one per processed chunk; retries/fallback can add more |
+| `context_shunt_read` | a cited answer, or labelled bounded legacy compaction after exhausted availability or citation verification failure | at least one per processed chunk; retries/fallback can add more |
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 
@@ -32,7 +32,7 @@ an explicit provider is pinned. The isolated completion path can prove the host'
 post-policy selection (`resolved`), not a provider-authoritative `actual` model. See the checked
 [`openclaw.json`](../../examples/config/openclaw.json).
 
-OpenClaw selects the shared TypeScript legacy compactor after exhausted availability.
+OpenClaw selects the shared TypeScript legacy compactor after exhausted availability or citation verification failure.
 It returns `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and
 `provenance.derived: false`, with an empty answer/citations and a dedicated bounded summary.
 It is independent of the question and covers only the first requested source, retaining
@@ -71,7 +71,7 @@ result (content and JSON details), measures UTF-8 bytes against `max_tool_result
 and publishes an immutable artifact through the existing store/session identity before
 returning a bounded envelope and handle. Short eligible results pass unchanged. Capture
 makes no Luna call. The model supplies a real question to `context_shunt_read` with the
-handle; exhausted availability uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
+handle; exhausted availability or citation verification failure uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
 Serialization, store, or handler failure never returns the original eligible oversized text.
 The host runner independently fails closed to its bounded middleware error and preserves
 its special successful-delivery fallback.

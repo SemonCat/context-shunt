@@ -131,7 +131,7 @@ use the secondary, guarded exact-prefix extraction tier when enabled. If neither
 safely return output, the response contains only a bounded pointer/failure and recovery
 guidance, never raw oversized content. Reuse a valid handle with a narrower question or
 inspect a bounded range.
-OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
+OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability or citation verification failure; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
 See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
 
 ## Quick start
@@ -181,7 +181,7 @@ Capture is off by default; configure exact read-only MCP IDs and disable Tokenju
 atomically when enabling. Host ingress sanitization happens first: ambiguous text/block/details
 ceilings are withheld without a handle; snapshots claim only middleware-visible content, never
 complete producer bytes. No Luna call occurs at capture. Handles feed the question-aware reader,
-with labelled `LEGACY_COMPACTED` fallback after exhausted availability.
+with labelled `LEGACY_COMPACTED` fallback after exhausted availability or citation verification failure.
 See [coverage and limits](docs/capability-matrix.md#openclaw), [cutover](docs/acceptance.md#openclaw-middleware-cutover),
 and [installation and cleanup](docs/install.md).
 
@@ -192,7 +192,7 @@ and [installation and cleanup](docs/install.md).
 | Local pre-read gate, reader, exact inspect, session stats/lifecycle | Supported (compatibility baseline 0.18.2) | Supported |
 | Tool-result capture | Enabled in the reported 0.21.1 deployment; off by default, requires local attestation | Supported when enabled; eligible middleware-visible results only |
 | External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`) |
-| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability |
+| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability or citation verification failure |
 | Reader attribution ceiling | `unverified` | `resolved` |
 | Writer / `propose_patch` | Not implemented | Not implemented |
 

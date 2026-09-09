@@ -250,7 +250,7 @@ structure, secret redaction - never exact bytes and never model output, as
 excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
 heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
 extraction; otherwise the original bounded failure remains, never raw. Coverage and
-failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
+failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability or citation verification failure; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
 [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
 for the exact trigger set, caps and wire shape.
 
