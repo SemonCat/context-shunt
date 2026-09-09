@@ -16,13 +16,21 @@ jobs:
   deterministic:
     # Gates need no live host, model provider, credentials, or service calls. Dependency
     # installation still uses the configured Python/npm package registries.
+    strategy:
+      matrix:
+        include:
+          # Preserve the declared minimum and exercise the live Hermes versions.
+          - python: "3.11"
+            jsonschema: "4.25.0"
+          - python: "3.13.5"
+            jsonschema: "4.26.0"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       - uses: actions/setup-node@v4
         with:
@@ -34,7 +42,7 @@ jobs:
         run: |
           python3 -m venv .venv
           ./.venv/bin/pip install --upgrade pip
-          ./.venv/bin/pip install -e 'packages/core-py[dev]'
+          ./.venv/bin/pip install -e 'packages/core-py[dev]' 'jsonschema==${{ matrix.jsonschema }}'
 
       - name: Install Node workspaces
         run: npm ci
@@ -94,7 +102,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: verify-reports
+          name: verify-reports-${{ matrix.python }}
           path: reports/
           if-no-files-found: ignore
           retention-days: 14

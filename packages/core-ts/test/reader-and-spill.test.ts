@@ -13,15 +13,18 @@ import { Coverage, buildEnvelope, serializedBytes } from "../src/envelope.js";
 import { ShuntError } from "../src/errors.js";
 import { classifyAttribution } from "../src/provenance.js";
 import {
-  FallbackChainProvider, type HostBridgeCall, HostBridgeProvider, UnavailableProvider,
-  responseAttribution,
+  type CallIdentity, FallbackChainProvider, type HostBridgeCall, HostBridgeProvider,
+  type ModelResponse, READER_SYSTEM_PROMPT, UnavailableProvider, buildUserMessage,
+  observedModel, responseAttribution,
 } from "../src/provider.js";
 import { OutputGuardError, enforce, enforceOrFixed } from "../src/guard.js";
 import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.js";
 import { InMemoryMetrics } from "../src/metrics.js";
 import { Deadline, FakeClock } from "../src/clock.js";
+import { estimateTokens as accountingTokens } from "../src/accounting.js";
+import { estimateTokens, planChunks } from "../src/chunking.js";
 import { referencedIds } from "../src/citations.js";
-import { Reader } from "../src/reader.js";
+import { MAX_RAW_CITATIONS, Reader } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
 import { SpillEngine } from "../src/spill.js";
@@ -29,8 +32,8 @@ import { ScopeIdentity, SnapshotStore } from "../src/store.js";
 import { ShuntSession } from "../src/session.js";
 import { conformance } from "./fixtures.js";
 import {
-  FakeLuna, answerJson, derivedProvenance, makeCapability, makeConfig, makeIdentity,
-  makeRegistry,
+  FakeLuna, answerJson, claimsJson, derivedProvenance, makeCapability, makeConfig,
+  makeIdentity, makeRegistry,
 } from "./support.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -125,7 +128,8 @@ describe("reader gate", () => {
     ]);
     const env = await new Reader(registry, luna).answer("sess", request(entry));
     expect(luna.callCount).toBe(2);
-    expect(env.status).toBe("partial");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("MODEL_ERROR");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
   });
 
@@ -142,7 +146,8 @@ describe("reader gate", () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry));
-    expect(env.status).toBe("partial");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("MODEL_ERROR");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
     expect(env.answer).toBe("");
   });
@@ -248,12 +253,47 @@ describe("reader gate", () => {
     expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
   });
 
-  it("does not retry invalid model output and leaks none of it", async () => {
-    const { entry, luna, reader } = fixture("this is not json at all");
-    const env = await reader.answer("sess", request(entry));
-    expect(luna.callCount).toBe(1);
+  it("gets one format retry on invalid model output, then fails closed leaking nothing", async () => {
+    // Malformed JSON is a schema failure: eligible for exactly one format retry, drawn
+    // from its own budget - separate from, and independent of, the transient-provider
+    // retry budget. The two may both fire for the same chunk; see the test below.
+    const { registry, entry } = fixture();
+    const luna = new FakeLuna(["this is not json at all", "still not json, still not json"]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(2);
     expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
     expect(JSON.stringify(env)).not.toContain("not json");
+  });
+
+  it("recovers on its one format retry", async () => {
+    const { registry, entry } = fixture();
+    const good = answerJson("Three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const luna = new FakeLuna(["this is not json at all", good]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(2);
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
+  });
+
+  it("draws from independent transient and format retry budgets, and both may fire", async () => {
+    // "Independent" means neither budget can steal the other's slot, not that only one
+    // of them may ever fire: one call, one transient retry, one format retry - three
+    // calls total, the sum of the two limits.
+    const { registry, entry } = fixture();
+    const good = answerJson("Three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const luna = new FakeLuna([
+      new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true),
+      "not json",
+      good,
+    ]);
+    const env = await new Reader(registry, luna).answer("sess", request(entry));
+    expect(luna.callCount).toBe(3);
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
   });
 
   it("reports SOURCE_CHANGED when the named snapshot no longer matches", async () => {
@@ -346,7 +386,7 @@ function generate(spec: any): unknown {
   }
 }
 
-describe("suma spill conformance", () => {
+describe("tool-result-capture spill conformance", () => {
   const spillCases = conformance("spill-cases.json");
 
   it("has a non-empty corpus", () => {
@@ -1003,5 +1043,968 @@ describe("all-fallback failure accounting", () => {
     expect(result.cost.attemptsStarted).toBe(calls);
     expect(result.cost.attemptsUsageComplete).toBe(0);
     expect(result.cost.method).not.toBe("exact");
+  });
+});
+
+/**
+ * The structured-claims contract (TypeScript core).
+ *
+ * The historical failure this replaces: a model produced a factually correct answer with
+ * a mechanically valid `citations` entry, and the reader still erased it, because
+ * `stripUnsupportedAssertions` requires every sentence to carry a hand-placed `[cN]`
+ * marker and the model had forgotten to write one. Under the claims contract there is no
+ * marker for the model to forget - the reader places every one, mechanically, from a
+ * `citation_ids` list it structurally validates. The first test below is the direct
+ * regression proof: it would fail against the pre-fix reader, which had no `claims` field
+ * to read at all.
+ */
+describe("structured claims contract", () => {
+  function claimsFixture(...sources: string[]) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entries = sources.map((s) => registry.register("sess", snapshotBytes(enc(s))));
+    return { registry, entries };
+  }
+
+  function multiRequest(
+    entries: Array<{ sourceId: string; snapshot: { snapshotId: string } }>,
+    question = QUESTION,
+  ) {
+    return {
+      schema_version: "1.0",
+      request_id: "req_claims",
+      operation: "read",
+      question,
+      sources: entries.map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      })),
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    };
+  }
+
+  it("publishes a claim with no hand-placed marker", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe("Retries stop after three attempts [c1].");
+    expect(env.citations.map((c) => c.id)).toEqual(["c1"]);
+    expect((env.citations[0] as any).verified).toBe(true);
+  });
+
+  it("renders every marker for a multi-claim, multi-citation answer", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [
+        { text: "Retries stop after three attempts.", citation_ids: ["c1"] },
+        {
+          text: "The timeout backs off exponentially before that ceiling.",
+          citation_ids: ["c1", "c2"],
+        },
+      ],
+      [
+        { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+        { id: "c2", line_start: 3, line_end: 3, quote: 'backoff = "exponential"' },
+      ],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe(
+      "Retries stop after three attempts [c1]. "
+      + "The timeout backs off exponentially before that ceiling [c1][c2].",
+    );
+    expect(new Set(env.citations.map((c) => c.id))).toEqual(new Set(["c1", "c2"]));
+  });
+
+  it("drops only the claim with an unknown citation id", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [
+        { text: "Retries stop after three attempts.", citation_ids: ["c1"] },
+        { text: "A fact with a citation id nobody declared.", citation_ids: ["c9"] },
+      ],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe("Retries stop after three attempts [c1].");
+  });
+
+  it("drops a claim whose citation fails mechanical verification", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Timeout is thirty seconds.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "timeout_seconds = 30" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(["NO_MATCH", "CITATION_INVALID"]).toContain(env.code);
+    expect(env.answer ?? "").toBe("");
+  });
+
+  it("drops a claim with a duplicate citation id", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Repeated evidence.", citation_ids: ["c1", "c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("never publishes a claim with no citations", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "An assertion nobody backed with evidence.", citation_ids: [] }],
+      [],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("refuses a reply carrying both claims and answer, and can recover on retry", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const ambiguous = JSON.stringify({
+      answer: "Three [c1].",
+      claims: [{ text: "Three.", citation_ids: ["c1"] }],
+      citations: [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    });
+    const good = claimsJson(
+      [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const luna = new FakeLuna([ambiguous, good]);
+    const env = await new Reader(registry, luna).answer("sess", multiRequest(entries));
+    expect(luna.callCount).toBe(2);
+    expect(env.code).toBe("ANSWERED");
+  });
+
+  it("exhausts its retry on a persistently ambiguous reply and fails closed", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const ambiguous = JSON.stringify({
+      answer: "x [c1].", claims: [], citations: [{ id: "c1", quote: "x" }],
+    });
+    const luna = new FakeLuna([ambiguous, ambiguous]);
+    const env = await new Reader(registry, luna).answer("sess", multiRequest(entries));
+    expect(luna.callCount).toBe(2);
+    expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
+  });
+
+  it("namespaces claims from two chunks into disjoint global ids", async () => {
+    // The two chunk calls race for concurrency (maxConcurrentModelCalls); which one
+    // reaches the fake provider first is not a contract this test controls, so the reply
+    // is chosen from the excerpt each call actually received, not from call order.
+    const { registry, entries } = claimsFixture("alpha config line\n", "beta config line\n");
+    const replyFor = (user: string): string =>
+      user.includes("alpha")
+        ? claimsJson(
+            [{ text: "The first source mentions alpha.", citation_ids: ["c1"] }],
+            [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha config line" }],
+          )
+        : claimsJson(
+            [{ text: "The second source mentions beta.", citation_ids: ["c1"] }],
+            [{ id: "c1", line_start: 1, line_end: 1, quote: "beta config line" }],
+          );
+    const luna = new FakeLuna([], replyFor);
+    const env = await new Reader(registry, luna)
+      .answer("sess", multiRequest(entries, "What do the sources say?"));
+    expect(env.code).toBe("ANSWERED");
+    const ids = env.citations.map((c) => c.id);
+    expect(new Set(ids).size).toBe(2);
+    expect(env.answer).toContain("alpha");
+    expect(env.answer).toContain("beta");
+    for (const id of ids) expect(env.answer).toContain(`[${id}]`);
+  });
+
+  it("still accepts a legacy answer with a valid hand-placed marker", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = answerJson("The retry ceiling is three [c1].", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toContain("[c1]");
+  });
+
+  it("still erases a legacy answer missing its marker - never auto-rescued", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = answerJson("The retry ceiling is three.", [
+      { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+    ]);
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer).toBe("");
+  });
+
+  it("refuses a secret in claim text even with a valid citation", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{
+        text: "The API key is sk-ant-abcdef1234567890abcdef1234567890abcdef.",
+        citation_ids: ["c1"],
+      }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).not.toBe("ok");
+    expect(env.answer ?? "").toBe("");
+    expect(JSON.stringify(env)).not.toContain("sk-ant-");
+  });
+
+  it("catches a secret even in a structurally dropped claim", async () => {
+    const { registry, entries } = claimsFixture(SOURCE);
+    const reply = claimsJson(
+      [{
+        text: "The API key is sk-ant-abcdef1234567890abcdef1234567890abcdef.",
+        citation_ids: ["c9"],
+      }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply]))
+      .answer("sess", multiRequest(entries));
+    expect(env.status).not.toBe("ok");
+    expect(JSON.stringify(env)).not.toContain("sk-ant-");
+  });
+
+  it("never retries a content judgement (BAD_USAGE) as a format failure", async () => {
+    class BadUsageProvider {
+      calls = 0;
+      readonly target = { model: READER_MODEL, provider: "openai" };
+      async complete() {
+        this.calls += 1;
+        return {
+          text: claimsJson([], []),
+          requested: { provider: "openai", model: READER_MODEL },
+          resolved: {},
+          reported: {},
+          providerConfirmsGeneration: false,
+          usage: { inputTokens: 10 ** 9, outputTokens: 5, method: "exact" as const },
+          fallbackUsed: false,
+        };
+      }
+    }
+    const { registry, entries } = claimsFixture(SOURCE);
+    const provider = new BadUsageProvider();
+    const env = await new Reader(registry, provider).answer("sess", multiRequest(entries));
+    expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
+    expect(provider.calls).toBe(1);
+  });
+
+  it("instructs verbatim identifiers, numbers and booleans in claim text", () => {
+    // A live eval found the model paraphrasing hyphenated identifiers ("payments-team"
+    // -> "payments team") and boolean flags in claim text, missing a corpus's literal
+    // expected-fact check even though the answer was semantically correct and the
+    // citation verified. The prompt now asks for verbatim preservation of exactly those
+    // token classes; this pins the instruction so it cannot be silently dropped again.
+    expect(READER_SYSTEM_PROMPT).toContain("exactly as they appear in the excerpt");
+    expect(READER_SYSTEM_PROMPT).toContain("hyphenated or compound names");
+    expect(READER_SYSTEM_PROMPT).toContain("boolean or yes/no values");
+    // The marker rule this whole contract exists for must still be there too.
+    expect(READER_SYSTEM_PROMPT).toContain("no citation marker such as");
+  });
+});
+
+/**
+ * The Sol max release blockers, reproduced and closed on this core. Each `it` is named for
+ * the false statement the pre-fix reader could publish.
+ */
+describe("release blockers: forged markers, caps, shared budget, identity", () => {
+  const CAP_SOURCE = Array.from(
+    { length: 20 },
+    (_v, i) => `key${String(i + 1).padStart(2, "0")} = value${String(i + 1).padStart(2, "0")}\n`,
+  ).join("");
+  const CAP_QUESTION = "Which keys are configured and to what?";
+
+  function capFixture(content = CAP_SOURCE) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    return { registry, entry: registry.register("sess", snapshotBytes(enc(content))) };
+  }
+
+  function capRequest(
+    entry: { sourceId: string; snapshot: { snapshotId: string } },
+    maxAnswerBytes = 8192,
+    question = CAP_QUESTION,
+  ) {
+    return {
+      schema_version: "1.0",
+      request_id: "req_cap",
+      operation: "read",
+      question,
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: maxAnswerBytes, deadline_ms: 60000 },
+    };
+  }
+
+  const key = (i: number) =>
+    `key${String(i).padStart(2, "0")} = value${String(i).padStart(2, "0")}`;
+
+  // Before the fix, `claims[].text` was rendered verbatim, so a model that wrote its own
+  // `[c999]` published it - inside an envelope whose provenance still said every citation
+  // had been mechanically verified, next to a `citations` array that never contained c999.
+  it("never publishes a forged marker from claim text", async () => {
+    const { registry, entry } = capFixture(SOURCE);
+    const reply = claimsJson(
+      [
+        { text: "Retries stop after three attempts [c999].", citation_ids: ["c1"] },
+        { text: "Backoff is exponential.", citation_ids: ["c2"] },
+      ],
+      [
+        { id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" },
+        { id: "c2", line_start: 3, line_end: 3, quote: 'backoff = "exponential"' },
+      ],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply])).answer(
+      "sess",
+      capRequest(entry, 8192, QUESTION),
+    );
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toBe("Backoff is exponential [c2].");
+    const published = new Set((env.citations ?? []).map((c) => c.id));
+    for (const id of referencedIds(env.answer ?? "")) expect(published.has(id)).toBe(true);
+  });
+
+  it("publishes nothing when every claim forged its marker", async () => {
+    const { registry, entry } = capFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Retries stop after three attempts [c1].", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const env = await new Reader(registry, new FakeLuna([reply])).answer(
+      "sess",
+      capRequest(entry, 8192, QUESTION),
+    );
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.answer ?? "").toBe("");
+  });
+
+  const capCitations = () =>
+    Array.from({ length: 20 }, (_v, i) => ({
+      id: `c${i + 1}`,
+      line_start: i + 1,
+      line_end: i + 1,
+      quote: key(i + 1),
+    }));
+
+  const capClaim = (i: number) => ({
+    text: `Key ${i} is set to value${String(i).padStart(2, "0")}.`,
+    citation_ids: [`c${i}`],
+  });
+
+  // Twenty citations verify and the ceiling is sixteen. The four claims cite the *last*
+  // four, so truncating in emission order dropped exactly those citations - and then every
+  // claim that referenced them, publishing nothing for a request whose answer would fit.
+  // Taking the referenced ones first makes the whole answer fit, and only *unreferenced*
+  // evidence overflows - which the envelope already discards, so nothing was lost and the
+  // coverage stays `complete`. Counting unread overflow as dropped material would make two
+  // identical answers differ by where their unused evidence fell against the ceiling.
+  it("keeps the citations the claims actually reference, losing nothing", async () => {
+    const { registry, entry } = capFixture();
+    const claims = [17, 18, 19, 20].map(capClaim);
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, capCitations())]),
+    ).answer("sess", capRequest(entry));
+    expect(env.code).toBe("ANSWERED");
+    for (const i of [17, 18, 19, 20]) {
+      expect(env.answer).toContain(`value${String(i).padStart(2, "0")}`);
+    }
+    expect(new Set((env.citations ?? []).map((c) => c.id))).toEqual(
+      new Set(["c17", "c18", "c19", "c20"]),
+    );
+    expect(env.status).toBe("ok");
+    expect(env.coverage?.complete).toBe(true);
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
+  });
+
+  // When the overflow *is* referenced, material really is lost and must be declared.
+  it("reports the referenced citations the ceiling could not keep", async () => {
+    const { registry, entry } = capFixture();
+    const claims = Array.from({ length: 20 }, (_v, i) => capClaim(i + 1));
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, capCitations())]),
+    ).answer("sess", capRequest(entry));
+    expect(env.code).toBe("ANSWERED");
+    expect((env.citations ?? []).length).toBe(L.maxCitations);
+    expect(env.status).toBe("partial");
+    expect(env.coverage?.complete).toBe(false);
+    const dropped = (env.coverage?.omitted ?? []).filter((o) => o.reason === "BUDGET_EXCEEDED");
+    expect(dropped.length).toBe(20 - L.maxCitations);
+    for (let i = L.maxCitations + 1; i <= 20; i += 1) {
+      expect(env.answer).not.toContain(`value${String(i).padStart(2, "0")}`);
+    }
+  });
+
+  // The first cut of the cap fix counted every overflowing citation as dropped material,
+  // so twenty citations and no surviving claim came back `LIMIT_EXCEEDED/ANSWER_OVER_CAP`:
+  // a ceiling blamed for emptying an answer that had never existed.
+  it("does not let unread overflow invent an answer a cap emptied", async () => {
+    const { registry, entry } = capFixture();
+    const env = await new Reader(registry, new FakeLuna([claimsJson([], capCitations())])).answer(
+      "sess",
+      capRequest(entry),
+    );
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
+  });
+
+  it("records the claims the per-answer ceiling dropped", async () => {
+    const { registry, entry } = capFixture();
+    const claims = Array.from({ length: L.maxClaimsPerAnswer + 6 }, (_v, i) => ({
+      text: `Assertion number ${i}.`,
+      citation_ids: ["c1"],
+    }));
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, [{ id: "c1", line_start: 1, line_end: 1, quote: key(1) }])]),
+    ).answer("sess", capRequest(entry));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.status).toBe("partial");
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+  });
+
+  // Shrinking the answer to fit `max_answer_bytes` and then reporting `complete: true` told
+  // the caller the whole selection had been read when part of the reading was just deleted.
+  it("records the claims the answer byte ceiling dropped", async () => {
+    const { registry, entry } = capFixture();
+    const citations = [1, 2, 3].map((i) => ({
+      id: `c${i}`,
+      line_start: i,
+      line_end: i,
+      quote: key(i),
+    }));
+    const claims = [1, 2, 3].map((i) => ({
+      text: `Key ${i} is set to value${String(i).padStart(2, "0")}.`,
+      citation_ids: [`c${i}`],
+    }));
+    const env = await new Reader(registry, new FakeLuna([claimsJson(claims, citations)])).answer(
+      "sess",
+      capRequest(entry, 40),
+    );
+    expect(env.code).toBe("ANSWERED");
+    expect(new TextEncoder().encode(env.answer ?? "").length).toBeLessThanOrEqual(40);
+    expect(env.status).toBe("partial");
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+    expect(enforce(env)).toBe(env);
+  });
+
+  // NO_MATCH says the sources held nothing, which is a different and untrue statement: the
+  // source answered and the answer was deleted a claim at a time to satisfy a ceiling.
+  it("reports LIMIT_EXCEEDED, not NO_MATCH, for an answer a cap emptied", async () => {
+    const { registry, entry } = capFixture();
+    const env = await new Reader(
+      registry,
+      new FakeLuna([
+        claimsJson(
+          [{ text: "Key 1 is set to value01.", citation_ids: ["c1"] }],
+          [{ id: "c1", line_start: 1, line_end: 1, quote: key(1) }],
+        ),
+      ]),
+    ).answer("sess", capRequest(entry, 1));
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.answer ?? "").toBe("");
+    expect(env.recovery?.handles_valid).toBe(true);
+  });
+
+  it("still reports NO_MATCH when nothing was dropped", async () => {
+    const { registry, entry } = capFixture();
+    const env = await new Reader(registry, new FakeLuna([claimsJson([], [])])).answer(
+      "sess",
+      capRequest(entry),
+    );
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
+  });
+
+  // Every candidate re-sends the whole prompt, so a chain of three transmitted three
+  // prompts against a single debit and could exceed `maxRequestInputTokens` outright.
+  it("never starts a fallback candidate the input budget cannot afford", async () => {
+    const { registry, entry } = capFixture();
+    const perCall = perCallTokens(entry);
+    const limits = narrowLimits(L, { maxRequestInputTokens: perCall });
+    const primary = new FakeLuna([new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true)]);
+    const alternative = new FakeLuna([
+      claimsJson(
+        [{ text: "Key 1 is set to value01.", citation_ids: ["c1"] }],
+        [{ id: "c1", line_start: 1, line_end: 1, quote: key(1) }],
+      ),
+    ]);
+    const chain = new FallbackChainProvider(primary, [alternative], limits);
+    const env = await new Reader(registry, chain, limits).answer("sess", capRequest(entry));
+    expect(primary.callCount).toBe(1);
+    expect(alternative.callCount).toBe(0);
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+  });
+
+  it("still advances a fallback the input budget can afford", async () => {
+    const { registry, entry } = capFixture();
+    const limits = narrowLimits(L, { maxRequestInputTokens: perCallTokens(entry) * 2 });
+    const reply = claimsJson(
+      [{ text: "Key 1 is set to value01.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: key(1) }],
+    );
+    const primary = new FakeLuna([new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true)]);
+    const alternative = new FakeLuna([reply]);
+    const third = new FakeLuna([reply]);
+    const chain = new FallbackChainProvider(primary, [alternative, third], limits);
+    const env = await new Reader(registry, chain, limits).answer("sess", capRequest(entry));
+    expect(primary.callCount).toBe(1);
+    expect(alternative.callCount).toBe(1);
+    expect(third.callCount).toBe(0);
+    expect(env.code).toBe("ANSWERED");
+  });
+
+  /** What the reader debits for one physical call of this chunk's prompt. */
+  function perCallTokens(
+    entry: { sourceId: string; snapshot: unknown },
+    limits = L,
+    question = CAP_QUESTION,
+  ): number {
+    const planned = planChunks(
+      [{ sourceId: entry.sourceId, snapshot: entry.snapshot as never, selector: { kind: "all" } }],
+      { maxChunks: 8, limits, question },
+    );
+    const chunk = planned.chunks[0] as { text: string; locator: Record<string, unknown> };
+    return (
+      estimateTokens(READER_SYSTEM_PROMPT, limits)
+      + estimateTokens(buildUserMessage(question, chunk.text, chunk.locator), limits)
+    );
+  }
+
+  // The chain head is what was asked for first, not what answered: publishing
+  // `requested_model` from the head certified a request that was never served.
+  it("publishes a fallback winner as the model that answered", async () => {
+    const { registry, entry } = capFixture(SOURCE);
+    const reply = claimsJson(
+      [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+    );
+    const primary = new FakeLuna(
+      [new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true)],
+      undefined,
+      READER_MODEL,
+    );
+    const alternative = new FakeLuna([reply], undefined, "fallback-model");
+    const chain = new FallbackChainProvider(primary, [alternative]);
+    const env = await new Reader(registry, chain).answer(
+      "sess",
+      capRequest(entry, 8192, QUESTION),
+    );
+    expect(env.code).toBe("ANSWERED");
+    expect(env.provenance?.requested_model).toBe("fallback-model");
+    expect(env.provenance?.resolved_model).toBe("fallback-model");
+    expect(env.provenance?.fallback_used).toBe(true);
+  });
+
+  // First-known-wins hid divergence: chunk one's model was published as the model that
+  // produced the whole answer.
+  it("certifies neither model when two chunks were answered by different ones", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const first = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const second = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
+    const replies = [
+      claimsJson(
+        [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+        [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+      ),
+      claimsJson(
+        [{ text: "Alpha is one.", citation_ids: ["c1"] }],
+        [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" }],
+      ),
+    ];
+    /** A different model per excerpt, so the divergence does not depend on call order. */
+    const perChunk = {
+      target: { model: READER_MODEL, provider: "openai" },
+      async complete(opts: { user: string }) {
+        const isSecond = opts.user.includes("alpha = 1");
+        const identity = {
+          provider: "openai",
+          model: isSecond ? "some-other-model" : READER_MODEL,
+        };
+        return {
+          text: (isSecond ? replies[1] : replies[0]) as string,
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          usage: { inputTokens: 10, outputTokens: 5, method: "exact" as const },
+          fallbackUsed: false,
+          attempts: 1,
+        };
+      },
+    };
+    const env = await new Reader(registry, perChunk as never).answer("sess", {
+      schema_version: "1.0",
+      request_id: "req_mixed",
+      operation: "read",
+      question: QUESTION,
+      sources: [first, second].map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      })),
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(env.code).toBe("ANSWERED");
+    expect(env.provenance?.attribution_status).toBe("unknown");
+    expect(env.provenance?.resolved_model).toBeNull();
+    expect(env.provenance?.reported_model).toBeNull();
+    expect(env.provenance?.requested_model).toBeUndefined();
+  });
+
+  it("still certifies one model that answered every chunk", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const first = registry.register("sess", snapshotBytes(enc(SOURCE)));
+    const second = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
+    const luna = new FakeLuna([
+      claimsJson(
+        [{ text: "Retries stop after three attempts.", citation_ids: ["c1"] }],
+        [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+      ),
+      claimsJson(
+        [{ text: "Alpha is one.", citation_ids: ["c1"] }],
+        [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" }],
+      ),
+    ]);
+    const env = await new Reader(registry, luna).answer("sess", {
+      schema_version: "1.0",
+      request_id: "req_same",
+      operation: "read",
+      question: QUESTION,
+      sources: [first, second].map((e) => ({
+        source_id: e.sourceId,
+        snapshot_id: e.snapshot.snapshotId,
+        selector: { kind: "all" },
+      })),
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(env.provenance?.attribution_status).toBe("actual");
+    expect(env.provenance?.reported_model).toBe(READER_MODEL);
+    expect(env.provenance?.requested_model).toBe(READER_MODEL);
+  });
+
+  // A refused usage claim used to take real completion bytes with it, reporting
+  // `output_tokens: 0` for a call that had produced hundreds of bytes.
+  it("keeps the bytes it measured when a usage claim is refused", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\nbeta = 2\n")));
+    const text = answerJson("Alpha is one [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" },
+    ]);
+    let calls = 0;
+    const badUsage = {
+      target: { model: READER_MODEL, provider: "openai" },
+      async complete() {
+        calls += 1;
+        return {
+          text,
+          requested: { provider: "openai", model: READER_MODEL },
+          resolved: { provider: "openai", model: READER_MODEL },
+          reported: { provider: null, model: null },
+          providerConfirmsGeneration: false,
+          // Above every ceiling, so `validateModelResponse` refuses the claim.
+          usage: { inputTokens: 10, outputTokens: 1_000_000_000, method: "exact" as const },
+          fallbackUsed: false,
+          attempts: 1,
+        };
+      },
+    };
+    const result = await new Reader(registry, badUsage as never).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_usage",
+      operation: "read",
+      question: "What is alpha?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(calls).toBe(1);
+    expect(result.cost.attemptsStarted).toBe(1);
+    expect(result.cost.attemptsUsageComplete).toBe(0);
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.outputTokens).toBe(accountingTokens(new TextEncoder().encode(text).length));
+    expect(result.cost.outputTokens as number).toBeGreaterThan(0);
+    expect(result.envelope.answer ?? "").toBe("");
+  });
+});
+
+describe("release blockers: raw-citation bound, nested chains, bridge usage, per-call identity", () => {
+  const tmp = () => mkdtempSync(join(tmpdir(), "shunt-blockers-"));
+  const CAP_SOURCE = Array.from(
+    { length: 20 },
+    (_v, i) => `key${String(i + 1).padStart(2, "0")} = value${String(i + 1).padStart(2, "0")}\n`,
+  ).join("");
+  const OVER_BOUND = MAX_RAW_CITATIONS + 4;
+
+  function fixture(content = CAP_SOURCE) {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    return { registry, entry: registry.register("sess", snapshotBytes(enc(content))) };
+  }
+
+  function request(entry: { sourceId: string; snapshot: { snapshotId: string } }) {
+    return {
+      schema_version: "1.0",
+      request_id: "req_blockers",
+      operation: "read",
+      question: "Which keys are configured and to what?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    };
+  }
+
+  const manyCitations = (count: number) =>
+    Array.from({ length: count }, (_v, i) => {
+      const line = (i % 20) + 1;
+      return {
+        id: `c${i + 1}`,
+        line_start: line,
+        line_end: line,
+        quote: `key${String(line).padStart(2, "0")} = value${String(line).padStart(2, "0")}`,
+      };
+    });
+
+  // `raw.slice(0, 64)` cut before anything discovered c65 was cited, so a well-formed
+  // reply well under the byte cap came back `ok` / `complete: true` with nothing
+  // published: a request whose answer a ceiling removed reported no ceiling.
+  it("reports a claim whose citation the raw bound cut", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 65 is set to value05.", citation_ids: ["c65"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.answer ?? "").toBe("");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.coverage?.complete).toBe(false);
+  });
+
+  it("leaves an answer the bound did not touch complete", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 1 is set to value01.", citation_ids: ["c1"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer).toContain("value01");
+    expect(env.status).toBe("ok");
+    expect(env.coverage?.complete).toBe(true);
+  });
+
+  // `normalizeClaims` is fail-closed on any unknown id, so the surviving citation buys
+  // the claim nothing and the ceiling is still why it is gone.
+  it("reports a claim citing one good and one cut citation", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 1 is set to value01.", citation_ids: ["c1", "c66"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(OVER_BOUND))]),
+    ).answer("sess", request(entry));
+    expect(env.answer ?? "").toBe("");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+  });
+
+  // The discriminator is the bound, not "the id is missing": nothing was cut here, so the
+  // reply cited something that never existed and NO_MATCH is the truthful answer.
+  it("still blames the model for an id nobody declared", async () => {
+    const { registry, entry } = fixture();
+    const claims = [{ text: "Key 99 is set to nothing.", citation_ids: ["c99"] }];
+    const env = await new Reader(
+      registry,
+      new FakeLuna([claimsJson(claims, manyCitations(4))]),
+    ).answer("sess", request(entry));
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
+    expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
+  });
+
+  const unavailableBridge: HostBridgeCall = async () => {
+    throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+  };
+
+  // Every rule the chain enforces is written per entry - one entry, one physical call. A
+  // nested chain made several behind one entry, so `attempts` counted one and the winner's
+  // aggregate reply was judged against a single-call ceiling.
+  it("flattens a nested chain into one ordered candidate list", () => {
+    const a = new HostBridgeProvider(unavailableBridge, L, "a", "openai");
+    const b = new HostBridgeProvider(unavailableBridge, L, "b", "openai");
+    const c = new HostBridgeProvider(unavailableBridge, L, "c", "openai");
+    const nested = new FallbackChainProvider(a, [new FallbackChainProvider(b, [c], L)], L);
+    expect((nested as unknown as { chain: unknown[] }).chain).toEqual([a, b, c]);
+    const deeper = new FallbackChainProvider(
+      new FallbackChainProvider(a, [new FallbackChainProvider(b, [c], L)], L),
+      [],
+      L,
+    );
+    expect((deeper as unknown as { chain: unknown[] }).chain).toEqual([a, b, c]);
+    expect(nested.target.model).toBe("a");
+  });
+
+  it("refuses a nested chain built with other limits rather than widening it", () => {
+    const innerLimits = narrowLimits(L, { maxOutputTokensPerCall: 64 });
+    const inner = new FallbackChainProvider(
+      new HostBridgeProvider(unavailableBridge, innerLimits, "b", "openai"),
+      [],
+      innerLimits,
+    );
+    expect(
+      () =>
+        new FallbackChainProvider(
+          new HostBridgeProvider(unavailableBridge, L, "a", "openai"),
+          [inner],
+          L,
+        ),
+    ).toThrow(/NESTED_CHAIN_LIMITS_DIFFER/);
+  });
+
+  // A malformed usage count is refused *while the usage object is built*, so no response
+  // existed and the error carried nothing: a call that returned hundreds of bytes was
+  // published as `outputTokens: 0`.
+  it("keeps the reply bytes when a bridge usage claim is refused", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
+    const text = claimsJson(
+      [{ text: "Alpha is one.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" }],
+    );
+    let calls = 0;
+    const bridge: HostBridgeCall = async () => {
+      calls += 1;
+      // Negative is not a count.
+      return { text, usage_exact: true, input_tokens: 5, output_tokens: -1 };
+    };
+    const result = await new Reader(
+      registry,
+      new HostBridgeProvider(bridge, L, READER_MODEL, "openai"),
+    ).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_badusage",
+      operation: "read",
+      question: "What is alpha?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(result.cost.attemptsUsageComplete).toBe(0);
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.outputTokens as number).toBeGreaterThanOrEqual(
+      accountingTokens(new TextEncoder().encode(text).length),
+    );
+  });
+
+  class Unavailable {
+    constructor(private readonly name: string) {}
+    get target() {
+      return { model: this.name, provider: "openai" };
+    }
+    complete(): Promise<ModelResponse> {
+      throw new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+    }
+  }
+
+  // One identity times `attemptsStarted` certified every call in a run that fell back:
+  // only the last one reported which model ran, and the other two reported nothing.
+  it("records identity per physical call rather than multiplying the winner's", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const reply = claimsJson(
+      [{ text: "The mode is fast.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }],
+    );
+    const chain = new FallbackChainProvider(
+      new Unavailable("down-a") as never,
+      [new Unavailable("down-b") as never, new FakeLuna([reply])],
+      L,
+    );
+    const result = await new Reader(registry, chain).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_identity",
+      operation: "read",
+      question: "What is the mode?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(result.envelope.code).toBe("ANSWERED");
+    const records = (result.provenance.callIdentities ?? []) as CallIdentity[];
+    expect(records.length).toBe(result.cost.attemptsStarted);
+    expect(records.length).toBe(3);
+    const observed = records.map(observedModel);
+    expect(observed.filter((m) => m === READER_MODEL).length).toBe(1);
+    expect(observed.filter((m) => m === "").length).toBe(2);
+    expect(records.filter((r) => r.attribution === "unknown").length).toBe(2);
+  });
+
+  it("records exactly one identity for a single call", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
+    const reply = claimsJson(
+      [{ text: "The mode is fast.", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }],
+    );
+    const result = await new Reader(registry, new FakeLuna([reply])).answerDetailed("sess", {
+      schema_version: "1.0",
+      request_id: "req_one",
+      operation: "read",
+      question: "What is the mode?",
+      sources: [
+        {
+          source_id: entry.sourceId,
+          snapshot_id: entry.snapshot.snapshotId,
+          selector: { kind: "all" },
+        },
+      ],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    const records = (result.provenance.callIdentities ?? []) as CallIdentity[];
+    expect(records.length).toBe(1);
+    expect(result.cost.attemptsStarted).toBe(1);
+    expect(observedModel(records[0] as CallIdentity)).toBe(READER_MODEL);
   });
 });

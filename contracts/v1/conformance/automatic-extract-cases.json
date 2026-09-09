@@ -1,0 +1,7 @@
+[
+  {"name":"ascii-prefix","text":"abcdefghij","cap":4,"expected":"abcd","end":4},
+  {"name":"utf8-boundary","text":"日本語tail","cap":4,"expected":"日","end":3},
+  {"name":"escaped-exact","text":"\"\t\\\r\nTAIL","cap":5,"expected":"\"\t\\\r\n","end":5},
+  {"name":"never-whole-source","text":"short\n","cap":2048,"expected":"short","end":5},
+  {"name":"no-nonempty-proper-prefix","text":"日","cap":2048,"expected":null,"end":null}
+]

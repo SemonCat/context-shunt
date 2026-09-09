@@ -1,10 +1,10 @@
 {
   "schema_version": "1.1",
-  "description": "Legal status/code pairings for the v1 envelope. Any pair not listed here MUST be rejected by both cores and by envelope.schema.json. Revision 1.1 adds EXTRACTED, STATS, STORE_FAILED, DISCLOSURE_EXHAUSTED, PROVENANCE_UNAVAILABLE and IMPORTED; every 1.0 pairing is unchanged. IMPORTED is deliberately distinct from SPILLED: SPILLED belongs to the capability-gated post-tool mode that no supported host enables, so reusing it for an external artifact import would read as a claim of post-tool interception.",
+  "description": "Legal status/code pairings for the v1 envelope. Any pair not listed here MUST be rejected by both cores and by envelope.schema.json. Revision 1.1 adds EXTRACTED, STATS, STORE_FAILED, DISCLOSURE_EXHAUSTED, PROVENANCE_UNAVAILABLE, IMPORTED and LEGACY_COMPACTED; every 1.0 pairing is unchanged. IMPORTED is deliberately distinct from SPILLED: SPILLED belongs to the capability-gated post-tool mode that no supported host enables, so reusing it for an external artifact import would read as a claim of post-tool interception. LEGACY_COMPACTED is partial-only: it always stands in for a reader failure that produced no answer, so it can never be the 'ok' outcome of a request that fully succeeded.",
   "statuses": ["ok", "partial", "blocked", "error"],
   "codes": [
     "ANSWERED", "NO_MATCH", "LARGE_READ", "UNCLASSIFIABLE_READ", "SPILLED",
-    "EXTRACTED", "STATS", "IMPORTED",
+    "EXTRACTED", "STATS", "IMPORTED", "LEGACY_COMPACTED",
     "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
     "SOURCE_EXPIRED", "BINARY_UNSUPPORTED", "LIMIT_EXCEEDED", "TIMEOUT",
     "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "SPILL_FAILED",
@@ -13,7 +13,7 @@
   ],
   "pairs": {
     "ok": ["ANSWERED", "NO_MATCH", "SPILLED", "EXTRACTED", "STATS", "IMPORTED"],
-    "partial": ["ANSWERED", "NO_MATCH", "EXTRACTED", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "TIMEOUT", "CANCELLED"],
+    "partial": ["ANSWERED", "NO_MATCH", "EXTRACTED", "LEGACY_COMPACTED", "UPSTREAM_TRUNCATED", "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "TIMEOUT", "CANCELLED"],
     "blocked": ["LARGE_READ", "UNCLASSIFIABLE_READ", "UNSAFE_SOURCE", "BINARY_UNSUPPORTED", "HOST_UNSAFE"],
     "error": [
       "INVALID_REQUEST", "UNSUPPORTED_VERSION", "UNSAFE_SOURCE", "SOURCE_CHANGED",
@@ -29,6 +29,7 @@
     "imported_requires_empty_answer": true,
     "imported_requires_import_receipt": true,
     "extracted_requires_empty_answer": true,
+    "legacy_compacted_requires_empty_answer": true,
     "stats_requires_empty_answer": true,
     "retryable_allowed_statuses": ["error", "partial"],
     "emitted_schema_version": "1.1",

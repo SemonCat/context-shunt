@@ -5,7 +5,8 @@ contract parity against the same fixtures in
 [`contracts/v1`](../contracts/v1).
 
 Before installing, read [`capability-matrix.md`](capability-matrix.md): it says which
-modes each host actually supports and why the optional Suma post-tool mode is off.
+modes each host actually supports and why the optional `tool_result_capture` mode
+(formerly documented under the internal name `suma_post_tool`) is off by default.
 
 ## Prerequisites
 
@@ -13,7 +14,7 @@ modes each host actually supports and why the optional Suma post-tool mode is of
 | --- | --- |
 | Python (Hermes adapter) | 3.11 or newer |
 | Node (OpenClaw adapter) | **22.22.3 or newer** — the store uses `node:sqlite`, and this is also OpenClaw's own floor |
-| Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled |
+| Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled. The `tool_result_capture` hook-ordering finding is a separate, dated verification against one live 0.21.1 host — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) — not a claim about 0.18.2 or about every 0.21.1 install |
 | OpenClaw | compatibility verified against `openclaw` 2026.9.2, with native plugins enabled |
 | Reader model | a host model bridge; `gpt-5.6-luna` is the default and is configurable |
 
@@ -48,6 +49,13 @@ npm install
 
 `scripts/verify` exits `0` on pass, `1` on failure, and `2` for `NOT_RUN` — a gate whose
 prerequisite is absent. `NOT_RUN` is never a pass.
+
+Reader availability failures now default to a labelled, bounded exact-text escape hatch
+(2 KiB prefix of the first source), using the existing inspector and disclosure ceilings.
+Set `reader.automatic_extract: false` for error-only recovery, or
+`reader.fallback_max_bytes` (1–4096) to narrow/tune it. `inspect.enabled: false` also disables
+it. No database migration is needed; the 1.1 wire schema is unchanged. See
+[trigger and compatibility details](configuration.md#automatic-exact-extraction-after-reader-unavailability).
 
 ## Hermes
 

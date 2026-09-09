@@ -1,0 +1,520 @@
+{
+  "schema_version": "1.1",
+  "description": "Structured claims contract: normalize_claims/normalizeClaims validates a model's claims array structurally against its own citations array before verification; render_claims/renderClaims deterministically places every [cN] marker from the surviving claims. Both language cores must agree on every case here. citations_seen is the set of local ids the same response declared in its citations array (before namespacing) - what normalize_claims checks citation_ids against. Revision 1.1 adds the forged-marker rule: marker syntax in a model-authored claim text drops that claim, and marker_cases fixes the publication invariant unpublished_marker_ids/unpublishedMarkerIds enforces on the way out - every [cN] in a published answer must name a citation the same envelope publishes.",
+  "cases": [
+    {
+      "id": "single_claim_single_citation",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts.",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Retries stop after three attempts.",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "Retries stop after three attempts [c1]."
+      }
+    },
+    {
+      "id": "multi_citation_claim",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "The timeout backs off exponentially before that ceiling.",
+          "citation_ids": [
+            "c1",
+            "c2"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "The timeout backs off exponentially before that ceiling.",
+            "citation_ids": [
+              "c1",
+              "c2"
+            ]
+          }
+        ],
+        "rendered": "The timeout backs off exponentially before that ceiling [c1][c2]."
+      }
+    },
+    {
+      "id": "multi_claim_answer",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts.",
+          "citation_ids": [
+            "c1"
+          ]
+        },
+        {
+          "text": "Backoff is exponential.",
+          "citation_ids": [
+            "c2"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Retries stop after three attempts.",
+            "citation_ids": [
+              "c1"
+            ]
+          },
+          {
+            "text": "Backoff is exponential.",
+            "citation_ids": [
+              "c2"
+            ]
+          }
+        ],
+        "rendered": "Retries stop after three attempts [c1]. Backoff is exponential [c2]."
+      }
+    },
+    {
+      "id": "unknown_citation_id_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Guessed fact.",
+          "citation_ids": [
+            "c9"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "duplicate_citation_id_within_a_claim_drops_it",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Repeated evidence.",
+          "citation_ids": [
+            "c1",
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "empty_citation_ids_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Unsupported assertion.",
+          "citation_ids": []
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "citation_ids_not_a_list_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Malformed shape.",
+          "citation_ids": "c1"
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "blank_text_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "   ",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "non_string_text_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": 42,
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "malformed_id_pattern_drops_the_claim",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Bad id shape.",
+          "citation_ids": [
+            "C1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "too_many_citation_ids_drops_the_claim",
+      "citations_seen": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5"
+      ],
+      "claims": [
+        {
+          "text": "Five-way evidence exceeds the per-claim cap.",
+          "citation_ids": [
+            "c1",
+            "c2",
+            "c3",
+            "c4",
+            "c5"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "claim_text_over_byte_cap_is_dropped",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "no_trailing_punctuation_appends_markers",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "mode is fast",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "mode is fast",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "mode is fast [c1]"
+      }
+    },
+    {
+      "id": "one_bad_claim_does_not_sink_a_good_one",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Good claim.",
+          "citation_ids": [
+            "c1"
+          ]
+        },
+        {
+          "text": "Bad claim.",
+          "citation_ids": [
+            "c9"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Good claim.",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "Good claim [c1]."
+      }
+    },
+    {
+      "id": "claims_not_a_list_yields_nothing",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": {
+        "text": "not a list"
+      },
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "non_dict_item_in_claims_is_skipped",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        "not a claim object"
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "marker_in_claim_text_drops_the_claim",
+      "comment": "The renderer copies text verbatim, so a model-authored marker would be published as though the program had placed it - naming a citation that does not exist while the envelope still reports citations_mechanically_verified: true.",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts [c999].",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "marker_naming_a_real_citation_in_claim_text_still_drops_the_claim",
+      "comment": "The id being real changes nothing: the field's meaning is that the program wrote every marker in it, so model marker bytes are refused whatever they name.",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "Retries stop after three attempts [c1].",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [],
+        "rendered": ""
+      }
+    },
+    {
+      "id": "a_forged_marker_does_not_sink_a_clean_claim",
+      "comment": "Same fail-closed granularity as a bad citation_ids: the claim, not the answer.",
+      "citations_seen": [
+        "c1",
+        "c2"
+      ],
+      "claims": [
+        {
+          "text": "Forged evidence [c7].",
+          "citation_ids": [
+            "c1"
+          ]
+        },
+        {
+          "text": "Backoff is exponential.",
+          "citation_ids": [
+            "c2"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "Backoff is exponential.",
+            "citation_ids": [
+              "c2"
+            ]
+          }
+        ],
+        "rendered": "Backoff is exponential [c2]."
+      }
+    },
+    {
+      "id": "bracketed_text_that_is_not_marker_syntax_survives",
+      "comment": "The rule is marker syntax, not brackets: a claim quoting a config key or an array index is ordinary prose and must not be dropped.",
+      "citations_seen": [
+        "c1"
+      ],
+      "claims": [
+        {
+          "text": "The value is read from config[cache] on startup.",
+          "citation_ids": [
+            "c1"
+          ]
+        }
+      ],
+      "expect": {
+        "surviving_claims": [
+          {
+            "text": "The value is read from config[cache] on startup.",
+            "citation_ids": [
+              "c1"
+            ]
+          }
+        ],
+        "rendered": "The value is read from config[cache] on startup [c1]."
+      }
+    }
+  ],
+  "marker_cases": {
+    "description": "The publication invariant. `text` is a fully rendered answer and `published` is the set of citation ids the same envelope publishes; `expect.unpublished` is every marker id in the answer that no published citation backs, sorted and deduplicated. An empty list is the only publishable state - the reader refuses the envelope otherwise, because the alternative is an answer citing evidence it does not carry.",
+    "cases": [
+      {
+        "id": "every_marker_is_published",
+        "text": "Retries stop after three attempts [c1]. Backoff is exponential [c2].",
+        "published": [
+          "c1",
+          "c2"
+        ],
+        "expect": {
+          "unpublished": []
+        }
+      },
+      {
+        "id": "forged_marker_is_reported",
+        "text": "Retries stop after three attempts [c999].",
+        "published": [
+          "c1"
+        ],
+        "expect": {
+          "unpublished": [
+            "c999"
+          ]
+        }
+      },
+      {
+        "id": "several_forged_markers_are_deduplicated_and_sorted",
+        "text": "One [c9]. Two [c8]. Three [c9].",
+        "published": [
+          "c1"
+        ],
+        "expect": {
+          "unpublished": [
+            "c8",
+            "c9"
+          ]
+        }
+      },
+      {
+        "id": "a_dropped_citation_leaves_its_marker_unpublished",
+        "comment": "What an envelope-fit or cap drop looks like from here: the citation is gone from `published` while the marker is still in the text.",
+        "text": "Retries stop after three attempts [c1]. Backoff is exponential [c2].",
+        "published": [
+          "c1"
+        ],
+        "expect": {
+          "unpublished": [
+            "c2"
+          ]
+        }
+      },
+      {
+        "id": "the_unmappable_marker_is_never_published",
+        "comment": "`[c0]` is what a legacy marker naming an id its own chunk never declared is rewritten to. Global ids start at c1, so it can never match a published citation and the sentence carrying it is always dropped.",
+        "text": "Cross-chunk evidence [c0].",
+        "published": [
+          "c1",
+          "c2"
+        ],
+        "expect": {
+          "unpublished": [
+            "c0"
+          ]
+        }
+      },
+      {
+        "id": "an_answer_with_no_markers_publishes_nothing_unbacked",
+        "text": "The excerpt does not answer the question.",
+        "published": [],
+        "expect": {
+          "unpublished": []
+        }
+      }
+    ]
+  }
+}

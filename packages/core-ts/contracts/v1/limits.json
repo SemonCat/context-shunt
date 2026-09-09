@@ -24,7 +24,8 @@
     "max_answer_bytes": 8192,
     "max_quote_bytes": 512,
     "max_question_bytes": 2048,
-    "session_spill_quota_bytes": 67108864
+    "session_spill_quota_bytes": 67108864,
+    "max_claim_text_bytes": 2048
   },
   "counts": {
     "max_sources_per_request": 8,
@@ -33,7 +34,10 @@
     "max_citations": 16,
     "max_concurrent_model_calls": 2,
     "max_chunk_overlap_lines": 1,
-    "max_transient_retries": 1
+    "max_transient_retries": 1,
+    "max_claims_per_answer": 24,
+    "max_citation_ids_per_claim": 4,
+    "max_format_retries": 1
   },
   "tokens": {
     "max_chunk_tokens": 8000,

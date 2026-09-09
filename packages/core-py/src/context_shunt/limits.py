@@ -67,6 +67,7 @@ V11_ONLY_ENVELOPE_FIELDS: frozenset[str] = frozenset(
         "provenance",
         "accounting_id",
         "extraction",
+        "legacy_compaction",
         "stats",
         "recovery",
         "import_receipt",
@@ -99,12 +100,16 @@ class Limits:
     max_quote_bytes: int
     max_question_bytes: int
     session_spill_quota_bytes: int
+    max_claim_text_bytes: int
     max_sources_per_request: int
     max_chunks_per_request: int
     max_citations: int
     max_concurrent_model_calls: int
     max_chunk_overlap_lines: int
     max_transient_retries: int
+    max_claims_per_answer: int
+    max_citation_ids_per_claim: int
+    max_format_retries: int
     max_chunk_tokens: int
     max_request_input_tokens: int
     max_output_tokens_per_call: int
@@ -155,12 +160,16 @@ class Limits:
             max_quote_bytes=raw["bytes"]["max_quote_bytes"],
             max_question_bytes=raw["bytes"]["max_question_bytes"],
             session_spill_quota_bytes=raw["bytes"]["session_spill_quota_bytes"],
+            max_claim_text_bytes=raw["bytes"]["max_claim_text_bytes"],
             max_sources_per_request=raw["counts"]["max_sources_per_request"],
             max_chunks_per_request=raw["counts"]["max_chunks_per_request"],
             max_citations=raw["counts"]["max_citations"],
             max_concurrent_model_calls=raw["counts"]["max_concurrent_model_calls"],
             max_chunk_overlap_lines=raw["counts"]["max_chunk_overlap_lines"],
             max_transient_retries=raw["counts"]["max_transient_retries"],
+            max_claims_per_answer=raw["counts"]["max_claims_per_answer"],
+            max_citation_ids_per_claim=raw["counts"]["max_citation_ids_per_claim"],
+            max_format_retries=raw["counts"]["max_format_retries"],
             max_chunk_tokens=raw["tokens"]["max_chunk_tokens"],
             max_request_input_tokens=raw["tokens"]["max_request_input_tokens"],
             max_output_tokens_per_call=raw["tokens"]["max_output_tokens_per_call"],
@@ -248,11 +257,12 @@ def supported_request_version(version: Any) -> bool:
 def envelope_byte_cap(result_kind: str | None, limits: Limits = DEFAULT_LIMITS) -> int:
     """The serialized cap that applies to one envelope.
 
-    Deterministic extraction and stats carry a bounded payload of their own - up to
-    ``max_extraction_bytes`` of exact snapshot bytes, or one page of operation records -
-    so they are measured against ``max_extended_envelope_bytes``. Every other envelope
-    keeps the original 16 KiB cap. Both values live in ``contracts/v1/limits.json``.
+    Deterministic extraction, legacy compaction and stats carry a bounded payload of their
+    own - up to ``max_extraction_bytes`` of exact snapshot bytes or heuristic summary text,
+    or one page of operation records - so they are measured against
+    ``max_extended_envelope_bytes``. Every other envelope keeps the original 16 KiB cap.
+    Both values live in ``contracts/v1/limits.json``.
     """
-    if result_kind in ("deterministic_extraction", "stats"):
+    if result_kind in ("deterministic_extraction", "legacy_compaction", "stats"):
         return limits.max_extended_envelope_bytes
     return limits.max_envelope_bytes

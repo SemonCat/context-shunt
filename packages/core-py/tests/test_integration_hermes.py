@@ -377,7 +377,7 @@ def test_capability_report_names_the_real_host_version(host_result):
     assert capability.get("reader_model") == "gpt-5.6-luna"
     assert capability.get("contract_version") == "1.1"
     modes = {m["mode"]: m for m in capability["modes"]}
-    assert modes["suma_post_tool"]["enabled"] is False
+    assert modes["tool_result_capture"]["enabled"] is False
     assert modes["deterministic_inspect"]["enabled"] is True
     assert modes["session_stats"]["enabled"] is True
     assert modes["reader_task_config"]["enabled"] is True

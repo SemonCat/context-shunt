@@ -2,189 +2,127 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-過大 payload 的證據中介層。把大型工具結果或檔案擋在主模型上下文之外，只回傳不透明 handle，
-並在提問時以不可變更快照逐位元組驗證引用。
+把過大的檔案與工具結果留在主模型上下文之外。context-shunt 保存不可變更的快照，回傳不透明
+handle，再讓主模型帶著明確問題交給成本較低的 reader 閱讀。答案附有證據、涵蓋範圍，以及
+經程式驗證的引用。
 
-> **目前狀態：預發行、唯讀。** Hermes 0.18.2 支援 artifact import；Hermes 0.18.2 與
-> OpenClaw 2026.9.2 支援讀取前攔截。兩者都無法攔截過大的工具執行結果。專案沒有 writer，
-> 也不支援 `propose_patch`。Shadow A/B 中依賴 provider 的 gates 皆為 `NOT_RUN`，因此目前
-> 不宣稱已達正式環境等效。
+> **預發行、唯讀。** 依操作人員回報，Hermes 部署已完成原子切換，啟用 `tool_result_capture`
+> 與內建 legacy fallback；獨立的 `oversize-tool-result-compactor` plugin 已停用，該部署不再需要它。
+> 新安裝預設仍關閉 capture，必須先確認 host 的執行順序。OpenClaw 支援本機讀取前防護，
+> 不支援工具結果擷取。實際 reader 評估與 provider benchmark gates 仍為 `NOT_RUN`。
 
-## 為什麼需要 context-shunt
+## 運作方式
 
-截斷或啟發式摘要雖然省空間，卻必須事先猜測什麼重要。少見的條件、否定結果，甚至問題的答案
-都可能因此消失——而啟發式做法最先切掉的，往往正是 log 頁面的中段。
+### 本機檔案：先攔截，再讀取
 
-context-shunt 會在內容進入上下文前先完整保存，只給主模型 metadata 與 handle，並提供兩條取用
-路徑：不呼叫模型的決定性搜尋，以及針對單一明確問題、附帶已驗證引用的低成本 reader。系統
-不會在沒有提問的情況下自行產生摘要。
+讀取前閘門與帶著問題閱讀的流程，設計靈感來自 Spotify Portal/Shunt
+（[設計來源](THIRD_PARTY_NOTICES.md)）。依預設限制，完整文字讀取必須同時不超過 350 個實體行
+與 16 KiB。過大或無法證明範圍受限的讀取會在執行前遭攔截；安全的來源會保存下來，供 reader
+依問題閱讀。小型或可證明範圍受限的讀取可繼續使用 host 原有工具。
 
-## 主要路徑：過大的工具結果
+涵蓋範圍明確限定：Hermes 攔截 `read_file`、`search_files` 與 `terminal`；OpenClaw 涵蓋
+`read` 與 `exec`，沒有註冊搜尋工具的攔截。這不代表所有讀取工具都受保護；若需要完整防護，
+必須停用未受控的工具。
 
-真正耗掉 session 上下文的通常是**工具結果**——log 查詢頁、雲端 journal 頁、issue tracker
-匯出、wiki 頁面——而不是原始碼檔案。要把這些擋在上下文之外，必須在 host 截斷並寫入之前拿到
-完整結果，而目前兩個 host 都不提供這個順序保證，所以 `suma_post_tool` 一律回報不支援並保持
-關閉。
+### Hermes 工具結果：先擷取，再提問
 
-host 能提供的，是別人已經寫下來的 artifact。若 compactor 或 spooler 已把過大結果寫成檔案並
-附上 manifest，擷取這一步其實已經完成。`context_shunt_import` 就是接收這份 artifact：
+不綁定特定產品的 `tool_result_capture` 能力，會在 `transform_tool_result` 攔截符合條件的
+過大 MCP／工具結果，時機在進入主模型上下文之前。它將收到的完整內容保存為不可變更的
+artifact，以有大小上限的不透明 handle／pointer 和 metadata 取代原結果。
+擷取過程**不呼叫模型**，也不產生啟發式摘要。
 
-```text
-producer 寫出 artifact + manifest
-                |
-       context_shunt_import
-                |
-   逐項重新驗證：allowlist 內的 root、正規化後的一般檔案、
-   非 symlink／hardlink、實際讀到的位元組比對大小與 digest、
-   限定 text 或 JSON、機密內容政策
-                |
-        私有不可變更快照
-                |
-   不透明 handle + metadata ------> 主模型上下文
-                |
-                +-- context_shunt_inspect：精確原文，0 次模型呼叫
-                `-- context_shunt_read：單一問題，附驗證引用
-```
-
-Manifest 的每個欄位與其中每條路徑都視為不可信輸入。Manifest 只是一組「聲明」，在對檔案完成
-重新驗證前都不採信；被拒絕時不會留下 handle，也不會回傳 payload。Import contract 與特定
-producer 無關——外部 manifest 透過 translation profile 轉換成核心格式，而未列入部署 allowlist
-的 schema 即使已有對應 profile 也一律拒絕。
-
-這**不是** post-tool 攔截，envelope 也把兩者分開：import 回報 `IMPORTED`，永不使用 `SPILLED`。
-此功能預設關閉，啟用時必須明確設定 import root 與允許的 producer manifest schema。
-
-## 次要路徑：過大的檔案讀取
-
-原本的 pre-read gate，行為不變。代理直接讀取檔案時往往還不知道答案在哪裡，原文卻已占用主
-模型上下文；依目前預設，完整文字讀取可通過 350 個實體行與 16 KiB，超過則在**執行前**阻擋，
-並保存被擋下的內容。
+這個 hook **收不到使用者的問題**，因此無法自動請 Luna 摘要每一份大型結果。
+主模型必須明確呼叫 `context_shunt_read`，傳入問題與 artifact handle。部署範例的 reader
+使用 `gpt-5.6-luna`；使用者可自行設定模型與 provider。
 
 ```text
-host 讀取要求
-        |
-        +-- 小型或可證明有界 ----------> 原本的 host 工具
-        |
-        `-- 過大或無法證明有界 ------> 阻擋、保存，取得與上方相同的 handle
+符合條件的過大工具結果                    過大的本機讀取
+              |                                |
+     tool_result_capture                  pre-read gate
+              |                                |
+              +--------- 不可變更快照 ----------+
+                              |
+                    有界 handle → 主模型
+                              |
+              明確問題 + handle → context_shunt_read
+                              |
+                 reader → 證據／涵蓋範圍／定位資訊
+                              |
+                         程式驗證引用
+                              |
+                    主模型可檢視有界來源範圍
 ```
 
-這是唯一能在操作發生前介入的路徑。它只涵蓋 capability report 明列的 host 工具；若部署環境
-要求所有讀取都受控，必須停用未受 context-shunt 管理的原始讀取工具。
+Hermes hook 目前擷取過大的**字串**結果；結構化／多模態區塊直接放行。它無法還原 producer
+事先截掉的內容。Hook 順序曾在一台 Hermes 0.21.1 host 上檢查，並非所有安裝環境都已獲證明。
+新部署必須自行確認順序，並同時設定 `tool_result_capture.enabled: true` 與
+`tool_result_capture.host_ordering_verified_locally: true`。符合條件的過大結果若擷取失敗，
+adapter 只回傳有界失敗訊息，不會以原始結果作為 fail-open 備援。
+詳見[能力證據](docs/capability-matrix.md)與[切換程序](docs/acceptance.md#tool_result_capture-cutover-on-hermes)。
 
-## 核心保證
+`suma_post_tool` 只是已棄用的設定遷移別名，從來不是產品名稱。
+公開設定請使用 `tool_result_capture`。
 
-- **沒有提問就不會有摘要。** Reader 只在收到明確問題時執行。系統中沒有任何自動的通用摘要，
-  Reader 失敗時也不會退回啟發式摘要。
-- **依問題讀取。** 每個實際處理的 chunk 都會收到原始問題。Reader 只能看到已授權的片段，
-  不會取得 host 對話或其他工具。
-- **Reader 輸出是證據，不是結論。** 回傳內容包含引用、涵蓋範圍、省略項目與可機械核對的
-  locator。驗證只能證明引用文字確實存在於所指位置，不能證明它支持該主張；envelope 會如實
-  說明，而不暗示已得出結論。
-- **引用可核對，涵蓋範圍不隱瞞。** 決定性程式會把每段公開引用與快照比對，並列出未處理或
-  省略的 chunk。這只能證明文字確實位於引用位置，不能證明它在語意上支持模型推論。
-- **可精確查看原文。** `context_shunt_inspect` 不呼叫模型，可依行號、UTF-8 安全位元組範圍或
-  字面搜尋回傳受限的精確內容。
-- **快照不可變更且有使用範圍。** `workspace_roots` 與 `artifact_import.roots` 是兩份獨立的
-  allowlist，因此中介 producer 的 artifact 不會擴大一般讀取可擷取的範圍；機密路徑／內容、二進位檔案
-  與不安全來源一律拒絕。私有 blob 由 TTL 與 session 清理機制移除。Inspect 預算與刪除動作是揭露控制，
-  不等於機密保證或安全抹除。
-- **Token 帳務如實標示。** Session 記錄會分開計算主模型省下的 token 與 reader 輸入／輸出，
-  區分精確值和估算值，也納入實際重試與可用性備援。專案不會把 token 自行換算
-  成金額節省。
+### 既有 artifact：不經攔截也能匯入
 
-## 四個唯讀工具
+Hermes 的 `context_shunt_import` 可接收其他 producer 已保存的文字／JSON artifact。
+建立私有快照前，會驗證 manifest、允許的根目錄、一般檔案類型、大小、雜湊與機密政策。
+它回傳 `IMPORTED`，而非 `SPILLED`；匯入不代表具備工具執行後攔截能力。此功能預設關閉，
+需要明確設定 `artifact_import.roots` 與允許的 producer schemas。OpenClaw 尚未實作匯入。
+
+## 提問與檢視
+
+以擷取或匯入回傳的 handle 呼叫 `context_shunt_read`；請將下列示意識別值換成實際值：
+
+```json
+{
+  "question": "重試次數的上限是多少？",
+  "handles": [{
+    "source_id": "src_example1234",
+    "snapshot_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }]
+}
+```
+
+初次擷取本機檔案時，改用 `"paths": ["/workspace/service/retry.py"]`，不要同時傳入 `handles`。
+每個處理中的 chunk 都收到問題與已授權的摘錄，不會取得 host 對話或工具。回傳答案包含引文、
+涵蓋範圍、遺漏項目與定位資訊。程式會對不可變更快照逐位元組驗證引文；這**不能證明**引文足以
+支持 reader 的推論。採信答案前，請先確認部分涵蓋與上游截斷情形。
 
 | 工具 | 用途 | 模型呼叫 |
 | --- | --- | --- |
-| `context_shunt_import` | 接收 producer 已保存的過大工具結果 artifact。回傳 handle 與 metadata，絕不回傳 artifact 內容。 | 0 |
-| `context_shunt_read` | 對已授權路徑或既有快照 handle 提問。 | 每個已處理 chunk 至少一次；重試與可用性備援可能增加呼叫次數。 |
-| `context_shunt_inspect` | 從快照取得精確行、UTF-8 安全位元組範圍或字面搜尋結果。 | 0 |
-| `context_shunt_stats` | 查看目前 session 的有界 token 與揭露帳務。 | 0 |
+| `context_shunt_read` | 針對已授權路徑或快照 handle 提問。 | 每個處理中的 chunk；重試與模型備援可能增加次數。 |
+| `context_shunt_inspect` | 精確行範圍、UTF-8 安全的 byte 範圍，或字面搜尋結果。 | 零 |
+| `context_shunt_stats` | 有界的 session token 與揭露量統計。 | 零 |
+| `context_shunt_import` | 接收 producer 已保存的 artifact（僅 Hermes，需設定）。 | 零 |
 
-決定性的逃生門是第一級功能：`inspect` 不需要 provider、不需要 reader 設定、也不呼叫模型，
-即使 reader 被停用或缺少 bridge 仍可使用。即使 `reader.enabled` 為 false，adapter 仍可能註冊
-reader 工具；真正執行時會在呼叫模型前拒絕。`context_shunt_import` 只在部署已設定
-`artifact_import` 且 capability probe 支援時才註冊。
+`inspect` 獨立於 reader，沒有 provider 也能使用，但仍受設定、單次與累計揭露預算，以及
+handle 有效性限制。快照不可變更且限定於 session；TTL 與 session 清理限制保存時間。
+Workspace 與 import 根目錄使用不同白名單。不安全、含機密或二進位來源會遭拒；清理不保證
+安全抹除。參見[工具 schema](contracts/v1/tool-args.schema.json)。
 
-## 一次完整 import
+## Reader 失敗時
 
-交出 producer 已寫好的 artifact：
+在 Python／Hermes 上，reader 重試與模型備援耗盡後，符合條件的 `MODEL_ERROR`、`TIMEOUT`
+或 `CITATION_INVALID` 會觸發 **context-shunt 內部**移植的有界 legacy compactor
+（`reader.legacy_compaction` 預設為 `true`）。模型身分不符與 provenance 政策拒絕不適用。
+它針對第一個要求的來源，以訊號行、頭尾取樣、重複行折疊與 JSON 整理產生決定性啟發式摘要，
+不是 Luna 的答案，也不是精確來源範圍。
 
-```json
-{ "manifest_path": "/var/lib/your-compactor/artifacts/q-8412.manifest.json" }
-```
+Envelope 明確標示 `status: partial`、`code: LEGACY_COMPACTED`、
+`result_kind: legacy_compaction` 與 `provenance.derived: false`。摘要放在
+`legacy_compaction`，`answer` 與 `citations` 留空；涵蓋範圍仍標為部分，失敗的模型嘗試
+仍列入統計。Hermes 切換後不再需要獨立 legacy plugin，因為備援已內建。
 
-回傳 envelope 的部分欄位：
-
-```json
-{
-  "status": "ok",
-  "code": "IMPORTED",
-  "answer": "",
-  "citations": [],
-  "pointer": {
-    "source_id": "src_9f2c41b7e0d3a86e",
-    "snapshot_id": "sha256:2a97...5aea",
-    "bytes": 1048576,
-    "internal": true
-  },
-  "import_receipt": {
-    "producer": "your-compactor",
-    "manifest_schema": "context_shunt.artifact_import.v1",
-    "origin_tool": "log_query",
-    "artifact_sha256": "2a97...5aea",
-    "bytes": 1048576,
-    "upstream_truncated": false
-  }
-}
-```
-
-`artifact_sha256` 是實際讀到的位元組所算出的 digest，而不是 manifest 聲明的值——receipt 存在
-時，兩者已被證明相同。
-
-## 一次完整讀取
-
-先對註冊工具提出明確問題：
-
-```json
-{
-  "question": "What is the retry ceiling?",
-  "paths": ["/workspace/service/retry.py"]
-}
-```
-
-回傳 envelope 的部分欄位可能如下：
-
-```json
-{
-  "status": "ok",
-  "code": "ANSWERED",
-  "answer": "Retries stop after three attempts [c1].",
-  "citations": [
-    {
-      "id": "c1",
-      "locator": {"kind": "lines", "start": 41, "end": 41},
-      "quote": "max_retries = 3",
-      "verified": true
-    }
-  ],
-  "coverage": {
-    "complete": true,
-    "processed_chunks": 1,
-    "planned_chunks": 1,
-    "omitted": [],
-    "upstream_truncated": false
-  }
-}
-```
-
-為了便於閱讀，上例省略了不透明的 source／snapshot ID、provenance、recovery 與 accounting
-欄位。完整格式請查閱 [tool argument schema](contracts/v1/tool-args.schema.json) 與
-[版本化 contracts](contracts/v1/)。
+若 compaction 停用或無法安全回傳，完全不可用的 reader 可在相關設定啟用時，改走第二層、
+受防護的精確前綴擷取。若安全備援也失敗，只留下有界 pointer／失敗訊息與復原指引，絕不
+放行過大的原始內容。可用有效 handle 縮小問題重問，或檢視有界範圍。
+TypeScript／OpenClaw 支援精確擷取層，但尚未移植 legacy compaction。
+詳見[備援語意與限制](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)。
 
 ## 快速開始
 
-需要 Python 3.11 以上與 Node 22.22.3 以上。在既有 checkout 內執行：
+使用 Python 3.11+ 與 Node 22.22.3+。在現有 checkout 執行：
 
 ```bash
 python3 -m venv .venv
@@ -200,10 +138,11 @@ npm install
 cp -R adapters/hermes/context-shunt ~/.hermes/plugins/context-shunt
 ```
 
-把可執行的 [Hermes 設定範例](examples/config/hermes.config.yaml)合併到
-`~/.hermes/config.yaml`，修改 `workspace_roots` 後重新啟動 Hermes。Hermes 外掛的 `llm`
-policy 必須允許指定的 model／provider。`auxiliary.context_shunt_reader` 會覆蓋外掛的 reader
-預設值；Hermes 的 `auto` 表示沿用原設定。
+將 [Hermes 範例](examples/config/hermes.config.yaml) 合併至 `~/.hermes/config.yaml`，設定
+`workspace_roots`，在 plugin 的 `llm` 政策授權 reader 模型／provider，然後重啟 Hermes。
+`auxiliary.context_shunt_reader` 會覆寫 plugin reader 預設值；`auto` 表示繼承。
+範例刻意保持 capture 關閉，直到操作人員確認本機順序。遷移時請依上述原子切換程序操作，
+確保停用獨立 compactor 時 capture 已生效。
 
 ### OpenClaw
 
@@ -213,98 +152,46 @@ openclaw plugins install --link ./adapters/openclaw --force
 openclaw plugins enable context-shunt
 ```
 
-把可執行的 [OpenClaw 設定範例](examples/config/openclaw.json)合併到 `openclaw.json`，修改
-`workspace_roots`，並在相鄰的 `llm` policy 允許 reader 的目標模型。重新啟動 Gateway 後確認實際
-載入內容：
+將 [OpenClaw 範例](examples/config/openclaw.json) 合併至 `openclaw.json`，設定
+`workspace_roots`，並在相鄰的 `llm` 政策授權 reader 目標，接著重啟 Gateway 並檢查載入結果：
 
 ```bash
 openclaw plugins inspect context-shunt --runtime --json
 ```
 
-兩個 host 的完整步驟請見[安裝、升級、清理與移除](docs/install.md)。
+OpenClaw 目前缺少對等的「工具執行後、進入上下文前」攔截介面：較早的 hook 只能觀察，
+持久化 hook 則只能看到已被限縮的結果。即使設定要求啟用，`tool_result_capture` 仍然
+**不受支援**，不會擷取任意過大的 MCP／工具輸出。參見[安裝與清理](docs/install.md)。
 
-## 目前可用範圍
+## Host 支援與如實統計
 
-| 能力 | Hermes 0.18.2 | OpenClaw 2026.9.2 |
+| 能力 | Hermes | OpenClaw 2026.9.2 |
 | --- | --- | --- |
-| 外部 artifact import | 支援；未設定前不啟用 | 不支援（`IMPORT_UNIMPLEMENTED`：僅有 Python core） |
-| 過大讀取的 pre-read gate | 支援 | 支援 |
-| 依問題讀取 | 支援；歸屬上限為 `unverified` | 支援；歸屬上限為 `resolved` |
-| 精確 inspect 與 session stats | 支援 | 支援 |
-| 過大 post-tool 結果攔截 | 不支援 | 不支援 |
-| Writer / `propose_patch` | 未實作 | 未實作 |
+| 本機 pre-read gate、reader、精確 inspect、session stats／生命週期 | 支援（相容性基準為 0.18.2） | 支援 |
+| 工具結果擷取 | 回報的 0.21.1 部署已啟用；預設關閉，需本機確認聲明 | 不支援 |
+| 外部 artifact 匯入 | 支援；設定前關閉 | 不支援（`IMPORT_UNIMPLEMENTED`） |
+| 內建 legacy compaction | 支援，為預設 reader 失敗備援 | 尚未實作 |
+| Reader 歸屬證據上限 | `unverified` | `resolved` |
+| Writer／`propose_patch` | 尚未實作 | 尚未實作 |
 
-兩個 adapter 都無法證明 provider-authoritative 的 `actual` 模型身分。OpenClaw 能回報 host
-最終選定的 route；Hermes 無法區分 provider 回報與 request echo。
+兩個 adapter 都無法證明 provider 權威確認的 `actual` 模型身分。要求的模型、解析後的路由
+與 provider 確認的身分是不同資訊；provenance 不會把請求的回顯當作證據。
+模型／provider 設定與可用性備援都有明確紀錄，模型不符時會拒絕。
 
-OpenClaw 不支援 `artifact_import`，原因是 TypeScript core 尚未實作 import boundary——這是
-專案本身的缺口，而非 host 限制，因此補上時不需要變更 host。
+Token 統計分開記錄主上下文節省量與 reader 輸入／輸出，標示精確值或估算值，並包含重試與
+備援嘗試。Token 減量不等於金額節省。Spotify 回報的節省量是靈感，**不是本專案實測保證**。
+決定性 shadow corpus 只衡量有限的檢索路徑；正式環境等效的 Luna 評估與 provider benchmarks
+仍為 `NOT_RUN`。擷取路徑已部署，不代表這些缺少的結果就算通過。
+詳見[指標](docs/metrics.md)、[能力矩陣](docs/capability-matrix.md)與[驗收 gates](docs/acceptance.md)。
 
-不需要 live provider 的決定性 gates 已實作。先前記錄的真實 host integration evidence 共
-122 個案例、0 個失敗。40 題 production-equivalent Luna 評估與 provider benchmark
-仍為 `NOT_RUN`；兩個 post-tool gate 也因缺少 host 端必要介面而維持 `NOT_RUN`。`NOT_RUN` 不計為
-通過。詳情請見 [capability matrix](docs/capability-matrix.md) 與
-[acceptance gates](docs/acceptance.md)。
+## 文件與貢獻
 
-## Shadow A/B 證明了什麼、沒證明什麼
+- [架構](docs/architecture.md)、[安全](docs/security.md)與[限制](docs/limitations.md)
+- [設定](docs/configuration.md)、[範例](examples/config/README.md)與[安裝](docs/install.md)
+- [版本化契約](contracts/v1/)、[Python core](packages/core-py/) 與 [TypeScript core](packages/core-ts/)
+- [Hermes adapter](adapters/hermes/)、[OpenClaw adapter](adapters/openclaw/) 與[評估 corpus](evals/)
 
-`./scripts/verify shadow all` 在固定的合成語料上比較四條 lane：raw baseline、啟發式
-head/tail compactor 的參考實作、透過 import boundary 加 `inspect` 的決定性檢索，以及依問題
-查找的 reader。
-
-其中三個 gate 只靠本 repo 就能實測——主模型上下文 token 縮減（≥ 60%）、相對 raw baseline
-沒有證據回歸，以及決定性檢索 lane 的延遲。在目前語料上，檢索 lane 保住了 compactor
-從頁面中段丟掉的每一段預期引用。縮減比例只計入實際被中介的項目：其中一個因超過 source cap
-而被拒絕的項目占了整體 baseline 的絕大部分，若把它的 counterfactual 也算進去，這個數字就會
-變成「對沒有任何 lane 能作答的 payload 省下的量」。
-
-另外五個 gate 回報 `NOT_RUN`，且不會改用無法回答問題的 lane 來計分。Reader lane **無論是否
-設定 bridge 都固定回報 `NOT_RUN`**：要對模型 lane 計分，必須有事先固定的語料與門檻，而那是
-[`eval luna`](docs/acceptance.md) 所負責的 gate。這五個 gate 分別是：task correctness、
-semantic evidence support、mechanical citation validity（檢索 lane 不產生引用，在該 lane
-計分會得到毫無意義的 100%）、follow-up 比率，以及 net cost reduction——後者還需要本 repo
-所沒有的版本化價目表。
-
-以上結果都不構成替換線上 compactor 的依據。此中介層是附加功能；推進順序與各階段所需證據
-記錄於 [acceptance gates](docs/acceptance.md#what-has-to-be-true-before-the-live-compactor-is-replaced)。
-
-## Reader 無法回答時
-
-模型錯誤、配額不足、逾時、格式錯誤或無效引用都會安全拒絕。Handle 與有界的 inspect 路徑
-仍然保留；原本過大的內容不會因此回到主模型上下文，也沒有可退回的啟發式摘要。
-
-- 沿用回傳的 handle，把問題問得更精確；不可變更快照不必重新擷取。
-- 需要原文時，用 `context_shunt_inspect` 指定範圍或字面搜尋。
-- 採用答案前先看 `coverage`。上游截斷、期限或限制造成的缺漏都會明確標為 partial。
-
-## 設定與帳務
-
-Reader 預設模型為 `gpt-5.6-luna`；`reader.model` 與 `reader.provider` 都可設定，provider 留空時
-交由 host routing。`fallback_chain` 只處理可用性，不會補救品質不佳的答案。所有數值 limits
-只能縮小，不能放寬。
-
-`artifact_import` 預設關閉，且沒有預設的 root 與 producer schema；只開啟旗標而未同時設定
-兩者會被視為設定錯誤，而不是放行全部。
-
-[設定參考](docs/configuration.md)整理 host policy、deadline、TTL、store、揭露、concurrency、
-retry、import 與 envelope limits；[metrics 說明](docs/metrics.md)定義主模型上下文節省、reader usage、
-估算方式、重試計算及 session scope。
-
-## 文件索引
-
-| 主題 | 文件 |
-| --- | --- |
-| 設計與信任邊界 | [Architecture](docs/architecture.md)、[安全性](docs/security.md)、[已知限制](docs/limitations.md) |
-| Host 支援與 release evidence | [Capability matrix](docs/capability-matrix.md)、[acceptance gates](docs/acceptance.md)、[開發狀態](docs/implementation-plan.md) |
-| 設定與維運 | [設定參考](docs/configuration.md)、[metrics](docs/metrics.md)、[安裝指南](docs/install.md) |
-| Import contract | [`artifact-import.schema.json`](contracts/v1/artifact-import.schema.json) 與其[一致性語料](contracts/v1/conformance/artifact-import-cases.json) |
-| 公開 contracts 與儲存格式 | [版本化 contracts](contracts/v1/)、[SQLite DDL](contracts/store/v1.sql) |
-| 實作 | [Python core](packages/core-py/)、[TypeScript core](packages/core-ts/)、[Hermes adapter](adapters/hermes/)、[OpenClaw adapter](adapters/openclaw/) |
-| 評估與驗證 | [Evaluation corpus](evals/)、[shadow A/B 語料](evals/shadow/corpus.json)、[`scripts/verify`](scripts/verify) |
-
-## 參與開發
-
-送出變更前請執行不需 live provider 的檢查：
+提出變更前，請執行決定性檢查：
 
 ```bash
 ./scripts/verify unit all
@@ -315,10 +202,5 @@ npm run typecheck --workspaces --if-present
 git diff --check
 ```
 
-這些命令不會把缺少的 live-model evidence 算成通過。Host integration 與 live evaluation 的要求
-記錄在 [acceptance guide](docs/acceptance.md)。
-
-## 授權與致謝
-
-本專案採用 [Apache-2.0](LICENSE) 授權。第三方元件與授權資訊列於
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+採用 [Apache-2.0](LICENSE) 授權。設計來源與相依套件授權見
+[第三方聲明](THIRD_PARTY_NOTICES.md)。

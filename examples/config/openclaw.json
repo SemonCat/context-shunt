@@ -18,7 +18,9 @@
             "enabled": true,
             "model": "gpt-5.6-luna",
             "provider": "",
-            "attribution_policy": "allow_unverified"
+            "attribution_policy": "allow_unverified",
+            "automatic_extract": true,
+            "fallback_max_bytes": 2048
           },
           "inspect": {
             "enabled": true
@@ -26,7 +28,7 @@
           "stats": {
             "enabled": true
           },
-          "suma_post_tool": {
+          "tool_result_capture": {
             "enabled": false
           },
           "limits": {}

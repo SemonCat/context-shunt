@@ -59,6 +59,22 @@ export class ShuntError extends Error {
    * difference is what decides whether a total may be called exact.
    */
   usageCompleteAttempts?: number;
+  /**
+   * Bytes of reply this core measured for itself on a call whose *usage claim* was
+   * refused. Not a token count and not the provider's word for anything: it is what the
+   * response body weighed, so the ledger can build a conservative estimate instead of
+   * publishing `outputTokens: 0` for a call that plainly produced output. A byte count
+   * reveals no content, so it cannot widen what an error may say.
+   */
+  responseBytes?: number;
+  /**
+   * One per-call identity record for each physical call the failing operation made, when
+   * a composite provider made more than one. A call that failed observed nothing about
+   * which model ran, so these records are mostly unknown - which is the point: without
+   * them the reader could only spread the *answering* call's identity over calls that
+   * never reported one.
+   */
+  callIdentities?: readonly unknown[];
 
   constructor(code: string, detail?: string, retryable?: boolean) {
     if (!(code in SAFE_MESSAGES)) throw new Error(`unknown error code: ${code}`);

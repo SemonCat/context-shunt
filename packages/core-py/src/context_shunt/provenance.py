@@ -86,6 +86,10 @@ class AttributionPolicy(str, Enum):
 class ResultKind(str, Enum):
     MODEL_DERIVED = "model_derived"
     DETERMINISTIC_EXTRACTION = "deterministic_extraction"
+    #: A deterministic heuristic summary produced only after a reader (model) failure -
+    #: never exact snapshot bytes (that is DETERMINISTIC_EXTRACTION) and never
+    #: model-derived. See ``legacy_compact.py``.
+    LEGACY_COMPACTION = "legacy_compaction"
     GATE_DECISION = "gate_decision"
     POINTER = "pointer"
     STATS = "stats"
@@ -95,6 +99,7 @@ class ResultKind(str, Enum):
 class ProvenanceLabel(str, Enum):
     MODEL_GENERATED_ANSWER = "model_generated_answer"
     DETERMINISTIC_EXTRACTION = "deterministic_extraction"
+    LEGACY_COMPACTION = "legacy_compaction"
     GATE_DECISION = "gate_decision"
     POINTER_ONLY = "pointer_only"
     SESSION_METRICS = "session_metrics"
@@ -190,6 +195,14 @@ class Provenance:
     resolved: ModelIdentity = field(default_factory=ModelIdentity)
     reported: ModelIdentity = field(default_factory=ModelIdentity)
     fallback_used: bool | None = None
+    #: One identity record per physical provider call behind this request, in call order.
+    #: Deliberately **not** published by :meth:`to_dict`: the envelope contract is a
+    #: single statement about the answer, and per-call detail belongs to whoever is
+    #: auditing the calls rather than to every consumer of an answer. It exists because
+    #: the fields above describe the call that *answered* - multiplying them by
+    #: ``attempts_started`` is the one arithmetic that certifies calls no evidence
+    #: describes. Empty when nothing made a call.
+    call_identities: tuple[Any, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

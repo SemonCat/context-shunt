@@ -52,7 +52,7 @@ Pinned or bounded, with their licences:
 
 | Package | Version | Licence | Used by |
 | --- | --- | --- | --- |
-| `jsonschema` | `>=4.25,<4.26` | MIT | Python core — contract validation |
+| `jsonschema` | `>=4.25,<4.27` | MIT | Python core — contract validation |
 | `ajv` | `8.17.1` | MIT | TypeScript core — contract validation |
 | `ajv-formats` | `3.0.1` | MIT | TypeScript core — `date-time` format |
 

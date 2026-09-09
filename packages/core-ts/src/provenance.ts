@@ -129,6 +129,16 @@ export interface Provenance {
   resolved?: ModelIdentity;
   reported?: ModelIdentity;
   fallbackUsed?: boolean;
+  /**
+   * One identity record per physical provider call behind this request, in call order.
+   * Deliberately **not** carried into `ProvenanceShape`: the envelope contract is a
+   * single statement about the answer, and per-call detail belongs to whoever is auditing
+   * the calls rather than to every consumer of an answer. It exists because the fields
+   * above describe the call that *answered* - multiplying them by `attemptsStarted` is
+   * the one arithmetic that certifies calls no evidence describes. Absent when nothing
+   * made a call.
+   */
+  callIdentities?: readonly unknown[];
 }
 
 export interface ProvenanceShape {

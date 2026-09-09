@@ -8,7 +8,7 @@
  *    executor runs; the observed executor count remains zero.
  * 3. The hooks the adapter depends on exist in the host's own typed-hook catalogue, and
  *    `after_tool_call` is still documented as observe-only.
- * 4. The ordering evidence behind the disabled Suma post-tool mode still holds in the
+ * 4. The ordering evidence behind the disabled tool_result_capture mode still holds in the
  *    host source: the persistence cap runs *before* the plugin's persist hook. If a host
  *    upgrade changes that, this gate fails and the capability decision has to be redone -
  *    which is exactly what "re-run the ordering evidence on upgrade" means.
@@ -77,7 +77,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(persistIndex).toBeGreaterThan(capIndex);
   });
 
-  it("keeps the Suma post-tool mode disabled for this host version", () => {
+  it("keeps the tool_result_capture mode disabled for this host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     const report = buildCapabilityReport({
       hooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
@@ -85,7 +85,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
       hostVersion: String(pkg.version),
     });
     expect(report.hostVersion).toBe(String(pkg.version));
-    expect(modeEnabled(report, "suma_post_tool")).toBe(false);
+    expect(modeEnabled(report, "tool_result_capture")).toBe(false);
     expect(modeEnabled(report, "local_gate")).toBe(true);
     expect(modeEnabled(report, "reader")).toBe(true);
     // The two paths that need no provider at all.

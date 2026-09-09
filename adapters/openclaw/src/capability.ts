@@ -5,8 +5,10 @@
  * executes and can return a deny decision, and the runtime model bridge can be pinned to
  * `gpt-5.6-luna`.
  *
- * The optional Suma post-tool mode is **not** supported on this host, and the reasons are
- * structural rather than a matter of effort:
+ * The optional oversized-tool-result capture mode (`tool_result_capture` - the
+ * `suma_post_tool` name was this project's own internal shorthand, never a product name,
+ * and is retired here in favor of one that says what the mode does) is **not** supported
+ * on this host, and the reasons are structural rather than a matter of effort:
  *
  * 1. `CAPTURE_AFTER_TRUNCATION` - in OpenClaw the persistence guard caps the tool result
  *    *before* the plugin hook runs. In `src/agents/session-tool-result-guard.ts` the
@@ -52,11 +54,14 @@ export const SHELL_TOOLS: Record<string, "shell"> = {
   exec: "shell",
 };
 
-export const SUMA_EVIDENCE: readonly string[] = [
+export const TOOL_RESULT_CAPTURE_EVIDENCE: readonly string[] = [
   "openclaw src/agents/session-tool-result-guard.ts: capToolResultForPersistence() runs before persistToolResult(), so tool_result_persist sees post-truncation content",
   "openclaw docs/plugins/hooks.md: after_tool_call is documented as observe-only and cannot replace a result",
   "openclaw docs/plugins/hooks.md: tool_result_persist / before_message_write are synchronous and fail-open - a failed result is ignored",
 ];
+
+/** Deprecated alias. `suma_post_tool` was never a product name; see the module docstring. */
+export const SUMA_EVIDENCE = TOOL_RESULT_CAPTURE_EVIDENCE;
 
 export interface ProbeInput {
   /** Hook names the host runtime actually exposes. */
@@ -125,9 +130,9 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
 
   modes.push(
     unsupported(
-      "suma_post_tool",
+      "tool_result_capture",
       ["CAPTURE_AFTER_TRUNCATION", "OBSERVE_ONLY_HOOK", "HOST_FAIL_OPEN"],
-      SUMA_EVIDENCE,
+      TOOL_RESULT_CAPTURE_EVIDENCE,
     ),
   );
 

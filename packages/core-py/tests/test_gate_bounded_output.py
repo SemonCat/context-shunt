@@ -9,12 +9,20 @@ from context_shunt.errors import ShuntError
 from context_shunt.guard import OutputGuardError, enforce, enforce_or_fixed
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.provenance import ResultKind
-from context_shunt.reader import Reader
+from context_shunt.provider import FallbackChainProvider
+from context_shunt.reader import MAX_RAW_CITATIONS, Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.spill import SpillEngine
 from context_shunt.store import SnapshotStore
-from tests.support import FakeLuna, answer_json, derived_provenance, make_identity, make_registry
+from tests.support import (
+    FakeLuna,
+    answer_json,
+    derived_provenance,
+    make_identity,
+    make_registry,
+    transient,
+)
 
 pytestmark = pytest.mark.gate_bounded_output
 L = DEFAULT_LIMITS
@@ -372,3 +380,390 @@ def test_trimming_is_deterministic_and_independent_of_citation_order(tmp_path):
     second = _answer_over(tmp_path / "b", filler_repeats=3)
     assert {c["id"] for c in first["citations"]} == {c["id"] for c in second["citations"]}
     assert first["answer"] == second["answer"]
+
+
+# -- caps report what they drop ---------------------------------------------------------
+
+_CAP_SOURCE = "".join(f"key{i:02d} = value{i:02d}\n" for i in range(1, 21))
+_CAP_QUESTION = "Which keys are configured and to what?"
+
+
+def _cap_fixture(tmp_path, source: str = _CAP_SOURCE):
+    registry = make_registry(tmp_path, session_id="sess")
+    return registry, registry.register("sess", snapshot_bytes(source.encode()))
+
+
+def _cap_request(entry, *, max_answer_bytes: int = 8192, question: str = _CAP_QUESTION):
+    return {
+        "schema_version": "1.0",
+        "request_id": "req_cap",
+        "operation": "read",
+        "question": question,
+        "sources": [
+            {
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "selector": {"kind": "all"},
+            }
+        ],
+        "budgets": {
+            "max_chunks": 8,
+            "max_answer_bytes": max_answer_bytes,
+            "deadline_ms": 60000,
+        },
+    }
+
+
+def _claims_reply(claims, citations):
+    import json as _json
+
+    return _json.dumps({"claims": claims, "citations": citations})
+
+
+def test_the_citation_cap_keeps_the_citations_the_claims_actually_reference(tmp_path):
+    """The release blocker: an arbitrary-order citation cap lost material twice.
+
+    Twenty citations verify and the ceiling is sixteen. The four claims in this reply cite
+    the *last* four. Truncating in emission order dropped exactly those four citations,
+    and then every claim that referenced them, so a request whose answer would have fitted
+    published nothing at all. Taking the referenced citations first makes the whole answer
+    fit, and because only unreferenced evidence overflowed, nothing was lost - so the
+    envelope says `complete`, not `partial`. Reporting the unused overflow as dropped
+    material would make two identical answers differ by which side of the ceiling their
+    *unread* evidence happened to land on.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 21)
+    ]
+    claims = [
+        {"text": f"Key {i} is set to value{i:02d}.", "citation_ids": [f"c{i}"]}
+        for i in range(17, 21)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED"
+    for i in range(17, 21):
+        assert f"value{i:02d}" in env["answer"]
+    assert {c["id"] for c in env["citations"]} == {f"c{i}" for i in range(17, 21)}
+    assert env["status"] == "ok" and env["coverage"]["complete"] is True
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+
+
+def test_the_citation_cap_reports_the_referenced_citations_it_could_not_keep(tmp_path):
+    """When the overflow *is* referenced, material really is lost and must be declared.
+
+    Twenty claims each cite their own citation, so prioritization cannot save anything:
+    four referenced citations pass the ceiling, the four claims resting on them go with
+    them, and the answer is genuinely short of what the source supports. That is the case
+    `complete: false` exists for - and the discriminator between this test and the one
+    above is whether a claim referenced the citation, not how many verified.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 21)
+    ]
+    claims = [
+        {"text": f"Key {i} is set to value{i:02d}.", "citation_ids": [f"c{i}"]}
+        for i in range(1, 21)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED"
+    assert len(env["citations"]) == L.max_citations
+    assert env["status"] == "partial" and env["coverage"]["complete"] is False
+    dropped = [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+    assert len(dropped) == 20 - L.max_citations
+    # The claims that rested on the dropped citations are gone from the answer too.
+    for i in range(L.max_citations + 1, 21):
+        assert f"value{i:02d}" not in env["answer"]
+
+
+def test_unread_citations_over_the_cap_cannot_invent_an_answer_a_cap_emptied(tmp_path):
+    """A reply with no usable claims is `NO_MATCH`, however much evidence it attached.
+
+    The first cut of the cap fix counted *every* overflowing citation as dropped material,
+    so twenty citations and no surviving claim came back `LIMIT_EXCEEDED/ANSWER_OVER_CAP`:
+    a ceiling was blamed for emptying an answer that had never existed. The reply below
+    cites nothing from its claims, so there is no answer material for a cap to lose.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 21)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply([], citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+
+
+def test_the_claims_cap_records_what_it_dropped(tmp_path):
+    """Claims past ``max_claims_per_answer`` are never read, so they are reported."""
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "key01 = value01"}]
+    claims = [
+        {"text": f"Assertion number {i}.", "citation_ids": ["c1"]}
+        for i in range(L.max_claims_per_answer + 6)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED"
+    assert env["answer"].count("Assertion number") == L.max_claims_per_answer
+    assert env["status"] == "partial" and env["coverage"]["complete"] is False
+    assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
+
+
+def test_the_answer_byte_cap_records_what_it_dropped(tmp_path):
+    """Shrinking the answer to fit and then reporting `complete: true` told the caller the
+    whole selection had been read when part of the reading had just been deleted."""
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": f"key{i:02d} = value{i:02d}"}
+        for i in range(1, 4)
+    ]
+    claims = [
+        {"text": f"Key {i} is set to value{i:02d}.", "citation_ids": [f"c{i}"]} for i in range(1, 4)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry, max_answer_bytes=40))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED"
+    assert len(env["answer"].encode("utf-8")) <= 40
+    assert env["status"] == "partial" and env["coverage"]["complete"] is False
+    assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
+    assert enforce(env) is env
+
+
+def test_an_answer_a_cap_emptied_is_limit_exceeded_not_no_match(tmp_path):
+    """NO_MATCH says the sources held nothing. That is a different, untrue statement.
+
+    Here the source answered, and the answer was deleted a claim at a time until the byte
+    ceiling was satisfied and nothing was left. The honest report names the ceiling.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "key01 = value01"}]
+    claims = [{"text": "Key 1 is set to value01.", "citation_ids": ["c1"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry, max_answer_bytes=1))
+        .envelope
+    )
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+    assert env.get("answer", "") == ""
+    assert env["recovery"]["handles_valid"] is True
+
+
+def test_a_source_that_says_nothing_is_still_no_match(tmp_path):
+    """The control: an empty answer with nothing dropped is still NO_MATCH."""
+    registry, entry = _cap_fixture(tmp_path)
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply([], [])]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+
+
+# -- the shared input budget covers every physical call ---------------------------------
+
+
+def _per_call_tokens(entry, limits=L, question: str = _CAP_QUESTION) -> int:
+    """What the reader debits for one physical call of this chunk's prompt."""
+    from context_shunt.chunking import estimate_tokens as chunk_tokens
+    from context_shunt.chunking import plan
+    from context_shunt.provider import READER_SYSTEM_PROMPT, build_user_message
+
+    the_plan = plan(
+        [(entry.source_id, entry.snapshot, {"kind": "all"})],
+        max_chunks=8,
+        limits=limits,
+        question=question,
+    )
+    chunk = the_plan.chunks[0]
+    return chunk_tokens(READER_SYSTEM_PROMPT, limits) + chunk_tokens(
+        build_user_message(question, chunk.text, chunk.locator), limits
+    )
+
+
+def test_a_fallback_candidate_the_budget_cannot_afford_is_never_started(tmp_path):
+    """The release blocker: the budget was debited once, outside the provider chain.
+
+    Every candidate re-sends the whole prompt, so a chain of three transmitted three
+    prompts against a single debit and could exceed ``max_request_input_tokens`` outright.
+    The budget here fits exactly one call: the primary is tried and fails, and the
+    alternative is refused before it is started rather than after it is billed.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    budget = _per_call_tokens(entry)
+    limits = L.narrow(max_request_input_tokens=budget)
+    reply = _claims_reply(
+        [{"text": "Key 1 is set to value01.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "key01 = value01"}],
+    )
+    primary = FakeLuna(replies=[transient()])
+    alternative = FakeLuna(replies=[reply])
+    chain = FallbackChainProvider(primary, [alternative], limits)
+    env = Reader(registry, chain, limits=limits).answer("sess", _cap_request(entry)).envelope
+    assert primary.call_count == 1
+    assert alternative.call_count == 0, "a candidate the budget cannot afford was started"
+    assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
+
+
+def test_a_fallback_candidate_the_budget_can_afford_still_runs(tmp_path):
+    """The control: two calls' worth of budget lets the chain advance exactly once."""
+    registry, entry = _cap_fixture(tmp_path)
+    limits = L.narrow(max_request_input_tokens=_per_call_tokens(entry) * 2)
+    reply = _claims_reply(
+        [{"text": "Key 1 is set to value01.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "key01 = value01"}],
+    )
+    primary = FakeLuna(replies=[transient()])
+    alternative = FakeLuna(replies=[reply])
+    third = FakeLuna(replies=[reply])
+    chain = FallbackChainProvider(primary, [alternative, third], limits)
+    env = Reader(registry, chain, limits=limits).answer("sess", _cap_request(entry)).envelope
+    assert primary.call_count == 1 and alternative.call_count == 1
+    assert third.call_count == 0
+    assert env["code"] == "ANSWERED"
+
+
+def test_a_cap_does_not_relabel_a_verification_failure(tmp_path):
+    """Precedence: nothing verified is a citation failure, whatever a cap also dropped.
+
+    The cap branch answers "the source said something and it would not fit". When no
+    citation verified there was nothing to fit, so the verification failure keeps
+    precedence and the envelope still names it.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    # The quote is real but the locator names a different line, so verification fails on
+    # the snapshot bytes and nothing survives.
+    citations = [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "key01 = value01"}]
+    claims = [
+        {"text": f"Assertion number {i}.", "citation_ids": ["c1"]}
+        for i in range(L.max_claims_per_answer + 6)
+    ]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
+    assert env["recovery"]["handles_valid"] is True
+
+
+# -- the raw-citation bound reports what it cut ------------------------------------------
+
+_OVER_BOUND = MAX_RAW_CITATIONS + 4
+
+
+def _many_citations(count: int) -> list[dict]:
+    """``count`` citations over a 20-line source, cycling the lines it can quote."""
+    return [
+        {
+            "id": f"c{i}",
+            "line_start": (i - 1) % 20 + 1,
+            "line_end": (i - 1) % 20 + 1,
+            "quote": f"key{(i - 1) % 20 + 1:02d} = value{(i - 1) % 20 + 1:02d}",
+        }
+        for i in range(1, count + 1)
+    ]
+
+
+def test_a_claim_whose_citation_the_raw_bound_cut_is_not_silently_dropped(tmp_path):
+    """The release blocker: `raw[:64]` sliced before anything discovered c65 was cited.
+
+    Sixty-eight citations are declared and the bound is sixty-four, so `c65` never becomes
+    a citation at all. The one surviving claim cites exactly that id, so
+    `normalize_claims` drops it for naming an id its own reply "never declared" - which is
+    the model's fault when it is true and this program's bound when it is not. The reply is
+    well formed and well under the byte cap, and it came back `ok` / `complete: true` with
+    nothing published: a request whose answer was cut by a ceiling reported no ceiling.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 65 is set to value05.", "citation_ids": ["c65"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["answer"] == ""
+    # Not NO_MATCH: the source did answer, and a ceiling is why nothing was published.
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+    assert env["coverage"]["complete"] is False
+
+
+def test_a_claim_the_bound_did_not_touch_still_publishes_completely(tmp_path):
+    """The bound only reports what it actually cost.
+
+    The same over-bound reply, but the surviving claim cites `c1` - inside the bound. The
+    citation it rests on verified, so nothing about this answer was lost and the envelope
+    must not claim otherwise. Sixty-seven unread citations are not dropped answer material.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 1 is set to value01.", "citation_ids": ["c1"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["code"] == "ANSWERED" and "value01" in env["answer"]
+    assert env["status"] == "ok" and env["coverage"]["complete"] is True
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]
+
+
+def test_a_claim_citing_one_good_and_one_cut_citation_is_still_lost_to_the_ceiling(tmp_path):
+    """Surviving evidence does not rescue a claim, because the rule is fail-closed.
+
+    `normalize_claims` drops a claim on *any* unknown id, so a claim citing `c1` (inside
+    the bound) and `c66` (past it) is dropped whole - the valid citation buys it nothing.
+    The ceiling is still the reason, so this counts as material dropped, and a version of
+    the check that required the claim to be left with no valid id at all would have
+    under-reported exactly this case.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(_OVER_BOUND)
+    claims = [{"text": "Key 1 is set to value01.", "citation_ids": ["c1", "c66"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["answer"] == ""
+    assert env["status"] == "error" and env["code"] == "LIMIT_EXCEEDED"
+
+
+def test_a_claim_citing_an_id_nobody_declared_is_still_the_models_fault(tmp_path):
+    """The discriminator is the *bound*, not "the id is missing".
+
+    Four citations, well inside the bound, and a claim citing `c99`. Nothing was cut, so
+    there is no omission to report and no ceiling to blame: the reply cited something that
+    never existed, the claim is dropped, and `NO_MATCH` is the truthful answer.
+    """
+    registry, entry = _cap_fixture(tmp_path)
+    citations = _many_citations(4)
+    claims = [{"text": "Key 99 is set to nothing.", "citation_ids": ["c99"]}]
+    env = (
+        Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+    assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]

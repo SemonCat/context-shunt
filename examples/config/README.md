@@ -23,9 +23,13 @@ adding fake keys to either plugin `config` block.
 | `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
 | `reader.attribution_policy` | `allow_unverified` | What to do when the host cannot prove which model answered. See below. |
 | `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
+| `reader.automatic_extract` | `true` | Exact extraction escape hatch after exhausted availability; also requires inspect. |
+| `reader.fallback_max_bytes` | `2048` | 1–4096 source bytes, narrowed by all existing limits. |
+| `reader.legacy_compaction` | `true` | Broader deterministic fallback for a reader failure `automatic_extract` does not cover. **Python core only** — not yet in `openclaw.json`'s shape; the TypeScript core does not build or consume it yet. |
+| `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core only, same caveat as above. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
-| `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill request. Both adapters report it unsupported, so `true` does not activate the mode. |
+| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. Unsupported on OpenClaw. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
 | `artifact_import.enabled` | `false` | Adopt an oversized tool-result artifact an external producer already persisted. Supported on Hermes; the OpenClaw core has no import boundary and reports the mode unsupported. |
 | `artifact_import.roots` | `[]` | Allowlist of canonical directories an artifact and its manifest may live under. Separate from `workspace_roots`, and refused if a root contains the private cache. |
 | `artifact_import.accepted_manifest_schemas` | `[]` | Allowlist of producer manifest schemas. A manifest declaring a schema outside it is refused even when a translation profile for that schema exists. |
@@ -33,12 +37,13 @@ adding fake keys to either plugin `config` block.
 
 ## `artifact_import`
 
-The import boundary is the deployable answer to oversized *tool results*, and it is
-deliberately not the same thing as `suma_post_tool`. That mode needs the host to hand a
-plugin the complete result before truncation and accept a replacement before persistence,
-which neither supported host does. An artifact a producer already wrote to disk needs
-neither: the capture already happened, so all the host has to supply is a way to invoke
-the import.
+The import boundary is one of two deployable answers to oversized *tool results*, and it is
+deliberately not the same thing as `tool_result_capture`. That mode needs the host to hand a
+plugin the complete result before truncation and accept a replacement before persistence -
+unsupported on OpenClaw, and on Hermes off by default pending an explicit operator
+attestation (see `docs/capability-matrix.md`). An artifact a producer already wrote to disk
+needs neither: the capture already happened, so all the host has to supply is a way to
+invoke the import.
 
 Enabling it is two decisions, and neither has a permissive default:
 

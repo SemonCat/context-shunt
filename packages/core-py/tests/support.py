@@ -91,7 +91,18 @@ class FakeLuna:
 
 
 def answer_json(answer: str, citations: list[dict[str, Any]]) -> str:
+    """The legacy reply shape: prose the model marks up itself with ``[cN]``."""
     return json.dumps({"answer": answer, "citations": citations})
+
+
+def claims_json(claims: list[dict[str, Any]], citations: list[dict[str, Any]]) -> str:
+    """The current reply shape: structured claims plus the citations they reference.
+
+    ``claims`` items are ``{"text": str, "citation_ids": [str, ...]}``; markers are never
+    written by the caller here either - the reader places them, mechanically, from
+    ``citation_ids``.
+    """
+    return json.dumps({"claims": claims, "citations": citations})
 
 
 def derived_provenance(**overrides: Any) -> Provenance:
@@ -157,7 +168,7 @@ def make_registry(
 
 
 def make_capability(
-    *, suma: bool = False, artifact_import: bool = False, adapter: str = "test"
+    *, tool_result_capture: bool = False, artifact_import: bool = False, adapter: str = "test"
 ) -> CapabilityReport:
     from context_shunt.capability import DisabledReason
 
@@ -172,9 +183,9 @@ def make_capability(
         modes=[
             supported("local_gate"),
             supported("reader"),
-            supported("suma_post_tool")
-            if suma
-            else unsupported("suma_post_tool", DisabledReason.ORDERING_UNPROVEN),
+            supported("tool_result_capture")
+            if tool_result_capture
+            else unsupported("tool_result_capture", DisabledReason.ORDERING_UNPROVEN),
             supported("artifact_import")
             if artifact_import
             else unsupported("artifact_import", DisabledReason.IMPORT_UNIMPLEMENTED),

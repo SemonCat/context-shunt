@@ -19,9 +19,14 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.provider` | string, at most 128 UTF-8 bytes | `""` | Provider request; empty delegates routing to the host. |
 | `reader.attribution_policy` | enum | `allow_unverified` | `allow_unverified` publishes the host's truthful attribution status; `require_match` refuses below actual/resolved agreement. |
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
+| `reader.automatic_extract` | boolean | `true` | Secondary exact extraction after wholly exhausted availability when legacy compaction is disabled or unsafe; also requires `inspect.enabled`. |
+| `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
+| `reader.legacy_compaction` | boolean | `true` | Python/Hermes: prefer bounded deterministic compaction for terminal `MODEL_ERROR`, `TIMEOUT`, and `CITATION_INVALID`, before automatic extraction. Model-identity and provenance-policy refusals remain excluded. |
+| `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
-| `suma_post_tool.enabled` | boolean | `false` | Requests the optional oversized post-tool path. Both current adapters report it unsupported, so it is not activated. |
+| `tool_result_capture.enabled` | boolean | `false` | Requests the optional oversized-tool-result capture path. Unsupported on OpenClaw. On Hermes, additionally requires `tool_result_capture.host_ordering_verified_locally: true` to be reported supported at all — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not). The deprecated key `suma_post_tool.enabled` is still accepted as an alias; setting both to disagreeing values is refused with `TOOL_RESULT_CAPTURE_CONFIG_CONFLICT`. |
+| `tool_result_capture.host_ordering_verified_locally` | boolean | `false` | An explicit **operator attestation** that the operator personally verified their own installed Hermes host's `transform_tool_result` capture-before-truncation ordering. This code does not and cannot prove it; setting it without reading the linked evidence first is the deployment's own risk. |
 | `artifact_import.enabled` | boolean | `false` | Requests the external-artifact import boundary. Supported on Hermes; the OpenClaw core has no import implementation and reports the mode unsupported with `IMPORT_UNIMPLEMENTED`. |
 | `artifact_import.roots` | string array, at most 8 | `[]` | Canonical directories a producer's artifact and manifest may live under. A separate allowlist from `workspace_roots`; a root that contains `cache_dir` is refused with `CACHE_INSIDE_IMPORT_ROOT`. |
 | `artifact_import.accepted_manifest_schemas` | string array | `[]` | Producer manifest schemas this deployment authorizes. A manifest declaring a schema outside this list is refused with `MANIFEST_SCHEMA_NOT_ALLOWED` even when a translation profile exists for it. |
@@ -191,3 +196,89 @@ split an over-wide single line; use a byte selector if exact pieces are acceptab
 Store quotas reject new capture instead of evicting a live handle. TTL readability is a
 SQL predicate, so an expired or revoked handle is unusable before physical sweep. The store
 is local and SQLite-backed; do not place it on a network filesystem.
+
+### Automatic exact extraction after reader unavailability
+
+`reader.automatic_extract` defaults to `true`; `reader.fallback_max_bytes` defaults to
+2048 and accepts integers from 1 through 4096. On Python/Hermes this is the secondary tier: enabled legacy compaction is tried and guarded first. `inspect.enabled: false` disables automatic
+extraction as well. No opt-in is needed because this reuses the authorized snapshot,
+secret guard, transactional disclosure ceilings and exact inspector already enabled by default.
+
+The trigger is a **wholly unavailable read** after the normal retry/provider chain has
+stopped: at least one physical attempt started, every planned chunk outcome failed with
+`MODEL_ERROR` or `TIMEOUT`, and no response or non-availability failure was observed.
+Quota, provider and network failures qualify through the existing availability boundary.
+A safe model-call/request timeout qualifies; cancellation, model substitution, provenance
+refusal, malformed output (including malformed-then-outage), citation-invalid output,
+valid empty/weak answers and partial model answers do not. Budget exhaustion before model
+availability is established does not qualify. Timeouts stop model work; the subsequent
+bounded local inspection can add store/guard latency beyond the model request deadline.
+Even a delivered late response is conservatively excluded.
+The first attempted failing chunk in request order supplies the bounded original category
+(`MODEL_ERROR` or `TIMEOUT`); no provider body or error-priority ranking is published.
+
+Selection is always one UTF-8-safe **byte prefix of the first requested source**, independent
+of the question and reader selectors, including JSON record selectors. It never ranks
+semantic importance or pretends to answer the question. Other sources remain listed and
+omitted. The prefix is capped by the configured bytes, request `max_answer_bytes`, deployed
+answer/inspect/extraction caps, serialized headroom and remaining source/session disclosure.
+It must be nonempty and strictly shorter than the source, even if a line-oversized source
+fits the byte cap. Repeated automatic reads select the same prefix and charge it each time.
+Use explicit inspect for a different range; automatic extraction never follows a cursor.
+
+The wire shape remains revision **1.1**, with no new required field, status, code, schema
+or store migration: `partial/EXTRACTED`, `result_kind: deterministic_extraction`,
+`provenance.derived: false`, no model attribution, empty `answer`/`citations`, and fixed
+`guidance` saying “Escape hatch: exact deterministic fallback extraction; not model-derived
+and not an LLM summary”, plus the original category and selection rule. The existing
+`extraction` block carries exact half-open byte locators, immutable snapshot identity,
+charged disclosure totals and an authenticated inspect cursor. Outer coverage is always
+incomplete, conservatively lists each source as `UNKNOWN_REMAINDER`, and makes no assertion
+about upstream truncation. Sources and recovery actions are retained.
+
+The session records **one read operation** with all failed physical LLM attempts/costs and
+the actual serialized extraction egress (`delivery_boundary: extraction`). If a timeout
+interrupts a chain before its aggregate returns, observed budget debits retain already
+started physical attempts and repeated prompt costs; the debit handle is closed to
+prevent later attempts. Unreported usage remains explicitly estimated/unknown. Provenance
+attempt counts describe the failed read; no requested/resolved/reported model is attached
+to the exact text. Direct low-level `Reader` calls return the availability error and cost;
+automatic disclosure belongs to `ShuntSession.read`, which owns disclosure accounting.
+
+Compatibility change: wholly unavailable reads formerly capable of returning partial
+`NO_MATCH` now return truthful `MODEL_ERROR`/`TIMEOUT`. When neither legacy compaction nor automatic extraction can safely deliver,
+exhausted disclosure, unusable/expired handles, failed storage, an empty prefix or a guard
+refusal, the original bounded availability error and recovery guidance are returned.
+If handle validation fails, recovery truthfully marks handles invalid and requests recapture.
+
+### Legacy-compaction fallback for reader outcomes automatic extraction does not cover
+
+On Python/Hermes, `reader.legacy_compaction` (default `true`) is the first bounded
+fallback tier after the reader has exhausted retries and its model fallback chain.
+A terminal `status: error` with `MODEL_ERROR`, `TIMEOUT`, or `CITATION_INVALID` qualifies,
+including wholly unavailable readers. A reported-model mismatch and
+`PROVENANCE_UNAVAILABLE` remain excluded. Malformed output published as `NO_MATCH`
+is not reclassified as an availability error.
+
+If compaction is disabled, raises, or fails the output guard, a wholly unavailable
+read may use the secondary `automatic_extract` tier if enabled together with inspect.
+If neither tier can safely deliver, the original bounded failure remains; raw source
+is never used as a fail-open result. This precedence change is scoped to Python/Hermes;
+TypeScript/OpenClaw extraction behavior is unchanged.
+
+Unlike automatic extraction, this is not an exact byte prefix — it is
+`legacy_compact.compact_tool_result`, a ported, deterministic heuristic summary of the
+**first requested source's full text**: signal lines (error/exception/failure/timeout/5xx),
+head/tail sampling, repeated-line collapsing, JSON structure and secret-value redaction. It
+is capped first by `reader.legacy_compaction_max_chars` (1000–60000, default 16000) and then
+by the envelope's own `max_extraction_bytes` (16 KiB) at a UTF-8-safe boundary, whichever is
+smaller. The wire shape is revision **1.1**: `partial/LEGACY_COMPACTED`,
+`result_kind: legacy_compaction`, `provenance.derived: false`,
+`provenance.label: legacy_compaction`, empty `answer`/`citations`, and a dedicated
+`legacy_compaction` envelope block (`summary`, `summary_bytes`, `original_bytes`,
+`hard_cap_chars`, `original_failure`) — deliberately not the `extraction` block, whose
+schema description says "never a summary". Coverage preserves the reader’s processed/planned counts, upstream truncation and
+omissions, and adds bounded `UNKNOWN_REMAINDER` omissions for requested sources; only the first source is covered, matching automatic extraction's own
+established simplification. Compaction and secondary extraction retain the read operation’s accounting ID, failed
+physical-attempt costs, original failure category and artifact handles. Both are explicitly
+partial, deterministic, and not model-derived or an LLM summary.

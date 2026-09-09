@@ -5,8 +5,10 @@
  *
  * - `writer.enabled = true` is refused at load time. There is no writer, so accepting the
  *   flag and quietly ignoring it would turn a missing feature into a hidden one.
- * - `suma_post_tool.enabled` defaults to `false` and, even when set, only takes effect if
- *   the adapter's capability probe proves a safe capture/replacement order.
+ * - `tool_result_capture.enabled` defaults to `false` and, even when set, only takes effect
+ *   if the adapter's capability probe reports the mode supported. The deprecated
+ *   `suma_post_tool` key is still accepted as an alias; setting both to disagreeing values
+ *   is refused rather than guessed.
  * - A cap may be narrowed, never widened.
  *
  * Changed in 1.1: the reader model and provider are configurable. Revision 1.0 refused any
@@ -103,12 +105,17 @@ const SNAKE_LIMITS: Record<string, keyof Limits> = {
 const MAX_MODEL_REF_BYTES = 128;
 const MAX_FALLBACK_ENTRIES = 4;
 const READER_KEYS = new Set([
-  "enabled", "model", "provider", "attribution_policy", "fallback_chain",
+  "enabled", "model", "provider", "attribution_policy", "fallback_chain", "automatic_extract", "fallback_max_bytes",
 ]);
 const ENABLED_SECTION_KEYS = new Set(["enabled"]);
+const TOOL_RESULT_CAPTURE_KEYS = new Set(["enabled", "host_ordering_verified_locally"]);
 const CONFIG_KEYS = new Set([
   "workspace_roots", "spill_dir", "cache_dir", "denylist", "gate_enabled", "reader",
-  "inspect", "stats", "suma_post_tool", "writer", "operations", "limits",
+  "inspect", "stats", "tool_result_capture",
+  // Deprecated alias for `tool_result_capture`, accepted so an existing config file keeps
+  // working unchanged. See `mergeToolResultCaptureRaw`.
+  "suma_post_tool",
+  "writer", "operations", "limits",
 ]);
 
 /** One availability target: a model, optionally pinned to a provider. */
@@ -127,9 +134,17 @@ export interface Config {
   readonly readerModel: string;
   readonly readerProvider: string;
   readonly readerAttributionPolicy: AttributionPolicy;
+  readonly readerAutomaticExtract?: boolean;
+  readonly readerFallbackMaxBytes?: number;
   readonly readerFallbackChain: readonly ProviderRef[];
   readonly inspectEnabled: boolean;
   readonly statsEnabled: boolean;
+  readonly toolResultCaptureEnabled: boolean;
+  /** Explicit operator attestation that they personally verified their own host's
+   * transform_tool_result-shaped hook ordering. Never assumed; see the Hermes adapter's
+   * `_tool_result_capture_mode` for why this exists. */
+  readonly toolResultCaptureHostOrderingVerifiedLocally: boolean;
+  /** Deprecated alias for {@link toolResultCaptureEnabled}. */
   readonly sumaPostToolEnabled: boolean;
   readonly limits: Limits;
 }
@@ -145,11 +160,15 @@ export interface RawConfig {
     model?: string;
     provider?: string;
     attribution_policy?: string;
+    automatic_extract?: boolean;
+    fallback_max_bytes?: number;
     fallback_chain?: Array<{ model?: string; provider?: string }>;
   };
   inspect?: { enabled?: boolean };
   stats?: { enabled?: boolean };
-  suma_post_tool?: { enabled?: boolean };
+  tool_result_capture?: { enabled?: boolean; host_ordering_verified_locally?: boolean };
+  /** @deprecated alias for `tool_result_capture` */
+  suma_post_tool?: { enabled?: boolean; host_ordering_verified_locally?: boolean };
   writer?: { enabled?: boolean };
   operations?: string[];
   limits?: Record<string, unknown>;
@@ -165,7 +184,9 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     if (!CONFIG_KEYS.has(key)) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   }
 
-  for (const nested of [cfg.reader, cfg.inspect, cfg.stats, cfg.suma_post_tool, cfg.writer]) {
+  for (const nested of [
+    cfg.reader, cfg.inspect, cfg.stats, cfg.tool_result_capture, cfg.suma_post_tool, cfg.writer,
+  ]) {
     if (nested !== undefined && (
       typeof nested !== "object" || nested === null || Array.isArray(nested)
     )) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
@@ -188,19 +209,27 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   for (const key of Object.keys(cfg.reader ?? {})) {
     if (!READER_KEYS.has(key)) throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   }
-  for (const section of [cfg.inspect, cfg.stats, cfg.suma_post_tool, cfg.writer]) {
+  for (const section of [cfg.inspect, cfg.stats, cfg.writer]) {
     for (const key of Object.keys(section ?? {})) {
       if (!ENABLED_SECTION_KEYS.has(key)) {
         throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
       }
     }
   }
+  const toolResultCaptureRaw = mergeToolResultCaptureRaw(cfg);
+  for (const key of Object.keys(toolResultCaptureRaw)) {
+    if (!TOOL_RESULT_CAPTURE_KEYS.has(key)) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+    }
+  }
   for (const value of [
     cfg.gate_enabled,
     cfg.reader?.enabled,
+    cfg.reader?.automatic_extract,
     cfg.inspect?.enabled,
     cfg.stats?.enabled,
-    cfg.suma_post_tool?.enabled,
+    toolResultCaptureRaw.enabled,
+    toolResultCaptureRaw.host_ordering_verified_locally,
     cfg.writer?.enabled,
   ]) {
     if (value !== undefined && typeof value !== "boolean") {
@@ -223,6 +252,11 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   const policyRaw = cfg.reader?.attribution_policy ?? "allow_unverified";
   if (policyRaw !== "allow_unverified" && policyRaw !== "require_match") {
     throw new ShuntError("INVALID_REQUEST", "BAD_ATTRIBUTION_POLICY", false);
+  }
+  const fallbackMaxBytes = cfg.reader?.fallback_max_bytes === undefined
+    ? 2048 : cfg.reader.fallback_max_bytes;
+  if (!Number.isSafeInteger(fallbackMaxBytes) || fallbackMaxBytes < 1 || fallbackMaxBytes > 4096) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   }
   const chainRaw = cfg.reader?.fallback_chain ?? [];
   if (!Array.isArray(chainRaw) || chainRaw.length > MAX_FALLBACK_ENTRIES) {
@@ -289,11 +323,33 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     readerProvider: provider,
     readerAttributionPolicy: policyRaw as AttributionPolicy,
     readerFallbackChain: fallbackChain,
+    readerAutomaticExtract: cfg.reader?.automatic_extract ?? true,
+    readerFallbackMaxBytes: fallbackMaxBytes,
     inspectEnabled: cfg.inspect?.enabled ?? true,
     statsEnabled: cfg.stats?.enabled ?? true,
-    sumaPostToolEnabled: cfg.suma_post_tool?.enabled ?? false,
+    toolResultCaptureEnabled: toolResultCaptureRaw.enabled ?? false,
+    toolResultCaptureHostOrderingVerifiedLocally:
+      toolResultCaptureRaw.host_ordering_verified_locally ?? false,
+    sumaPostToolEnabled: toolResultCaptureRaw.enabled ?? false,
     limits,
   };
+}
+
+/**
+ * Merge the canonical `tool_result_capture` key with the deprecated `suma_post_tool`
+ * alias, preferring the canonical key and refusing a config that sets both to disagreeing
+ * values rather than silently picking a side of a half-migrated file.
+ */
+function mergeToolResultCaptureRaw(
+  cfg: RawConfig,
+): { enabled?: boolean; host_ordering_verified_locally?: boolean } {
+  const current = cfg.tool_result_capture;
+  const legacy = cfg.suma_post_tool;
+  if (current !== undefined && legacy !== undefined
+    && JSON.stringify(current) !== JSON.stringify(legacy)) {
+    throw new ShuntError("INVALID_REQUEST", "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT", false);
+  }
+  return (current ?? legacy) ?? {};
 }
 
 function readModelRef(value: unknown, required: boolean): string {

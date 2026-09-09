@@ -5,10 +5,10 @@
  * needs. Where the proof does not exist the mode is reported `unsupported` with a fixed
  * reason and stays off - never faked, never "probably fine".
  *
- * For the optional Suma post-tool mode the required proof is two-part: complete capture of
- * the result *before* any host truncation, and safe replacement *before* persistence and
- * context insertion. See `docs/capability-matrix.md` for the file-and-line evidence behind
- * each reason.
+ * For the optional oversized-tool-result capture mode (`tool_result_capture`) the required
+ * proof is two-part: complete capture of the result *before* any host truncation, and safe
+ * replacement *before* persistence and context insertion. See `docs/capability-matrix.md`
+ * for the file-and-line evidence behind each reason.
  */
 export type Support = "supported" | "unsupported" | "disabled_by_config";
 

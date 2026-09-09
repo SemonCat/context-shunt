@@ -1,0 +1,44 @@
+{
+  "note": "LEGACY_COMPACTED carries its summary in legacy_compaction.summary and never a prose answer; mixing the two would blur a deterministic heuristic fallback with a model-generated answer",
+  "document": {
+    "schema_version": "1.1",
+    "request_id": "req_read_01",
+    "status": "partial",
+    "code": "LEGACY_COMPACTED",
+    "answer": "The upstream service returned repeated 503 errors.",
+    "citations": [],
+    "coverage": {
+      "complete": false,
+      "processed_chunks": 0,
+      "planned_chunks": 1,
+      "omitted": [
+        { "source_id": "src_01ab", "selector": { "kind": "all" }, "reason": "MODEL_ERROR" }
+      ],
+      "upstream_truncated": null
+    },
+    "sources": [],
+    "retryable": true,
+    "result_kind": "legacy_compaction",
+    "provenance": {
+      "derived": false,
+      "label": "legacy_compaction",
+      "attribution_status": "not_applicable",
+      "attribution_confidence": "none",
+      "attribution_policy": "not_applicable",
+      "attempts_started": 2,
+      "usage_complete": false,
+      "citations_mechanically_verified": true
+    },
+    "accounting_id": "acc_1111222233334444",
+    "legacy_compaction": {
+      "deterministic": true,
+      "source_id": "src_01ab",
+      "snapshot_id": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "summary": "Line count: 400",
+      "summary_bytes": 13,
+      "original_bytes": 4096,
+      "hard_cap_chars": 60000,
+      "original_failure": "MODEL_ERROR"
+    }
+  }
+}

@@ -57,6 +57,7 @@ _ALLOWED_KEYS = frozenset(
         "provenance",
         "accounting_id",
         "extraction",
+        "legacy_compaction",
         "stats",
         "recovery",
         "import_receipt",
@@ -146,10 +147,13 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
         ):
             raise OutputGuardError("source bytes over cap")
 
-    if code in ("SPILLED", "EXTRACTED", "STATS", "IMPORTED") and (answer or citations):
+    if code in ("SPILLED", "EXTRACTED", "STATS", "IMPORTED", "LEGACY_COMPACTED") and (
+        answer or citations
+    ):
         raise OutputGuardError(f"{code} must not carry an answer")
 
     _check_extraction(envelope, limits)
+    _check_legacy_compaction(envelope, limits)
 
     if serialized_bytes(envelope) > envelope_byte_cap(envelope.get("result_kind"), limits):
         raise OutputGuardError("envelope over byte cap")
@@ -166,7 +170,8 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
     published under a version string that understates what it contains.
     """
     present_v11 = {key for key in _ALLOWED_KEYS if key in envelope} & (
-        _REQUIRED_V11_KEYS | {"extraction", "stats", "recovery", "import_receipt"}
+        _REQUIRED_V11_KEYS
+        | {"extraction", "legacy_compaction", "stats", "recovery", "import_receipt"}
     )
     if version == "1.0":
         if present_v11:
@@ -210,6 +215,32 @@ def _check_extraction(envelope: dict[str, Any], limits: Limits) -> None:
         raise OutputGuardError("extraction over per-result cap")
     if extraction.get("result_bytes") != total:
         raise OutputGuardError("extraction result_bytes disagrees with its segments")
+
+
+def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
+    block = envelope.get("legacy_compaction")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        raise OutputGuardError("legacy_compaction must be an object")
+    if block.get("deterministic") is not True:
+        raise OutputGuardError("legacy_compaction must declare itself deterministic")
+    summary = block.get("summary")
+    if not isinstance(summary, str):
+        raise OutputGuardError("legacy_compaction summary malformed")
+    text = summary.encode("utf-8")
+    if contains_secret_marker(text):
+        raise OutputGuardError("secret marker in legacy_compaction summary")
+    if len(text) > limits.max_extraction_bytes:
+        raise OutputGuardError("legacy_compaction over per-result cap")
+    if block.get("summary_bytes") != len(text):
+        raise OutputGuardError("legacy_compaction summary_bytes disagrees with summary")
+    # provenance.derived must already be false for this envelope (checked in
+    # `_check_version_fields` via result_kind agreement); this is the belt to that
+    # braces - a compaction block can never accompany a claim of model derivation.
+    provenance = envelope.get("provenance")
+    if isinstance(provenance, dict) and provenance.get("derived") is True:
+        raise OutputGuardError("legacy_compaction must not accompany a derived=true provenance")
 
 
 def enforce_or_fixed(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[str, Any]:

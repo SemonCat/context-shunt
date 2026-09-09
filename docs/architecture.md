@@ -36,6 +36,7 @@ Hermes adapter                         OpenClaw adapter
         shared contract and independent policy cores
           gate -> snapshot/store -> chunk planner
           reader -> citation verifier -> output guard
+          exhausted availability -> bounded exact inspect -> output guard
           inspect/stats -> output guard
                          |
                          v
@@ -52,42 +53,57 @@ the caller's question, and one authorized excerpt at a time. It receives no host
 shell, network, writer, or other tools. Model output cannot grant permissions or create a
 valid citation.
 
-## The two intake paths
+## The intake paths
 
-There are two ways content becomes a snapshot, and they answer different problems.
+There are three ways content becomes a snapshot, and they answer different problems.
 
 ```text
-  primary: an oversized TOOL RESULT              secondary: an oversized FILE READ
-  a producer already persisted                   the agent is about to make
-             |                                              |
-   manifest + artifact file                        host read request
-             |                                              |
-   artifact import boundary                          pre-read gate
-   (allowlisted roots, re-proven claims)      (blocked before execution)
-             |                                              |
-             +----------------> immutable snapshot <---------+
-                                        |
-                       opaque handle, internal or ordinary
-                                        |
+  primary: an oversized TOOL RESULT                          secondary: an oversized
+  ------------------------------------                       FILE READ
+  a producer already            the host's own hook          the agent is about
+  persisted a file               captures it inline          to make
+             |                          |                              |
+   manifest + artifact file    transform_tool_result-shaped    host read request
+             |                  hook (operator-attested            |
+   artifact import boundary     only; Hermes only)              pre-read gate
+   (allowlisted roots,                  |                  (blocked before execution)
+    re-proven claims)          capture-then-pointer                   |
+             |                  (SpillEngine)                         |
+             +----------------------+----------------> immutable <----+
+                                                          snapshot
+                                                             |
+                                       opaque handle, internal or ordinary
+                                                             |
             +---------------------------+---------------------------+
             |                           |                           |
    deterministic inspect        question-aware reader        session accounting
    (zero model calls)           (citation-verified)          (signed, bounded)
 ```
 
-The primary path exists because the oversized context that actually costs a session is a
-tool result - a log query page, a cloud journal page, an issue tracker export, a wiki page -
-not a source file. Holding one of those out of the context requires intercepting the result
-before the host truncates and persists it, and neither supported host provides that
-ordering; `suma_post_tool` is reported unsupported for that reason and stays off.
+Both tool-result sub-paths exist because the oversized context that actually costs a
+session is a tool result - a log query page, a cloud journal page, an issue tracker
+export, a wiki page - not a source file, and answering a question about one afterward
+always goes through the same question-aware reader either way (never the hook itself:
+neither hook nor import receives a question, so "capture" and "answer" stay two steps on
+every path).
 
-What a host *can* be handed is an artifact somebody else already wrote down. A compactor or
-spooler that persists an oversized tool result and describes it with a manifest has already
-performed the capture. The import boundary adopts that artifact, and from then on it is an
-ordinary handle.
+**Artifact import** needs a producer that already wrote the result to a file and described
+it with a manifest; the import boundary re-proves every claim the manifest makes and adopts
+it as an ordinary handle. It needs no interception ordering at all, which is why it is
+supported wherever a host can register the tool.
+
+**`tool_result_capture`** needs the host to hand the adapter the complete result *before*
+truncation and accept a bounded replacement *before* persistence and context insertion.
+Unsupported on OpenClaw (its persistence cap runs before the one hook positioned early
+enough, and that hook cannot replace a result either way). On Hermes it is wired but stays
+off by default, becoming supported only with an explicit operator attestation - see
+[capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 
 The secondary path is the original pre-read gate, unchanged. It remains the answer for an
-oversized *file* read, and it is the only path that can act before an operation runs.
+oversized *file* read, and it is the only path that can act before an operation runs. A
+full read that gets past it uses the question-aware reader exactly like a captured tool
+result does; a reader failure on either kind of source uses the same automatic-extraction
+and legacy-compaction fallback tiers described below.
 
 ## Artifact import boundary
 
@@ -180,20 +196,69 @@ enter the internal request schema or output envelope.
 Text chunks preserve physical-line locations and UTF-8 boundaries. JSON snapshots have a
 deterministic record index; citations identify stable record ordinals rather than pretty
 printed lines. A request may plan at most eight chunks, use at most two concurrent model
-calls, and start at most one core retry per transient failure. All attempts share the
-64,000-token input and 60-second request budgets. One model call is capped at 45 seconds and
-2,048 output tokens.
+calls, and start at most one core retry per transient failure, plus at most one further
+retry for a schema or claims/citations relationship failure. The two budgets are
+independent - each may spend its own retry on the same chunk, so both can fire together -
+and the combined worst case for one chunk is bounded by the sum of the two limits, never
+more. All attempts share the 64,000-token input and 60-second request budgets. One model
+call is capped at 45 seconds and 2,048 output tokens.
 
-Each model call receives the original question. The model returns structured assertions and
-citations. The verifier independently checks handle scope, full snapshot hash, locator
-range, and exact quote bytes. It deletes an assertion whose citation fails; if nothing
-survives the result is `CITATION_INVALID`. Mechanical verification proves that a quote
-exists, not that the quote semantically supports the assertion.
+Each model call receives the original question. The model returns structured `claims`
+(`{"text", "citation_ids"}`) plus the `citations` array those ids reference, never a
+hand-placed inline marker: the reader validates every `citation_ids` entry against the same
+reply's own `citations` (unknown, duplicate, or missing ids drop that one claim, never the
+whole answer, and never guessed at) and mechanically verifies each surviving id against the
+snapshot exactly as before. Only after that does it deterministically render the public
+`answer` string, placing every `[cN]` marker itself - the model never writes one. This
+removes a formatting task the model previously had to get right twice (once as a marker in
+prose, once as a citation object); a reply already shaped the old way - hand-placed markers
+in free-form prose - is still accepted only when it already satisfies that older contract,
+never inferred from markerless prose. A reply carrying both shapes at once is refused as
+ambiguous rather than guessed at. The verifier independently checks handle scope, full
+snapshot hash, locator range, and exact quote bytes. It deletes an assertion whose citation
+fails; if nothing survives the result is `CITATION_INVALID`. Mechanical verification proves
+that a quote exists, not that the quote semantically supports the assertion.
 
 Coverage reports processed/planned chunks, omissions, and whether upstream truncation is
 known. Incomplete or unknown coverage cannot be published as complete. If a serialized
 answer would exceed its envelope, evidence is dropped deterministically and the assertions
 that depended on it are removed; an empty result is a refusal, not a false `NO_MATCH`.
+
+## Automatic availability escape hatch
+
+`ShuntSession.read` uses the existing inspector only after a wholly unavailable reader
+result. It extracts a nonempty, strictly shorter byte prefix of the first source (2 KiB by
+default, at most 4 KiB), revalidates every handle, guards before charging disclosure, and
+records one delivery with both failed LLM cost and extraction egress. It publishes
+`partial/EXTRACTED`, explicit escape-hatch guidance, deterministic provenance and conservative
+omissions, never a summary. The 1.1 envelope and store schemas are unchanged. Wholly failed
+reads now report `MODEL_ERROR`/`TIMEOUT` rather than partial `NO_MATCH` when extraction cannot
+run. See [configuration](configuration.md#automatic-exact-extraction-after-reader-unavailability)
+for exact triggers, selector-independent prefix selection, limits and compatibility.
+
+## Legacy-compaction fallback
+
+On Python/Hermes, `reader.legacy_compaction` (default on) is tried before automatic
+extraction for terminal `CITATION_INVALID`, `MODEL_ERROR`, and `TIMEOUT`, including
+wholly unavailable readers after retries and model fallback. It publishes a deterministic, ported heuristic summary of the
+first requested source - signal lines, head/tail sampling, repeated-line collapsing, JSON
+structure, secret redaction - never exact bytes and never model output, as
+`partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`,
+`provenance.derived: false`, and a dedicated `legacy_compaction` block distinct from
+`extraction`'s "never a summary" contract. A reported-model mismatch is deliberately
+excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
+heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
+extraction; otherwise the original bounded failure remains, never raw. Coverage and
+failed-attempt accounting are preserved. TypeScript/OpenClaw precedence is unchanged. See
+[configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
+for the exact trigger set, caps and wire shape.
+
+The algorithm itself (`context_shunt.legacy_compact`) is a function-for-function port of
+the text/JSON-shaping half of the incumbent tool-result compactor plugin this project
+displaces on hosts where it is deployed - read read-only from a live operator host, not
+reconstructed from memory or from the deterministic-shadow corpus's reference emulation
+(which is explicitly documented as a narrower stand-in, not the incumbent's real
+algorithm). See the module's own docstring for exactly what was and was not ported.
 
 ## Exact inspection and disclosure
 
@@ -215,11 +280,21 @@ not summarize or call a model. It only publishes a pointer after a complete safe
 failure returns a bounded error without the raw result. Internal-pointer recursion bypass is
 verified against store state, not trusted from payload data.
 
-This engine is behind `suma_post_tool` and is not wired on either supported host. Hermes
-exposes tool results only after truncation and its transform hook fails open; OpenClaw
-applies its cap before the persistence hook. Neither supplies both complete capture and safe
-replacement before persistence/context insertion. Capability probing therefore reports the
-mode unsupported and it remains inactive even if requested in configuration.
+This engine is behind `tool_result_capture` (formerly documented under the internal name
+`suma_post_tool`). It is not wired on OpenClaw: OpenClaw applies its persistence cap before
+the one hook positioned early enough to observe a result, and that hook cannot replace one
+either way, so neither guarantee this mode needs can be shown there. On Hermes, direct
+read-only inspection of one live 0.21.1 host found the tool executes and `post_tool_call`
+fires before `transform_tool_result` runs, with no truncation call visible between - so the
+mode is wired there, but stays reported unsupported by default: that finding is evidence
+about one running instance, not a reproducible, host-version-independent proof, and per-tool
+self-truncation upstream of that dispatch layer was not audited. It becomes supported, and
+the `transform_tool_result` hook registered, only when a deployment sets an explicit
+operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) - this
+code does not and cannot prove the ordering for itself. See
+[capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
+for the exact evidence and [acceptance.md](acceptance.md#tool_result_capture-cutover-on-hermes)
+for the cutover plan.
 
 ## Output, security, and no-raw-leak boundary
 
@@ -234,7 +309,7 @@ reader provider and constrain roots. The system refuses instead of redacting and
 modified text as an original quote.
 
 Raw payloads and provider exception bodies are excluded from envelopes, logs, traces,
-metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments and short
+metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments (including automatic availability escape hatches) and short
 verified citation quotes are the only deliberate source-text disclosures to the main
 context. The no-raw-leak gates inject sentinels and failures across every stage.
 

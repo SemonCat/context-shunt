@@ -2,205 +2,140 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-An evidence broker for oversized payloads. It keeps a large tool result or file out of the
-main model context, hands back an opaque handle, and answers questions about it with
-citations verified byte-for-byte against an immutable snapshot.
+Keep oversized files and tool results out of the main model's context. context-shunt stores
+an immutable snapshot, returns an opaque handle, and lets the main model ask a cheaper
+reader an explicit question. Answers include evidence, coverage, and mechanically verified citations.
 
-> **Status: pre-release and read-only.** Artifact import is supported on Hermes 0.18.2;
-> pre-read interception on Hermes 0.18.2 and OpenClaw 2026.9.2. Interception of oversized
-> post-tool results is unsupported on both hosts. There is no writer or `propose_patch`.
-> The shadow A/B's provider-dependent gates are `NOT_RUN`, so this is not a
-> production-equivalent claim.
+> **Pre-release, read-only.** The operator-reported Hermes deployment uses
+> `tool_result_capture` and the internal legacy fallback after an atomic cutover; the
+> standalone `oversize-tool-result-compactor` plugin is disabled and no longer needed there.
+> Capture remains off by default for new installations and requires verified host ordering.
+> OpenClaw supports local pre-read protection, but not tool-result capture.
+> Live reader evaluation and provider benchmark gates remain `NOT_RUN`.
 
-## Why context-shunt exists
+## How it works
 
-Blind truncation and heuristic summaries save space by deciding what matters in advance.
-That is exactly when a rare condition, a negative result, or the answer itself can vanish —
-and the middle of a log page is where heuristics cut first.
+### Local files: gate before reading
 
-context-shunt persists the full payload before it reaches the context, gives the main model
-metadata and a handle, and makes the source reachable two ways: a deterministic search that
-calls no model, and a cheap reader that answers one explicit question with verified quotes.
-It never generates an unasked-for summary.
+The pre-read gate and question-aware reader flow are inspired by Spotify Portal/Shunt
+([design provenance](THIRD_PARTY_NOTICES.md)). A full text read passes only within the default
+350 physical lines and 16 KiB limits. Oversized or unprovably bounded reads are blocked
+before execution; safe sources are captured for a question-aware read. Small or provably
+bounded reads can use the original host tool.
 
-## The primary path: oversized tool results
+Coverage is explicit: Hermes gates `read_file`, `search_files`, and `terminal`; OpenClaw
+covers `read` and `exec`, with no search tool registered for gating. This is not blanket
+protection for every possible read tool; disable uncontrolled tools if complete coverage is required.
 
-The oversized context that actually costs a session is a **tool result** — a log query
-page, a cloud journal page, an issue tracker export, a wiki page — not a source file.
-Holding one out of the context requires seeing the complete result before the host
-truncates and persists it, and neither supported host provides that ordering. So
-`suma_post_tool` is reported unsupported and stays off.
+### Hermes tool results: capture first, ask afterward
 
-What a host *can* be handed is an artifact somebody else already wrote down. A compactor or
-spooler that persists an oversized result and describes it with a manifest has already done
-the capture. `context_shunt_import` adopts that artifact:
+The product-neutral `tool_result_capture` capability intercepts eligible oversized MCP/tool
+results at `transform_tool_result`, before they enter the main-model context. It stores the
+full content received as an immutable artifact and replaces the result with a bounded opaque
+handle/pointer and metadata. Capture makes **zero model calls** and produces no heuristic summary.
 
-```text
-producer writes artifact + manifest
-                |
-       context_shunt_import
-                |
-   every claim re-proven: allowlisted root, canonical regular file,
-   no symlink/hardlink, size and digest against the bytes actually read,
-   text-or-JSON, secret policy
-                |
-      immutable private snapshot
-                |
-   opaque handle + metadata ------> main model context
-                |
-                +-- context_shunt_inspect: exact text, zero model calls
-                `-- context_shunt_read: one question, verified citations
-```
-
-Every manifest field and every path inside it is untrusted input. A manifest is a set of
-claims, and nothing in it is believed until it has been re-proven against the file; a
-refusal leaves no handle and never returns the payload. The import contract is
-producer-agnostic — a foreign manifest reaches the core through a translation profile, and
-a schema this deployment has not allowlisted is refused even when a profile for it exists.
-
-This is **not** post-tool interception, and the envelope keeps the two apart: an import
-publishes `IMPORTED`, never `SPILLED`. It is off by default and needs an explicit import
-root plus an allowlisted producer manifest schema.
-
-## The secondary path: oversized file reads
-
-The original pre-read gate, unchanged. Raw file reads spend the main model's context on
-source text before the agent knows which part it needs; the current default allows a full
-text read through 350 physical lines and 16 KiB and blocks anything larger *before it
-runs*, capturing what it withheld.
+The hook **does not receive the user's question**. It cannot automatically ask Luna to
+summarize every large result. The main model must call `context_shunt_read` with an explicit
+question and the artifact handle. The reader uses `gpt-5.6-luna` in the deployed example;
+users can configure the model and provider.
 
 ```text
-host read request
-        |
-        +-- small or provably bounded ----------> original host tool
-        |
-        `-- oversized / unprovable ------> block, capture, same handle as above
+eligible oversized tool result          oversized local read
+              |                                |
+     tool_result_capture                  pre-read gate
+              |                                |
+              +---- immutable snapshot --------+
+                              |
+                   bounded handle → main model
+                              |
+              explicit question + handle → context_shunt_read
+                              |
+                 reader → evidence / coverage / locators
+                              |
+                  mechanical citation verification
+                              |
+              main model can inspect bounded source ranges
 ```
 
-This is the only path that can act before an operation happens. It covers the host tool
-identifiers listed in its capability report; deployments that require complete coverage
-must disable any uncontrolled raw-read tools.
+The Hermes hook currently captures oversized **string** results; structured/multimodal
+blocks pass through. It cannot restore content a producer already truncated. Hook ordering
+was inspected on one Hermes 0.21.1 host, not proven for every installation. New deployments
+must verify their own ordering and set both `tool_result_capture.enabled: true` and
+`tool_result_capture.host_ordering_verified_locally: true`. The adapter returns a bounded
+failure if an eligible oversized capture fails, never the raw result as a fail-open fallback.
+See the [capability evidence](docs/capability-matrix.md) and [cutover procedure](docs/acceptance.md#tool_result_capture-cutover-on-hermes).
 
-## Core guarantees
+`suma_post_tool` is only a deprecated configuration migration alias, never the product name.
+Use `tool_result_capture` in public configuration.
 
-- **Nothing is summarized unasked.** The reader runs only for an explicit question. There
-  is no automatic generic summary anywhere in this system, and no heuristic fallback to
-  produce one when the reader fails.
-- **Question-aware reading.** Every processed chunk receives the original question. The
-  reader gets an authorized excerpt, not the host conversation or a set of tools.
-- **Reader output is evidence, not a verdict.** An answer arrives with quotes, coverage,
-  omissions and mechanically checkable locators. Verification proves a quote exists where
-  it says it does; it does not prove the quote supports the claim, and the envelope says so
-  rather than implying a conclusion.
-- **Verified quotations and honest coverage.** Deterministic code checks each published
-  quote against the snapshot and reports omitted or unprocessed chunks. This proves that a
-  quotation exists at the cited location; it does not prove that the quote supports the
-  model's reasoning.
-- **An exact-text escape hatch.** `context_shunt_inspect` returns bounded line, byte, or
-  literal-search results without a model call.
-- **Immutable, scoped snapshots.** `workspace_roots` and `artifact_import.roots` are
-  separate allowlists, so brokering a producer's artifacts never widens what an ordinary
-  read may capture. Secret, binary, and unsafe sources are refused. Private blobs expire through TTL and session cleanup.
-  Inspection budgets and deletion are disclosure controls, not a confidentiality guarantee
-  or secure erase.
-- **Truthful accounting.** Session records separate main-context tokens saved from reader
-  input/output, label exact versus estimated counts, and include physical retry and fallback
-  attempts. The project does not infer currency savings from token counts.
+### Existing artifacts: import without interception
 
-## Four read-only tools
+On Hermes, `context_shunt_import` can adopt a text/JSON artifact another producer already
+persisted. It validates the manifest, allowlisted root, regular file, size, digest, and
+secret policy before creating a private snapshot. It returns `IMPORTED`, not `SPILLED`;
+import does not imply post-tool interception. It is off by default and requires explicit
+`artifact_import.roots` and allowlisted producer schemas. OpenClaw has no import implementation yet.
 
-| Tool | Use it for | Model calls |
-| --- | --- | --- |
-| `context_shunt_import` | Adopt an oversized tool-result artifact a producer already persisted. Returns a handle and metadata, never the artifact's bytes. | Zero |
-| `context_shunt_read` | Ask a question about one or more authorized paths or existing snapshot handles. | At least one per processed chunk; retries and availability fallbacks can add calls. |
-| `context_shunt_inspect` | Retrieve exact lines, UTF-8-safe byte ranges, or literal-search matches from a snapshot. | Zero |
-| `context_shunt_stats` | View bounded token and disclosure accounting for the current session. | Zero |
+## Ask and inspect
 
-The deterministic escape hatch is first-class: `inspect` needs no provider, no reader
-configuration and no model call, and it stays available when the reader is disabled or its
-bridge is absent. Adapters may keep the reader tool registered when `reader.enabled` is
-false; execution is then refused before any model call. `context_shunt_import` is registered
-only where `artifact_import` is configured and the capability probe supports it.
-
-## One import, end to end
-
-Hand over an artifact a producer already wrote:
-
-```json
-{ "manifest_path": "/var/lib/your-compactor/artifacts/q-8412.manifest.json" }
-```
-
-Selected fields from the returned envelope:
-
-```json
-{
-  "status": "ok",
-  "code": "IMPORTED",
-  "answer": "",
-  "citations": [],
-  "pointer": {
-    "source_id": "src_9f2c41b7e0d3a86e",
-    "snapshot_id": "sha256:2a97...5aea",
-    "bytes": 1048576,
-    "internal": true
-  },
-  "import_receipt": {
-    "producer": "your-compactor",
-    "manifest_schema": "context_shunt.artifact_import.v1",
-    "origin_tool": "log_query",
-    "artifact_sha256": "2a97...5aea",
-    "bytes": 1048576,
-    "upstream_truncated": false
-  }
-}
-```
-
-`artifact_sha256` is the digest of the bytes actually read, not the one the manifest
-claimed — by the time the receipt exists the two have been proven equal.
-
-## One read, end to end
-
-Ask the registered tool a concrete question:
+Call `context_shunt_read` with the handle returned by capture or import, replacing these
+illustrative identifiers with the actual values:
 
 ```json
 {
   "question": "What is the retry ceiling?",
-  "paths": ["/workspace/service/retry.py"]
+  "handles": [{
+    "source_id": "src_example1234",
+    "snapshot_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }]
 }
 ```
 
-Selected fields from the returned envelope might look like this:
+For an initial local capture, use `"paths": ["/workspace/service/retry.py"]` instead of
+`handles`. Every processed chunk receives the question and an authorized excerpt, without
+the host conversation or tools. The returned answer includes quotes, coverage, omissions,
+and locators. Code verifies quotes against the immutable snapshot byte-for-byte; it does
+**not** prove that a quote supports the reader's reasoning. Check partial coverage and
+upstream truncation before relying on an answer.
 
-```json
-{
-  "status": "ok",
-  "code": "ANSWERED",
-  "answer": "Retries stop after three attempts [c1].",
-  "citations": [
-    {
-      "id": "c1",
-      "locator": {"kind": "lines", "start": 41, "end": 41},
-      "quote": "max_retries = 3",
-      "verified": true
-    }
-  ],
-  "coverage": {
-    "complete": true,
-    "processed_chunks": 1,
-    "planned_chunks": 1,
-    "omitted": [],
-    "upstream_truncated": false
-  }
-}
-```
+| Tool | Purpose | Model calls |
+| --- | --- | --- |
+| `context_shunt_read` | Ask about authorized paths or snapshot handles. | Per processed chunk; retries and model fallbacks can add attempts. |
+| `context_shunt_inspect` | Exact lines, UTF-8-safe byte ranges, or literal-search matches. | Zero |
+| `context_shunt_stats` | Bounded session token and disclosure accounting. | Zero |
+| `context_shunt_import` | Adopt a producer's persisted artifact (Hermes only, when configured). | Zero |
 
-This display omits opaque source and snapshot identifiers, provenance, recovery, and
-accounting fields. See the [tool argument schema](contracts/v1/tool-args.schema.json) and
-[versioned contracts](contracts/v1/) for complete shapes.
+`inspect` is independent of the reader and remains available without a provider, subject
+to configuration, per-call and cumulative disclosure budgets, and handle validity. Snapshots
+are immutable and session-scoped; TTL and session cleanup limit their lifetime. Workspace
+and import roots are separate allowlists. Unsafe, secret, or binary sources are refused;
+cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/tool-args.schema.json).
+
+## When the reader fails
+
+On Python/Hermes, exhausted reader retries/model fallbacks ending in eligible `MODEL_ERROR`,
+`TIMEOUT`, or `CITATION_INVALID` trigger the ported bounded legacy compactor **inside
+context-shunt** (`reader.legacy_compaction: true` by default). Model-identity mismatches and
+provenance-policy refusals do not qualify. This is a deterministic heuristic summary of the
+first requested source, using signal lines, head/tail sampling, repetition collapsing, and
+JSON shaping—not a Luna answer or an exact source range.
+
+The envelope explicitly reports `status: partial`, `code: LEGACY_COMPACTED`,
+`result_kind: legacy_compaction`, and `provenance.derived: false`. Its summary lives in
+`legacy_compaction`, with empty `answer` and `citations`; coverage stays partial and failed
+model attempts remain in accounting. The standalone legacy plugin is unnecessary after the
+Hermes cutover because this fallback is internal.
+
+If compaction is disabled or cannot safely return output, a wholly unavailable reader may
+use the secondary, guarded exact-prefix extraction tier when enabled. If safe fallback also
+fails, only a bounded pointer/failure and recovery guidance remain—never raw oversized
+content. Reuse a valid handle with a narrower question or inspect a bounded range.
+TypeScript/OpenClaw supports the exact-extraction tier, but has not ported legacy compaction.
+See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
 
 ## Quick start
 
-Use Python 3.11 or newer and Node 22.22.3 or newer. From an existing checkout:
+Use Python 3.11+ and Node 22.22.3+. From an existing checkout:
 
 ```bash
 python3 -m venv .venv
@@ -216,10 +151,12 @@ npm install
 cp -R adapters/hermes/context-shunt ~/.hermes/plugins/context-shunt
 ```
 
-Merge the executable [Hermes example](examples/config/hermes.config.yaml) into
-`~/.hermes/config.yaml`, set `workspace_roots`, and restart Hermes. Its plugin `llm` policy
-must authorize the requested model/provider. `auxiliary.context_shunt_reader` overrides the
-plugin reader defaults; Hermes value `auto` means inherit.
+Merge the [Hermes example](examples/config/hermes.config.yaml) into `~/.hermes/config.yaml`,
+set `workspace_roots`, authorize the reader model/provider in the plugin `llm` policy, and
+restart Hermes. `auxiliary.context_shunt_reader` overrides plugin reader defaults; `auto`
+means inherit. The example deliberately leaves capture off until local ordering is attested.
+For migration, follow the atomic cutover procedure linked above so capture is active when
+the standalone compactor is disabled.
 
 ### OpenClaw
 
@@ -229,106 +166,49 @@ openclaw plugins install --link ./adapters/openclaw --force
 openclaw plugins enable context-shunt
 ```
 
-Merge the executable [OpenClaw example](examples/config/openclaw.json) into
-`openclaw.json`, set `workspace_roots`, and authorize the reader target in the adjacent `llm`
-policy. Then restart the Gateway and confirm what loaded:
+Merge the [OpenClaw example](examples/config/openclaw.json) into `openclaw.json`, set
+`workspace_roots`, authorize the reader target in the adjacent `llm` policy, then restart
+the Gateway and inspect the loaded plugin:
 
 ```bash
 openclaw plugins inspect context-shunt --runtime --json
 ```
 
-[Installation, upgrade, cleanup, and uninstall](docs/install.md) covers both hosts in
-detail.
+OpenClaw currently lacks the equivalent pre-context post-tool seam: its early hook is
+observe-only, while the persistence hook sees already-capped results. `tool_result_capture`
+is **unsupported even if requested in config**. It does not capture arbitrary oversized
+MCP/tool outputs. See [installation and cleanup](docs/install.md).
 
-## What works today
+## Host support and honest accounting
 
-| Capability | Hermes 0.18.2 | OpenClaw 2026.9.2 |
+| Capability | Hermes | OpenClaw 2026.9.2 |
 | --- | --- | --- |
-| External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`: Python core only) |
-| Oversized pre-read gate | Supported | Supported |
-| Question-aware reader | Supported; attribution ceiling `unverified` | Supported; attribution ceiling `resolved` |
-| Exact inspect and session stats | Supported | Supported |
-| Oversized post-tool interception | Unsupported | Unsupported |
+| Local pre-read gate, reader, exact inspect, session stats/lifecycle | Supported (compatibility baseline 0.18.2) | Supported |
+| Tool-result capture | Enabled in the reported 0.21.1 deployment; off by default, requires local attestation | Unsupported |
+| External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`) |
+| Internal legacy compaction | Supported, default reader-failure fallback | Not implemented |
+| Reader attribution ceiling | `unverified` | `resolved` |
 | Writer / `propose_patch` | Not implemented | Not implemented |
 
-Neither adapter can prove provider-authoritative `actual` model identity. OpenClaw can
-report the host's resolved route; Hermes cannot distinguish a provider report from a
-request echo.
+Neither adapter proves provider-authoritative `actual` model identity. Requested models,
+resolved routes, and provider-confirmed identities are distinct; provenance does not turn
+a request echo into proof. Model/provider configuration and availability fallbacks are
+explicit, and a model mismatch is refused.
 
-`artifact_import` is unsupported on OpenClaw because the TypeScript core has no import
-boundary — a repository gap, not a host limitation, so closing it needs no host change.
+Token accounting separates main-context savings from reader input/output, marks exact
+versus estimated counts, and includes retries and fallback attempts. Token reductions are
+not currency savings. Spotify's reported savings are inspiration, **not this project's
+measured guarantee**. The deterministic shadow corpus measures a limited retrieval lane;
+production-equivalent Luna evaluation and provider benchmarks remain `NOT_RUN`. A deployed
+capture path does not turn those missing results into passes. See [metrics](docs/metrics.md),
+[capability matrix](docs/capability-matrix.md), and [acceptance gates](docs/acceptance.md).
 
-Deterministic gates are implemented and require no live provider. Previously recorded
-real-host integration evidence covered 122 cases with 0 failures. The production-equivalent
-40-item Luna evaluation and provider benchmark remain `NOT_RUN`. Both post-tool gates also
-remain `NOT_RUN` because the required host seams are unsupported. `NOT_RUN` is never counted
-as a pass; see the [capability matrix](docs/capability-matrix.md) and
-[acceptance gates](docs/acceptance.md).
+## Documentation and contributing
 
-## Shadow A/B, and what it does not prove
-
-`./scripts/verify shadow all` compares four lanes over a fixed synthetic corpus: the raw
-baseline, a reference emulation of a heuristic head/tail compactor, deterministic retrieval
-through the import boundary, and the question-aware reader.
-
-Three gates are measured from the repository alone — main-context token reduction (≥ 60%),
-no evidence regression against the raw baseline, and latency for the deterministic
-retrieval lane. On the current corpus the retrieval lane keeps every expected quote the
-compactor drops from the middle of a page. The reduction is measured over the items the
-broker actually brokered; the item it refuses for exceeding the source cap is most of the
-whole-corpus baseline, and crediting that counterfactual would make the headline a saving
-on a payload no lane can answer from.
-
-Five gates report `NOT_RUN`, and the harness will not score them from a lane that cannot
-answer the question they ask: task correctness, semantic evidence support, mechanical
-citation validity (the retrieval lane publishes no citations, so scoring it there would be
-a vacuous 100%), bounded follow-up rate, and net cost reduction — which additionally needs
-a versioned price table this repository does not have. The reader lane is `NOT_RUN`
-*unconditionally*, bridge or no bridge: scoring a model lane needs a fixed corpus and fixed
-thresholds, and [`eval luna`](docs/acceptance.md) is the gate that owns them.
-
-Nothing here authorizes replacing a live compactor. The broker is additive; the rollout
-order and the evidence each step requires are in
-[acceptance gates](docs/acceptance.md#what-has-to-be-true-before-the-live-compactor-is-replaced).
-
-## When the reader cannot answer
-
-Model errors, quota limits, timeouts, malformed output, and invalid citations fail closed.
-The handle and the bounded inspect path survive; the oversized original does not fall back
-into the main context, and there is no heuristic summary to fall back to.
-
-- Reuse the returned handle and ask a narrower question; the immutable snapshot need not be
-  captured again.
-- Use `context_shunt_inspect` for an exact range or literal search.
-- Read `coverage` before relying on the answer. Partial work stays marked partial, including
-  upstream truncation and chunks omitted by deadlines or limits.
-
-## Configuration and accounting
-
-The reader defaults to `gpt-5.6-luna`; model and provider are configurable, and an empty
-provider delegates routing to the host. A fallback chain handles availability only. It does
-not replace a weak answer. Numeric limits may be narrowed for a deployment but never widened.
-
-`artifact_import` is off by default with no roots and no accepted producer schemas; enabling
-it without both is a configuration error rather than an allow-all.
-
-See the [configuration reference](docs/configuration.md) for host policy, deadlines, TTL,
-store, disclosure, concurrency, retry, import, and envelope limits. The [metrics guide](docs/metrics.md)
-defines main-context savings, reader usage, estimates, retries, and session scope.
-
-## Documentation map
-
-| Topic | Reference |
-| --- | --- |
-| Design and trust boundaries | [Architecture](docs/architecture.md), [security](docs/security.md), and [known limitations](docs/limitations.md) |
-| Current host support and release evidence | [Capability matrix](docs/capability-matrix.md), [acceptance gates](docs/acceptance.md), and [development status](docs/implementation-plan.md) |
-| Configuration and operations | [Configuration](docs/configuration.md), [metrics](docs/metrics.md), and [installation](docs/install.md) |
-| Import contract | [`artifact-import.schema.json`](contracts/v1/artifact-import.schema.json) and its [conformance corpus](contracts/v1/conformance/artifact-import-cases.json) |
-| Public contracts and storage | [Versioned contracts](contracts/v1/) and [SQLite DDL](contracts/store/v1.sql) |
-| Implementations | [Python core](packages/core-py/), [TypeScript core](packages/core-ts/), [Hermes adapter](adapters/hermes/), and [OpenClaw adapter](adapters/openclaw/) |
-| Evaluation and verification | [Evaluation corpus](evals/), [shadow A/B corpus](evals/shadow/corpus.json), and [`scripts/verify`](scripts/verify) |
-
-## Contributing
+- [Architecture](docs/architecture.md), [security](docs/security.md), and [limitations](docs/limitations.md)
+- [Configuration](docs/configuration.md), [examples](examples/config/README.md), and [installation](docs/install.md)
+- [Versioned contracts](contracts/v1/), [Python core](packages/core-py/), and [TypeScript core](packages/core-ts/)
+- [Hermes adapter](adapters/hermes/), [OpenClaw adapter](adapters/openclaw/), and [evaluation corpus](evals/)
 
 Run the deterministic checks before opening a change:
 
@@ -341,10 +221,5 @@ npm run typecheck --workspaces --if-present
 git diff --check
 ```
 
-These commands do not turn missing live-model evidence into a pass. Host integration and
-live evaluation requirements are defined in the [acceptance guide](docs/acceptance.md).
-
-## License and credits
-
-Licensed under [Apache-2.0](LICENSE). Dependency licenses and bundled notices are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Licensed under [Apache-2.0](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md)
+for design provenance and dependency licenses.
