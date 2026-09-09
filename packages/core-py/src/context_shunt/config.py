@@ -81,6 +81,8 @@ _READER_KEYS = {
     "fallback_chain",
     "automatic_extract",
     "fallback_max_bytes",
+    "legacy_compaction",
+    "legacy_compaction_max_chars",
 }
 _ARTIFACT_IMPORT_KEYS = {"enabled", "roots", "accepted_manifest_schemas"}
 _ENABLED_SECTION_KEYS = {"enabled"}
@@ -131,6 +133,15 @@ class ReaderConfig:
     fallback_chain: tuple[ProviderRef, ...] = ()
     automatic_extract: bool = True
     fallback_max_bytes: int = 2048
+    #: The broader deterministic fallback: a ported heuristic compaction of the source,
+    #: covering reader outcomes automatic_extract was never asked to (malformed output,
+    #: citation-empty, or an availability failure when automatic_extract is off). See
+    #: `session.py`'s `_LEGACY_COMPACTION_TRIGGER_CODES` for the exact ordering.
+    legacy_compaction: bool = True
+    #: Character budget handed to the compaction algorithm before the envelope's own byte
+    #: cap is enforced. Kept below `limits.max_extraction_bytes` (16 KiB) by default so the
+    #: algorithm's own cap is normally what fires, not the safety truncation behind it.
+    legacy_compaction_max_chars: int = 16_000
 
 
 @dataclass(frozen=True)
@@ -300,9 +311,19 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
     fallback_bytes = reader_raw.get("fallback_max_bytes", 2048)
     if type(fallback_bytes) is not int or not 1 <= fallback_bytes <= 4096:
         raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    if "legacy_compaction" in reader_raw and type(reader_raw["legacy_compaction"]) is not bool:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    legacy_compaction_max_chars = reader_raw.get("legacy_compaction_max_chars", 16_000)
+    if (
+        type(legacy_compaction_max_chars) is not int
+        or not 1_000 <= legacy_compaction_max_chars <= 60_000
+    ):
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     return ReaderConfig(
         automatic_extract=reader_raw.get("automatic_extract", True),
         fallback_max_bytes=fallback_bytes,
+        legacy_compaction=reader_raw.get("legacy_compaction", True),
+        legacy_compaction_max_chars=legacy_compaction_max_chars,
         enabled=reader_raw.get("enabled", True),
         model=model.strip(),
         provider=provider.strip(),

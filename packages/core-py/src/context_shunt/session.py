@@ -53,6 +53,7 @@ from .errors import ShuntError
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
 from .guard import OutputGuardError, enforce, enforce_or_fixed, fixed_error
 from .inspect import CURSOR_PREFIX, Inspector, decode_cursor, encode_cursor
+from .legacy_compact import compact_tool_result
 from .limits import EMITTED_SCHEMA_VERSION
 from .metrics import MetricsSink, NullMetrics
 from .paths import authorize
@@ -80,6 +81,19 @@ from .store import ScopeIdentity, SnapshotStore
 
 _INSPECT_OPERATIONS = frozenset({"inspect"})
 _STATS_OPERATIONS = frozenset({"stats"})
+#: Reader outcomes the legacy-compaction fallback may cover: provider/timeout failures the
+#: automatic-extract escape hatch did not already handle (a partial response was seen, or
+#: automatic_extract/inspect is off), plus a citation-empty result (every citation offered
+#: failed mechanical verification). `INVALID_MODEL_OUTPUT` is deliberately absent: reader.py
+#: never publishes it as a terminal envelope `code` - a chunk that fails to parse becomes a
+#: `coverage.omitted` reason on an otherwise `NO_MATCH` envelope, not a `status: error`
+#: envelope this fallback could intercept. `PROVENANCE_UNAVAILABLE` is also deliberately
+#: absent: it is a deployment's own `require_match` policy refusing an unprovable
+#: attribution, and a heuristic summary is not a remedy for a policy the operator chose -
+#: same reasoning as excluding a reported-model mismatch below. See `read`'s ordering
+#: comment for why this is disjoint from, not a replacement of, the narrower and
+#: already-tested automatic-extract trigger.
+_LEGACY_COMPACTION_TRIGGER_CODES = frozenset({"MODEL_ERROR", "TIMEOUT", "CITATION_INVALID"})
 #: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
 #: a cursor of exactly this length so a real one can never overshoot the budget it set.
 _MAX_CURSOR_CHARS = 512
@@ -275,6 +289,34 @@ class ShuntSession:
                         **candidate,
                         "recovery": E.recovery_for(exc.code, handles_valid=False),
                     }
+        elif (
+            not result.availability_failure
+            and candidate.get("status") == "error"
+            and candidate.get("code") in _LEGACY_COMPACTION_TRIGGER_CODES
+            and candidate.get("provenance", {}).get("attribution_status") != "mismatch"
+            and self.config.reader.legacy_compaction
+        ):
+            # `not result.availability_failure` keeps this disjoint from the branch above
+            # rather than merely falling through to it via `elif`: a wholly-unavailable
+            # failure stays governed by `automatic_extract`'s own on/off switch, even when
+            # that switch is off, exactly as before this fallback existed. This branch picks
+            # up what automatic_extract was never asked to cover at all - a partial/
+            # malformed response, or a citation failure with no surviving evidence - and it
+            # is always a richer, ported heuristic summary rather than a bare byte prefix.
+            # A reported-model mismatch is excluded on purpose: `enforce_policy` already
+            # treats a contradicted model identity as a wrong answer, not a weak one, and a
+            # deterministic summary is not a remedy for that - it would look like a softer
+            # landing for exactly the failure this project refuses to paper over.
+            try:
+                candidate = self._legacy_compaction_fallback(
+                    request, result, request_id, operation_id
+                )
+            except Exception:
+                # Compaction itself failed (unreadable snapshot, expired handle, anything
+                # unexpected): keep the original bounded reader failure. Never raw, never a
+                # half-built compaction block - requirement is pointer/failure, not a
+                # best-effort partial write.
+                candidate = result.envelope
         published = enforce_or_fixed(candidate, self.config.limits)
         refined = bool((request or {}).get("refined"))
         try:
@@ -291,7 +333,7 @@ class ShuntSession:
             reader=result.cost,
             boundary=(
                 DeliveryBoundary.EXTRACTION
-                if published.get("code") == "EXTRACTED"
+                if published.get("code") in ("EXTRACTED", "LEGACY_COMPACTED")
                 else DeliveryBoundary.ENVELOPE
             ),
         )
@@ -336,6 +378,88 @@ class ShuntSession:
             request_id,
             operation_id,
             fallback=result,
+        )
+
+    def _legacy_compaction_fallback(
+        self,
+        request: dict[str, Any],
+        result: ReaderResult,
+        request_id: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Deterministic legacy-shaped compaction over the first requested source.
+
+        Ported from the incumbent tool-result compactor (``legacy_compact.py``): signal
+        lines, head/tail sampling, repeated-line collapsing, JSON structure and secret
+        redaction. Heuristic, not exact - always ``partial`` and always labelled
+        ``derived=false``, so it can never be mistaken for either an exact
+        ``deterministic_extraction`` or a ``model_derived`` answer. Covers only the first
+        requested source, matching the existing automatic-extract escape hatch's own
+        simplification; any other selected sources are recorded as an omission rather than
+        silently dropped.
+        """
+        for source in request["sources"]:
+            entry = self._registry.resolve(self.session_id, source["source_id"])
+            if entry.snapshot.snapshot_id != source["snapshot_id"]:
+                raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+        first = request["sources"][0]
+        entry = self._registry.resolve(self.session_id, first["source_id"])
+        original_bytes = entry.snapshot.bytes_len
+        text = entry.snapshot.data.decode("utf-8")
+
+        hard_chars = self.config.reader.legacy_compaction_max_chars
+        summary = compact_tool_result(text, hard_chars=hard_chars)
+        summary = _utf8_safe_cap(summary, self.config.limits.max_extraction_bytes)
+        summary_bytes = len(summary.encode("utf-8"))
+
+        original_failure = str(result.envelope.get("code") or "")
+        if original_failure not in _LEGACY_COMPACTION_TRIGGER_CODES:
+            # Should be unreachable given the caller's own guard, but the block's own
+            # contract only accepts these four tokens - refuse rather than publish an
+            # invented one.
+            raise ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN")
+
+        source_handles = list(result.envelope.get("sources") or [])
+        coverage = E.Coverage(upstream_truncated=None)
+        for handle in source_handles:
+            coverage.omit(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
+
+        attempts = result.cost.attempts_started
+        return E.build(
+            request_id=request_id,
+            status="partial",
+            code="LEGACY_COMPACTED",
+            coverage=coverage,
+            sources=source_handles,
+            retryable=False,
+            result_kind=ResultKind.LEGACY_COMPACTION,
+            provenance=replace(
+                deterministic(ProvenanceLabel.LEGACY_COMPACTION),
+                attempts_started=attempts,
+                usage_complete=(
+                    result.cost.attempts_usage_complete == attempts if attempts else True
+                ),
+            ),
+            guidance=(
+                "Escape hatch: deterministic legacy-shaped compaction of the source, ported "
+                "from the incumbent tool-result compactor; not model-derived and not an LLM "
+                "summary. Original reader failure: "
+                + original_failure
+                + ". Covers only the first requested source, independent of the question; "
+                "other sources and structure the heuristic dropped are omitted."
+            ),
+            recovery=E.recovery_for(original_failure, handles_valid=True),
+            accounting_id=operation_id,
+            legacy_compaction={
+                "deterministic": True,
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "summary": summary,
+                "summary_bytes": summary_bytes,
+                "original_bytes": original_bytes,
+                "hard_cap_chars": hard_chars,
+                "original_failure": original_failure,
+            },
         )
 
     def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, int]:
@@ -995,6 +1119,23 @@ class ShuntSession:
                 generation=generation,
             ),
         )
+
+
+def _utf8_safe_cap(text: str, max_bytes: int) -> str:
+    """Bound ``text`` to ``max_bytes`` UTF-8 bytes without splitting a multi-byte character.
+
+    ``legacy_compact.compact_tool_result`` caps by character count against its own
+    (configurable) hard limit, which is measured in Python string length, not UTF-8 bytes -
+    a summary full of multi-byte characters can still exceed the envelope contract's byte
+    cap even after that cap is applied. A raw byte slice can land mid-character; decoding
+    with ``errors="ignore"`` drops at most the one partial trailing character rather than
+    raising, which is the correct trade for a bounded fallback that must never fail closed
+    over its own safety margin.
+    """
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text
+    return data[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _omission_selector(selector: dict[str, Any]) -> dict[str, Any]:
