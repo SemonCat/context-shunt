@@ -170,7 +170,7 @@ export function derivedProvenance(overrides: Partial<Provenance> = {}): Provenan
   };
 }
 
-export function makeCapability(suma = false): CapabilityReport {
+export function makeCapability(toolResultCapture = false): CapabilityReport {
   return {
     adapter: "test",
     adapterVersion: "1.1.0",
@@ -182,7 +182,9 @@ export function makeCapability(suma = false): CapabilityReport {
     modes: [
       supported("local_gate"),
       supported("reader"),
-      suma ? supported("suma_post_tool") : unsupported("suma_post_tool", ["ORDERING_UNPROVEN"]),
+      toolResultCapture
+        ? supported("tool_result_capture")
+        : unsupported("tool_result_capture", ["ORDERING_UNPROVEN"]),
     ],
     testedFixtureId: "gate-cases.json",
   };

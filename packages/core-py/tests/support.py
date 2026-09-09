@@ -168,7 +168,7 @@ def make_registry(
 
 
 def make_capability(
-    *, suma: bool = False, artifact_import: bool = False, adapter: str = "test"
+    *, tool_result_capture: bool = False, artifact_import: bool = False, adapter: str = "test"
 ) -> CapabilityReport:
     from context_shunt.capability import DisabledReason
 
@@ -183,9 +183,9 @@ def make_capability(
         modes=[
             supported("local_gate"),
             supported("reader"),
-            supported("suma_post_tool")
-            if suma
-            else unsupported("suma_post_tool", DisabledReason.ORDERING_UNPROVEN),
+            supported("tool_result_capture")
+            if tool_result_capture
+            else unsupported("tool_result_capture", DisabledReason.ORDERING_UNPROVEN),
             supported("artifact_import")
             if artifact_import
             else unsupported("artifact_import", DisabledReason.IMPORT_UNIMPLEMENTED),

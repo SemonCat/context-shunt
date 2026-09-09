@@ -128,10 +128,15 @@ export class ShuntSession {
     this.spill = new SpillEngine(
       this.registry,
       config.limits,
-      config.sumaPostToolEnabled && modeEnabled(capability, "suma_post_tool"),
+      config.toolResultCaptureEnabled && modeEnabled(capability, "tool_result_capture"),
     );
   }
 
+  get toolResultCaptureEnabled(): boolean {
+    return this.spill.enabled;
+  }
+
+  /** @deprecated alias for {@link toolResultCaptureEnabled} */
   get sumaEnabled(): boolean {
     return this.spill.enabled;
   }
@@ -701,15 +706,15 @@ export class ShuntSession {
     return published;
   }
 
-  // -- optional oversized post-tool -----------------------------------------
+  // -- optional oversized-tool-result capture --------------------------------
 
-  /** Only ever consulted when the capability probe proved the host order is safe. */
+  /** Only ever consulted when the capability probe reports tool_result_capture supported. */
   postToolResult(
     requestId: string,
     result: unknown,
     opts: { internalSourceId?: string; upstreamTruncated?: boolean } = {},
   ): SpillOutcome | null {
-    if (!this.sumaEnabled) return null;
+    if (!this.toolResultCaptureEnabled) return null;
     const operationId = newOperationId();
     let outcome: SpillOutcome;
     try {
@@ -745,7 +750,7 @@ export class ShuntSession {
         boundary: outcome.action === "spill" ? "pointer" : "envelope",
       });
     }
-    this.metrics.count("suma_outcome", { result: guarded.action });
+    this.metrics.count("tool_result_capture_outcome", { result: guarded.action });
     return guarded;
   }
 

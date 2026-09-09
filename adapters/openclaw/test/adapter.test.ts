@@ -22,7 +22,7 @@ import {
   STATS_TOOL_NAME,
   default as plugin,
 } from "../index.js";
-import { buildCapabilityReport, SUMA_EVIDENCE } from "../src/capability.js";
+import { buildCapabilityReport, TOOL_RESULT_CAPTURE_EVIDENCE } from "../src/capability.js";
 import { normalizeToolCall, requestIdFrom } from "../src/normalize.js";
 
 interface Registered {
@@ -131,20 +131,20 @@ describe("capability probe", () => {
     expect(report.readerModel).toBe(READER_MODEL);
   });
 
-  it("reports the Suma post-tool mode unsupported with host-source evidence", () => {
+  it("reports the tool_result_capture mode unsupported with host-source evidence", () => {
     const report = buildCapabilityReport({
       hooks: ["before_tool_call", "tool_result_persist", "after_tool_call"],
       hasModelBridge: true,
       hostVersion: "2026.9.2",
     });
-    const mode = report.modes.find((m) => m.mode === "suma_post_tool")!;
+    const mode = report.modes.find((m) => m.mode === "tool_result_capture")!;
     expect(mode.support).toBe("unsupported");
     expect([...mode.reasons]).toEqual([
       "CAPTURE_AFTER_TRUNCATION",
       "OBSERVE_ONLY_HOOK",
       "HOST_FAIL_OPEN",
     ]);
-    expect(mode.evidence).toEqual(SUMA_EVIDENCE);
+    expect(mode.evidence).toEqual(TOOL_RESULT_CAPTURE_EVIDENCE);
     expect(mode.evidence.length).toBeGreaterThan(0);
   });
 
@@ -251,12 +251,14 @@ describe("registration", () => {
     expect(new ContextShuntPlugin(api).config.limits.fullReadMaxLines).toBe(100);
   });
 
-  it("keeps the Suma post-tool mode off even when configuration asks for it", () => {
+  it("keeps the tool_result_capture mode off even when configuration asks for it", () => {
     const dir = workspace();
+    // Regression: the deprecated suma_post_tool config key still works as an alias.
     const { api } = configured(dir, { suma_post_tool: { enabled: true } });
     const p = new ContextShuntPlugin(api);
     expect(p.config.sumaPostToolEnabled).toBe(true);
-    expect(modeEnabled(p.capability, "suma_post_tool")).toBe(false);
+    expect(p.config.toolResultCaptureEnabled).toBe(true);
+    expect(modeEnabled(p.capability, "tool_result_capture")).toBe(false);
     // Configuration alone cannot enable it: the session refuses to run the mode.
     expect(p.capabilityJson()["modes"]).toBeDefined();
   });
@@ -621,25 +623,28 @@ describe("the deterministic inspector", () => {
   });
 });
 
-describe("Suma post-tool mode is fail-closed on this host", () => {
+describe("tool_result_capture mode is fail-closed on this host", () => {
   it("returns null from postToolResult even for an oversized payload", () => {
     const dir = workspace();
-    const { api } = configured(dir, { suma_post_tool: { enabled: true } });
+    const { api } = configured(dir, { tool_result_capture: { enabled: true } });
     const p = new ContextShuntPlugin(api);
     // Reaching into the session the way the adapter would if the mode were wired.
     const session = (p as any).session("s1");
+    expect(session.toolResultCaptureEnabled).toBe(false);
     expect(session.sumaEnabled).toBe(false);
     expect(session.postToolResult("req_x", "y".repeat(200000))).toBeNull();
   });
 
   it("spills correctly once a host is proven safe, so the engine itself is not the blocker", () => {
     const dir = workspace();
-    const { api } = configured(dir, { suma_post_tool: { enabled: true } });
+    const { api } = configured(dir, { tool_result_capture: { enabled: true } });
     const p = new ContextShuntPlugin(api);
     const proven = {
       ...p.capability,
       modes: p.capability.modes.map((m) =>
-        m.mode === "suma_post_tool" ? { ...m, support: "supported" as const, reasons: [] } : m,
+        m.mode === "tool_result_capture"
+          ? { ...m, support: "supported" as const, reasons: [] }
+          : m,
       ),
     };
     const session = new ShuntSession("s2", p.config, proven);

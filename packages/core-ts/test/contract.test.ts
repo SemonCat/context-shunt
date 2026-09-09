@@ -79,7 +79,8 @@ describe("contract invariants", () => {
     ["reader", { enabld: true }],
     ["inspect", { enabld: true }],
     ["stats", { enabld: true }],
-    ["suma_post_tool", { enabld: true }],
+    ["tool_result_capture", { enabld: true }],
+    ["suma_post_tool", { enabld: true }], // deprecated alias, still validated
     ["writer", { enabld: true }],
   ])("rejects unknown keys in the %s config section", (section, value) => {
     const raw = { workspace_roots: ["/tmp/context-shunt-config"], [section]: value };
@@ -101,5 +102,77 @@ describe("contract invariants", () => {
       { workspace_roots: ["/tmp/context-shunt-config"], ...extra } as never,
       "/tmp/context-shunt-cache",
     )).toThrowError(ShuntError);
+  });
+});
+
+describe("tool_result_capture / suma_post_tool config migration", () => {
+  const roots = { workspace_roots: ["/tmp/context-shunt-config"] };
+
+  it("accepts the deprecated suma_post_tool alias", () => {
+    const config = loadConfig(
+      { ...roots, suma_post_tool: { enabled: true } } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.toolResultCaptureEnabled).toBe(true);
+    expect(config.sumaPostToolEnabled).toBe(true);
+  });
+
+  it("accepts the canonical tool_result_capture key when the alias is absent", () => {
+    const config = loadConfig(
+      { ...roots, tool_result_capture: { enabled: true } } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.toolResultCaptureEnabled).toBe(true);
+  });
+
+  it("accepts an agreeing alias and canonical key", () => {
+    const config = loadConfig(
+      {
+        ...roots,
+        tool_result_capture: { enabled: true },
+        suma_post_tool: { enabled: true },
+      } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.toolResultCaptureEnabled).toBe(true);
+  });
+
+  it("refuses a conflicting alias and canonical key", () => {
+    expect(() => loadConfig(
+      {
+        ...roots,
+        tool_result_capture: { enabled: true },
+        suma_post_tool: { enabled: false },
+      } as never,
+      "/tmp/context-shunt-cache",
+    )).toThrowError(ShuntError);
+    try {
+      loadConfig(
+        {
+          ...roots,
+          tool_result_capture: { enabled: true },
+          suma_post_tool: { enabled: false },
+        } as never,
+        "/tmp/context-shunt-cache",
+      );
+    } catch (err) {
+      expect((err as ShuntError).detail).toBe("TOOL_RESULT_CAPTURE_CONFIG_CONFLICT");
+    }
+  });
+
+  it("defaults the host-ordering attestation to false", () => {
+    const config = loadConfig(roots as never, "/tmp/context-shunt-cache");
+    expect(config.toolResultCaptureHostOrderingVerifiedLocally).toBe(false);
+  });
+
+  it("carries an explicit host-ordering attestation through", () => {
+    const config = loadConfig(
+      {
+        ...roots,
+        tool_result_capture: { enabled: true, host_ordering_verified_locally: true },
+      } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.toolResultCaptureHostOrderingVerifiedLocally).toBe(true);
   });
 });

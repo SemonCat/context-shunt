@@ -111,14 +111,34 @@
           }
         }
       },
-      "suma_post_tool": {
+      "tool_result_capture": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Optional oversized-result spill mode. Default off, and refused on this host: the capability probe cannot prove capture before truncation or replacement before persistence."
+            "description": "Optional oversized-tool-result capture mode. Default off, and refused on this host: the capability probe cannot prove capture before truncation or replacement before persistence."
+          },
+          "host_ordering_verified_locally": {
+            "type": "boolean",
+            "default": false,
+            "description": "Operator attestation that the installed host's ordering was personally verified. This adapter does not act on it today - the mode stays refused on this host regardless - but the field is accepted for config parity with the Hermes adapter."
+          }
+        }
+      },
+      "suma_post_tool": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Deprecated alias for tool_result_capture, accepted so an existing config file keeps working unchanged. Setting both to disagreeing values is refused rather than guessed.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "host_ordering_verified_locally": {
+            "type": "boolean",
+            "default": false
           }
         }
       },

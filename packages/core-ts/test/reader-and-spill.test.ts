@@ -386,7 +386,7 @@ function generate(spec: any): unknown {
   }
 }
 
-describe("suma spill conformance", () => {
+describe("tool-result-capture spill conformance", () => {
   const spillCases = conformance("spill-cases.json");
 
   it("has a non-empty corpus", () => {

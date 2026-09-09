@@ -140,12 +140,12 @@ def test_supported_and_unsupported_modes():
         reader_model=READER_MODEL,
         modes=[
             supported("local_gate"),
-            unsupported("suma_post_tool", DisabledReason.HOST_FAIL_OPEN),
+            unsupported("tool_result_capture", DisabledReason.HOST_FAIL_OPEN),
         ],
     )
     assert report.enabled("local_gate") is True
-    assert report.enabled("suma_post_tool") is False
-    assert report.mode("suma_post_tool").reasons == (DisabledReason.HOST_FAIL_OPEN,)
+    assert report.enabled("tool_result_capture") is False
+    assert report.mode("tool_result_capture").reasons == (DisabledReason.HOST_FAIL_OPEN,)
     assert report.enabled("nonexistent") is False
     rendered = report.to_dict()
     assert rendered["modes"][1]["reasons"] == ["HOST_FAIL_OPEN"]
@@ -153,7 +153,7 @@ def test_supported_and_unsupported_modes():
 
 
 def test_config_disabled_is_distinct_from_unsupported():
-    mode = disabled_by_config("suma_post_tool")
+    mode = disabled_by_config("tool_result_capture")
     assert mode.support is Support.DISABLED_BY_CONFIG
     assert mode.enabled is False
 
@@ -209,15 +209,106 @@ def test_request_id_is_sanitized_and_bounded():
     assert len(module._request_id({"tool_call_id": "x" * 500})) <= 60
 
 
-def test_suma_post_tool_is_unsupported_with_host_evidence():
+def test_tool_result_capture_is_unsupported_by_default_with_host_evidence():
+    """No operator attestation configured: the mode stays off, honestly reasoned."""
     module = _load_adapter()
     report = module.build_capability_report(FakeCtx({}, llm=FakeLlm()))
-    mode = report.mode("suma_post_tool")
+    mode = report.mode("tool_result_capture")
     assert mode.support is Support.UNSUPPORTED
-    assert DisabledReason.CAPTURE_AFTER_TRUNCATION in mode.reasons
-    assert DisabledReason.HOST_FAIL_OPEN in mode.reasons
-    assert any("try/except" in e for e in mode.evidence)
-    assert any("post-truncation" in e for e in mode.evidence)
+    assert DisabledReason.ORDERING_UNPROVEN in mode.reasons
+    assert any("no operator attestation" in e for e in mode.evidence)
+    assert any("fail-open" in e for e in mode.evidence)
+
+
+def test_tool_result_capture_is_supported_with_operator_attestation(tmp_path):
+    """An explicit operator attestation, and only that, turns the mode on."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    mode = module._capability.mode("tool_result_capture")
+    assert mode.support is Support.SUPPORTED
+    assert any("operator attestation" in e for e in mode.evidence)
+    assert any("2026-09-09" in e for e in mode.evidence)
+    assert "transform_tool_result" in ctx.registered_hooks
+
+
+def test_tool_result_capture_hook_not_registered_without_attestation(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    assert module._capability.enabled("tool_result_capture") is False
+    assert "transform_tool_result" not in ctx.registered_hooks
+
+
+def test_tool_result_capture_hook_not_registered_when_attested_but_config_disabled(tmp_path):
+    """The attestation alone is not enough; `enabled` still gates registration."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": False, "host_ordering_verified_locally": True}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    assert module._capability.enabled("tool_result_capture") is True
+    assert "transform_tool_result" not in ctx.registered_hooks
+
+
+def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failure(tmp_path):
+    """The one no-raw-leak invariant that matters at this hook: never fall through raw."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    oversized = "y" * 200_000
+
+    class _BoomSession:
+        def post_tool_result(self, *args, **kwargs):
+            raise RuntimeError("unexpected")
+
+    module._sessions["tcap"] = _BoomSession()
+    out = module.transform_tool_result(
+        tool_name="search_files", result=oversized, task_id="tcap", session_id="tcap"
+    )
+    assert out is not None
+    assert oversized not in out
+    envelope = json.loads(out)
+    assert envelope["code"] == "HOST_UNSAFE"
+
+
+def test_transform_tool_result_returns_none_for_small_results(tmp_path):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    assert module.transform_tool_result(tool_name="read_file", result="short") is None
+
+
+def test_transform_tool_result_returns_none_for_structured_results(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    # A dict/list result is left alone at this hook regardless of size - see the
+    # docstring's structured/multimodal reasoning.
+    assert module.transform_tool_result(
+        tool_name="vision", result={"type": "image", "data": "y" * 200_000}
+    ) is None
+
+
+def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    oversized = "log line\n" * 50_000
+    out = module.transform_tool_result(
+        tool_name="search_files", result=oversized, task_id="tspill", session_id="tspill"
+    )
+    assert out is not None
+    envelope = json.loads(out)
+    assert envelope["code"] == "SPILLED"
+    assert oversized not in out
+    assert "Ask the context-shunt reader a question" in envelope["guidance"]
 
 
 def test_gate_hook_is_registered_and_no_writer_tool_is(tmp_path):
@@ -500,18 +591,22 @@ def test_tool_schemas_declare_no_write_surface_and_no_full_retrieval():
         assert forbidden not in parameters
 
 
-def test_suma_mode_stays_off_even_when_configuration_asks_for_it(tmp_path):
+def test_capture_mode_stays_off_even_when_configuration_asks_for_it(tmp_path):
+    """Regression: the deprecated `suma_post_tool` config key still works as an alias."""
     config = make_config(tmp_path, suma_post_tool={"enabled": True})
-    session = ShuntSession("sess", config, make_capability(suma=False))
+    session = ShuntSession("sess", config, make_capability(tool_result_capture=False))
     assert config.suma_post_tool.enabled is True
+    assert config.tool_result_capture.enabled is True
+    assert session.tool_result_capture_enabled is False
     assert session.suma_enabled is False
     assert session.post_tool_result("req_x", "y" * 200000) is None
 
 
 def test_engine_spills_once_a_host_is_proven_safe(tmp_path):
     """The engine is not the blocker: given a proven host, the same call spills."""
-    config = make_config(tmp_path, suma_post_tool={"enabled": True})
-    session = ShuntSession("sess", config, make_capability(suma=True))
+    config = make_config(tmp_path, tool_result_capture={"enabled": True})
+    session = ShuntSession("sess", config, make_capability(tool_result_capture=True))
+    assert session.tool_result_capture_enabled is True
     assert session.suma_enabled is True
     outcome = session.post_tool_result("req_x", "y" * 200000)
     assert outcome.action == "spill"

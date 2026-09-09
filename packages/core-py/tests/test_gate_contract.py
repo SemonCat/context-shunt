@@ -97,7 +97,8 @@ def test_limits_match_the_shared_contract():
         ("reader", {"enabld": True}),
         ("inspect", {"enabld": True}),
         ("stats", {"enabld": True}),
-        ("suma_post_tool", {"enabld": True}),
+        ("tool_result_capture", {"enabld": True}),
+        ("suma_post_tool", {"enabld": True}),  # deprecated alias, still validated
         ("writer", {"enabld": True}),
     ],
 )
@@ -126,3 +127,76 @@ def test_config_rejects_unknown_limit_and_top_level_sections(tmp_path):
                 {"workspace_roots": [str(workspace)], **extra},
                 default_spill_dir=tmp_path / "cache",
             )
+
+
+# -- tool_result_capture / suma_post_tool config migration ------------------------------
+
+
+def test_tool_result_capture_accepts_the_deprecated_suma_post_tool_alias(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = load_config(
+        {"workspace_roots": [str(workspace)], "suma_post_tool": {"enabled": True}},
+        default_spill_dir=tmp_path / "cache",
+    )
+    assert config.tool_result_capture.enabled is True
+    assert config.suma_post_tool.enabled is True
+    assert config.suma_post_tool is config.tool_result_capture
+
+
+def test_tool_result_capture_key_takes_precedence_when_alias_absent(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = load_config(
+        {"workspace_roots": [str(workspace)], "tool_result_capture": {"enabled": True}},
+        default_spill_dir=tmp_path / "cache",
+    )
+    assert config.tool_result_capture.enabled is True
+
+
+def test_tool_result_capture_agreeing_alias_and_canonical_key_is_accepted(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = load_config(
+        {
+            "workspace_roots": [str(workspace)],
+            "tool_result_capture": {"enabled": True},
+            "suma_post_tool": {"enabled": True},
+        },
+        default_spill_dir=tmp_path / "cache",
+    )
+    assert config.tool_result_capture.enabled is True
+
+
+def test_tool_result_capture_conflicting_alias_and_canonical_key_is_refused(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ShuntError) as exc:
+        load_config(
+            {
+                "workspace_roots": [str(workspace)],
+                "tool_result_capture": {"enabled": True},
+                "suma_post_tool": {"enabled": False},
+            },
+            default_spill_dir=tmp_path / "cache",
+        )
+    assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.detail == "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT"
+
+
+def test_tool_result_capture_host_ordering_attestation_field(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = load_config(
+        {
+            "workspace_roots": [str(workspace)],
+            "tool_result_capture": {"enabled": True, "host_ordering_verified_locally": True},
+        },
+        default_spill_dir=tmp_path / "cache",
+    )
+    assert config.tool_result_capture.host_ordering_verified_locally is True
+    # Default is false: an operator attestation is never assumed.
+    default_config = load_config(
+        {"workspace_roots": [str(workspace)]}, default_spill_dir=tmp_path / "cache"
+    )
+    assert default_config.tool_result_capture.host_ordering_verified_locally is False

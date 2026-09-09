@@ -4,9 +4,11 @@ Rules that matter more than the rest:
 
 * ``writer.enabled = true`` is refused at load time. There is no writer, so accepting the
   flag and quietly ignoring it would turn a missing feature into a hidden one.
-* ``suma_post_tool.enabled`` defaults to ``false`` and, even when set, only takes effect
-  if the adapter's capability probe proves a safe capture/replacement order. On both
-  supported hosts that proof does not exist, so the mode stays off.
+* ``tool_result_capture.enabled`` defaults to ``false`` and, even when set, only takes
+  effect if the adapter's capability probe reports the mode supported - which additionally
+  requires ``host_ordering_verified_locally``, an explicit operator attestation this code
+  does not and cannot prove for itself. The deprecated ``suma_post_tool`` key is still
+  accepted as an alias; setting both to disagreeing values is refused rather than guessed.
 * ``artifact_import`` defaults to disabled with no roots. Enabling it needs at least one
   explicit import root *and* an explicitly allowlisted manifest schema: an artifact
   producer is a trust decision, so neither the roots nor the accepted producer shapes have
@@ -68,6 +70,9 @@ _CONFIG_KEYS = {
     "reader",
     "inspect",
     "stats",
+    "tool_result_capture",
+    #: Deprecated alias for `tool_result_capture`, accepted so an existing config file
+    #: keeps working unchanged. See `_read_tool_result_capture`.
     "suma_post_tool",
     "writer",
     "operations",
@@ -86,13 +91,35 @@ _READER_KEYS = {
 }
 _ARTIFACT_IMPORT_KEYS = {"enabled", "roots", "accepted_manifest_schemas"}
 _ENABLED_SECTION_KEYS = {"enabled"}
+_TOOL_RESULT_CAPTURE_KEYS = {"enabled", "host_ordering_verified_locally"}
 _MAX_FALLBACK_ENTRIES = 4
 _MAX_MODEL_REF_BYTES = 128
 
 
 @dataclass(frozen=True)
-class SumaConfig:
+class ToolResultCaptureConfig:
+    """The optional oversized-tool-result capture mode.
+
+    Capture at the host's transform_tool_result-shaped hook has been directly verified
+    feasible on one specific operator's live host (read-only inspection, dated and cited in
+    docs/capability-matrix.md) - but that is evidence about one running instance, not a
+    reproducible, version-independent proof this adapter can make about every host it might
+    be installed against. `enabled` alone is therefore never enough to turn the mode on:
+    the capability probe additionally requires `host_ordering_verified_locally`, an
+    explicit **operator attestation** (this code does not and cannot prove it for itself)
+    that the operator personally confirmed the ordering on their own installed host.
+    Without both, the mode is reported unsupported and stays off regardless of what a
+    config file requests - the same discipline every other mode in this project follows.
+    """
+
     enabled: bool = False
+    host_ordering_verified_locally: bool = False
+
+
+#: Deprecated alias kept for existing imports. `suma_post_tool` was never a product name,
+#: only this project's internal shorthand for "the optional oversized post-tool mode", and
+#: is retired as public vocabulary in favor of a name that says what the mode does.
+SumaConfig = ToolResultCaptureConfig
 
 
 @dataclass(frozen=True)
@@ -160,9 +187,14 @@ class Config:
     gate_enabled: bool = True
     reader: ReaderConfig = field(default_factory=ReaderConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
-    suma_post_tool: SumaConfig = field(default_factory=SumaConfig)
+    tool_result_capture: ToolResultCaptureConfig = field(default_factory=ToolResultCaptureConfig)
     artifact_import: ArtifactImportConfig = field(default_factory=ArtifactImportConfig)
     limits: Limits = DEFAULT_LIMITS
+
+    @property
+    def suma_post_tool(self) -> ToolResultCaptureConfig:
+        """Deprecated alias for :attr:`tool_result_capture`. See ``SumaConfig``."""
+        return self.tool_result_capture
 
     @property
     def cache_root(self) -> Path:
@@ -188,6 +220,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
         "reader",
         "inspect",
         "stats",
+        "tool_result_capture",
         "suma_post_tool",
         "artifact_import",
         "writer",
@@ -203,9 +236,12 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     reader_raw = raw.get("reader") or {}
     if set(reader_raw) - _READER_KEYS:
         raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
-    for key in ("inspect", "stats", "suma_post_tool", "writer"):
+    for key in ("inspect", "stats", "writer"):
         if set(raw.get(key) or {}) - _ENABLED_SECTION_KEYS:
             raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    tool_result_capture_raw = _merge_tool_result_capture_raw(raw)
+    if set(tool_result_capture_raw) - _TOOL_RESULT_CAPTURE_KEYS:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     import_raw = raw.get("artifact_import") or {}
     if set(import_raw) - _ARTIFACT_IMPORT_KEYS:
         raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
@@ -215,7 +251,8 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
         reader_raw.get("automatic_extract"),
         (raw.get("inspect") or {}).get("enabled"),
         (raw.get("stats") or {}).get("enabled"),
-        (raw.get("suma_post_tool") or {}).get("enabled"),
+        tool_result_capture_raw.get("enabled"),
+        tool_result_capture_raw.get("host_ordering_verified_locally"),
         import_raw.get("enabled"),
         (raw.get("writer") or {}).get("enabled"),
     ):
@@ -265,10 +302,29 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
             inspect_enabled=(raw.get("inspect") or {}).get("enabled", True),
             stats_enabled=(raw.get("stats") or {}).get("enabled", True),
         ),
-        suma_post_tool=SumaConfig(enabled=(raw.get("suma_post_tool") or {}).get("enabled", False)),
+        tool_result_capture=ToolResultCaptureConfig(
+            enabled=tool_result_capture_raw.get("enabled", False),
+            host_ordering_verified_locally=tool_result_capture_raw.get(
+                "host_ordering_verified_locally", False
+            ),
+        ),
         artifact_import=artifact_import,
         limits=limits,
     )
+
+
+def _merge_tool_result_capture_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """Merge the canonical ``tool_result_capture`` key with the deprecated ``suma_post_tool``
+    alias, preferring the canonical key and refusing a config that sets both to disagreeing
+    values rather than silently picking a side of a half-migrated file.
+    """
+    current = raw.get("tool_result_capture")
+    legacy = raw.get("suma_post_tool")
+    if current is not None and legacy is not None and dict(current) != dict(legacy):
+        raise ShuntError(
+            "INVALID_REQUEST", "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT", retryable=False
+        )
+    return dict((current if current is not None else legacy) or {})
 
 
 def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:

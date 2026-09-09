@@ -20,10 +20,12 @@ Host support
 ------------
 Enabling this additionally requires proof that the host captures the complete result
 before truncation and accepts a safe replacement before persistence and context insertion.
-Neither supported host provides both today, so the mode is reported unsupported and stays
-off; see ``capability.py`` and ``docs/capability-matrix.md``. The store and engine below
-remain present and tested behind that capability gate rather than being deleted, so the
-day a host does provide the ordering there is a tested implementation to enable.
+See ``capability.py`` and ``docs/capability-matrix.md`` for the current, host- and
+version-specific evidence; the mode name is ``tool_result_capture`` (``suma_post_tool`` is
+a deprecated config alias only - it was never a product name, just this project's internal
+shorthand for "the optional oversized post-tool mode"). The store and engine below remain
+present and tested behind that capability gate rather than being deleted, so a host that
+does provide the ordering has a tested implementation ready to enable.
 """
 
 from __future__ import annotations

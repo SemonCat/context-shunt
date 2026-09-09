@@ -52,21 +52,30 @@ never claims ``provider_confirms_generation``: attribution comes back ``unverifi
 ``mismatch`` when the value contradicts the request), never ``actual``. Capture, inspect
 and stats do not depend on the reader and stay fully usable either way.
 
-The optional post-tool spill mode is not wired. ``transform_tool_result`` hands the plugin
-a result that is already post-truncation, and the host wraps the hook in try/except so a
-raising handler leaves the original result in place. Neither "complete capture before
-truncation" nor "no raw fallback" can be shown, so the mode is reported unsupported and
-stays off. See docs/capability-matrix.md.
+The optional oversized-tool-result capture mode (``tool_result_capture``, formerly
+documented under the internal name ``suma_post_tool``) is wired but not claimed
+unconditionally. ``transform_tool_result`` is registered when the capability probe reports
+the mode supported, which additionally requires an explicit operator attestation
+(``tool_result_capture.host_ordering_verified_locally: true``) - see
+``_tool_result_capture_mode`` for exactly what was and was not verified, and
+docs/capability-matrix.md for the dated evidence. Even when wired, the handler never
+depends on the host's fail-open behavior: ``_apply_transform_tool_result_hook`` still runs
+inside try/except on the host side, and this adapter's own handler never raises past that
+boundary regardless of which side of the ordering question the installed host is on.
 
-What *is* wired for oversized tool results
-------------------------------------------
+The hook receives no question - Hermes does not forward the conversation's ``user_task`` to
+``transform_tool_result`` at all - so it only ever captures and points; answering happens
+through a separate ``context_shunt_read`` call, the same two-step shape the artifact-import
+boundary already uses.
+
+What else is wired for oversized tool results
+-----------------------------------------------
 The artifact import route, which needs no interception at all. A compactor or spooler that
 already persisted an oversized tool result to a file, plus a manifest describing it, can
 hand that artifact over through ``context_shunt_import``; the core proves the file matches
-the manifest and returns an opaque handle. This is not post-tool interception and the
-adapter never reports it as such: ``suma_post_tool`` stays ``unsupported`` and
-``artifact_import`` is a separate mode, off unless a deployment configures import roots and
-allowlists a producer manifest schema.
+the manifest and returns an opaque handle. This has never depended on ``tool_result_capture``
+and remains a separate mode, off unless a deployment configures import roots and allowlists
+a producer manifest schema.
 """
 
 from __future__ import annotations
@@ -84,6 +93,7 @@ from context_shunt import __version__ as CORE_VERSION  # noqa: E402
 from context_shunt.capability import (  # noqa: E402
     CapabilityReport,
     DisabledReason,
+    ModeCapability,
     supported,
     unsupported,
 )
@@ -218,20 +228,10 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
         else unsupported("artifact_import", DisabledReason.HOOK_MISSING)
     )
 
-    # Suma post-tool: refused on evidence, not on absence of effort.
-    modes.append(
-        unsupported(
-            "suma_post_tool",
-            DisabledReason.CAPTURE_AFTER_TRUNCATION,
-            DisabledReason.HOST_FAIL_OPEN,
-            evidence=(
-                "hermes-agent model_tools.py: transform_tool_result runs inside try/except "
-                "and the original result survives a raising handler (fail-open)",
-                "hermes-agent hooks doc: transform_tool_result receives the result "
-                "post-truncation and post-ANSI-strip",
-            ),
-        )
-    )
+    # Oversized tool-result capture: see _tool_result_capture_mode's docstring for why
+    # this is not a blanket claim even though the ordering was directly verified on one
+    # live host.
+    modes.append(_tool_result_capture_mode())
 
     return CapabilityReport(
         adapter=ADAPTER,
@@ -245,6 +245,69 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
         ),
         modes=modes,
         tested_fixture_id="contracts/v1/conformance/gate-cases.json",
+    )
+
+
+def _tool_result_capture_mode() -> ModeCapability:
+    """Whether ``tool_result_capture`` (oversized-tool-result capture) is supported.
+
+    Deliberately not a blanket claim. A prior version of this adapter reported the mode
+    unsupported unconditionally, citing hermes-agent 0.18.2 documentation:
+    ``transform_tool_result`` receives the result "post-truncation and post-ANSI-strip"
+    (``CAPTURE_AFTER_TRUNCATION``), and the host wraps the hook dispatch in try/except, so
+    a raising handler leaves the original result in place (``HOST_FAIL_OPEN``).
+
+    Direct, read-only inspection of one operator's own live Hermes 0.21.1 host on
+    2026-09-09 (cited in ``docs/capability-matrix.md``) found the CAPTURE_AFTER_TRUNCATION
+    reason no longer holds at that dispatch layer: ``handle_function_call`` calls
+    ``_execute_tool``, emits ``post_tool_call``, and only then calls
+    ``_apply_transform_tool_result_hook`` - with no truncation call visible between execute
+    and the hook. That is evidence about one running instance, not a reproducible,
+    version-independent proof this adapter can make about every host it might be installed
+    against: a registry tool could still self-truncate its own output before returning,
+    which was not (and cannot generically be) audited here. ``HOST_FAIL_OPEN`` still holds
+    regardless of that finding - it is unrelated to the truncation-ordering question - so
+    ``transform_tool_result`` below never raises, whichever side of this the installed host
+    is actually on.
+
+    So: unsupported by default (``ORDERING_UNPROVEN`` - a narrower, honest reason than the
+    stale ``CAPTURE_AFTER_TRUNCATION`` claim), *unless* the deployment sets
+    ``tool_result_capture.host_ordering_verified_locally: true`` in its own config - an
+    explicit operator attestation this code does not and cannot prove for itself.
+    """
+    attested = bool(
+        _config is not None and _config.tool_result_capture.host_ordering_verified_locally
+    )
+    fail_open_evidence = (
+        "hermes-agent model_tools.py: _apply_transform_tool_result_hook runs inside "
+        "try/except and the original result survives a raising handler (fail-open); "
+        "this adapter's own hook handler never raises regardless"
+    )
+    if attested:
+        return supported(
+            "tool_result_capture",
+            evidence=(
+                "operator attestation: tool_result_capture.host_ordering_verified_locally="
+                "true - this adapter does not independently verify the installed host's "
+                "hook ordering; the operator has",
+                "read-only inspection of one live Hermes 0.21.1 host (2026-09-09) found "
+                "handle_function_call -> _execute_tool -> _emit(post_tool_call) -> "
+                "_apply_transform_tool_result_hook, no truncation call visible between "
+                "execute and the hook at that dispatch layer (docs/capability-matrix.md); "
+                "per-tool self-truncation upstream of that layer was not audited",
+                fail_open_evidence,
+            ),
+        )
+    return unsupported(
+        "tool_result_capture",
+        DisabledReason.ORDERING_UNPROVEN,
+        evidence=(
+            "no operator attestation (tool_result_capture.host_ordering_verified_locally "
+            "is false or unset): this adapter ships generically and has no reproducible, "
+            "version-independent proof of the installed host's capture-before-truncation "
+            "ordering for every Hermes version it might run against",
+            fail_open_evidence,
+        ),
     )
 
 
@@ -267,6 +330,7 @@ def _supported_hooks(ctx: Any) -> set[str]:
         return {
             "pre_tool_call",
             "post_tool_call",
+            "transform_tool_result",
             "on_session_start",
             "on_session_end",
             "on_session_finalize",
@@ -506,6 +570,82 @@ def _request_id(kwargs: dict[str, Any]) -> str:
 
 def _block_message(envelope: dict[str, Any]) -> str:
     return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
+
+
+def transform_tool_result(
+    tool_name: str = "",
+    args: dict | None = None,
+    result: Any = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    **kwargs,
+) -> str | None:
+    """Capture an eligible oversized tool result and replace it with a bounded pointer.
+
+    Registered only when the capability probe reports ``tool_result_capture`` supported -
+    which requires an explicit operator attestation (see ``_tool_result_capture_mode``),
+    never assumed. Runs at Hermes' ``transform_tool_result`` hook: after the tool executed
+    and after ``post_tool_call`` fired, before the result enters context.
+
+    Two-step by design, not by choice: the host does not forward the conversation's
+    ``user_task`` to this hook at all (verified against the same live host this adapter's
+    ordering evidence comes from), so there is no question here to answer with. This
+    handler only ever captures and points; ``context_shunt_read`` - which does carry an
+    explicit question - answers it afterward, exactly like the artifact-import boundary's
+    own capture-then-ask shape.
+
+    Never raises, and never returns ``None`` for a result already known to be oversized:
+    Hermes wraps this dispatch in try/except and lets a raising handler's *original, raw*
+    result through unchanged (host-level fail-open, confirmed at 0.21.1 too) - this handler
+    must never depend on that safety net. The size check below is done directly, before
+    touching the session, specifically so an internal failure on a small, ineligible result
+    can cheaply return ``None`` (nothing was ever at risk of leaking), while a genuinely
+    oversized result that then fails internally still returns a bounded failure envelope,
+    never falls through to the host's raw passthrough.
+    """
+    if _config is None or not _capability.enabled("tool_result_capture"):
+        return None
+    if not isinstance(result, str):
+        # Structured/multimodal results (images, tool content blocks) are left alone at
+        # this hook - the same reasoning the incumbent compactor documented: replacing a
+        # content block here persists the replacement before the main model can inspect it
+        # once. SpillEngine's own conformance corpus (spill-cases.json) still exercises
+        # structured-result handling for the paths that do reach it (context_shunt_import
+        # today; a future controlled producer wrapper could reach it here too).
+        return None
+    try:
+        oversized = len(result.encode("utf-8")) > _config.limits.max_tool_result_bytes
+    except Exception:
+        oversized = False
+    if not oversized:
+        # Not an eligible candidate. SpillEngine would reach the same passthrough verdict
+        # itself; checking it here first avoids session/store construction on the
+        # overwhelmingly common small-result path, and means nothing was ever at risk of
+        # leaking raw if the check below happens to fail.
+        return None
+
+    request_id = _request_id({"tool_call_id": tool_call_id, **kwargs})
+    try:
+        session = _session(task_id, session_id)
+        outcome = session.post_tool_result(request_id, result)
+    except Exception:
+        # This result was already measured oversized, so returning None here would fall
+        # through to Hermes' own fail-open and leak it raw. An internal failure past this
+        # point must still return a bounded string.
+        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
+    if outcome is None or outcome.action == "passthrough":
+        # `None` means the mode is disabled at the session level (config.enabled=false,
+        # already excluded above via the capability check, kept as defense in depth);
+        # `passthrough` means the session's own SpillEngine independently judged this
+        # ineligible - its check is authoritative, this hook's own pre-check above is only
+        # a cheap way to skip session construction for the common case.
+        return None
+    if outcome.envelope is None:
+        # Every non-passthrough SpillOutcome carries a bounded envelope; this should be
+        # unreachable, but refuse rather than pass anything unbounded through if it isn't.
+        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
+    return _block_message(outcome.envelope)
 
 
 def on_session_end(session_id: str = "", **kwargs):
@@ -939,6 +1079,12 @@ def register(ctx: Any) -> None:
         ctx.register_hook("on_session_finalize", on_session_finalize)
     if "on_session_reset" in hooks:
         ctx.register_hook("on_session_reset", on_session_reset)
+    if (
+        _capability.enabled("tool_result_capture")
+        and _config.tool_result_capture.enabled
+        and "transform_tool_result" in hooks
+    ):
+        ctx.register_hook("transform_tool_result", transform_tool_result)
 
     register_tool = getattr(ctx, "register_tool", None)
     if callable(register_tool):

@@ -138,8 +138,12 @@ class ShuntSession:
             attribution_policy=config.reader.attribution_policy,
         )
         self._inspector = Inspector(config.limits)
-        suma_enabled = config.suma_post_tool.enabled and capability.enabled("suma_post_tool")
-        self._spill = SpillEngine(self._registry, limits=config.limits, enabled=suma_enabled)
+        tool_result_capture_enabled = config.tool_result_capture.enabled and capability.enabled(
+            "tool_result_capture"
+        )
+        self._spill = SpillEngine(
+            self._registry, limits=config.limits, enabled=tool_result_capture_enabled
+        )
         # The import boundary is built only when configuration *and* the capability probe
         # agree. A deployment that enabled it without roots never reaches here: the
         # config loader refuses that combination rather than defaulting to allow-all.
@@ -175,7 +179,12 @@ class ShuntSession:
         return self._spill
 
     @property
+    def tool_result_capture_enabled(self) -> bool:
+        return self._spill.enabled
+
+    @property
     def suma_enabled(self) -> bool:
+        """Deprecated alias for :attr:`tool_result_capture_enabled`."""
         return self._spill.enabled
 
     @property
@@ -966,7 +975,7 @@ class ShuntSession:
         self._metrics.count("artifact_import", {"result": "imported", "code": "IMPORTED"})
         return published
 
-    # -- optional Suma post-tool ------------------------------------------
+    # -- optional oversized-tool-result capture ----------------------------
     def post_tool_result(
         self,
         request_id: str,
@@ -975,8 +984,17 @@ class ShuntSession:
         internal_source_id: str | None = None,
         upstream_truncated: bool = False,
     ):
-        """Only ever consulted when the capability probe proved the host order is safe."""
-        if not self.suma_enabled:
+        """Capture-then-pointer for one complete tool result.
+
+        Only ever consulted when the capability probe reports ``tool_result_capture``
+        supported (config enabled *and* the operator's ordering attestation present - see
+        ``config.ToolResultCaptureConfig``). Never returns the raw result: every branch of
+        :meth:`SpillEngine.evaluate` returns either ``passthrough`` (nothing eligible, so
+        nothing is touched) or a bounded envelope. Answering the caller's actual question
+        about a captured pointer is a separate step, through ``context_shunt_read`` - this
+        method never sees the caller's question, so it never could.
+        """
+        if not self.tool_result_capture_enabled:
             return None
         operation_id = new_operation_id()
         outcome = self._spill.evaluate(
@@ -1014,7 +1032,7 @@ class ShuntSession:
                     else DeliveryBoundary.ENVELOPE
                 ),
             )
-        self._metrics.count("suma_outcome", {"result": outcome.action})
+        self._metrics.count("tool_result_capture_outcome", {"result": outcome.action})
         return outcome
 
     # -- accounting --------------------------------------------------------
