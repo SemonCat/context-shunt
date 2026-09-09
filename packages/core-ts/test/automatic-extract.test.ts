@@ -6,14 +6,23 @@ import { ShuntError } from "../src/errors.js";
 import { serializedBytes } from "../src/envelope.js";
 import { enforce } from "../src/guard.js";
 import { Inspector } from "../src/inspect.js";
+import { DEFAULT_LIMITS } from "../src/limits.js";
 import { FallbackChainProvider, type ReaderProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
+import * as legacyCompact from "../src/legacy-compact.js";
 import { FakeLuna, makeCapability, makeConfig } from "./support.js";
 
 const outage = () => new ShuntError("MODEL_ERROR", "PRIVATE_BODY", true);
-function setup(provider: ReaderProvider = new FakeLuna([], outage()), config: Record<string, unknown> = {}) {
+function setup(
+  provider: ReaderProvider = new FakeLuna([], outage()),
+  config: Record<string, unknown> = {},
+  sessionOptions: { legacyCompaction?: boolean; legacyCompactionMaxChars?: number } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "shunt-auto-"));
-  const session = new ShuntSession("sess", makeConfig(dir, config), makeCapability(), { provider });
+  const session = new ShuntSession("sess", makeConfig(dir, config), makeCapability(), {
+    provider,
+    ...sessionOptions,
+  });
   const body = 'prefix 日本 "quoted" \\ tab\t\n'.repeat(1000) + "TAIL_CANARY";
   const path = join(dir, "ws", "source.txt");
   writeFileSync(path, body);
@@ -129,6 +138,133 @@ describe("automatic deterministic escape hatch", () => {
     const { session, request } = setup(undefined, { reader: { fallback_max_bytes: 100 } });
     request.budgets.max_answer_bytes = 50;
     expect((await session.read(request)).extraction!.result_bytes).toBeLessThanOrEqual(50);
+  });
+});
+
+describe("explicit legacy availability fallback", () => {
+  it("publishes a partial, deterministic legacy summary after availability is exhausted", async () => {
+    const first = new FakeLuna([], outage());
+    const second = new FakeLuna([], outage());
+    const { session, entry, request, body } = setup(
+      new FallbackChainProvider(first, [second]),
+      {},
+      { legacyCompaction: true },
+    );
+    const env = await session.read(request);
+    enforce(env);
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    expect(env.status).toBe("partial");
+    expect(env.result_kind).toBe("legacy_compaction");
+    expect(env.provenance).toMatchObject({
+      derived: false,
+      label: "legacy_compaction",
+      attribution_status: "not_applicable",
+      attempts_started: 4,
+      usage_complete: false,
+    });
+    expect(env.legacy_compaction).toMatchObject({
+      deterministic: true,
+      source_id: entry.sourceId,
+      snapshot_id: entry.snapshot.snapshotId,
+      original_bytes: Buffer.byteLength(body),
+      original_failure: "MODEL_ERROR",
+    });
+    expect(env.legacy_compaction!.summary).toContain("Line count:");
+    expect(env.legacy_compaction!.summary_bytes)
+      .toBe(Buffer.byteLength(env.legacy_compaction!.summary));
+    expect(env.guidance).toContain("not model-derived");
+    expect(env.recovery).toEqual(expect.objectContaining({ handles_valid: true }));
+    expect(JSON.stringify(env)).not.toContain("PRIVATE_BODY");
+    expect(env.legacy_compaction!.summary).not.toBe(body);
+  });
+
+  it("fits long escaped Unicode summaries under the ordinary envelope cap", async () => {
+    const { session, request, dir } = setup(
+      undefined,
+      {},
+      { legacyCompaction: true, legacyCompactionMaxChars: 60_000 },
+    );
+    const body = JSON.stringify(Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => [
+        `payload_${index}`,
+        `日本語 payload ${index} with \"quotes\" and \\\\slashes ${"x".repeat(350)}`,
+      ]),
+    ));
+    expect(Buffer.byteLength(legacyCompact.compactToolResult(body, { hardChars: 60_000 })))
+      .toBeGreaterThan(DEFAULT_LIMITS.maxEnvelopeBytes);
+    const path = join(dir, "ws", "escaped.json");
+    writeFileSync(path, body);
+    const entry = session.registerPath(path);
+    request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId,
+      selector: { kind: "all" } }];
+    const env = await session.read(request);
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    enforce(env);
+    expect(serializedBytes(env)).toBeLessThanOrEqual(DEFAULT_LIMITS.maxEnvelopeBytes);
+    expect(env.legacy_compaction!.summary_bytes)
+      .toBeLessThanOrEqual(DEFAULT_LIMITS.maxExtractionBytes);
+    expect(env.legacy_compaction!.summary).not.toContain("payload_39");
+    expect(env.legacy_compaction!.summary).toContain("日本語");
+  });
+
+  it("does not raw-fail-open when the opted-in compactor fails", async () => {
+    const sentinel = "LEGACY_COMPACTOR_PRIVATE_SENTINEL";
+    const spy = vi.spyOn(legacyCompact, "compactToolResult")
+      .mockImplementation(() => { throw new Error(sentinel); });
+    try {
+      const { session, request, body } = setup(undefined, {}, { legacyCompaction: true });
+      const env = await session.read(request);
+      expect(env.code).toBe("MODEL_ERROR");
+      expect(env.legacy_compaction).toBeUndefined();
+      expect(env.extraction).toBeUndefined();
+      expect(JSON.stringify(env)).not.toContain(sentinel);
+      expect(JSON.stringify(env)).not.toContain(body);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("marks handles invalid when legacy source revalidation fails", async () => {
+    const { session, request } = setup(undefined, {}, { legacyCompaction: true });
+    const original = session.registry.resolve.bind(session.registry);
+    let resolves = 0;
+    vi.spyOn(session.registry, "resolve").mockImplementation((...args) => {
+      if (++resolves > 1) throw new ShuntError("SOURCE_CHANGED", "PRIVATE_STORE_BODY");
+      return original(...args);
+    });
+    const env = await session.read(request);
+    expect(env.code).toBe("MODEL_ERROR");
+    expect(env.recovery!.handles_valid).toBe(false);
+    expect(JSON.stringify(env)).not.toContain("PRIVATE_STORE_BODY");
+  });
+
+  it("summarizes only the first source while retaining all source handles", async () => {
+    const { session, request, dir, entry } = setup(undefined, {}, { legacyCompaction: true });
+    const secondPath = join(dir, "ws", "second.txt");
+    writeFileSync(secondPath, "SECOND_SOURCE_ONLY_CANARY\n".repeat(100));
+    const second = session.registerPath(secondPath);
+    request.sources.push({
+      source_id: second.sourceId,
+      snapshot_id: second.snapshot.snapshotId,
+      selector: { kind: "all" },
+    });
+    const env = await session.read(request);
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    expect(env.sources.map((source) => source.source_id)).toEqual([entry.sourceId, second.sourceId]);
+    expect(env.coverage.omitted.map((omission) => omission.source_id))
+      .toEqual(expect.arrayContaining([entry.sourceId, second.sourceId]));
+    expect(JSON.stringify(env)).not.toContain("SECOND_SOURCE_ONLY_CANARY");
+  });
+
+  it("preserves the old exact-prefix availability fallback when legacy mode is omitted", async () => {
+    const { session, request } = setup();
+    const env = await session.read(request);
+    expect(env.code).toBe("EXTRACTED");
+    expect(env.result_kind).toBe("deterministic_extraction");
+  });
+
+  it.each([999, 60_001, 2.5, "16000", null])("rejects invalid legacy hard caps %s", (value) => {
+    expect(() => setup(undefined, {}, { legacyCompactionMaxChars: value as number })).toThrow();
   });
 });
 

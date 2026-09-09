@@ -45,6 +45,7 @@ export type AttributionPolicy = "require_match" | "allow_unverified" | "not_appl
 export type ResultKind =
   | "model_derived"
   | "deterministic_extraction"
+  | "legacy_compaction"
   | "gate_decision"
   | "pointer"
   | "stats"
@@ -53,6 +54,7 @@ export type ResultKind =
 export type ProvenanceLabel =
   | "model_generated_answer"
   | "deterministic_extraction"
+  | "legacy_compaction"
   | "gate_decision"
   | "pointer_only"
   | "session_metrics"

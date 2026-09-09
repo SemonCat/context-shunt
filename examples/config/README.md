@@ -25,11 +25,11 @@ adding fake keys to either plugin `config` block.
 | `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
 | `reader.automatic_extract` | `true` | Exact extraction escape hatch after exhausted availability; also requires inspect. |
 | `reader.fallback_max_bytes` | `2048` | 1–4096 source bytes, narrowed by all existing limits. |
-| `reader.legacy_compaction` | `true` | Broader deterministic fallback for a reader failure `automatic_extract` does not cover. **Python core only** — not yet in `openclaw.json`'s shape; the TypeScript core does not build or consume it yet. |
+| `reader.legacy_compaction` | `true` | Broader deterministic fallback for a reader failure `automatic_extract` does not cover. **Python core only** — not yet in `openclaw.json`'s shape; OpenClaw selects its port via an adapter session option after exhausted availability. |
 | `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core only, same caveat as above. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
-| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. Unsupported on OpenClaw. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
+| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw 2026.9.3 supports eligible read-only middleware-visible results. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
 | `artifact_import.enabled` | `false` | Adopt an oversized tool-result artifact an external producer already persisted. Supported on Hermes; the OpenClaw core has no import boundary and reports the mode unsupported. |
 | `artifact_import.roots` | `[]` | Allowlist of canonical directories an artifact and its manifest may live under. Separate from `workspace_roots`, and refused if a root contains the private cache. |
 | `artifact_import.accepted_manifest_schemas` | `[]` | Allowlist of producer manifest schemas. A manifest declaring a schema outside it is refused even when a translation profile for that schema exists. |
@@ -40,7 +40,7 @@ adding fake keys to either plugin `config` block.
 The import boundary is one of two deployable answers to oversized *tool results*, and it is
 deliberately not the same thing as `tool_result_capture`. That mode needs the host to hand a
 plugin the complete result before truncation and accept a replacement before persistence -
-unsupported on OpenClaw, and on Hermes off by default pending an explicit operator
+OpenClaw captures only the middleware-visible view, and Hermes is off by default pending an explicit operator
 attestation (see `docs/capability-matrix.md`). An artifact a producer already wrote to disk
 needs neither: the capture already happened, so all the host has to supply is a way to
 invoke the import.
@@ -115,3 +115,11 @@ The complete list of accepted keys and current defaults, including concurrency, 
 deadline, store, TTL, JSON, inspect, disclosure, and stats limits, is in
 [`docs/configuration.md`](../../docs/configuration.md). Token and attempt accounting is in
 [`docs/metrics.md`](../../docs/metrics.md).
+
+
+OpenClaw 1.2.0 targets the official 2026.9.3 middleware in both embedded and OpenClaw-owned
+Codex dynamic tools. The example stages capture off. Before enabling, disable Tokenjuice
+and other reducers in the same config transaction. Add verified read-only MCP IDs to
+`tool_result_capture.read_only_tools`, for example `["mcp__logs__query"]`; unknown and
+mutating tools stay excluded. The Hermes ordering attestation is ignored on OpenClaw.
+See [runtime and ingress limits](../../docs/capability-matrix.md#openclaw).

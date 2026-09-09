@@ -80,7 +80,10 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "cancellation": ("gate_cancellation", [(CORE_TS, "test/reader-and-spill.test.ts")]),
     "permissions": ("gate_permissions", [(CORE_TS, "test/permissions.test.ts")]),
     "no-writes": ("gate_no_writes", [(CORE_TS, "test/reader-and-spill.test.ts")]),
-    "capability": ("gate_capability", [(OPENCLAW_ADAPTER, "test/adapter.test.ts")]),
+    "capability": (
+        "gate_capability",
+        [(OPENCLAW_ADAPTER, "test/adapter.test.ts"), (OPENCLAW_ADAPTER, "test/capture.test.ts")],
+    ),
     "store": ("gate_store", [(CORE_TS, "test/store.test.ts")]),
     "inspect": (
         "gate_inspect",
@@ -90,10 +93,11 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     # Python-only: the import boundary lives in the Python core, and the OpenClaw
     # capability report says so rather than implying a TypeScript twin exists.
     "artifact-import": ("gate_artifact_import", []),
-    # Python-only: the legacy-compaction fallback (both the ported algorithm and its
-    # session-level wiring) exists only in the Python core today - see
-    # docs/capability-matrix.md's "Future work" for the TypeScript-parity gap.
-    "legacy-compaction": ("gate_legacy_compact", []),
+    # Both language ports plus the TypeScript availability-only session boundary.
+    "legacy-compaction": ("gate_legacy_compact", [
+        (CORE_TS, "test/legacy-compact.test.ts"),
+        (CORE_TS, "test/automatic-extract.test.ts"),
+    ]),
     # Python-only: what each *live reader route* actually does. Deterministic - it drives
     # each bridge against a stub - and it is what makes the live gates' refusal to score
     # through a role-collapsing route trustworthy rather than a comment.
@@ -416,13 +420,9 @@ def run_integration(host: str, mode: str) -> list[GateResult]:
             )
         ]
 
-    if mode == "post-tool":
-        # Both supported hosts are proven unable to give the required capture/replacement
-        # order (docs/capability-matrix.md), so this gate will not run in any environment
-        # - it is disabled by design, not waiting on a prerequisite. Decided *before* the
-        # host prerequisite for exactly that reason: producing a checkout would not change
-        # the answer, and reporting "missing prerequisite" implied it would. The
-        # fail-closed behaviour is still gated, deterministically, by `--mode unsupported`.
+    if mode == "post-tool" and host == "hermes":
+        # Hermes still needs its deployment-specific ordering attestation. OpenClaw's
+        # official middleware is exercised below against the real host loader/runner.
         return [
             GateResult(
                 "integration",
@@ -720,6 +720,17 @@ def run_packaging(gate: str) -> list[GateResult]:
         if missing:
             failures.append(f"{manifest} files[] is missing {missing}")
 
+    # The installed-plugin middleware entitlement and published dependency must agree.
+    checks += 1
+    plugin_manifest = json.loads((OPENCLAW_ADAPTER / "openclaw.plugin.json").read_text())
+    plugin_package = json.loads((OPENCLAW_ADAPTER / "package.json").read_text())
+    core_package = json.loads((CORE_TS / "package.json").read_text())
+    ok = plugin_manifest["contracts"].get("agentToolResultMiddleware") == ["openclaw", "codex"]
+    ok = ok and plugin_package["dependencies"]["@context-shunt/core"] == core_package["version"]
+    lines.append(f"OpenClaw middleware entitlement and core version: {'pass' if ok else 'fail'}")
+    if not ok:
+        failures.append("OpenClaw middleware entitlement or core dependency version mismatch")
+
     # 4. Both packages ship the vendored contracts *including the store DDL*, which is
     #    executed at runtime - a package without it cannot open a store at all.
     for label, root in (
@@ -807,28 +818,8 @@ def run_packaging(gate: str) -> list[GateResult]:
 
 def _example_config_loads(example: Path) -> tuple[bool, str]:
     """The documented configuration must be one the loader accepts, key for key."""
-    interpreter = _python()
-    if interpreter is None:
-        return False, "python3 not found"
-    script = (
-        "import json, pathlib, sys, tempfile;"
-        'sys.path.insert(0, "packages/core-py/src");'
-        "from context_shunt.config import load;"
-        f"raw = json.loads(pathlib.Path({str(example)!r}).read_text());"
-        'cfg = raw["plugins"]["entries"]["context-shunt"]["config"];'
-        "root = pathlib.Path(tempfile.mkdtemp());"
-        '(root / "ws").mkdir();'
-        'cfg = {**cfg, "workspace_roots": [str(root / "ws")],'
-        '       "cache_dir": str(root / "cache")};'
-        "loaded = load(cfg, default_spill_dir=root / 'cache');"
-        "assert loaded.suma_post_tool.enabled is False;"
-        "assert loaded.reader.model == 'gpt-5.6-luna';"
-        'print("OK")'
-    )
-    proc = _run([interpreter, "-c", script], ROOT)
-    if proc.returncode != 0 or "OK" not in proc.stdout:
-        return False, f"example config is not loadable: {_tail(proc.stderr or proc.stdout, 3)}"
-    return True, ""
+    status, cases, detail = _vitest(OPENCLAW_ADAPTER, "test/config.test.ts")
+    return status == "pass" and cases > 0, detail
 
 
 def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:

@@ -7,12 +7,12 @@
  * fields, and refuses any citation not marked verified. A guard failure yields a fixed
  * small error envelope, never the input it was handed.
  *
- * Two caps, both normative. Most envelopes are capped at 16 KiB. A deterministic
- * extraction or a stats page carries a bounded payload of its own - up to 16 KiB of exact
- * snapshot bytes, or one page of records - so those are measured against
- * `maxExtendedEnvelopeBytes` (20 KiB), leaving 4 KiB for the envelope around a full-size
- * extraction. The extraction payload itself is measured separately against the 16 KiB
- * per-result cap, so the escape hatch cannot widen by hiding bytes in envelope overhead.
+ * Two caps, both normative. Most envelopes are capped at 16 KiB. A deterministic extraction
+ * or stats page carries a bounded payload of its own - up to 16 KiB of exact snapshot bytes,
+ * or one page of records - so those are measured against `maxExtendedEnvelopeBytes` (20 KiB),
+ * leaving 4 KiB for the envelope around a full-size payload. The extraction and legacy
+ * compaction payloads are each measured separately against the 16 KiB per-result cap, so an
+ * escape hatch cannot widen by hiding bytes in envelope overhead.
  *
  * Adding a field to the envelope means adding it here too: `ALLOWED_KEYS` is a closed set.
  */
@@ -34,13 +34,13 @@ const ALLOWED_KEYS = new Set([
   "sources", "retryable", "guidance", "pointer",
   // -- 1.1 --
   "result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery",
-  "import_receipt",
+  "legacy_compaction", "import_receipt",
 ]);
 const ALLOWED_SOURCE_KEYS = new Set([
   "source_id", "snapshot_id", "media_type", "bytes", "expires_at",
 ]);
 const REQUIRED_V11_KEYS = ["result_kind", "provenance", "accounting_id"] as const;
-const OPTIONAL_V11_KEYS = ["extraction", "stats", "recovery", "import_receipt"] as const;
+const OPTIONAL_V11_KEYS = ["extraction", "legacy_compaction", "stats", "recovery", "import_receipt"] as const;
 const SAFE_ACCOUNTING_ID = /^acc_[0-9a-f]{16}$/;
 
 export class OutputGuardError extends Error {}
@@ -124,6 +124,37 @@ function checkExtraction(env: Record<string, unknown>, limits: Limits): void {
   }
 }
 
+function checkLegacyCompaction(env: Record<string, unknown>, limits: Limits): void {
+  const block = env["legacy_compaction"];
+  if (block === undefined) return;
+  if (typeof block !== "object" || block === null) {
+    throw new OutputGuardError("legacy_compaction must be an object");
+  }
+  const value = block as Record<string, unknown>;
+  if (value["deterministic"] !== true) {
+    throw new OutputGuardError("legacy_compaction must declare itself deterministic");
+  }
+  const summary = value["summary"];
+  if (typeof summary !== "string") {
+    throw new OutputGuardError("legacy_compaction summary malformed");
+  }
+  if (containsSecretMarker(summary)) {
+    throw new OutputGuardError("secret marker in legacy_compaction summary");
+  }
+  const summaryBytes = utf8Length(summary);
+  if (summaryBytes > limits.maxExtractionBytes) {
+    throw new OutputGuardError("legacy_compaction over per-result cap");
+  }
+  if (value["summary_bytes"] !== summaryBytes) {
+    throw new OutputGuardError("legacy_compaction summary_bytes disagrees with summary");
+  }
+  const provenance = env["provenance"];
+  if (typeof provenance === "object" && provenance !== null
+      && (provenance as Record<string, unknown>)["derived"] === true) {
+    throw new OutputGuardError("legacy_compaction must not accompany a derived=true provenance");
+  }
+}
+
 export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Envelope {
   if (typeof envelope !== "object" || envelope === null) throw new OutputGuardError("not an object");
   const env = envelope as Record<string, unknown>;
@@ -184,13 +215,15 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
   }
 
   if (
-    (code === "SPILLED" || code === "EXTRACTED" || code === "STATS" || code === "IMPORTED")
+    (code === "SPILLED" || code === "EXTRACTED" || code === "STATS"
+      || code === "IMPORTED" || code === "LEGACY_COMPACTED")
     && (answer.length > 0 || citations.length > 0)
   ) {
     throw new OutputGuardError(`${code} must not carry an answer`);
   }
 
   checkExtraction(env, limits);
+  checkLegacyCompaction(env, limits);
 
   const cap = envelopeByteCap(
     typeof env["result_kind"] === "string" ? (env["result_kind"] as string) : undefined,

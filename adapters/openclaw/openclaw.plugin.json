@@ -10,6 +10,10 @@
       "context_shunt_read",
       "context_shunt_inspect",
       "context_shunt_stats"
+    ],
+    "agentToolResultMiddleware": [
+      "openclaw",
+      "codex"
     ]
   },
   "configSchema": {
@@ -61,17 +65,24 @@
             "description": "Optional provider to pin. Empty lets the host route."
           },
           "attribution_policy": {
-            "enum": ["allow_unverified", "require_match"],
+            "enum": [
+              "allow_unverified",
+              "require_match"
+            ],
             "default": "allow_unverified",
             "description": "What to do when attribution cannot be proven. allow_unverified publishes the truthful unverified label; require_match refuses to answer instead. A contradiction is refused either way."
           },
           "automatic_extract": {
-            "type": "boolean", "default": true,
-            "description": "After exhausted reader availability, return a labelled bounded exact-text escape hatch. Also requires inspect.enabled."
+            "type": "boolean",
+            "default": true,
+            "description": "Compatibility setting for the core exact-extraction tier. OpenClaw selects labelled legacy compaction on exhausted availability; unsafe compaction retains a bounded failure."
           },
           "fallback_max_bytes": {
-            "type": "integer", "minimum": 1, "maximum": 4096, "default": 2048,
-            "description": "Maximum source bytes in the automatic first-source prefix; all inspect and disclosure limits still apply."
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "default": 2048,
+            "description": "Compatibility budget for the core exact-prefix tier; OpenClaw legacy compaction uses its own 16000-character ceiling and the existing envelope byte cap."
           },
           "fallback_chain": {
             "type": "array",
@@ -81,10 +92,18 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "model": { "type": "string", "maxLength": 128 },
-                "provider": { "type": "string", "maxLength": 128 }
+                "model": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "provider": {
+                  "type": "string",
+                  "maxLength": 128
+                }
               },
-              "required": ["model"]
+              "required": [
+                "model"
+              ]
             }
           }
         }
@@ -118,12 +137,21 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Optional oversized-tool-result capture mode. Default off, and refused on this host: the capability probe cannot prove capture before truncation or replacement before persistence."
+            "description": "Capture eligible read-only text/JSON via the official OpenClaw 2026.9.3 middleware before model delivery. Disable Tokenjuice and other result reducers atomically when enabling."
           },
           "host_ordering_verified_locally": {
             "type": "boolean",
             "default": false,
-            "description": "Operator attestation that the installed host's ordering was personally verified. This adapter does not act on it today - the mode stays refused on this host regardless - but the field is accepted for config parity with the Hermes adapter."
+            "description": "Deprecated compatibility field; ignored by OpenClaw. Official middleware contract evidence gates capture."
+          },
+          "read_only_tools": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+            },
+            "description": "Exact additional tool IDs whose producer contract is read-only. Defaults cover read, web_fetch, web_search. Unknown/mutating/control tools are not covered."
           }
         }
       },

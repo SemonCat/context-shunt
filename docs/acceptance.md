@@ -337,3 +337,32 @@ provider configuration and the limits contract), which route was configured, the
 statuses those identities were accepted on. A dirty tree **fails** it: an attestation of a
 tree that is not the tree is worthless. Absent live evidence is `NOT_RUN`, not a pass - an
 attestation missing the identities of the calls it attests is not an attestation.
+
+
+### OpenClaw middleware cutover
+
+This release implements the plugin boundary; it does not install, enable, restart, deploy,
+or edit the live host. Tokenjuice exists in the operator's live config. Treat these steps
+as remaining operator/live gates, not completed work:
+
+1. Stage the built 1.2.0 TypeScript packages and review the manifest entitlement for both
+   runtimes. Verify OpenClaw is 2026.9.3 and each added `read_only_tools` ID is actually read-only.
+2. Run `CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw ./scripts/verify integration openclaw --mode post-tool`.
+   This runs the real loader/runner deterministically; without the host it is `NOT_RUN`.
+3. Quiesce requests. Prepare and validate **one** host configuration transaction that explicitly
+   enables context-shunt, enables its capture flag, and disables Tokenjuice plus every other
+   reducer for these results. No supported priority option exists. Do not enable both and
+   hope registration order preserves originals. Apply using the host's supported config path;
+   activate/restart only as required by that host, then resume traffic after checking registration.
+4. Live acceptance: check one middleware registration and supported capability, send an
+   oversized eligible MCP sentinel below 99,999 text chars, verify a pointer reaches the model,
+   ask a real question through `context_shunt_read`, and exhaust model availability to verify
+   `LEGACY_COMPACTED` / `legacy_compaction`. Repeat a cap-boundary sentinel: no raw text and no
+   complete-original snapshot claim. Check message receipts, accepted `sessions_spawn`, errors,
+   unknown/mutating exclusions and session continuity across compaction.
+5. Roll back under quiescence in a single transaction: restore the prior reducer while
+   disabling capture. Retain the existing artifact TTL/session policy; do not wipe handles.
+
+Codex-native PostToolUse replacement and complete-original capture above ingress sanitization
+caps are outside this seam. The latter needs an upstream host change or producer-side design;
+no OpenClaw source patch is required for the supported middleware-visible scope.

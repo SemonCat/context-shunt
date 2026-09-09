@@ -92,12 +92,13 @@ it with a manifest; the import boundary re-proves every claim the manifest makes
 it as an ordinary handle. It needs no interception ordering at all, which is why it is
 supported wherever a host can register the tool.
 
-**`tool_result_capture`** needs the host to hand the adapter the complete result *before*
-truncation and accept a bounded replacement *before* persistence and context insertion.
-Unsupported on OpenClaw (its persistence cap runs before the one hook positioned early
-enough, and that hook cannot replace a result either way). On Hermes it is wired but stays
-off by default, becoming supported only with an explicit operator attestation - see
-[capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
+**`tool_result_capture`** uses each host's supported replacement seam. OpenClaw 2026.9.3
+uses the official runtime-neutral middleware for eligible read-only text/JSON in embedded
+and OpenClaw-owned Codex dynamic tools. It captures the immutable middleware-visible
+representation, not necessarily complete producer output: the host sanitizes before the
+handler. Ambiguous cap boundaries are withheld and refused. Codex-native results are
+observe-only. Hermes still requires its existing local operator attestation.
+See [capability evidence](capability-matrix.md#openclaw).
 
 The secondary path is the original pre-read gate, unchanged. It remains the answer for an
 oversized *file* read, and it is the only path that can act before an operation runs. A
@@ -249,7 +250,7 @@ structure, secret redaction - never exact bytes and never model output, as
 excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
 heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
 extraction; otherwise the original bounded failure remains, never raw. Coverage and
-failed-attempt accounting are preserved. TypeScript/OpenClaw precedence is unchanged. See
+failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
 [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
 for the exact trigger set, caps and wire shape.
 
@@ -281,9 +282,7 @@ failure returns a bounded error without the raw result. Internal-pointer recursi
 verified against store state, not trusted from payload data.
 
 This engine is behind `tool_result_capture` (formerly documented under the internal name
-`suma_post_tool`). It is not wired on OpenClaw: OpenClaw applies its persistence cap before
-the one hook positioned early enough to observe a result, and that hook cannot replace one
-either way, so neither guarantee this mode needs can be shown there. On Hermes, direct
+`suma_post_tool`). OpenClaw wires the official middleware to `ShuntSession.postToolResult`, sharing the existing `ScopeIdentity`, immutable store, pointer schema and accounting. A missing scope fails closed; middleware does not use a shared unbound scope. Host-clipped candidates receive no handle. Tokenjuice and other result reducers must be disabled atomically at cutover. On Hermes, direct
 read-only inspection of one live 0.21.1 host found the tool executes and `post_tool_call`
 fires before `transform_tool_result` runs, with no truncation call visible between - so the
 mode is wired there, but stays reported unsupported by default: that finding is evidence

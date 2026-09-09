@@ -38,6 +38,7 @@ export * from "./gate.js";
 export * from "./inspect.js";
 export * from "./guard.js";
 export * from "./limits.js";
+export * from "./legacy-compact.js";
 export * from "./metrics.js";
 export * from "./paths.js";
 export * from "./probe.js";

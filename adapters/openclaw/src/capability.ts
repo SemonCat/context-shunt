@@ -1,35 +1,3 @@
-/**
- * OpenClaw capability probe.
- *
- * The local gate and the reader are supported: `before_tool_call` runs before the tool
- * executes and can return a deny decision, and the runtime model bridge can be pinned to
- * `gpt-5.6-luna`.
- *
- * The optional oversized-tool-result capture mode (`tool_result_capture` - the
- * `suma_post_tool` name was this project's own internal shorthand, never a product name,
- * and is retired here in favor of one that says what the mode does) is **not** supported
- * on this host, and the reasons are structural rather than a matter of effort:
- *
- * 1. `CAPTURE_AFTER_TRUNCATION` - in OpenClaw the persistence guard caps the tool result
- *    *before* the plugin hook runs. In `src/agents/session-tool-result-guard.ts` the
- *    sequence is `capToolResultForPersistence(...)` and only then `persistToolResult(...)`,
- *    which is what invokes `tool_result_persist`. A plugin therefore receives content that
- *    has already been truncated, so "complete capture before truncation" is unprovable.
- * 2. `OBSERVE_ONLY_HOOK` - `after_tool_call` can see the result but cannot replace it
- *    (documented as "Observe" in `docs/plugins/hooks.md`), so the one hook positioned
- *    early enough cannot perform the safe replacement.
- * 3. `HOST_FAIL_OPEN` - the synchronous result hooks are documented as fail-open: a
- *    handler that throws is logged and its result ignored, leaving the original in place.
- *
- * Because the required order cannot be shown, the mode is reported `unsupported` and stays
- * off. `HOST_UNSAFE` is what a caller gets if it tries to force it on.
- *
- * `artifact_import` - adopting an oversized tool result a producer already persisted - is
- * reported `unsupported` here for a different and narrower reason: nothing about this host
- * prevents it, but the TypeScript core has no import boundary yet. That is a repository
- * fact, not a host fact, so it carries its own `IMPORT_UNIMPLEMENTED` reason rather than
- * borrowing a host limitation it does not have.
- */
 import {
   type CapabilityReport,
   type DisabledReason,
@@ -40,7 +8,7 @@ import {
 } from "@context-shunt/core";
 
 export const ADAPTER = "openclaw";
-export const ADAPTER_VERSION = "1.1.0";
+export const ADAPTER_VERSION = "1.2.0";
 
 /**
  * OpenClaw tool ids this adapter claims to cover. A read tool outside this list is not
@@ -55,12 +23,15 @@ export const SHELL_TOOLS: Record<string, "shell"> = {
 };
 
 export const TOOL_RESULT_CAPTURE_EVIDENCE: readonly string[] = [
-  "openclaw src/agents/session-tool-result-guard.ts: capToolResultForPersistence() runs before persistToolResult(), so tool_result_persist sees post-truncation content",
-  "openclaw docs/plugins/hooks.md: after_tool_call is documented as observe-only and cannot replace a result",
-  "openclaw docs/plugins/hooks.md: tool_result_persist / before_message_write are synchronous and fail-open - a failed result is ignored",
+  "OpenClaw 2026.9.3 / 773b6d8: registerAgentToolResultMiddleware with manifest contracts.agentToolResultMiddleware=[openclaw,codex] and explicit plugin enablement",
+  "Embedded OpenClaw and OpenClaw-owned Codex dynamic tools: replacement before model delivery when registered; Codex-native PostToolUse is observe-only, replacement unsupported",
+  "src/agents/harness/tool-result-middleware.ts: host fails closed on throws/invalid output and preserves delivered-message fallback",
+  "Ingress sanitizes before first handler: 200 blocks, 100000 UTF-16 chars per text aggregation, 100000 details bytes, 5000000 image chars; detectable boundaries refused, original completeness unknown even below caps",
+  "src/plugins/agent-tool-result-middleware.ts and loader: registry order, no priority; disable Tokenjuice and other result reducers atomically when enabling capture",
+  "Snapshots contain deterministic middleware-visible text/JSON only; upstream_truncated=null, never a complete-original claim; explicitly configured read-only tools only",
 ];
 
-/** Deprecated alias. `suma_post_tool` was never a product name; see the module docstring. */
+/** Deprecated alias. `suma_post_tool` was never a product name. */
 export const SUMA_EVIDENCE = TOOL_RESULT_CAPTURE_EVIDENCE;
 
 export interface ProbeInput {
@@ -69,6 +40,8 @@ export interface ProbeInput {
   /** Whether a runtime model bridge is present. */
   readonly hasModelBridge: boolean;
   readonly hostVersion: string;
+  readonly hasToolResultMiddleware?: boolean;
+  readonly captureEnabled?: boolean;
   /** Set when the host cannot disable provider prompt tracing. */
   readonly unsafeTracing?: boolean;
   /**
@@ -128,12 +101,18 @@ export function buildCapabilityReport(input: ProbeInput): CapabilityReport {
         ]),
   );
 
+  const captureReasons: DisabledReason[] = [];
+  if (!input.hasToolResultMiddleware) captureReasons.push("HOOK_MISSING");
+  if (input.hostVersion !== "2026.9.3") captureReasons.push("HOST_VERSION_UNVERIFIED");
+  if (input.captureEnabled !== true) captureReasons.push("CONFIG_DISABLED");
+  if (input.unsafeTracing) captureReasons.push("UNSAFE_TRACING");
   modes.push(
-    unsupported(
-      "tool_result_capture",
-      ["CAPTURE_AFTER_TRUNCATION", "OBSERVE_ONLY_HOOK", "HOST_FAIL_OPEN"],
-      TOOL_RESULT_CAPTURE_EVIDENCE,
-    ),
+    captureReasons.length === 0
+      ? supported("tool_result_capture", TOOL_RESULT_CAPTURE_EVIDENCE)
+      : unsupported("tool_result_capture", captureReasons, [
+          ...TOOL_RESULT_CAPTURE_EVIDENCE,
+          "Not registered: requires enabled capture, official API and the verified 2026.9.3 contract; revalidate host upgrades",
+        ]),
   );
 
   modes.push(

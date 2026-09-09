@@ -1,27 +1,6 @@
-/**
- * integration openclaw --mode local: the real host checkout, or nothing.
- *
- * These checks use the installed host rather than a stand-in:
- *
- * 1. The real plugin loader activates this adapter and accepts its tool factory.
- * 2. The host's real before-tool wrapper vetoes a 400-line read before the wrapped
- *    executor runs; the observed executor count remains zero.
- * 3. The hooks the adapter depends on exist in the host's own typed-hook catalogue, and
- *    `after_tool_call` is still documented as observe-only.
- * 4. The ordering evidence behind the disabled tool_result_capture mode still holds in the
- *    host source: the persistence cap runs *before* the plugin's persist hook. If a host
- *    upgrade changes that, this gate fails and the capability decision has to be redone -
- *    which is exactly what "re-run the ordering evidence on upgrade" means.
- *
- * What this is *not*: a live runtime sentinel measurement of capture/truncation/persistence
- * order inside a running gateway. That needs a running host and is listed as future work
- * in docs/capability-matrix.md. The mode stays disabled either way, so nothing here can
- * turn an unsupported mode into a supported one.
- *
- *     CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
- *     scripts/verify integration openclaw --mode local
- *
- * Without that, `scripts/verify` reports NOT_RUN (exit 2), never a pass.
+/** Deterministic integration against the installed 2026.9.3 host loader/runner.
+ * No gateway, live configuration, provider calls, deployment or host source writes.
+ * Requires CONTEXT_SHUNT_OPENCLAW_ROOT; absent prerequisites are NOT_RUN in verify.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -47,7 +26,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   it("reads the installed host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     expect(pkg.name).toBe("openclaw");
-    expect(String(pkg.version)).toBe("2026.9.2");
+    expect(String(pkg.version)).toBe("2026.9.3");
   });
 
   it("exposes the typed hooks the adapter depends on", () => {
@@ -67,25 +46,28 @@ describe.skipIf(!available)("openclaw host integration", () => {
     expect(row).toMatch(/Observe/);
   });
 
-  it("still caps the tool result before invoking the plugin persist hook", () => {
-    // This is the evidence behind CAPTURE_AFTER_TRUNCATION. If the order flips, the gate
-    // fails and the capability decision must be re-derived rather than inherited.
-    const guard = hostFile("src/agents/session-tool-result-guard.ts");
-    const capIndex = guard.indexOf("const capped = capToolResultForPersistence(");
-    const persistIndex = guard.indexOf("const transformed = persistToolResult(capped,");
-    expect(capIndex).toBeGreaterThan(-1);
-    expect(persistIndex).toBeGreaterThan(capIndex);
+  it("exposes the official fail-closed middleware with ingress ceilings", () => {
+    const runner = hostFile("src/agents/harness/tool-result-middleware.ts");
+    for (const evidence of ["MAX_MIDDLEWARE_CONTENT_BLOCKS = 200", "MAX_MIDDLEWARE_TEXT_CHARS = 100_000",
+      "MAX_MIDDLEWARE_DETAILS_BYTES = 100_000", "MAX_MIDDLEWARE_IMAGE_DATA_CHARS = 5_000_000",
+      "sanitizeToolResultForMiddleware(event.result)", "Tool output unavailable due to post-processing error.",
+      "buildDeliveredMessagingFailureFallback", "for (const handler of handlersForRun)"]) expect(runner).toContain(evidence);
+    const registrar = hostFile("src/plugins/registry-registrars-tools-hooks.ts");
+    expect(registrar).toContain("plugin must declare contracts.agentToolResultMiddleware");
+    expect(registrar).toContain("plugin must be explicitly enabled to register agent tool result middleware");
+    expect(hostFile("src/plugins/agent-tool-result-middleware-types.ts")).not.toContain("priority");
   });
 
-  it("keeps the tool_result_capture mode disabled for this host version", () => {
+  it("reports capture supported only with enabled official registration", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     const report = buildCapabilityReport({
       hooks: ["before_tool_call", "after_tool_call", "tool_result_persist", "session_end"],
       hasModelBridge: true,
       hostVersion: String(pkg.version),
+      hasToolResultMiddleware: true, captureEnabled: true,
     });
     expect(report.hostVersion).toBe(String(pkg.version));
-    expect(modeEnabled(report, "tool_result_capture")).toBe(false);
+    expect(modeEnabled(report, "tool_result_capture")).toBe(true);
     expect(modeEnabled(report, "local_gate")).toBe(true);
     expect(modeEnabled(report, "reader")).toBe(true);
     // The two paths that need no provider at all.
@@ -149,7 +131,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
           allowedModels: ["openai/gpt-5.6-luna"],
           allowedCompletionModels: ["openai/gpt-5.6-luna"] },
           config: { workspace_roots: [workspace], cache_dir: join(workspace, "..", ".cache"),
-            suma_post_tool: { enabled: false } } }
+            tool_result_capture: { enabled: true, read_only_tools: ["mcp__logs__query"] } } }
       } } };
       const registry = loader.loadOpenClawPlugins({ cache: false, activate: true, workspaceDir: workspace, config });
       const record = registry.plugins.find((entry) => entry.id === "context-shunt");
@@ -165,7 +147,25 @@ describe.skipIf(!available)("openclaw host integration", () => {
         config, sessionKey: "agent:main:shunt", sessionId: "shunt", agentId: "main", runId: "run-shunt"
       }, { emitDiagnostics: false });
       const result = await wrapped.execute("tc-host", { path: source });
-      console.log(JSON.stringify({ status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
+      const middlewares = registry.agentToolResultMiddlewares.filter((entry) => entry.pluginId === "context-shunt");
+      const captureEvent = { toolCallId: "tc-capture", toolName: "mcp__logs__query", args: {},
+        result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_".repeat(2500) }] } };
+      const runtimeResults = [];
+      for (const runtime of ["openclaw", "codex"]) {
+        const runner = harness.createAgentToolResultMiddlewareRunner({ runtime, sessionKey: "agent:main:shunt", sessionId: "shunt" }, middlewares.map((entry) => entry.handler));
+        const captured = await runner.applyToolResultMiddleware(captureEvent);
+        const capped = await runner.applyToolResultMiddleware({ ...captureEvent,
+          result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_".repeat(6000) }] } });
+        const failures = [];
+        for (const handler of [() => { throw Error("RAW_CAPTURE_SENTINEL_"); }, () => ({ result: { content: null } })]) {
+          const failedRunner = harness.createAgentToolResultMiddlewareRunner({ runtime }, [handler]);
+          failures.push(await failedRunner.applyToolResultMiddleware(captureEvent));
+          failures.push(await failedRunner.applyToolResultMiddleware({ ...captureEvent, toolName: "message", args: { action: "send", target: "test" },
+            result: { content: [{ type: "text", text: "RAW_CAPTURE_SENTINEL_" }], details: { messageDelivery: { status: "settled" }, ok: true, messageId: "receipt" } } }));
+        }
+        runtimeResults.push({ runtime, captured, capped, failures });
+      }
+      console.log(JSON.stringify({ middlewareCount: middlewares.length, runtimeResults, status: record?.status, errors: registry.diagnostics.filter((entry) => entry.level === "error"),
         hooks: registry.typedHooks.map((entry) => entry.hookName), reader: reader?.name,
         toolNames,
         executions, blocked: result?.details?.status, envelope: JSON.parse(result.content[0].text) }));
@@ -183,6 +183,16 @@ describe.skipIf(!available)("openclaw host integration", () => {
       },
     });
     const result = JSON.parse(stdout.trim().split("\n").at(-1)!);
+    expect(result.middlewareCount).toBe(1);
+    for (const runtime of result.runtimeResults) {
+      expect(JSON.parse(runtime.captured.content[0].text).code).toBe("SPILLED");
+      expect(JSON.parse(runtime.capped.content[0].text).code).toBe("HOST_UNSAFE");
+      expect(JSON.stringify(runtime)).not.toContain("RAW_CAPTURE_SENTINEL_");
+      expect(runtime.failures[0].details).toEqual({ status: "error", middlewareError: true });
+      expect(runtime.failures[1].details).toMatchObject({ ok: true, deliveryStatus: "sent" });
+      expect(runtime.failures[2].details).toEqual({ status: "error", middlewareError: true });
+      expect(runtime.failures[3].details).toMatchObject({ ok: true, deliveryStatus: "sent" });
+    }
     expect(result.status).toBe("loaded");
     expect(result.errors).toEqual([]);
     expect(result.hooks).toContain("before_tool_call");
