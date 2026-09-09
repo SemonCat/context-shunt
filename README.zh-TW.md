@@ -104,7 +104,7 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 ## Reader 失敗時
 
 兩個核心遇到 `CITATION_INVALID` 都明確回傳錯誤，不用啟發式摘要或固定前綴代替答案。
-非空語意回覆若沒有可用引文，屬於引文錯誤；合法的空 `answer` 或空 `claims` 陣列搭配空引文，
+非空語意回覆若未引用通過驗證的證據，屬於引文錯誤；無關但有效的引文不能替它背書。合法的空 `answer` 或空 `claims` 陣列搭配空引文，
 仍回傳 `ok/NO_MATCH`。
 保留的 `source_id`／`snapshot_id` 可供 `context_shunt_inspect` 以 lines／bytes 範圍或 search
 選擇器查證；依 `next_cursor` 接續，仍受 TTL 與累計揭露上限約束。預設 inspect 會縮小頁面並提供接續資訊，

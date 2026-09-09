@@ -324,3 +324,85 @@ def test_empty_reply_with_malformed_citations_is_not_valid_no_match(tmp_path, re
     env = session.read(request)
     assert env["code"] == "CITATION_INVALID"
     assert env["coverage"]["complete"] is False
+
+
+@pytest.mark.parametrize("shape", ["legacy", "claims"])
+@pytest.mark.parametrize(
+    "case", ["empty", "uncited", "unused", "cited", "invalid_empty", "verified_empty"]
+)
+def test_semantic_support_requires_referenced_evidence(tmp_path, shape, case):
+    citation = {"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}
+    citations = [] if case in ("empty", "uncited") else [citation]
+    if case == "invalid_empty":
+        citations = [{}]
+    empty = case in ("empty", "invalid_empty", "verified_empty")
+    text = "" if empty else ("alpha [c1]." if case == "cited" else "UNVERIFIED_SENTINEL")
+    reply = (
+        {"answer": text, "citations": citations}
+        if shape == "legacy"
+        else {
+            "claims": []
+            if empty
+            else [
+                {
+                    "text": "alpha." if case == "cited" else text,
+                    "citation_ids": ["c1"] if case == "cited" else [],
+                }
+            ],
+            "citations": citations,
+        }
+    )
+    session, entry, request, _ = setup(
+        tmp_path, FakeLuna(replies=[json.dumps(reply)]), body="alpha\n"
+    )
+    env = session.read(request)
+    expected = (
+        "NO_MATCH"
+        if case in ("empty", "verified_empty")
+        else "ANSWERED"
+        if case == "cited"
+        else "CITATION_INVALID"
+    )
+    assert env["code"] == expected
+    assert env["status"] == ("error" if expected == "CITATION_INVALID" else "ok")
+    assert env["coverage"]["complete"] is (expected != "CITATION_INVALID")
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert "UNVERIFIED_SENTINEL" not in json.dumps(env)
+    if expected == "CITATION_INVALID":
+        assert env["answer"] == "" and env["citations"] == []
+        assert env["recovery"]["handles_valid"] is True
+    rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
+    record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
+    assert record["code"] == expected
+    assert record["reader_input_tokens"] == 10 and record["reader_output_tokens"] == 5
+
+
+@pytest.mark.parametrize("shape", ["legacy", "claims"])
+def test_unused_valid_citation_recovery_revalidates_ttl(tmp_path, monkeypatch, shape):
+    citation = {"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}
+    reply = (
+        {"answer": "UNVERIFIED_SENTINEL", "citations": [citation]}
+        if shape == "legacy"
+        else {
+            "claims": [{"text": "UNVERIFIED_SENTINEL", "citation_ids": []}],
+            "citations": [citation],
+        }
+    )
+    session, _, request, _ = setup(tmp_path, FakeLuna(replies=[json.dumps(reply)]), body="alpha\n")
+    original = session._registry.resolve
+    calls = 0
+
+    def resolve(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 2:
+            raise ShuntError("SOURCE_EXPIRED")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session._registry, "resolve", resolve)
+    env = session.read(request)
+    assert env["code"] == "CITATION_INVALID"
+    assert calls >= 3
+    assert env["recovery"]["handles_valid"] is False
+    assert "RECAPTURE_SOURCE" in env["recovery"]["actions"]
+    assert "UNVERIFIED_SENTINEL" not in json.dumps(env)

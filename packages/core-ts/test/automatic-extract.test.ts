@@ -440,3 +440,53 @@ it.each([{ answer: "", citations: [{}] }, { claims: [], citations: [{}] }])(
     expect(env.coverage.complete).toBe(false);
   },
 );
+
+
+describe.each(["legacy", "claims"])("referenced semantic support %s", (shape) => {
+  it.each(["empty", "uncited", "unused", "cited", "invalid_empty", "verified_empty"])("classifies %s with cost and handles", async (kind) => {
+    const citation = { id: "c1", line_start: 1, line_end: 1, quote: "alpha" };
+    const citations = ["empty", "uncited"].includes(kind) ? [] : kind === "invalid_empty" ? [{}] : [citation];
+    const empty = ["empty", "invalid_empty", "verified_empty"].includes(kind);
+    const text = empty ? "" : kind === "cited" ? "alpha [c1]." : "UNVERIFIED_SENTINEL";
+    const reply = shape === "legacy" ? { answer: text, citations } : {
+      claims: empty ? [] : [{ text: kind === "cited" ? "alpha." : text, citation_ids: kind === "cited" ? ["c1"] : [] }], citations };
+    const { session, dir, request } = setup(new FakeLuna([], JSON.stringify(reply)));
+    const path = join(dir, "ws", "alpha.txt"); writeFileSync(path, "alpha\n");
+    const entry = session.registerPath(path);
+    request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }];
+    const env = await session.read(request);
+    const expected = ["empty", "verified_empty"].includes(kind) ? "NO_MATCH" : kind === "cited" ? "ANSWERED" : "CITATION_INVALID";
+    expect(env.code).toBe(expected);
+    expect(env.status).toBe(expected === "CITATION_INVALID" ? "error" : "ok");
+    expect(env.coverage.complete).toBe(expected !== "CITATION_INVALID");
+    expect(env.sources[0]!.source_id).toBe(entry.sourceId);
+    expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");
+    if (expected === "CITATION_INVALID") {
+      expect(env.answer).toBe(""); expect(env.citations).toEqual([]);
+      expect(env.recovery!.handles_valid).toBe(true);
+    }
+    const record = stats(session).find((r) => r.operation_id === env.accounting_id)!;
+    expect(record.code).toBe(expected);
+    expect(record.reader_input_tokens).toBe(10); expect(record.reader_output_tokens).toBe(5);
+  });
+  it("revalidates TTL after an unused citation verified", async () => {
+    const citation = { id: "c1", line_start: 1, line_end: 1, quote: "alpha" };
+    const reply = shape === "legacy" ? { answer: "UNVERIFIED_SENTINEL", citations: [citation] } : {
+      claims: [{ text: "UNVERIFIED_SENTINEL", citation_ids: [] }], citations: [citation] };
+    const { session, dir, request } = setup(new FakeLuna([], JSON.stringify(reply)));
+    const path = join(dir, "ws", "alpha.txt"); writeFileSync(path, "alpha\n");
+    const entry = session.registerPath(path);
+    request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }];
+    const original = session.registry.resolve.bind(session.registry);
+    let calls = 0;
+    vi.spyOn(session.registry, "resolve").mockImplementation((...args) => {
+      if (++calls > 2) throw new ShuntError("SOURCE_EXPIRED");
+      return original(...args);
+    });
+    const env = await session.read(request);
+    expect(env.code).toBe("CITATION_INVALID"); expect(calls).toBeGreaterThanOrEqual(3);
+    expect(env.recovery!.handles_valid).toBe(false);
+    expect(env.recovery!.actions).toContain("RECAPTURE_SOURCE");
+    expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");
+  });
+});

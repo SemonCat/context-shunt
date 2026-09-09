@@ -1160,7 +1160,7 @@ describe("structured claims contract", () => {
     );
     const env = await new Reader(registry, new FakeLuna([reply]))
       .answer("sess", multiRequest(entries));
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.code).toBe("CITATION_INVALID");
     expect(env.answer).toBe("");
   });
 
@@ -1248,7 +1248,7 @@ describe("structured claims contract", () => {
     ]);
     const env = await new Reader(registry, new FakeLuna([reply]))
       .answer("sess", multiRequest(entries));
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.code).toBe("CITATION_INVALID");
     expect(env.answer).toBe("");
   });
 
@@ -1396,7 +1396,7 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
       "sess",
       capRequest(entry, 8192, QUESTION),
     );
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.code).toBe("CITATION_INVALID");
     expect(env.answer ?? "").toBe("");
   });
 
@@ -1842,7 +1842,7 @@ describe("release blockers: raw-citation bound, nested chains, bridge usage, per
   });
 
   // The discriminator is the bound, not "the id is missing": nothing was cut here, so the
-  // reply cited something that never existed and NO_MATCH is the truthful answer.
+  // reply cited something that never existed and must report a citation failure.
   it("still blames the model for an id nobody declared", async () => {
     const { registry, entry } = fixture();
     const claims = [{ text: "Key 99 is set to nothing.", citation_ids: ["c99"] }];
@@ -1850,8 +1850,8 @@ describe("release blockers: raw-citation bound, nested chains, bridge usage, per
       registry,
       new FakeLuna([claimsJson(claims, manyCitations(4))]),
     ).answer("sess", request(entry));
-    expect(env.status).toBe("ok");
-    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("CITATION_INVALID");
     expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(false);
   });
 

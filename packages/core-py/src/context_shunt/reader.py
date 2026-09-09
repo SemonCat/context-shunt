@@ -106,6 +106,7 @@ class ChunkOutcome:
     #: reply carrying both fails the call instead of guessing which one to trust.
     legacy_answer: str = ""
     requires_evidence: bool = False
+    semantic_content: bool = False
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
     availability_only: bool = True
@@ -720,10 +721,8 @@ class Reader:
             )
 
         verified, rejected = self._verify_all(session_id, raw_citations)
-        # Keep the complete verified set for failure classification. The published set
-        # below is narrowed to citations actually used by the rendered answer; treating
-        # that display set as evidence availability would turn a valid but unreferenced
-        # citation into a false ``CITATION_INVALID``.
+        # Keep mechanical verification separate from the evidence actually used below.
+        # Unrelated citations cannot support semantic content stripped from the answer.
         verified_evidence = verified
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
         self._metrics.observe("citations_rejected", rejected, {"result": "rejected"})
@@ -916,8 +915,11 @@ class Reader:
             # Distinguish a valid empty no-match from assertions stripped for lacking
             # evidence. Capture this before normalization can discard uncited claims
             # or malformed citations; supplied evidence must still verify.
-            if not verified_evidence and any(
-                o.requires_evidence and not o.failed_reason for o in outcomes
+            if (
+                not verified and any(o.semantic_content and not o.failed_reason for o in outcomes)
+            ) or (
+                not verified_evidence
+                and any(o.requires_evidence and not o.failed_reason for o in outcomes)
             ):
                 exc = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
                 failed = _as_failure_provenance(provenance)
@@ -1222,10 +1224,12 @@ class Reader:
                     # still carry a secret in its text, and a claim dropped later must
                     # still have been scanned before it is discarded.
                     outcome.requires_evidence = bool(parsed["citations"])
+                    outcome.semantic_content = False
                     for item in raw_claims[: self._limits.max_claims_per_answer]:
                         if isinstance(item, dict) and isinstance(item.get("text"), str):
                             assert_no_secret(item["text"].encode("utf-8"), "ANSWER")
-                            outcome.requires_evidence |= bool(item["text"].strip())
+                            outcome.semantic_content |= bool(item["text"].strip())
+                            outcome.requires_evidence |= outcome.semantic_content
                     # Claims past the ceiling are never read. That is dropped material,
                     # so it is carried out and reported as an omission rather than
                     # silently disappearing behind a `complete: true`.
@@ -1256,7 +1260,8 @@ class Reader:
                 outcome.citations_over_cap = len(
                     over_cap_ids & set(referenced_ids(parsed["answer"]))
                 )
-                outcome.requires_evidence = bool(parsed["answer"].strip() or parsed["citations"])
+                outcome.semantic_content = bool(parsed["answer"].strip())
+                outcome.requires_evidence = outcome.semantic_content or bool(parsed["citations"])
                 outcome.legacy_answer = parsed["answer"]
                 outcome.citations = citations_local
                 return outcome

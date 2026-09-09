@@ -144,7 +144,7 @@ def test_duplicate_citation_id_within_a_claim_drops_it(tmp_path):
         [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
     )
     env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
-    assert env["code"] == "NO_MATCH"
+    assert env["code"] == "CITATION_INVALID"
     assert env["answer"] == ""
 
 
@@ -255,7 +255,7 @@ def test_legacy_answer_missing_its_marker_is_still_erased_not_rescued(tmp_path):
         [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
     )
     env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
-    assert env["code"] == "NO_MATCH"
+    assert env["code"] == "CITATION_INVALID"
     assert env["answer"] == ""
 
 
@@ -423,7 +423,7 @@ def test_an_answer_that_is_only_forged_markers_publishes_nothing(tmp_path):
         [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "max_retries = 3"}],
     )
     env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
-    assert env["code"] == "NO_MATCH"
+    assert env["code"] == "CITATION_INVALID"
     assert env.get("answer", "") == ""
 
 

@@ -113,7 +113,8 @@ cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/too
 ## When the reader fails
 
 `CITATION_INVALID` remains an explicit error in both cores, even with legacy compaction
-enabled. A nonempty semantic reply without usable citations is a citation failure; a valid
+enabled. A nonempty semantic reply without referenced, verified evidence is a citation failure;
+an unrelated verified quote cannot support it. A valid
 empty `answer` or empty `claims` array with no citations remains `ok/NO_MATCH`.
 No heuristic or byte prefix substitutes for an answer. Retained `source_id` and
 `snapshot_id` handles support `context_shunt_inspect` with lines/bytes or search selectors;

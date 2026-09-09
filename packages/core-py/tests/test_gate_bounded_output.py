@@ -755,7 +755,7 @@ def test_a_claim_citing_an_id_nobody_declared_is_still_the_models_fault(tmp_path
 
     Four citations, well inside the bound, and a claim citing `c99`. Nothing was cut, so
     there is no omission to report and no ceiling to blame: the reply cited something that
-    never existed, the claim is dropped, and `NO_MATCH` is the truthful answer.
+    never existed, so the unsupported claim is an explicit citation failure.
     """
     registry, entry = _cap_fixture(tmp_path)
     citations = _many_citations(4)
@@ -765,5 +765,5 @@ def test_a_claim_citing_an_id_nobody_declared_is_still_the_models_fault(tmp_path
         .answer("sess", _cap_request(entry))
         .envelope
     )
-    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
     assert not [o for o in env["coverage"]["omitted"] if o["reason"] == "BUDGET_EXCEEDED"]

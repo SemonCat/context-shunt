@@ -93,3 +93,14 @@ uncited replies still return `CITATION_INVALID` with handles, cost, and post-pro
 revalidation preserved. Parameterized session regressions cover both response shapes,
 nonempty citation failures, and expired recovery handles. Both empty-reply regressions
 failed against `fc89d395` before this closure fix. No live capability changes.
+
+## Referenced-evidence closure
+
+Mechanical citation verification alone does not support an answer. Both cores previously
+allowed an unrelated valid quote to mask nonempty semantic content discarded for lacking
+references, then reported complete `NO_MATCH`. They now distinguish original semantic
+content from merely supplied citations and use the actually referenced verified evidence
+for semantic failure classification. Empty no-match replies, citation validation, correctly
+cited answers, budget-limit errors, and cost/handle/TTL behavior retain their contracts.
+Legacy and structured regressions use the invented source line `alpha`; unused-citation
+and recovery-TTL cases fail against `cb1bce9`, with empty and properly cited controls.

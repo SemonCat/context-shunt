@@ -117,6 +117,7 @@ interface ChunkOutcome {
    * carrying both fails the call instead of guessing which one to trust. */
   legacyAnswer: string;
   requiresEvidence: boolean;
+  semanticContent: boolean;
   citations: Array<Record<string, unknown>>;
   failedReason: string | null;
   availabilityOnly: boolean;
@@ -879,7 +880,10 @@ export class Reader {
       // Preserve valid empty no-match replies; only assertions stripped for lacking
       // evidence are citation failures. Supplied malformed citations must also fail
       // verification, so record both before normalization can discard them.
-      if (verified.length === 0 && outcomes.some((o) => o.requiresEvidence && !o.failedReason)) {
+      // Only citations used by the semantic content support it; an unrelated verified
+      // quote must not turn a stripped assertion into a successful no-match.
+      if ((citations.length === 0 && outcomes.some((o) => o.semanticContent && !o.failedReason))
+          || (verified.length === 0 && outcomes.some((o) => o.requiresEvidence && !o.failedReason))) {
         const failure = new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
         const failed: Provenance = { ...provenance, derived: false, label: "no_model_output" };
         return {
@@ -1071,6 +1075,7 @@ export class Reader {
       claims: [],
       legacyAnswer: "",
       requiresEvidence: false,
+      semanticContent: false,
       citations: [],
       failedReason: null,
       availabilityOnly: true,
@@ -1189,12 +1194,14 @@ export class Reader {
           // validation: a malformed claim (bad citation_ids) can still carry a secret in
           // its text, and a claim dropped later must still have been scanned first.
           outcome.requiresEvidence = parsed["citations"].length > 0;
+          outcome.semanticContent = false;
           for (const item of rawClaims.slice(0, this.limits.maxClaimsPerAnswer)) {
             if (typeof item === "object" && item !== null) {
               const text = (item as Record<string, unknown>)["text"];
               if (typeof text === "string") {
                 assertNoSecret(text, "ANSWER");
-                outcome.requiresEvidence ||= text.trim().length > 0;
+                outcome.semanticContent ||= text.trim().length > 0;
+                outcome.requiresEvidence ||= outcome.semanticContent;
               }
             }
           }
@@ -1230,7 +1237,8 @@ export class Reader {
         outcome.citationsOverCap = referencedIds(parsed["answer"]).filter((id) =>
           overCapIds.has(id),
         ).length;
-        outcome.requiresEvidence = parsed["answer"].trim().length > 0 || parsed["citations"].length > 0;
+        outcome.semanticContent = parsed["answer"].trim().length > 0;
+        outcome.requiresEvidence = outcome.semanticContent || parsed["citations"].length > 0;
         outcome.legacyAnswer = parsed["answer"];
         outcome.citations = citationsLocal;
         return outcome;
