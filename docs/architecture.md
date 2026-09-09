@@ -53,42 +53,57 @@ the caller's question, and one authorized excerpt at a time. It receives no host
 shell, network, writer, or other tools. Model output cannot grant permissions or create a
 valid citation.
 
-## The two intake paths
+## The intake paths
 
-There are two ways content becomes a snapshot, and they answer different problems.
+There are three ways content becomes a snapshot, and they answer different problems.
 
 ```text
-  primary: an oversized TOOL RESULT              secondary: an oversized FILE READ
-  a producer already persisted                   the agent is about to make
-             |                                              |
-   manifest + artifact file                        host read request
-             |                                              |
-   artifact import boundary                          pre-read gate
-   (allowlisted roots, re-proven claims)      (blocked before execution)
-             |                                              |
-             +----------------> immutable snapshot <---------+
-                                        |
-                       opaque handle, internal or ordinary
-                                        |
+  primary: an oversized TOOL RESULT                          secondary: an oversized
+  ------------------------------------                       FILE READ
+  a producer already            the host's own hook          the agent is about
+  persisted a file               captures it inline          to make
+             |                          |                              |
+   manifest + artifact file    transform_tool_result-shaped    host read request
+             |                  hook (operator-attested            |
+   artifact import boundary     only; Hermes only)              pre-read gate
+   (allowlisted roots,                  |                  (blocked before execution)
+    re-proven claims)          capture-then-pointer                   |
+             |                  (SpillEngine)                         |
+             +----------------------+----------------> immutable <----+
+                                                          snapshot
+                                                             |
+                                       opaque handle, internal or ordinary
+                                                             |
             +---------------------------+---------------------------+
             |                           |                           |
    deterministic inspect        question-aware reader        session accounting
    (zero model calls)           (citation-verified)          (signed, bounded)
 ```
 
-The primary path exists because the oversized context that actually costs a session is a
-tool result - a log query page, a cloud journal page, an issue tracker export, a wiki page -
-not a source file. Holding one of those out of the context requires intercepting the result
-before the host truncates and persists it, and neither supported host provides that
-ordering; `suma_post_tool` is reported unsupported for that reason and stays off.
+Both tool-result sub-paths exist because the oversized context that actually costs a
+session is a tool result - a log query page, a cloud journal page, an issue tracker
+export, a wiki page - not a source file, and answering a question about one afterward
+always goes through the same question-aware reader either way (never the hook itself:
+neither hook nor import receives a question, so "capture" and "answer" stay two steps on
+every path).
 
-What a host *can* be handed is an artifact somebody else already wrote down. A compactor or
-spooler that persists an oversized tool result and describes it with a manifest has already
-performed the capture. The import boundary adopts that artifact, and from then on it is an
-ordinary handle.
+**Artifact import** needs a producer that already wrote the result to a file and described
+it with a manifest; the import boundary re-proves every claim the manifest makes and adopts
+it as an ordinary handle. It needs no interception ordering at all, which is why it is
+supported wherever a host can register the tool.
+
+**`tool_result_capture`** needs the host to hand the adapter the complete result *before*
+truncation and accept a bounded replacement *before* persistence and context insertion.
+Unsupported on OpenClaw (its persistence cap runs before the one hook positioned early
+enough, and that hook cannot replace a result either way). On Hermes it is wired but stays
+off by default, becoming supported only with an explicit operator attestation - see
+[capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 
 The secondary path is the original pre-read gate, unchanged. It remains the answer for an
-oversized *file* read, and it is the only path that can act before an operation runs.
+oversized *file* read, and it is the only path that can act before an operation runs. A
+full read that gets past it uses the question-aware reader exactly like a captured tool
+result does; a reader failure on either kind of source uses the same automatic-extraction
+and legacy-compaction fallback tiers described below.
 
 ## Artifact import boundary
 
@@ -221,6 +236,30 @@ reads now report `MODEL_ERROR`/`TIMEOUT` rather than partial `NO_MATCH` when ext
 run. See [configuration](configuration.md#automatic-exact-extraction-after-reader-unavailability)
 for exact triggers, selector-independent prefix selection, limits and compatibility.
 
+## Legacy-compaction fallback
+
+A second, disjoint fallback tier - `reader.legacy_compaction`, default on - checks only
+where the automatic-extraction tier above did not already fire: `CITATION_INVALID` always,
+and `MODEL_ERROR`/`TIMEOUT` when the failure was not a wholly-unavailable one automatic
+extraction already claimed. It publishes a deterministic, ported heuristic summary of the
+first requested source - signal lines, head/tail sampling, repeated-line collapsing, JSON
+structure, secret redaction - never exact bytes and never model output, as
+`partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`,
+`provenance.derived: false`, and a dedicated `legacy_compaction` block distinct from
+`extraction`'s "never a summary" contract. A reported-model mismatch is deliberately
+excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
+heuristic summary is not a remedy for it. Compaction failure of any kind returns the
+original bounded reader failure unchanged, never raw. See
+[configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
+for the exact trigger set, caps and wire shape.
+
+The algorithm itself (`context_shunt.legacy_compact`) is a function-for-function port of
+the text/JSON-shaping half of the incumbent tool-result compactor plugin this project
+displaces on hosts where it is deployed - read read-only from a live operator host, not
+reconstructed from memory or from the deterministic-shadow corpus's reference emulation
+(which is explicitly documented as a narrower stand-in, not the incumbent's real
+algorithm). See the module's own docstring for exactly what was and was not ported.
+
 ## Exact inspection and disclosure
 
 `context_shunt_inspect` returns exact text with no provider call. `lines` uses 1-based
@@ -241,11 +280,21 @@ not summarize or call a model. It only publishes a pointer after a complete safe
 failure returns a bounded error without the raw result. Internal-pointer recursion bypass is
 verified against store state, not trusted from payload data.
 
-This engine is behind `suma_post_tool` and is not wired on either supported host. Hermes
-exposes tool results only after truncation and its transform hook fails open; OpenClaw
-applies its cap before the persistence hook. Neither supplies both complete capture and safe
-replacement before persistence/context insertion. Capability probing therefore reports the
-mode unsupported and it remains inactive even if requested in configuration.
+This engine is behind `tool_result_capture` (formerly documented under the internal name
+`suma_post_tool`). It is not wired on OpenClaw: OpenClaw applies its persistence cap before
+the one hook positioned early enough to observe a result, and that hook cannot replace one
+either way, so neither guarantee this mode needs can be shown there. On Hermes, direct
+read-only inspection of one live 0.21.1 host found the tool executes and `post_tool_call`
+fires before `transform_tool_result` runs, with no truncation call visible between - so the
+mode is wired there, but stays reported unsupported by default: that finding is evidence
+about one running instance, not a reproducible, host-version-independent proof, and per-tool
+self-truncation upstream of that dispatch layer was not audited. It becomes supported, and
+the `transform_tool_result` hook registered, only when a deployment sets an explicit
+operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) - this
+code does not and cannot prove the ordering for itself. See
+[capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
+for the exact evidence and [acceptance.md](acceptance.md#tool_result_capture-cutover-on-hermes)
+for the cutover plan.
 
 ## Output, security, and no-raw-leak boundary
 

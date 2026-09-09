@@ -23,8 +23,11 @@ context-shunt 會在內容進入上下文前先完整保存，只給主模型 me
 
 真正耗掉 session 上下文的通常是**工具結果**——log 查詢頁、雲端 journal 頁、issue tracker
 匯出、wiki 頁面——而不是原始碼檔案。要把這些擋在上下文之外，必須在 host 截斷並寫入之前拿到
-完整結果，而目前兩個 host 都不提供這個順序保證，所以 `suma_post_tool` 一律回報不支援並保持
-關閉。
+完整結果。OpenClaw 不提供這個順序保證，所以 `tool_result_capture`（原內部代號
+`suma_post_tool`，現已更名，理由與退場方式見 `docs/capability-matrix.md`）在該 host 上維持
+關閉。在 Hermes 上，這個順序已在一台實際運作中的 0.21.1 host 上直接驗證過，但那只是單一
+運作實例的證據，不代表每一次安裝都成立——因此預設仍是關閉，僅在部署方明確設定
+`host_ordering_verified_locally: true`（操作者自行確認）後才會回報為支援。
 
 host 能提供的，是別人已經寫下來的 artifact。若 compactor 或 spooler 已把過大結果寫成檔案並
 附上 manifest，擷取這一步其實已經完成。`context_shunt_import` 就是接收這份 artifact：

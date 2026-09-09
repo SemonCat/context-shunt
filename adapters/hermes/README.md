@@ -4,11 +4,18 @@
 
 Install, uninstall, cleanup and migration instructions live in
 [`docs/install.md`](../../docs/install.md). The mode matrix — including the model
-attribution ceiling on this host, the session-lifecycle rule, and why the optional
-oversized post-tool mode is disabled — is in
+attribution ceiling on this host, the session-lifecycle rule, and what `tool_result_capture`
+does and does not require — is in
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
-This adapter registers up to four read-only tools and no writer:
+This adapter registers up to four read-only tools, no writer, and — only with an explicit
+operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) — one
+`transform_tool_result` hook that captures an eligible oversized tool result and replaces it
+with a bounded pointer envelope before it reaches context. That hook never answers a
+question (Hermes does not forward one to it); a captured result is answered afterward
+through `context_shunt_read` like any other handle. See
+[`docs/acceptance.md`](../../docs/acceptance.md#tool_result_capture-cutover-on-hermes) for
+the cutover plan.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
@@ -21,7 +28,9 @@ This adapter registers up to four read-only tools and no writer:
 capability probe supports the mode; registering a permanently-refusing surface in front of
 the model would be worse than not offering it. This host supports the mode because the
 import needs no interception ordering at all — it is not post-tool interception, and
-`suma_post_tool` stays unsupported here regardless.
+`tool_result_capture` (formerly `suma_post_tool`) is a separate mode, off by default and
+supported only with an explicit operator attestation — see
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 
 Run `./scripts/verify integration hermes --mode local` against a real host checkout to
 check the wiring; without one it reports `NOT_RUN`, never a pass.

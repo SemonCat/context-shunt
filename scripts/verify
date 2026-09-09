@@ -90,6 +90,10 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     # Python-only: the import boundary lives in the Python core, and the OpenClaw
     # capability report says so rather than implying a TypeScript twin exists.
     "artifact-import": ("gate_artifact_import", []),
+    # Python-only: the legacy-compaction fallback (both the ported algorithm and its
+    # session-level wiring) exists only in the Python core today - see
+    # docs/capability-matrix.md's "Future work" for the TypeScript-parity gap.
+    "legacy-compaction": ("gate_legacy_compact", []),
     # Python-only: what each *live reader route* actually does. Deterministic - it drives
     # each bridge against a stub - and it is what makes the live gates' refusal to score
     # through a role-collapsing route trustworthy rather than a comment.
@@ -755,7 +759,7 @@ def run_packaging(gate: str) -> list[GateResult]:
     if ok:
         cfg = json.loads(example.read_text())
         entry = cfg["plugins"]["entries"]["context-shunt"]["config"]
-        ok = entry["suma_post_tool"]["enabled"] is False and "writer" not in entry
+        ok = entry["tool_result_capture"]["enabled"] is False and "writer" not in entry
         ok = ok and "propose_patch" not in example.read_text()
     lines.append(
         f"example config defaults (post-tool off, no writer): {'pass' if ok else 'fail'}"
@@ -1181,13 +1185,13 @@ tmp = pathlib.Path(tempfile.mkdtemp())
 (tmp / "ws" / "a.txt").write_text("alpha\\n")
 config = load_config(
     {"workspace_roots": [str(tmp / "ws")], "cache_dir": str(tmp / "cache"),
-     "suma_post_tool": {"enabled": True}},
+     "tool_result_capture": {"enabled": True}},
     default_spill_dir=tmp / "cache",
 )
 capability = CapabilityReport(
     adapter="smoke", adapter_version="1", host_name="smoke", host_version="1",
     contract_version=EMITTED_SCHEMA_VERSION, reader_model=READER_MODEL,
-    modes=[supported("local_gate"), supported("reader"), supported("suma_post_tool")],
+    modes=[supported("local_gate"), supported("reader"), supported("tool_result_capture")],
 )
 session = ShuntSession("smoke", config, capability)
 entry = session.register_path(str(tmp / "ws" / "a.txt"))

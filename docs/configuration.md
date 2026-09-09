@@ -21,9 +21,12 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
 | `reader.automatic_extract` | boolean | `true` | Enable exact extraction after wholly exhausted availability; also requires `inspect.enabled`. |
 | `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
+| `reader.legacy_compaction` | boolean | `true` | Enable the broader deterministic legacy-shaped compaction fallback (ported from the incumbent tool-result compactor) for reader outcomes `automatic_extract` does not already cover: `CITATION_INVALID` always, and `MODEL_ERROR`/`TIMEOUT` when `automatic_extract` did not already claim the request. See [`architecture.md`](architecture.md#legacy-compaction-fallback). |
+| `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
-| `suma_post_tool.enabled` | boolean | `false` | Requests the optional oversized post-tool path. Both current adapters report it unsupported, so it is not activated. |
+| `tool_result_capture.enabled` | boolean | `false` | Requests the optional oversized-tool-result capture path. Unsupported on OpenClaw. On Hermes, additionally requires `tool_result_capture.host_ordering_verified_locally: true` to be reported supported at all — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not). The deprecated key `suma_post_tool.enabled` is still accepted as an alias; setting both to disagreeing values is refused with `TOOL_RESULT_CAPTURE_CONFIG_CONFLICT`. |
+| `tool_result_capture.host_ordering_verified_locally` | boolean | `false` | An explicit **operator attestation** that the operator personally verified their own installed Hermes host's `transform_tool_result` capture-before-truncation ordering. This code does not and cannot prove it; setting it without reading the linked evidence first is the deployment's own risk. |
 | `artifact_import.enabled` | boolean | `false` | Requests the external-artifact import boundary. Supported on Hermes; the OpenClaw core has no import implementation and reports the mode unsupported with `IMPORT_UNIMPLEMENTED`. |
 | `artifact_import.roots` | string array, at most 8 | `[]` | Canonical directories a producer's artifact and manifest may live under. A separate allowlist from `workspace_roots`; a root that contains `cache_dir` is refused with `CACHE_INSIDE_IMPORT_ROOT`. |
 | `artifact_import.accepted_manifest_schemas` | string array | `[]` | Producer manifest schemas this deployment authorizes. A manifest declaring a schema outside this list is refused with `MANIFEST_SCHEMA_NOT_ALLOWED` even when a translation profile exists for it. |
@@ -247,3 +250,36 @@ Compatibility change: wholly unavailable reads formerly capable of returning par
 exhausted disclosure, unusable/expired handles, failed storage, an empty prefix or a guard
 refusal, the original bounded availability error and recovery guidance are returned.
 If handle validation fails, recovery truthfully marks handles invalid and requests recapture.
+
+### Legacy-compaction fallback for reader outcomes automatic extraction does not cover
+
+`reader.legacy_compaction` (default `true`) is a second, disjoint fallback tier, checked
+only when the automatic-extraction branch above did not already fire. It exists because
+automatic extraction's trigger — a wholly unavailable read — is deliberately narrow, and a
+malformed or citation-empty response left every earlier revision with a bare error and no
+deterministic fallback at all.
+
+The trigger is: the reader published `status: error` with `code` in `CITATION_INVALID`,
+`MODEL_ERROR`, or `TIMEOUT`, **and** it was not already claimed by automatic extraction
+(i.e. `result.availability_failure` is unset — either the failure was not a wholly
+unavailable one, or `automatic_extract`/`inspect.enabled` is off). A reported-model
+mismatch (`provenance.attribution_status: mismatch`) is explicitly excluded even though its
+envelope `code` is `MODEL_ERROR`: `enforce_policy` already treats a contradicted model
+identity as a wrong answer, not a weak one, and this fallback is not a remedy for that.
+
+Unlike automatic extraction, this is not an exact byte prefix — it is
+`legacy_compact.compact_tool_result`, a ported, deterministic heuristic summary of the
+**first requested source's full text**: signal lines (error/exception/failure/timeout/5xx),
+head/tail sampling, repeated-line collapsing, JSON structure and secret-value redaction. It
+is capped first by `reader.legacy_compaction_max_chars` (1000–60000, default 16000) and then
+by the envelope's own `max_extraction_bytes` (16 KiB) at a UTF-8-safe boundary, whichever is
+smaller. The wire shape is revision **1.1**: `partial/LEGACY_COMPACTED`,
+`result_kind: legacy_compaction`, `provenance.derived: false`,
+`provenance.label: legacy_compaction`, empty `answer`/`citations`, and a dedicated
+`legacy_compaction` envelope block (`summary`, `summary_bytes`, `original_bytes`,
+`hard_cap_chars`, `original_failure`) — deliberately not the `extraction` block, whose
+schema description says "never a summary". Coverage always lists other requested sources as
+`UNKNOWN_REMAINDER`; only the first source is covered, matching automatic extraction's own
+established simplification. If compaction itself fails for any reason (unreadable snapshot,
+an internal error), the original bounded reader-failure envelope is returned unchanged —
+never raw, never a half-built compaction block.

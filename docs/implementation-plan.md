@@ -31,9 +31,13 @@ available on the current checkout; consult the most recent verification output.
 
 ## Intentionally unavailable
 
-- `suma_post_tool` is unsupported on Hermes and OpenClaw because neither exposes the
-  required complete-capture and safe-replacement seam. The core engine exists behind the
-  capability gate, but the host feature is off and its live post-tool tests are `NOT_RUN`.
+- `tool_result_capture` (formerly `suma_post_tool`) is unsupported on OpenClaw, which does
+  not expose the required complete-capture and safe-replacement seam. On Hermes it is wired
+  and has been directly verified against one live 0.21.1 host, but stays unsupported by
+  default pending an explicit operator attestation — see `docs/capability-matrix.md`. The
+  core engine exists behind the capability gate either way, and there is no automated,
+  checkout-based post-tool integration gate yet, so that finding is `NOT_RUN` as a
+  reproducible test.
 - `artifact_import` is unsupported on OpenClaw: the TypeScript core has no import
   boundary. That is a repository gap rather than a host limitation, so closing it needs no
   host change.

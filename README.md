@@ -28,8 +28,11 @@ It never generates an unasked-for summary.
 The oversized context that actually costs a session is a **tool result** — a log query
 page, a cloud journal page, an issue tracker export, a wiki page — not a source file.
 Holding one out of the context requires seeing the complete result before the host
-truncates and persists it, and neither supported host provides that ordering. So
-`suma_post_tool` is reported unsupported and stays off.
+truncates and persists it. OpenClaw does not provide that ordering, so `tool_result_capture`
+stays off there. On Hermes it has been directly verified on one live 0.21.1 host, but that
+is evidence about one running instance, not every install — the mode stays off by default
+and turns on only with an explicit operator attestation. See
+[`docs/capability-matrix.md`](docs/capability-matrix.md) for both.
 
 What a host *can* be handed is an artifact somebody else already wrote down. A compactor or
 spooler that persists an oversized result and describes it with a manifest has already done

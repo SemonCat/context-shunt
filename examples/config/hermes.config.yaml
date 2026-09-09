@@ -65,6 +65,14 @@ plugins:
           #   - model: gpt-5.6-luna
           #     provider: openrouter
 
+          # Legacy-compaction: a second, disjoint fallback for a reader failure
+          # automatic_extract does not cover (a citation-empty result, or a
+          # malformed/partial response). On by default; a ported, deterministic
+          # heuristic summary, never exact bytes and never model output. See
+          # docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover.
+          legacy_compaction: true
+          legacy_compaction_max_chars: 16000 # 1000..60000
+
         # Deterministic exact extraction: zero model calls, 16 KiB per page, and every
         # page charged against a cumulative per-source and per-session disclosure ceiling.
         # Set enabled: false if you would rather no source bytes reach the context at all.
@@ -76,10 +84,20 @@ plugins:
         stats:
           enabled: true
 
-        # Optional oversized post-tool spill. Unsupported on this host (see
-        # docs/capability-matrix.md), so it stays off and setting it true changes nothing.
-        suma_post_tool:
+        # Optional oversized-tool-result capture. Off (unsupported) by default: turning it
+        # on requires an explicit operator attestation that you personally verified your
+        # own installed host's transform_tool_result capture-before-truncation ordering -
+        # see docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not
+        # and docs/acceptance.md#tool_result_capture-cutover-on-hermes before setting this.
+        # `enabled: true` alone changes nothing without the attestation below.
+        tool_result_capture:
           enabled: false
+          # host_ordering_verified_locally: true
+
+        # Deprecated alias for tool_result_capture, still accepted so an older config file
+        # keeps working unchanged. Do not set both to disagreeing values.
+        # suma_post_tool:
+        #   enabled: false
 
         # The external-artifact import boundary: adopt an oversized tool result a
         # compactor or spooler already persisted, without the host having to intercept

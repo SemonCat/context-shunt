@@ -28,7 +28,7 @@
           "stats": {
             "enabled": true
           },
-          "suma_post_tool": {
+          "tool_result_capture": {
             "enabled": false
           },
           "limits": {}

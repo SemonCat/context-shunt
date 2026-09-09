@@ -188,6 +188,115 @@ and only then consider replacing the incumbent, and only for the traffic the sha
 actually covered. Until every gate above has a real result, the claim is that the broker is
 deployable and **unproven at production equivalence**.
 
+### `tool_result_capture` cutover on Hermes
+
+This operator directed a cutover on their own live Hermes host ahead of the sequence above
+(see [`capability-matrix.md`](capability-matrix.md#shadow-rollout-and-what-has-to-be-true-before-anything-is-replaced)'s
+operator-override note). This section is the plan for that specific cutover: what it
+changes, the coverage gap it must not open, how to verify it before and after, and how to
+roll it back. **It was prepared, not applied — nothing in this repository or this document
+deploys, restarts, or modifies the live host.**
+
+#### What actually needs to change
+
+Two independent systems currently answer "what happens to an oversized tool result", and
+today only one of them is live:
+
+| System | State today | State after cutover |
+| --- | --- | --- |
+| `oversize-tool-result-compactor` (incumbent, v0.3.0, `author: Edison`) | live; the only `transform_tool_result` listener; fail-open at the host level if it raises | disabled |
+| context-shunt `tool_result_capture` | implemented, registered only with an explicit attestation, currently off | enabled and attested |
+
+Both hook the same `transform_tool_result` name. Hermes' `_apply_transform_tool_result_hook`
+takes the **first string return across every registered listener** (verified in the same
+0.21.1 reading behind `capability-matrix.md`'s evidence) — so running both at once is not
+"defense in depth", it is undefined precedence between two different bounded outputs for
+the same oversized result. They must be switched atomically, not run in parallel and not
+left with a gap between disabling one and enabling the other.
+
+#### The coverage-gap risk this plan exists to name
+
+The incumbent is more than a `transform_tool_result` listener: its own persistence
+(`_write_artifact`, `_record_manifest`) is what makes an oversized result reachable at all
+through `artifact_import` today, since `artifact_import` needs a producer to have already
+written the artifact and a manifest describing it — the incumbent's manifest shape
+(`hermes.tool_result_artifact_manifest.v1`) is not one of this deployment's
+`accepted_manifest_schemas`, so it was never actually wired that way, but the general
+shape of the risk holds: **disabling the incumbent without `tool_result_capture` actually
+enabled and attested does not "fall back" to anything — it removes the only oversized-
+tool-result handling this host had**, and every oversized result would reach the main
+model's context unbounded and raw. This is the "old compactor must become the producer, or
+coverage goes to zero" finding from this change's own design review, and it is the reason
+step 1 below is a precondition-check, not a suggestion.
+
+#### Precondition checks (run before touching any config)
+
+1. `./scripts/verify unit` passes on the commit being deployed (deterministic gates need no
+   host).
+2. The operator has personally reviewed [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
+   — the attestation below is *their* claim, not this adapter's.
+3. `reader.legacy_compaction` is `true` (the default) in the deployment's config, so a
+   reader failure on a captured handle degrades to a bounded summary rather than a bare
+   pointer with no further recourse.
+4. A rollback path exists: the incumbent plugin's files are untouched by this cutover (only
+   disabled, not removed), so re-enabling it is the same config change in reverse.
+
+#### The config change, applied as one unit
+
+Both edits belong in the **same** host config change/deploy, not sequenced:
+
+```yaml
+# hermes config.yaml (illustrative path: plugins.entries.<incumbent-id>.enabled or
+# whatever mechanism this host's plugin loader uses to disable a discovered plugin -
+# this repository does not know the operator's exact plugin-discovery configuration, and
+# does not assert one; see the note below)
+plugins:
+  entries:
+    oversize-tool-result-compactor:
+      enabled: false   # <-- illustrative; use whatever this host's real switch is
+
+    context-shunt:
+      config:
+        tool_result_capture:
+          enabled: true
+          host_ordering_verified_locally: true   # <-- the operator's own attestation
+        reader:
+          legacy_compaction: true                # default; explicit here for clarity
+```
+
+Two things this repository verified and two it did not, stated plainly:
+
+- **Verified**: the incumbent plugin also honors `HERMES_TOOL_RESULT_COMPACTOR_ENABLED`
+  (an environment variable read by its own `_enabled()`, default `true`) as an
+  application-level kill switch independent of host plugin-registration mechanics. Setting
+  it to `0`/`false` in the same deploy as the config change above is an equally valid way to
+  disable it, and is simpler to make atomic with a single environment change if the host's
+  plugin *registration* (as opposed to its *behavior*) is harder to gate per-deploy.
+- **Not verified**: exactly where either switch is set for this operator's specific
+  deployment (compose file, systemd unit, or the host's own plugin config) — this was not
+  traced further, in line with not modifying or restarting the live host. The operator
+  knows their own deploy mechanism; this plan names the two levers that work, not the
+  file to edit.
+
+#### Verification after cutover
+
+1. `context_shunt_stats` (or the equivalent request) shows new `read`/`capture` operation
+   records after an oversized tool call, not zero.
+2. Deliberately trigger one oversized MCP/tool result and confirm the main model's context
+   receives a bounded pointer envelope (`code: SPILLED`, `result_kind: pointer`) rather than
+   the raw result — this is the one invariant this entire change exists to guarantee, so it
+   is worth checking by hand once, not only trusting the deterministic gates.
+3. `capability_report()` shows `tool_result_capture` as `supported`, with evidence citing
+   the operator attestation.
+4. The incumbent's own artifact directory (`~/.hermes/tool-result-artifacts` by default)
+   stops receiving new entries.
+
+#### Rollback
+
+Revert the config change (or the environment variable) in one deploy. No data migration is
+needed either direction: context-shunt's captured handles and the incumbent's artifact
+files are independent stores that were never sharing state.
+
 ## Benchmarks
 
 `./scripts/verify benchmark core` measures deterministic gate/spill latency, bounded
