@@ -46,6 +46,7 @@ markers = [
   "gate_no_raw_leak", "gate_bounded_output", "gate_cancellation",
   "gate_permissions", "gate_no_writes", "gate_capability",
   "gate_store", "gate_inspect", "gate_accounting", "gate_artifact_import",
+  "gate_legacy_compact",
   "bridge_contract", "shadow_ab",
   "integration_hermes", "integration_openclaw",
   "eval_luna", "benchmark", "benchmark_provider",
