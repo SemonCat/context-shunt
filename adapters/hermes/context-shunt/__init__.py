@@ -276,7 +276,8 @@ def _tool_result_capture_mode() -> ModeCapability:
     explicit operator attestation this code does not and cannot prove for itself.
     """
     attested = bool(
-        _config is not None and _config.tool_result_capture.host_ordering_verified_locally
+        _config is not None
+        and _config.tool_result_capture.host_ordering_verified_locally
     )
     fail_open_evidence = (
         "hermes-agent model_tools.py: _apply_transform_tool_result_hook runs inside "

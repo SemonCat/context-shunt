@@ -245,16 +245,23 @@ def _json_string_samples(parsed: Any) -> tuple[list[str], list[str]]:
 def _json_representative_snippets(parsed: Any) -> list[str]:
     snippets: list[str] = []
     if isinstance(parsed, list) and parsed:
-        snippets.append("First array item: " + json.dumps(parsed[0], ensure_ascii=False, sort_keys=True)[:2_000])
+        snippets.append(
+            "First array item: " + json.dumps(parsed[0], ensure_ascii=False, sort_keys=True)[:2_000]
+        )
         if len(parsed) > 1:
-            snippets.append("Last array item: " + json.dumps(parsed[-1], ensure_ascii=False, sort_keys=True)[:2_000])
+            snippets.append(
+                "Last array item: "
+                + json.dumps(parsed[-1], ensure_ascii=False, sort_keys=True)[:2_000]
+            )
     elif isinstance(parsed, dict):
         keys = list(parsed.keys())
         snippets.append("Top-level keys: " + ", ".join(str(key) for key in keys[:40]))
         for key in keys[:5]:
             value = parsed[key]
             if isinstance(value, (dict, list)):
-                snippets.append(f"$.{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)[:2_000]}")
+                snippets.append(
+                    f"$.{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)[:2_000]}"
+                )
             else:
                 snippets.append(f"$.{key}: {_json_scalar(value)}")
     return snippets
@@ -274,7 +281,9 @@ def _compact_json_text(text: str, parsed: Any) -> str:
     if signal_strings:
         sections.append("")
         sections.append("High-signal exact JSON string values:")
-        sections.extend(_numbered_lines(list(enumerate(signal_strings, start=1)), _MAX_SIGNAL_LINES))
+        sections.extend(
+            _numbered_lines(list(enumerate(signal_strings, start=1)), _MAX_SIGNAL_LINES)
+        )
     if strings:
         sections.append("")
         sections.append("Representative exact JSON string values:")
@@ -329,7 +338,9 @@ def compact_tool_result(text: str, *, hard_chars: int = _DEFAULT_HARD_CHARS) -> 
     """
     redacted = _redact_secret_values(text)
     parsed = _try_parse_json(redacted)
-    compacted = _compact_json_text(redacted, parsed) if parsed is not None else _compact_log_text(redacted)
+    compacted = (
+        _compact_json_text(redacted, parsed) if parsed is not None else _compact_log_text(redacted)
+    )
     return _cap_text(compacted, max(1, hard_chars))
 
 

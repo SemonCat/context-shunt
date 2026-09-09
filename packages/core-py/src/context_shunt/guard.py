@@ -170,7 +170,8 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
     published under a version string that understates what it contains.
     """
     present_v11 = {key for key in _ALLOWED_KEYS if key in envelope} & (
-        _REQUIRED_V11_KEYS | {"extraction", "legacy_compaction", "stats", "recovery", "import_receipt"}
+        _REQUIRED_V11_KEYS
+        | {"extraction", "legacy_compaction", "stats", "recovery", "import_receipt"}
     )
     if version == "1.0":
         if present_v11:

@@ -290,9 +290,12 @@ def test_transform_tool_result_returns_none_for_structured_results(tmp_path):
     module.register(FakeCtx(config, llm=FakeLlm()))
     # A dict/list result is left alone at this hook regardless of size - see the
     # docstring's structured/multimodal reasoning.
-    assert module.transform_tool_result(
-        tool_name="vision", result={"type": "image", "data": "y" * 200_000}
-    ) is None
+    assert (
+        module.transform_tool_result(
+            tool_name="vision", result={"type": "image", "data": "y" * 200_000}
+        )
+        is None
+    )
 
 
 def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
@@ -753,14 +756,20 @@ def test_hermes_automatic_extract_config_reaches_delivery(tmp_path, enabled, leg
 
     module = _load_adapter()
     config = _config(tmp_path)
-    config["reader"] = {"automatic_extract": enabled, "fallback_max_bytes": 64, "legacy_compaction": legacy}
+    config["reader"] = {
+        "automatic_extract": enabled,
+        "fallback_max_bytes": 64,
+        "legacy_compaction": legacy,
+    }
     module.register(FakeCtx(config, llm=UnavailableLlm()))
     path = tmp_path / "ws" / "outage.txt"
     path.write_text("source line\n" * 400)
     out = json.loads(
         module.context_shunt_read(question="What is here?", paths=[str(path)], task_id="tauto")
     )
-    assert out["code"] == ("LEGACY_COMPACTED" if legacy else "EXTRACTED" if enabled else "MODEL_ERROR")
+    assert out["code"] == (
+        "LEGACY_COMPACTED" if legacy else "EXTRACTED" if enabled else "MODEL_ERROR"
+    )
     assert "PRIVATE_PROVIDER_BODY" not in json.dumps(out)
     if enabled and not legacy:
         assert out["extraction"]["result_bytes"] <= 64

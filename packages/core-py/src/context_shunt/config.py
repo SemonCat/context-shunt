@@ -320,9 +320,7 @@ def _merge_tool_result_capture_raw(raw: dict[str, Any]) -> dict[str, Any]:
     current = raw.get("tool_result_capture")
     legacy = raw.get("suma_post_tool")
     if current is not None and legacy is not None and dict(current) != dict(legacy):
-        raise ShuntError(
-            "INVALID_REQUEST", "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT", retryable=False
-        )
+        raise ShuntError("INVALID_REQUEST", "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT", retryable=False)
     return dict((current if current is not None else legacy) or {})
 
 
