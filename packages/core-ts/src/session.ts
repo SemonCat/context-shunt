@@ -53,6 +53,10 @@ import { GateDecision, PreReadGate, guidanceFor } from "./gate.js";
 import { enforce, enforceOrFixed, fixedError } from "./guard.js";
 import { EMITTED_SCHEMA_VERSION } from "./limits.js";
 import { CURSOR_PREFIX, Inspector, decodeCursor, encodeCursor } from "./inspect.js";
+import {
+  compactToolResult,
+  DEFAULT_LEGACY_SESSION_HARD_CHARS,
+} from "./legacy-compact.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
 import { authorize, pathPolicy, readAuthorizedBounded } from "./paths.js";
 import { fileProber } from "./probe.js";
@@ -76,6 +80,8 @@ import { ScopeIdentity, SnapshotStore } from "./store.js";
  * cursor of exactly this length so a real one can never overshoot the budget it set.
  */
 const MAX_CURSOR_CHARS = 512;
+/** Availability failures may use the deterministic legacy fallback when explicitly enabled. */
+const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT"]);
 
 export class ShuntSession {
   private readonly gate: PreReadGate;
@@ -88,6 +94,8 @@ export class ShuntSession {
   readonly identity: ScopeIdentity;
   readonly registry: SourceRegistry;
   readonly spill: SpillEngine;
+  private readonly legacyCompactionEnabled: boolean;
+  private readonly legacyCompactionMaxChars: number;
 
   constructor(
     readonly sessionId: string,
@@ -99,6 +107,10 @@ export class ShuntSession {
       metrics?: MetricsSink;
       store?: SnapshotStore;
       identity?: ScopeIdentity;
+      /** Enable the labelled deterministic fallback for exhausted reader availability. */
+      legacyCompaction?: boolean;
+      /** Character ceiling handed to the deterministic compactor before byte capping. */
+      legacyCompactionMaxChars?: number;
     } = {},
   ) {
     this.clock = opts.clock ?? monotonicClock;
@@ -116,6 +128,17 @@ export class ShuntSession {
     this.registry = new SourceRegistry(this.store, this.identity, config.limits);
     this.gate = new PreReadGate(fileProber(config.limits), config.limits, this.clock);
     this.provider = opts.provider ?? new UnavailableProvider();
+    this.legacyCompactionEnabled = opts.legacyCompaction ?? false;
+    this.legacyCompactionMaxChars = opts.legacyCompactionMaxChars === undefined
+      ? DEFAULT_LEGACY_SESSION_HARD_CHARS
+      : opts.legacyCompactionMaxChars;
+    if (
+      !Number.isSafeInteger(this.legacyCompactionMaxChars)
+      || this.legacyCompactionMaxChars < 1_000
+      || this.legacyCompactionMaxChars > 60_000
+    ) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+    }
     this.reader = new Reader(
       this.registry,
       this.provider,
@@ -238,7 +261,29 @@ export class ShuntSession {
       operationId,
     );
     let candidate = result.envelope;
-    if (result.availabilityFailure && this.config.readerAutomaticExtract !== false
+    let legacyAttempted = false;
+    if (
+      this.legacyCompactionEnabled
+      && result.availabilityFailure !== undefined
+      && !signal?.aborted
+      && result.envelope.status === "error"
+      && LEGACY_COMPACTION_TRIGGER_CODES.has(result.availabilityFailure)
+      && result.envelope.code === result.availabilityFailure
+      && result.envelope.provenance?.attribution_status !== "mismatch"
+    ) {
+      legacyAttempted = true;
+      try {
+        candidate = enforce(this.legacyCompactionFallback(request, result, requestId, operationId), this.config.limits);
+      } catch (err) {
+        // A malformed/unsafe summary is no delivery. In opted-in mode this must not
+        // downgrade to the old exact-prefix fallback, which would hide the failure class.
+        candidate = result.envelope;
+        if (isShuntError(err) && ["SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE"].includes(err.code)) {
+          candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
+        }
+      }
+    }
+    if (!legacyAttempted && result.availabilityFailure && this.config.readerAutomaticExtract !== false
         && this.config.inspectEnabled && !signal?.aborted) {
       try {
         candidate = this.automaticExtract(request, result, requestId, operationId);
@@ -267,7 +312,8 @@ export class ShuntSession {
       baselineCredited: creditedBytes > 0,
       creditedBytes,
       reader: result.cost,
-      boundary: published.code === "EXTRACTED" ? "extraction" : "envelope",
+      boundary: published.code === "EXTRACTED" || published.code === "LEGACY_COMPACTED"
+        ? "extraction" : "envelope",
     });
     return published;
   }
@@ -295,6 +341,114 @@ export class ShuntSession {
       selector: { kind: "bytes", start: 0, end: entry.snapshot.bytesLen },
       budgets: { max_result_bytes: budget, max_scan_lines: limits.inspectMaxScanLines },
     }, requestId, operationId, result);
+  }
+
+  private legacyCompactionFallback(
+    request: unknown,
+    result: ReaderResult,
+    requestId: string,
+    operationId: string,
+  ): Envelope {
+    const input = request as {
+      sources: Array<{ source_id: string; snapshot_id: string }>;
+    };
+    // Revalidate every handle after the provider wait, before the summary reads any bytes.
+    for (const source of input.sources) {
+      const entry = this.registry.resolve(this.sessionId, source.source_id);
+      if (entry.snapshot.snapshotId !== source.snapshot_id) {
+        throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
+      }
+    }
+    const first = input.sources[0];
+    if (!first) throw new ShuntError("INVALID_REQUEST", "NO_SOURCE", false);
+    const entry = this.registry.resolve(this.sessionId, first.source_id);
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(entry.snapshot.data);
+    } catch {
+      throw new ShuntError("UNSAFE_SOURCE", "INVALID_ENCODING", false);
+    }
+
+    const compacted = utf8SafeCap(
+      compactToolResult(text, { hardChars: this.legacyCompactionMaxChars }),
+      this.config.limits.maxExtractionBytes,
+    );
+    const originalFailure = result.envelope.code;
+    if (!LEGACY_COMPACTION_TRIGGER_CODES.has(originalFailure)) {
+      throw new ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN", false);
+    }
+
+    const sourceHandles = result.envelope.sources.map((handle) => ({ ...handle }));
+    const sourceCoverage = result.envelope.coverage;
+    const coverage = new Coverage();
+    coverage.complete = false;
+    coverage.processedChunks = sourceCoverage.processed_chunks;
+    coverage.plannedChunks = sourceCoverage.planned_chunks;
+    coverage.upstreamTruncated = sourceCoverage.upstream_truncated;
+    for (const omission of sourceCoverage.omitted) {
+      coverage.omitOnce(omission.source_id, { ...omission.selector }, omission.reason);
+    }
+    for (const handle of sourceHandles) {
+      coverage.omitOnce(handle.source_id, { kind: "all" }, "UNKNOWN_REMAINDER");
+    }
+
+    const attempts = result.cost.attemptsStarted;
+    const buildLegacyEnvelope = (summary: string): Envelope => buildEnvelope({
+      requestId,
+      status: "partial",
+      code: "LEGACY_COMPACTED",
+      coverage,
+      sources: sourceHandles,
+      retryable: false,
+      resultKind: "legacy_compaction",
+      provenance: {
+        ...deterministicProvenance("legacy_compaction"),
+        attemptsStarted: attempts,
+        usageComplete: attempts === 0 || result.cost.attemptsUsageComplete === attempts,
+      },
+      guidance:
+        "Escape hatch: deterministic legacy-shaped compaction of the source, ported from "
+        + "the incumbent tool-result compactor; not model-derived and not an LLM summary. "
+        + "Original reader failure: " + originalFailure
+        + ". Covers only the first requested source, independent of the question; other "
+        + "sources and structure the heuristic dropped are omitted.",
+      recovery: recoveryFor(originalFailure, true),
+      accountingId: operationId,
+      legacyCompaction: {
+        deterministic: true,
+        source_id: entry.sourceId,
+        snapshot_id: entry.snapshot.snapshotId,
+        summary,
+        summary_bytes: new TextEncoder().encode(summary).length,
+        original_bytes: entry.snapshot.bytesLen,
+        hard_cap_chars: this.legacyCompactionMaxChars,
+        original_failure: originalFailure as "MODEL_ERROR" | "TIMEOUT",
+      },
+    });
+
+    // Legacy compaction remains under the ordinary 16 KiB envelope cap. The heuristic's
+    // character cap controls its own output, but escaped metadata and retained handles also
+    // consume wire bytes, so trim the summary by complete Unicode code points until the
+    // complete envelope fits. If the metadata alone cannot fit, preserve the original
+    // bounded reader failure rather than publishing an invalid envelope.
+    let candidate = buildLegacyEnvelope(compacted);
+    if (serializedBytes(candidate) > this.config.limits.maxEnvelopeBytes) {
+      const empty = buildLegacyEnvelope("");
+      if (serializedBytes(empty) > this.config.limits.maxEnvelopeBytes) {
+        throw new ShuntError("LIMIT_EXCEEDED", "LEGACY_COMPACTION_ENVELOPE_OVER_CAP", false);
+      }
+      const chars = Array.from(compacted);
+      let low = 0;
+      let high = chars.length;
+      while (low < high) {
+        const midpoint = Math.ceil((low + high) / 2);
+        const trial = buildLegacyEnvelope(chars.slice(0, midpoint).join(""));
+        if (serializedBytes(trial) <= this.config.limits.maxEnvelopeBytes) low = midpoint;
+        else high = midpoint - 1;
+      }
+      candidate = buildLegacyEnvelope(chars.slice(0, low).join(""));
+    }
+    return candidate;
   }
 
   /**
@@ -859,6 +1013,8 @@ export class ShuntSession {
       metrics: this.metrics,
       store: this.store,
       identity: this.identity.withGeneration(generation),
+      legacyCompaction: this.legacyCompactionEnabled,
+      legacyCompactionMaxChars: this.legacyCompactionMaxChars,
     });
   }
 }
@@ -935,3 +1091,14 @@ export function buildProvider(
 }
 
 export { EMITTED_SCHEMA_VERSION };
+
+/** Bound UTF-8 output without splitting a multibyte code point. */
+function utf8SafeCap(text: string, maxBytes: number): string {
+  const data = new TextEncoder().encode(text);
+  if (data.length <= maxBytes) return text;
+  let end = Math.max(0, maxBytes);
+  // A UTF-8 continuation byte cannot begin a character. Drop the partial suffix rather
+  // than letting TextDecoder insert U+FFFD into a deterministic summary.
+  while (end > 0 && (data[end] as number) >= 0x80 && (data[end] as number) <= 0xbf) end -= 1;
+  return new TextDecoder().decode(data.subarray(0, end));
+}

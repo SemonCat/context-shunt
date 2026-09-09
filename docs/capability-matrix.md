@@ -16,7 +16,7 @@ integration result. An upgrade is unverified until the gate is rerun and reviewe
 
 ## Mode summary
 
-| Mode | Hermes (`hermes-agent` 0.18.2) | OpenClaw (`openclaw` 2026.9.2) | Default |
+| Mode | Hermes (`hermes-agent` 0.18.2) | OpenClaw (`openclaw` 2026.9.3) | Default |
 | --- | --- | --- | --- |
 | `local_gate` — block oversized/unprovable reads before execution | **supported** | **supported** | on |
 | `reader` — question-driven answers with verified citations | **supported**, attribution ceiling `unverified` | **supported**, attribution ceiling `resolved` | on |
@@ -25,7 +25,7 @@ integration result. An upgrade is unverified until the gate is rerun and reviewe
 | `session_lifecycle` — handles survive a per-turn boundary, revoked on a real one | **supported** | **supported** | on |
 | `reader_task_config` — reader appears in host model configuration | **supported** | n/a (plugin config schema) | on |
 | `artifact_import` — adopt an oversized tool-result artifact a producer already persisted | **supported** | **unsupported** (`IMPORT_UNIMPLEMENTED`) | off |
-| `tool_result_capture` — oversized tool/MCP result capture + pointer (formerly named `suma_post_tool` internally; see [below](#the-suma_post_tool-name-is-retired)) | **unsupported by default**; **supported** with an explicit operator attestation — [see below](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) | **unsupported** | off |
+| `tool_result_capture` — oversized tool/MCP result capture + pointer (formerly named `suma_post_tool` internally; see [below](#the-suma_post_tool-name-is-retired)) | **unsupported by default**; **supported** with an explicit operator attestation — [see below](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) | **supported when enabled** via official middleware; eligible read-only results and ingress limits only | off |
 | `legacy_compaction` — deterministic reader-failure fallback, ported from the incumbent compactor | n/a (core behavior, not a capability-gated mode; see [below](#legacy-compaction-fallback)) | n/a | on |
 | writer / `propose_patch` | **not implemented** | **not implemented** | refused at load |
 
@@ -54,10 +54,11 @@ fully renamed, not aliased.
 These two modes answer the same problem — an oversized tool result — and they are reported
 separately because they need different things from the host, by a wide margin.
 
-`tool_result_capture` needs the host to hand a plugin the **complete** result *before*
-truncation and to accept a **replacement** *before* persistence and context insertion. The
-evidence for each host is below; on Hermes this has now been directly verified against one
-live host (not blanket-claimed for every installation — see the dedicated section below).
+`tool_result_capture` needs a replaceable boundary before model delivery. Complete-original
+capture additionally needs a boundary before truncation: OpenClaw supports only the
+middleware-visible representation because ingress sanitization runs first. The evidence
+for each host and the supported limits are below; the Hermes ordering finding concerns
+one live installation, not every installation.
 
 `artifact_import` needs neither. The producer already captured the result and wrote it to a
 file, so there is no interception to get right. All the host has to supply is a way to
@@ -188,20 +189,64 @@ out of scope for a plugin and remains [future work](#future-work-stated-plainly)
 
 ### OpenClaw
 
-| Reason | Evidence |
-| --- | --- |
-| `CAPTURE_AFTER_TRUNCATION` | In `src/agents/session-tool-result-guard.ts` the persist path runs `capToolResultForPersistence(...)` and only then `persistToolResult(capped, ...)`, which is what invokes the `tool_result_persist` hook. The plugin therefore receives already-capped content. |
-| `OBSERVE_ONLY_HOOK` | `docs/plugins/hooks.md` lists `after_tool_call` as **Observe** — it can see a result but cannot replace one. The one hook positioned early enough cannot perform the replacement. |
-| `HOST_FAIL_OPEN` | `docs/plugins/hooks.md` documents `tool_result_persist` and `before_message_write` as synchronous with no async timeout, where "synchronous errors are logged; failed results are ignored" — the original message survives a failing handler. |
+OpenClaw 2026.9.3 / `773b6d8` supports optional capture through
+`api.registerAgentToolResultMiddleware(handler, { runtimes: ["openclaw", "codex"] })`.
+The manifest declares both runtimes in `contracts.agentToolResultMiddleware`; the installed
+plugin must be explicitly enabled. Capture defaults off. The adapter checks the API and
+verified host version, and registers once only when enabled; revalidate host upgrades.
+The old Hermes `host_ordering_verified_locally` field is accepted but ignored on OpenClaw.
 
-`scripts/verify integration openclaw --mode local` re-checks that ordering against the
-installed host on every run, so a host upgrade that changes it fails the gate instead of
-silently invalidating this table. The same gate now also pins the two host facts the 1.1
-lifecycle and accounting decisions rest on: that `PluginHookSessionEndReason` still contains
-`compaction` (and that `session_end` still carries `nextSessionId`), and that
-`src/agents/isolated-completion.ts` still says "absence must not be projected as zero" about
-token usage. If either changes, the decision that depends on it has to be re-derived rather
-than inherited.
+| Surface | Replacement coverage |
+| --- | --- |
+| Embedded OpenClaw tool results | Eligible read-only text/JSON, before model delivery |
+| OpenClaw-owned dynamic tools in the Codex harness | Same middleware coverage |
+| Codex-native PostToolUse tools | Observe-only; replacement unsupported |
+| Unknown/mutating tools, messaging, `sessions_spawn`, termination/side-effect controls | Excluded; original host semantics retained |
+
+Default eligible IDs are `read`, `web_fetch`, and `web_search`. Add exact MCP IDs through
+`tool_result_capture.read_only_tools` only after verifying the producer is read-only.
+A name is an operator declaration, not proof of a tool's behavior. Messaging/session and
+known mutating names cannot be opted in. Results with control details or extra top-level
+control fields are excluded. Captured error results retain bounded status/ok/isError/exitCode/signal
+facts; a context-shunt capture error does not relabel the tool's own outcome.
+Non-text/image/unknown blocks on an eligible tool are withheld with a bounded refusal.
+
+The shared TypeScript spill engine deterministically serializes the middleware-visible
+result (content and JSON details), measures UTF-8 bytes against `max_tool_result_bytes`,
+and publishes an immutable artifact through the existing store/session identity before
+returning a bounded envelope and handle. Short eligible results pass unchanged. Capture
+makes no Luna call. The model supplies a real question to `context_shunt_read` with the
+handle; exhausted availability uses labelled `LEGACY_COMPACTED` / `legacy_compaction`.
+Serialization, store, or handler failure never returns the original eligible oversized text.
+The host runner independently fails closed to its bounded middleware error and preserves
+its special successful-delivery fallback.
+
+**Ingress ceiling:** `src/agents/harness/tool-result-middleware.ts` sanitizes before the
+first handler: 200 content blocks, 100,000 UTF-16 characters per text aggregation,
+100,000 details bytes, and 5,000,000 image data characters. The adapter refuses text at
+99,999 characters or above (safe-surrogate truncation can leave 99,999), 200 blocks or
+more, details at 100,000 bytes or above, and the host's `truncated: true` details marker.
+No handle or complete snapshot is published for those inputs; the bounded 100k raw text
+is withheld. Coercion can also merge/drop blocks or sanitize details without a marker.
+Thus even below detectable ceilings the immutable artifact is the complete **middleware-visible
+representation**, never a promise of the original producer bytes. `coverage.complete=false`
+and `upstream_truncated=null`; earlier producer/reducer loss is unknown. Spill accounting
+conservatively uses `host_truncated_observed` for this sanitized view and never credits an
+unobserved larger original. Cap refusals publish no artifact or complete-capture credit.
+Recovering complete originals above host ingress caps requires an upstream host seam/change
+or producer-side bounded queries; this plugin does not patch OpenClaw.
+
+**Ordering:** `src/plugins/agent-tool-result-middleware.ts` enumerates registry order and
+`agent-tool-result-middleware-loader.ts` appends lazy-loaded handlers. The official options
+have no priority field. Disable Tokenjuice and every competing result reducer in the **same
+configuration transaction** that enables context-shunt capture. A reducer running first can
+make complete capture impossible. This is an operator cutover prerequisite, not an ordering
+claim inferred from plugin names or the ignored Hermes attestation field.
+
+The deterministic host integration gate uses the real installed loader and runner, checks
+manifest entitlement/explicit-enablement source guards, and exercises both runtimes,
+oversized sentinels, ingress clipping, and host exception/invalid-output/delivery fallbacks.
+It does not claim live gateway, provider, Codex-native replacement, or production cutover results.
 
 ## What the capture engine gives you regardless of the capability determination
 
@@ -214,19 +259,18 @@ bounded `SPILL_FAILED` or `LIMIT_EXCEEDED` envelope and never the raw payload.
 
 So the engine is not the host blocker. Keep those facts separate when reading a report: the
 deterministic gate has an executable implementation regardless of whether any given host
-enables the mode. On OpenClaw the mode stays off unconditionally (no operator override
-exists there). On Hermes it is off by default and requires an explicit operator attestation
+enables the mode. On OpenClaw enabled capture uses the official middleware under the limits above. On Hermes it is off by default and requires an explicit operator attestation
 to turn on — see [above](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 Whether the gate passed a particular checkout comes from that run's result either way.
 
 ## Legacy-compaction fallback
 
-`legacy_compaction` is Python/Hermes core session behavior, not a capability-gated mode;
+`legacy_compaction` is core session behavior, not a capability-gated mode;
 it needs the reader's snapshot store, not a host hook. After retries and the model fallback
 chain are exhausted, `context_shunt_read` tries it first for terminal `MODEL_ERROR`,
 `TIMEOUT`, or `CITATION_INVALID`, including wholly unavailable readers. If disabled or
 unsafe, the narrower availability-only `automatic_extract` tier may run next; otherwise
-the original bounded failure remains. TypeScript/OpenClaw has not ported this compactor.
+the original bounded failure remains. TypeScript ports the same algorithm; OpenClaw selects it on exhausted reader availability. The Python configuration/extra trigger codes below remain Hermes-specific.
 It is a direct, function-for-function port of the text/JSON-shaping
 half of the incumbent `oversize-tool-result-compactor` plugin (v0.3.0, read read-only from
 the same live host on 2026-09-09; see `packages/core-py/src/context_shunt/legacy_compact.py`'s
@@ -268,7 +312,7 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 | `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
-| `integration <host> --mode post-tool` | `expected_unsupported` (printed `N/A`) on OpenClaw, and on Hermes without an operator attestation — no environment enables it by default, and it does not block a release. There is no automated gate that re-derives the operator-attested 0.21.1 ordering finding on Hermes; that finding was a one-time, dated, read-only inspection of one live host, recorded in `docs/capability-matrix.md`, not a reproducible checkout-based gate. Setting `host_ordering_verified_locally: true` is an operator decision this gate does not and cannot verify |
+| `integration <host> --mode post-tool` | OpenClaw runs the same deterministic host runner gate as `--mode local` (`NOT_RUN` without a checkout); `expected_unsupported` (printed `N/A`) on Hermes without an operator attestation — no environment enables it by default, and it does not block a release. There is no automated gate that re-derives the operator-attested 0.21.1 ordering finding on Hermes; that finding was a one-time, dated, read-only inspection of one live host, recorded in `docs/capability-matrix.md`, not a reproducible checkout-based gate. Setting `host_ordering_verified_locally: true` is an operator decision this gate does not and cannot verify |
 | `shadow deterministic` | implemented — four-lane A/B over a fixed synthetic corpus; reports main-context reduction, evidence regression against the raw baseline, and model-free latency for real |
 | `shadow reader` | `expected_unsupported` (printed `N/A`) — task correctness, semantic evidence support, mechanical citation validity and follow-up rate are scored by `eval luna`, which owns the fixed corpus, thresholds and runs-per-item; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
@@ -318,8 +362,7 @@ is deployable and unproven at production equivalence — not that it is better.
   reason it is unsupported there names a core gap rather than a host limitation precisely
   because closing it needs no host change.
 - A live runtime sentinel measurement of capture/truncation/persistence/context-insertion
-  order inside a running gateway, for either host. The current gate verifies the ordering
-  from host source, which is enough to keep the mode off but is not a runtime measurement.
+  order inside a running gateway, for either host. The OpenClaw gate exercises the installed loader and middleware runner; it is not a live gateway measurement.
 - A controlled MCP producer wrapper for Hermes that would make `tool_result_capture`
   provably supportable there without depending on an unaudited per-tool
   self-truncation assumption or an operator attestation.
@@ -328,10 +371,6 @@ is deployable and unproven at production equivalence — not that it is better.
   `CONTEXT_SHUNT_HERMES_ROOT`) on every run, the way `integration hermes --mode local`
   already does for the other modes, so this table's Hermes evidence stops depending on a
   one-time manual reading.
-- TypeScript parity for `legacy_compaction`: the contract (schema, fixtures, provenance/
-  result-kind enums) is synced to `packages/core-ts/contracts/v1`, but `packages/core-ts/src`
-  does not yet build or consume `legacy_compaction` envelopes. The Python core is the only
-  one that currently produces this fallback tier.
 - The optional writer contract (`operation: propose_patch`). It is refused today; a future
   version needs its own schema version, write scopes, conflict checks and acceptance.
 - A host that lets a plugin observe the provider's own report of which model generated the

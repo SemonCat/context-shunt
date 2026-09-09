@@ -11,7 +11,7 @@ mechanically verified citations.
 > `tool_result_capture` and the internal legacy fallback after an atomic cutover; the
 > standalone `oversize-tool-result-compactor` plugin is disabled.
 > Capture remains off by default for new installations and requires verified host ordering.
-> OpenClaw supports local pre-read protection, but not tool-result capture.
+> OpenClaw 2026.9.3 supports optional read-only tool-result capture through its official middleware, with ingress and runtime limits.
 > Live reader evaluation and provider benchmark gates remain `NOT_RUN`.
 
 ## How it works
@@ -131,7 +131,7 @@ use the secondary, guarded exact-prefix extraction tier when enabled. If neither
 safely return output, the response contains only a bounded pointer/failure and recovery
 guidance, never raw oversized content. Reuse a valid handle with a narrower question or
 inspect a bounded range.
-TypeScript/OpenClaw supports the exact-extraction tier, but has not ported legacy compaction.
+OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
 See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
 
 ## Quick start
@@ -175,19 +175,24 @@ the Gateway and inspect the loaded plugin:
 openclaw plugins inspect context-shunt --runtime --json
 ```
 
-OpenClaw currently lacks the equivalent pre-context post-tool seam: its early hook is
-observe-only, while the persistence hook sees already-capped results. `tool_result_capture`
-is **unsupported even if requested in config**. It does not capture arbitrary oversized
-MCP/tool outputs. See [installation and cleanup](docs/install.md).
+OpenClaw 2026.9.3 uses `api.registerAgentToolResultMiddleware` for eligible read-only text/JSON
+in embedded tools and OpenClaw-owned Codex dynamic tools. Codex-native results are observe-only.
+Capture is off by default; configure exact read-only MCP IDs and disable Tokenjuice/other reducers
+atomically when enabling. Host ingress sanitization happens first: ambiguous text/block/details
+ceilings are withheld without a handle; snapshots claim only middleware-visible content, never
+complete producer bytes. No Luna call occurs at capture. Handles feed the question-aware reader,
+with labelled `LEGACY_COMPACTED` fallback after exhausted availability.
+See [coverage and limits](docs/capability-matrix.md#openclaw), [cutover](docs/acceptance.md#openclaw-middleware-cutover),
+and [installation and cleanup](docs/install.md).
 
 ## Host support and honest accounting
 
-| Capability | Hermes | OpenClaw 2026.9.2 |
+| Capability | Hermes | OpenClaw 2026.9.3 |
 | --- | --- | --- |
 | Local pre-read gate, reader, exact inspect, session stats/lifecycle | Supported (compatibility baseline 0.18.2) | Supported |
-| Tool-result capture | Enabled in the reported 0.21.1 deployment; off by default, requires local attestation | Unsupported |
+| Tool-result capture | Enabled in the reported 0.21.1 deployment; off by default, requires local attestation | Supported when enabled; eligible middleware-visible results only |
 | External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`) |
-| Internal legacy compaction | Supported, default reader-failure fallback | Not implemented |
+| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability |
 | Reader attribution ceiling | `unverified` | `resolved` |
 | Writer / `propose_patch` | Not implemented | Not implemented |
 

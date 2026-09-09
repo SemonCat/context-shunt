@@ -29,7 +29,8 @@
             "enabled": true
           },
           "tool_result_capture": {
-            "enabled": false
+            "enabled": false,
+            "read_only_tools": []
           },
           "limits": {}
         }

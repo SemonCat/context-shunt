@@ -25,7 +25,7 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
-| `tool_result_capture.enabled` | boolean | `false` | Requests the optional oversized-tool-result capture path. Unsupported on OpenClaw. On Hermes, additionally requires `tool_result_capture.host_ordering_verified_locally: true` to be reported supported at all — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not). The deprecated key `suma_post_tool.enabled` is still accepted as an alias; setting both to disagreeing values is refused with `TOOL_RESULT_CAPTURE_CONFIG_CONFLICT`. |
+| `tool_result_capture.enabled` | boolean | `false` | Requests the optional oversized-tool-result capture path. OpenClaw 2026.9.3 uses the official middleware, subject to read-only eligibility, ingress ceilings and atomic reducer cutover. On Hermes, additionally requires `tool_result_capture.host_ordering_verified_locally: true` to be reported supported at all — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not). The deprecated key `suma_post_tool.enabled` is still accepted as an alias; setting both to disagreeing values is refused with `TOOL_RESULT_CAPTURE_CONFIG_CONFLICT`. |
 | `tool_result_capture.host_ordering_verified_locally` | boolean | `false` | An explicit **operator attestation** that the operator personally verified their own installed Hermes host's `transform_tool_result` capture-before-truncation ordering. This code does not and cannot prove it; setting it without reading the linked evidence first is the deployment's own risk. |
 | `artifact_import.enabled` | boolean | `false` | Requests the external-artifact import boundary. Supported on Hermes; the OpenClaw core has no import implementation and reports the mode unsupported with `IMPORT_UNIMPLEMENTED`. |
 | `artifact_import.roots` | string array, at most 8 | `[]` | Canonical directories a producer's artifact and manifest may live under. A separate allowlist from `workspace_roots`; a root that contains `cache_dir` is refused with `CACHE_INSIDE_IMPORT_ROOT`. |
@@ -97,6 +97,26 @@ The auxiliary override is read through Hermes' public config loader because the 
 `ctx.llm` facade has no task argument. The effective target still appears in envelope
 provenance. Hermes cannot distinguish a provider report from a request echo, so its maximum
 supported attribution remains `unverified`.
+
+### OpenClaw capture configuration
+
+`tool_result_capture.read_only_tools` is an OpenClaw adapter-only list of exact additional
+read-only tool IDs (at most 100, each 1–128 characters). Defaults already cover `read`,
+`web_fetch`, and `web_search`. For example: `{"enabled": true, "read_only_tools": ["mcp__logs__query"]}`.
+Verify the actual producer contract before adding an ID. Unknown/mutating/control tools are
+excluded. The old `host_ordering_verified_locally` key is ignored on OpenClaw.
+OpenClaw always selects legacy compaction for exhausted availability. The older
+`reader.automatic_extract` and `reader.fallback_max_bytes` remain accepted but do not control
+this fallback; unsafe compaction preserves the bounded reader failure, never an exact prefix.
+The adapter removes its allowlist before invoking the shared core config loader; there is
+no parallel artifact schema or store. Both `openclaw` and `codex` middleware runtimes are
+selected; Codex-native tools remain observe-only. Version 2026.9.3 and a callable official
+registration API are required. No guessed hook or host-version fallback enables capture.
+
+Disable Tokenjuice and other reducers in the same transaction as enabling capture; see
+[cutover and acceptance](acceptance.md#openclaw-middleware-cutover).
+The shared `limits.max_tool_result_bytes` controls spill bytes; host ingress ceilings are
+independent and cannot be raised by this plugin. [Coverage/limits](capability-matrix.md#openclaw).
 
 ### OpenClaw host keys
 
@@ -264,7 +284,7 @@ If compaction is disabled, raises, or fails the output guard, a wholly unavailab
 read may use the secondary `automatic_extract` tier if enabled together with inspect.
 If neither tier can safely deliver, the original bounded failure remains; raw source
 is never used as a fail-open result. This precedence change is scoped to Python/Hermes;
-TypeScript/OpenClaw extraction behavior is unchanged.
+OpenClaw selects the TypeScript legacy compactor on exhausted availability. The Python-only legacy configuration keys and additional failure triggers described here do not expand OpenClaw triggers; generic TypeScript sessions keep the prior automatic-extraction default.
 
 Unlike automatic extraction, this is not an exact byte prefix — it is
 `legacy_compact.compact_tool_result`, a ported, deterministic heuristic summary of the

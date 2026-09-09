@@ -1,6 +1,6 @@
 {
   "name": "context-shunt",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Read-only context shunt: keep large sources out of the main agent's context and answer questions about them with verified citations.",
   "license": "Apache-2.0",

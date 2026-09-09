@@ -15,7 +15,7 @@ modes each host actually supports and why the optional `tool_result_capture` mod
 | Python (Hermes adapter) | 3.11 or newer |
 | Node (OpenClaw adapter) | **22.22.3 or newer** — the store uses `node:sqlite`, and this is also OpenClaw's own floor |
 | Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled. The `tool_result_capture` hook-ordering finding is a separate, dated verification against one live 0.21.1 host — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) — not a claim about 0.18.2 or about every 0.21.1 install |
-| OpenClaw | compatibility verified against `openclaw` 2026.9.2, with native plugins enabled |
+| OpenClaw | compatibility verified against `openclaw` 2026.9.3, with native plugins enabled |
 | Reader model | a host model bridge; `gpt-5.6-luna` is the default and is configurable |
 
 Without a model bridge the local gate, `context_shunt_inspect` and `context_shunt_stats`
@@ -103,6 +103,13 @@ rm -rf ~/.cache/context-shunt          # private snapshots and spill
 ```
 
 ## OpenClaw
+
+The official middleware is available in 2026.9.3. Installation and activation are separate:
+`contracts.agentToolResultMiddleware` declares both runtimes, and the installed plugin must
+be explicitly enabled. The example leaves capture off for safe staging. Before enabling,
+follow the [atomic Tokenjuice cutover](acceptance.md#openclaw-middleware-cutover); do not
+perform sequential live enables/disables while requests can race between reducers.
+The legacy Hermes ordering-attestation field is unnecessary here.
 
 Native plugins run in the Gateway process, so review the code before loading it.
 

@@ -15,12 +15,11 @@
  * above `maxToolResultBytes`. A short result passes through untouched and is never stored,
  * so this path cannot become a shadow log of every tool call.
  *
- * Enabling this on a host additionally requires proof that the host captures the complete
- * result before truncation and accepts a safe replacement before persistence and context
- * insertion. On OpenClaw that proof does not exist - see `docs/capability-matrix.md` - so
- * the mode stays disabled there. The engine remains present and tested behind that
- * capability gate rather than being deleted, so the day a host does provide the ordering
- * there is a tested implementation to enable.
+ * Enabling this engine as a host post-tool mode requires proof that the host captures the
+ * complete result before truncation and accepts a safe replacement before persistence and
+ * context insertion. A host middleware may provide a separate, bounded visibility path; this
+ * engine cannot infer completeness after an upstream sanitizer has run. The adapter owns that
+ * seam-specific capability report and must refuse or label cap-boundary input conservatively.
  */
 import { Coverage, Envelope, buildEnvelope, errorEnvelope, isoExpiry } from "./envelope.js";
 import { ShuntError, isShuntError } from "./errors.js";

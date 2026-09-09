@@ -139,6 +139,17 @@ export interface RecoveryShape {
   actions: string[];
 }
 
+export interface LegacyCompactionShape {
+  deterministic: true;
+  source_id: string;
+  snapshot_id: string;
+  summary: string;
+  summary_bytes: number;
+  original_bytes: number;
+  hard_cap_chars: number;
+  original_failure: "MODEL_ERROR" | "TIMEOUT" | "INVALID_MODEL_OUTPUT" | "CITATION_INVALID";
+}
+
 export interface Envelope {
   schema_version: string;
   request_id: string;
@@ -155,6 +166,7 @@ export interface Envelope {
   provenance?: ProvenanceShape;
   accounting_id?: string;
   extraction?: ExtractionShape;
+  legacy_compaction?: LegacyCompactionShape;
   stats?: StatsShape;
   recovery?: RecoveryShape;
 }
@@ -235,6 +247,7 @@ export interface BuildOptions {
   provenance?: Provenance;
   accountingId?: string;
   extraction?: ExtractionShape;
+  legacyCompaction?: LegacyCompactionShape;
   stats?: StatsShape;
   recovery?: RecoveryShape;
   schemaVersion?: string;
@@ -242,6 +255,7 @@ export interface BuildOptions {
 
 function defaultResultKind(code: string): ResultKind {
   if (code === "EXTRACTED") return "deterministic_extraction";
+  if (code === "LEGACY_COMPACTED") return "legacy_compaction";
   if (code === "STATS") return "stats";
   if (code === "SPILLED" || code === "IMPORTED") return "pointer";
   if (code === "LARGE_READ" || code === "UNCLASSIFIABLE_READ") return "gate_decision";
@@ -251,6 +265,7 @@ function defaultResultKind(code: string): ResultKind {
 
 const DEFAULT_LABELS: Partial<Record<ResultKind, ProvenanceLabel>> = {
   deterministic_extraction: "deterministic_extraction",
+  legacy_compaction: "legacy_compaction",
   stats: "session_metrics",
   pointer: "pointer_only",
   gate_decision: "gate_decision",
@@ -296,6 +311,14 @@ export function buildEnvelope(opts: BuildOptions): Envelope {
     }
     if (!opts.extraction) throw new Error("EXTRACTED requires an extraction block");
   }
+  if (opts.code === "LEGACY_COMPACTED") {
+    if (answer.length > 0 || citations.length > 0) {
+      throw new Error("LEGACY_COMPACTED must carry no answer and no citations");
+    }
+    if (!opts.legacyCompaction) {
+      throw new Error("LEGACY_COMPACTED requires a legacy_compaction block");
+    }
+  }
   if (opts.code === "STATS") {
     if (answer.length > 0 || citations.length > 0) {
       throw new Error("STATS must carry no answer and no citations");
@@ -333,6 +356,7 @@ export function buildEnvelope(opts: BuildOptions): Envelope {
   envelope.provenance = provenanceToShape(provenance);
   envelope.accounting_id = opts.accountingId ?? PLACEHOLDER_ACCOUNTING_ID;
   if (opts.extraction) envelope.extraction = opts.extraction;
+  if (opts.legacyCompaction) envelope.legacy_compaction = opts.legacyCompaction;
   if (opts.stats) envelope.stats = opts.stats;
   if (opts.recovery) envelope.recovery = validatedRecovery(opts.recovery);
   return envelope;

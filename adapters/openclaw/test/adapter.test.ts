@@ -139,12 +139,8 @@ describe("capability probe", () => {
     });
     const mode = report.modes.find((m) => m.mode === "tool_result_capture")!;
     expect(mode.support).toBe("unsupported");
-    expect([...mode.reasons]).toEqual([
-      "CAPTURE_AFTER_TRUNCATION",
-      "OBSERVE_ONLY_HOOK",
-      "HOST_FAIL_OPEN",
-    ]);
-    expect(mode.evidence).toEqual(TOOL_RESULT_CAPTURE_EVIDENCE);
+    expect([...mode.reasons]).toEqual(["HOOK_MISSING", "HOST_VERSION_UNVERIFIED", "CONFIG_DISABLED"]);
+    expect(mode.evidence).toEqual(expect.arrayContaining([...TOOL_RESULT_CAPTURE_EVIDENCE]));
     expect(mode.evidence.length).toBeGreaterThan(0);
   });
 
@@ -775,8 +771,8 @@ describe("fallback routes to the candidate's own provider", () => {
   });
 });
 
-describe("automatic exact extraction configuration", () => {
-  it.each([true, false])("applies automatic_extract=%s through the host adapter", async (enabled) => {
+describe("legacy fallback and exact-extraction config compatibility", () => {
+  it.each([true, false])("accepts automatic_extract=%s while selecting labelled legacy fallback", async (enabled) => {
     const dir = workspace();
     const path = join(dir, "ws", "outage.txt");
     writeFileSync(path, "source line\n".repeat(400));
@@ -789,11 +785,11 @@ describe("automatic exact extraction configuration", () => {
     const out = JSON.parse(await new ContextShuntPlugin(f.api).onReaderTool(
       { question: "What is here?", paths: [path] }, { sessionKey: "s1" },
     ));
-    expect(out.code).toBe(enabled ? "EXTRACTED" : "MODEL_ERROR");
+    expect(out.code).toBe("LEGACY_COMPACTED");
     expect(JSON.stringify(out)).not.toContain("PRIVATE_PROVIDER_BODY");
-    if (enabled) {
-      expect(out.extraction.result_bytes).toBeLessThanOrEqual(64);
-      expect(out.provenance.derived).toBe(false);
-    }
+    expect(out.extraction).toBeUndefined();
+    expect(out.result_kind).toBe("legacy_compaction");
+    expect(out.provenance.derived).toBe(false);
+    expect(out.legacy_compaction.summary_bytes).toBeLessThanOrEqual(16384);
   });
 });
