@@ -994,11 +994,17 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
         python = py_root / "bin" / "python"
         py_install_ok = venv_create.returncode == 0 and wheel_ok
         if py_install_ok:
-            install = _run([str(pip), "install", str(wheels[0])], ROOT)
+            # Resolve the built metadata alongside Hermes's installed version: an
+            # incompatible upper bound must fail instead of silently selecting 4.25.
+            install = _run(
+                [str(pip), "install", str(wheels[0]), "jsonschema==4.26.0"], ROOT
+            )
             probe = _run(
                 [
                     str(python),
                     "-c",
+                    "from importlib.metadata import version; "
+                    "assert version('jsonschema') == '4.26.0'; "
                     "import context_shunt as c; "
                     "assert c.__version__ == '1.1.0', c.__version__; "
                     "assert c.EMITTED_SCHEMA_VERSION == '1.1'; "
@@ -1017,7 +1023,7 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
             )
             py_install_ok = install.returncode == 0 and probe.returncode == 0
         lines.append(
-            f"clean wheel install and import: {'pass' if py_install_ok else 'fail'}"
+            f"clean wheel install and import (jsonschema 4.26.0): {'pass' if py_install_ok else 'fail'}"
         )
         if not py_install_ok:
             failures.append("clean wheel install/import failed")
@@ -1675,7 +1681,7 @@ def _license_check() -> GateResult:
         if spec.startswith("^") or spec.startswith("*") or spec == "latest":
             failures.append(f"@context-shunt/core dependency {name} is not pinned")
     pyproject = (ROOT / "packages" / "core-py" / "pyproject.toml").read_text()
-    if "jsonschema>=4.25,<4.26" not in pyproject:
+    if "jsonschema>=4.25,<4.27" not in pyproject:
         failures.append("core-py dependency jsonschema is not bounded")
     status = "pass" if not failures else "fail"
     return GateResult(

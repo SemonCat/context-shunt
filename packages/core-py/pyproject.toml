@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "context-shunt contributors" }]
 dependencies = [
-  "jsonschema>=4.25,<4.26",
+  "jsonschema>=4.25,<4.27",
 ]
 
 [project.optional-dependencies]
