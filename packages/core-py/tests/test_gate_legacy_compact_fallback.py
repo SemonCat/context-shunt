@@ -239,8 +239,13 @@ def test_retired_canary_citation_failure_preserves_evidence_not_a_prefix(tmp_pat
     assert record["attempts_started"] > 0
 
 
-def test_uncited_semantic_reply_is_citation_failure_with_cost_and_handle(tmp_path):
-    reply = json.dumps({"answer": "UNVERIFIED_SENTINEL", "citations": []})
+@pytest.mark.parametrize("shape", ["legacy", "claims"])
+def test_uncited_semantic_reply_is_citation_failure_with_cost_and_handle(tmp_path, shape):
+    reply = json.dumps(
+        {"answer": "UNVERIFIED_SENTINEL", "citations": []}
+        if shape == "legacy"
+        else {"claims": [{"text": "UNVERIFIED_SENTINEL", "citation_ids": []}], "citations": []}
+    )
     session, entry, request, body = setup(
         tmp_path,
         FakeLuna(replies=[reply]),
@@ -265,8 +270,13 @@ def test_uncited_semantic_reply_is_citation_failure_with_cost_and_handle(tmp_pat
     assert record["reader_output_tokens"] == 5
 
 
-def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, monkeypatch):
-    reply = json.dumps({"answer": "UNVERIFIED_SENTINEL", "citations": []})
+@pytest.mark.parametrize("shape", ["legacy", "claims"])
+def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, monkeypatch, shape):
+    reply = json.dumps(
+        {"answer": "UNVERIFIED_SENTINEL", "citations": []}
+        if shape == "legacy"
+        else {"claims": [{"text": "UNVERIFIED_SENTINEL", "citation_ids": []}], "citations": []}
+    )
     session, _, request, _ = setup(tmp_path, FakeLuna(replies=[reply]))
     original = session._registry.resolve
     calls = 0
@@ -284,3 +294,33 @@ def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, mon
     assert env["recovery"]["handles_valid"] is False
     assert "RECAPTURE_SOURCE" in env["recovery"]["actions"]
     assert "legacy_compaction" not in env and "extraction" not in env
+
+
+@pytest.mark.parametrize(
+    "reply", [{"answer": "", "citations": []}, {"claims": [], "citations": []}]
+)
+def test_empty_semantic_reply_is_valid_no_match(tmp_path, reply):
+    session, entry, request, body = setup(
+        tmp_path, FakeLuna(replies=[json.dumps(reply)]), body="irrelevant excerpt\n"
+    )
+    env = session.read(request)
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+    assert env["coverage"]["complete"] is True
+    assert env["answer"] == "" and env["citations"] == []
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert body not in json.dumps(env)
+    rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
+    record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
+    assert record["code"] == "NO_MATCH"
+    assert record["attempts_started"] == 1
+    assert record["reader_input_tokens"] == 10 and record["reader_output_tokens"] == 5
+
+
+@pytest.mark.parametrize(
+    "reply", [{"answer": "", "citations": [{}]}, {"claims": [], "citations": [{}]}]
+)
+def test_empty_reply_with_malformed_citations_is_not_valid_no_match(tmp_path, reply):
+    session, _, request, _ = setup(tmp_path, FakeLuna(replies=[json.dumps(reply)]))
+    env = session.read(request)
+    assert env["code"] == "CITATION_INVALID"
+    assert env["coverage"]["complete"] is False

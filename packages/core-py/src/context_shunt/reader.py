@@ -105,6 +105,7 @@ class ChunkOutcome:
     #: only when this call's reply used the ``answer`` shape - never both, an ambiguous
     #: reply carrying both fails the call instead of guessing which one to trust.
     legacy_answer: str = ""
+    requires_evidence: bool = False
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
     availability_only: bool = True
@@ -912,11 +913,11 @@ class Reader:
                     cost=cost,
                     source_ids=tuple(source_ids),
                 )
-            # A delivered, parsed model reply with no verifiable citations is missing
-            # evidence, not proof that the source had no answer. Keep deterministic
-            # no-hit searches (which made no model call) and cap/format failures distinct.
+            # Distinguish a valid empty no-match from assertions stripped for lacking
+            # evidence. Capture this before normalization can discard uncited claims
+            # or malformed citations; supplied evidence must still verify.
             if not verified_evidence and any(
-                o.responses_seen > 0 and not o.failed_reason for o in outcomes
+                o.requires_evidence and not o.failed_reason for o in outcomes
             ):
                 exc = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
                 failed = _as_failure_provenance(provenance)
@@ -1220,9 +1221,11 @@ class Reader:
                     # structural validation: a malformed claim (bad citation_ids) can
                     # still carry a secret in its text, and a claim dropped later must
                     # still have been scanned before it is discarded.
+                    outcome.requires_evidence = bool(parsed["citations"])
                     for item in raw_claims[: self._limits.max_claims_per_answer]:
                         if isinstance(item, dict) and isinstance(item.get("text"), str):
                             assert_no_secret(item["text"].encode("utf-8"), "ANSWER")
+                            outcome.requires_evidence |= bool(item["text"].strip())
                     # Claims past the ceiling are never read. That is dropped material,
                     # so it is carried out and reported as an omission rather than
                     # silently disappearing behind a `complete: true`.
@@ -1253,6 +1256,7 @@ class Reader:
                 outcome.citations_over_cap = len(
                     over_cap_ids & set(referenced_ids(parsed["answer"]))
                 )
+                outcome.requires_evidence = bool(parsed["answer"].strip() or parsed["citations"])
                 outcome.legacy_answer = parsed["answer"]
                 outcome.citations = citations_local
                 return outcome

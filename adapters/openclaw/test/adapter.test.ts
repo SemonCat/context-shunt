@@ -834,7 +834,7 @@ describe("legacy fallback and exact-extraction config compatibility", () => {
 });
 
 
-describe("citation failure preserves the bounded error and handles", () => {
+describe("empty no-match and citation failure preserve their delivery contracts", () => {
   const replies = [
     { name: "invalid quote", body: { answer: "UNVERIFIED_MODEL_SENTINEL [c1].", citations: [
       { id: "c1", line_start: 1, line_end: 1, quote: "FABRICATED_QUOTE_SENTINEL" },
@@ -844,10 +844,12 @@ describe("citation failure preserves the bounded error and handles", () => {
     { name: "empty claims and citations", body: { claims: [], citations: [] } },
   ];
   describe.each(["paths", "handles"] as const)("%s", (sourceForm) => {
-    it.each(replies)("returns $name as an explicit failure with handles and cost", async ({ body }) => {
+    it.each(replies)("classifies $name with handles and cost", async ({ body, name }) => {
+      const noMatch = name.startsWith("empty answer") || name.startsWith("empty claims");
+      const code = noMatch ? "NO_MATCH" : "CITATION_INVALID";
       const dir = workspace();
       const path = join(dir, "ws", "README.md");
-      const source = "# Reader contract\n" + "Documented source detail.\n".repeat(1500);
+      const source = "# Reader contract\n" + "Documented source detail.\n".repeat(noMatch ? 1 : 1500);
       writeFileSync(path, source);
       const f = configured(dir);
       const complete = vi.fn(async () => ({ text: JSON.stringify(body), provider: "openai",
@@ -863,18 +865,21 @@ describe("citation failure preserves the bounded error and handles", () => {
       const out = JSON.parse(await p.onReaderTool({ question: "Explain the reader contract.", ...args },
         { sessionKey: "s1", toolCallId: "citation-regression" }));
       const original = await reader.mock.results[0]!.value;
-      // Verification must reject the model output before fallback; no availability spoofing.
-      expect(original.envelope.code).toBe("CITATION_INVALID");
+      // Empty no-match is valid; nonempty unverified content remains a failure.
+      expect(original.envelope.code).toBe(code);
       expect(original.availabilityFailure).toBeUndefined();
-      expect(original.envelope.recovery?.handles_valid).toBe(true);
-      expect(out.code).toBe("CITATION_INVALID");
+      if (!noMatch) expect(original.envelope.recovery?.handles_valid).toBe(true);
+      expect(out.code).toBe(code);
       validateEnvelope(out);
-      expect(out.status).toBe("error");
-      expect(out.result_kind).toBe("failure");
+      expect(out.status).toBe(noMatch ? "ok" : "error");
+      expect(out.result_kind).toBe(noMatch ? "model_derived" : "failure");
       expect(out.sources).toEqual(original.envelope.sources);
-      expect(out.recovery.handles_valid).toBe(true);
-      expect(out.coverage.complete).toBe(false);
-      expect(out.provenance).toMatchObject({ derived: false, label: "no_model_output",
+      if (!noMatch) {
+        expect(out.recovery.handles_valid).toBe(true);
+        expect(out.provenance).toMatchObject({ derived: false, label: "no_model_output" });
+      }
+      expect(out.coverage.complete).toBe(noMatch);
+      expect(out.provenance).toMatchObject({
         attempts_started: complete.mock.calls.length, usage_complete: true });
       expect(out.answer).toBe("");
       expect(out.citations).toEqual([]);

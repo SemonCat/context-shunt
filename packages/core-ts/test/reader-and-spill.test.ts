@@ -1530,14 +1530,14 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(env.recovery?.handles_valid).toBe(true);
   });
 
-  it("rejects citation-empty model output even when nothing was dropped", async () => {
+  it("accepts empty model no-match when nothing was dropped", async () => {
     const { registry, entry } = capFixture();
     const env = await new Reader(registry, new FakeLuna([claimsJson([], [])])).answer(
       "sess",
       capRequest(entry),
     );
-    expect(env.status).toBe("error");
-    expect(env.code).toBe("CITATION_INVALID");
+    expect(env.status).toBe("ok");
+    expect(env.code).toBe("NO_MATCH");
   });
 
   // Every candidate re-sends the whole prompt, so a chain of three transmitted three

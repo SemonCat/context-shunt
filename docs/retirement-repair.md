@@ -82,3 +82,14 @@ Synthetic regressions reproduced four defects from independent review:
 
 All fixtures contain invented content. This follow-up changes no live capability or
 configuration and does not supply the remaining live proof described above.
+
+## Empty no-match contract closure
+
+The follow-up citation condition was too broad: a parsed response alone was treated as
+semantic content. Both cores now record whether the original answer or bounded claim text
+is nonempty before normalization can discard unsupported assertions. Valid empty legacy
+answers and empty structured claims with no citations remain `ok/NO_MATCH`; nonempty
+uncited replies still return `CITATION_INVALID` with handles, cost, and post-provider TTL
+revalidation preserved. Parameterized session regressions cover both response shapes,
+nonempty citation failures, and expired recovery handles. Both empty-reply regressions
+failed against `fc89d395` before this closure fix. No live capability changes.

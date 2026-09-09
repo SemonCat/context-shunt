@@ -368,8 +368,8 @@ it("secret guard refusal neither leaks nor charges", async () => {
   } finally { spy.mockRestore(); }
 });
 
-it("retired canary citation failure preserves evidence without a question-independent prefix", async () => {
-  const provider = new FakeLuna([], JSON.stringify({ answer: "UNVERIFIED_SENTINEL", citations: [] }));
+it.each([{ answer: "UNVERIFIED_SENTINEL", citations: [] }, { claims: [{ text: "UNVERIFIED_SENTINEL", citation_ids: [] }], citations: [] }])("retired canary citation failure preserves evidence without a question-independent prefix %j", async (reply) => {
+  const provider = new FakeLuna([], JSON.stringify(reply));
   const { session, entry, request, body } = setup(provider, {}, { legacyCompaction: true });
   const env = await session.read(request);
   expect(env.code).toBe("CITATION_INVALID");
@@ -398,8 +398,8 @@ it("retired canary citation failure preserves evidence without a question-indepe
 });
 
 
-it("revalidates citation recovery handles after the provider wait", async () => {
-  const provider = new FakeLuna([], JSON.stringify({ answer: "unverified", citations: [] }));
+it.each([{ answer: "unverified", citations: [] }, { claims: [{ text: "unverified", citation_ids: [] }], citations: [] }])("revalidates citation recovery handles after the provider wait %j", async (reply) => {
+  const provider = new FakeLuna([], JSON.stringify(reply));
   const { session, request } = setup(provider, {}, { legacyCompaction: true });
   const original = session.registry.resolve.bind(session.registry);
   let calls = 0;
@@ -414,3 +414,29 @@ it("revalidates citation recovery handles after the provider wait", async () => 
   expect(env.legacy_compaction).toBeUndefined();
   expect(env.extraction).toBeUndefined();
 });
+
+
+it.each([{ answer: "", citations: [] }, { claims: [], citations: [] }])(
+  "accepts empty semantic no-match %j", async (reply) => {
+    const { session, entry, request, body } = setup(new FakeLuna([], JSON.stringify(reply)));
+    request.sources[0]!.selector = { kind: "lines", start: 1, end: 1 } as (typeof request.sources)[number]["selector"];
+    const env = await session.read(request);
+    expect(env.status).toBe("ok"); expect(env.code).toBe("NO_MATCH");
+    expect(env.coverage.complete).toBe(true);
+    expect(env.answer).toBe(""); expect(env.citations).toEqual([]);
+    expect(env.sources[0]!.source_id).toBe(entry.sourceId);
+    expect(JSON.stringify(env)).not.toContain(body);
+    const record = stats(session).find((r) => r.operation_id === env.accounting_id)!;
+    expect(record.code).toBe("NO_MATCH"); expect(record.attempts_started).toBe(1);
+    expect(record.reader_input_tokens).toBe(10); expect(record.reader_output_tokens).toBe(5);
+  },
+);
+
+it.each([{ answer: "", citations: [{}] }, { claims: [], citations: [{}] }])(
+  "rejects empty reply with malformed citations %j", async (reply) => {
+    const { session, request } = setup(new FakeLuna([], JSON.stringify(reply)));
+    const env = await session.read(request);
+    expect(env.code).toBe("CITATION_INVALID");
+    expect(env.coverage.complete).toBe(false);
+  },
+);

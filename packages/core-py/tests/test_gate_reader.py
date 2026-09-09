@@ -222,12 +222,12 @@ def test_require_match_policy_refuses_an_unverified_attribution(tmp_path):
     assert "CONFIGURE_READER_MODEL" in env["recovery"]["actions"]
 
 
-def test_delivered_empty_model_reply_is_citation_failure(tmp_path):
+def test_delivered_empty_model_reply_is_no_match(tmp_path):
     registry, entry, luna, reader = _fixture(tmp_path, answer_json("", []))
     env = reader.answer("sess", _request(entry, {"kind": "lines", "start": 1, "end": 2})).envelope
-    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
+    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
     assert env["answer"] == "" and env["citations"] == []
-    assert env["coverage"]["complete"] is False
+    assert env["coverage"]["complete"] is True
 
 
 def test_search_with_no_hits_is_no_match_without_a_model_call(tmp_path):
