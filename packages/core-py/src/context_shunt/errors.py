@@ -34,6 +34,7 @@ SAFE_MESSAGES: dict[str, str] = {
     "UPSTREAM_TRUNCATED": "upstream result was already truncated",
     "EXTRACTED": "deterministic extraction returned exact snapshot bytes",
     "IMPORTED": "external producer artifact adopted as an immutable snapshot handle",
+    "LEGACY_COMPACTED": "reader failure covered by a deterministic legacy-shaped compaction; not model-derived",
     "STATS": "session accounting returned",
 }
 

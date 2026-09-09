@@ -161,6 +161,7 @@ def build(
     provenance: Provenance | None = None,
     accounting_id: str | None = None,
     extraction: dict[str, Any] | None = None,
+    legacy_compaction: dict[str, Any] | None = None,
     stats: dict[str, Any] | None = None,
     recovery: dict[str, Any] | None = None,
     import_receipt: dict[str, Any] | None = None,
@@ -181,6 +182,11 @@ def build(
             raise ValueError("EXTRACTED must carry no answer and no citations")
         if extraction is None:
             raise ValueError("EXTRACTED requires an extraction block")
+    if code == "LEGACY_COMPACTED":
+        if answer or citations:
+            raise ValueError("LEGACY_COMPACTED must carry no answer and no citations")
+        if legacy_compaction is None:
+            raise ValueError("LEGACY_COMPACTED requires a legacy_compaction block")
     if code == "STATS":
         if answer or citations:
             raise ValueError("STATS must carry no answer and no citations")
@@ -224,6 +230,8 @@ def build(
     env["accounting_id"] = accounting_id or _PLACEHOLDER_ACCOUNTING_ID
     if extraction is not None:
         env["extraction"] = extraction
+    if legacy_compaction is not None:
+        env["legacy_compaction"] = legacy_compaction
     if stats is not None:
         env["stats"] = stats
     if recovery is not None:
@@ -241,6 +249,8 @@ _PLACEHOLDER_ACCOUNTING_ID = "acc_" + "0" * 16
 def _default_result_kind(code: str) -> ResultKind:
     if code == "EXTRACTED":
         return ResultKind.DETERMINISTIC_EXTRACTION
+    if code == "LEGACY_COMPACTED":
+        return ResultKind.LEGACY_COMPACTION
     if code == "STATS":
         return ResultKind.STATS
     if code in ("SPILLED", "IMPORTED"):
@@ -255,6 +265,7 @@ def _default_result_kind(code: str) -> ResultKind:
 def _default_provenance(kind: ResultKind) -> Provenance:
     labels = {
         ResultKind.DETERMINISTIC_EXTRACTION: ProvenanceLabel.DETERMINISTIC_EXTRACTION,
+        ResultKind.LEGACY_COMPACTION: ProvenanceLabel.LEGACY_COMPACTION,
         ResultKind.STATS: ProvenanceLabel.SESSION_METRICS,
         ResultKind.POINTER: ProvenanceLabel.POINTER_ONLY,
         ResultKind.GATE_DECISION: ProvenanceLabel.GATE_DECISION,

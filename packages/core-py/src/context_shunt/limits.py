@@ -67,6 +67,7 @@ V11_ONLY_ENVELOPE_FIELDS: frozenset[str] = frozenset(
         "provenance",
         "accounting_id",
         "extraction",
+        "legacy_compaction",
         "stats",
         "recovery",
         "import_receipt",
@@ -256,11 +257,12 @@ def supported_request_version(version: Any) -> bool:
 def envelope_byte_cap(result_kind: str | None, limits: Limits = DEFAULT_LIMITS) -> int:
     """The serialized cap that applies to one envelope.
 
-    Deterministic extraction and stats carry a bounded payload of their own - up to
-    ``max_extraction_bytes`` of exact snapshot bytes, or one page of operation records -
-    so they are measured against ``max_extended_envelope_bytes``. Every other envelope
-    keeps the original 16 KiB cap. Both values live in ``contracts/v1/limits.json``.
+    Deterministic extraction, legacy compaction and stats carry a bounded payload of their
+    own - up to ``max_extraction_bytes`` of exact snapshot bytes or heuristic summary text,
+    or one page of operation records - so they are measured against
+    ``max_extended_envelope_bytes``. Every other envelope keeps the original 16 KiB cap.
+    Both values live in ``contracts/v1/limits.json``.
     """
-    if result_kind in ("deterministic_extraction", "stats"):
+    if result_kind in ("deterministic_extraction", "legacy_compaction", "stats"):
         return limits.max_extended_envelope_bytes
     return limits.max_envelope_bytes
