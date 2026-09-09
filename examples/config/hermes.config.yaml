@@ -59,6 +59,8 @@ plugins:
           # Availability-only fallback. Never a remedy for a poor-quality answer: the
           # honest remedy for that is a refined question over the same snapshot. Each
           # attempt keeps its own reported provenance, and reaching one sets fallback_used.
+          automatic_extract: true
+          fallback_max_bytes: 2048 # 1..4096; also bounded by inspect/disclosure limits
           # fallback_chain:
           #   - model: gpt-5.6-luna
           #     provider: openrouter

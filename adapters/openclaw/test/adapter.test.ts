@@ -769,3 +769,26 @@ describe("fallback routes to the candidate's own provider", () => {
     expect(out.provenance.fallback_used).toBe(true);
   });
 });
+
+describe("automatic exact extraction configuration", () => {
+  it.each([true, false])("applies automatic_extract=%s through the host adapter", async (enabled) => {
+    const dir = workspace();
+    const path = join(dir, "ws", "outage.txt");
+    writeFileSync(path, "source line\n".repeat(400));
+    const f = fakeApi();
+    f.api.pluginConfig = {
+      workspace_roots: [join(dir, "ws")], cache_dir: join(dir, "cache"),
+      reader: { automatic_extract: enabled, fallback_max_bytes: 64 },
+    };
+    f.api.runtime.llm.complete = async () => { throw new Error("PRIVATE_PROVIDER_BODY"); };
+    const out = JSON.parse(await new ContextShuntPlugin(f.api).onReaderTool(
+      { question: "What is here?", paths: [path] }, { sessionKey: "s1" },
+    ));
+    expect(out.code).toBe(enabled ? "EXTRACTED" : "MODEL_ERROR");
+    expect(JSON.stringify(out)).not.toContain("PRIVATE_PROVIDER_BODY");
+    if (enabled) {
+      expect(out.extraction.result_bytes).toBeLessThanOrEqual(64);
+      expect(out.provenance.derived).toBe(false);
+    }
+  });
+});

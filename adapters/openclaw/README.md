@@ -16,7 +16,7 @@ OpenClaw prevents the mode.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
-| `context_shunt_read` | a cited answer — generated text, not source bytes | at least one per processed chunk; retries/fallback can add more |
+| `context_shunt_read` | a cited answer, or a labelled bounded exact prefix after exhausted availability | at least one per processed chunk; retries/fallback can add more |
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 
@@ -32,3 +32,10 @@ An empty `reader.provider` passes a bare model to OpenClaw so the host owns prov
 an explicit provider is pinned. The isolated completion path can prove the host's
 post-policy selection (`resolved`), not a provider-authoritative `actual` model. See the checked
 [`openclaw.json`](../../examples/config/openclaw.json).
+
+The automatic exact-text escape hatch defaults on (`reader.automatic_extract: true`,
+`reader.fallback_max_bytes: 2048`, range 1–4096). Disabling inspect also disables it.
+It selects the first source's byte prefix, independently of the question, with all handles,
+locators, omissions and disclosure accounting retained. It is never an LLM summary.
+See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)
+for trigger exclusions, bounds and the 1.1 behavioral compatibility change.

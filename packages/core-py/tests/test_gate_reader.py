@@ -117,7 +117,7 @@ def test_only_one_transient_retry(tmp_path):
     )
     env = Reader(registry, luna).answer("sess", _request(entry)).envelope
     assert luna.call_count == 2
-    assert env["status"] == "partial"
+    assert env["status"] == "error" and env["code"] == "MODEL_ERROR"
     assert env["coverage"]["omitted"][0]["reason"] == "MODEL_ERROR"
 
 
@@ -137,7 +137,7 @@ def test_model_unavailable_is_a_safe_error_and_never_substitutes(tmp_path):
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(SOURCE.encode()))
     env = Reader(registry, UnavailableProvider()).answer("sess", _request(entry)).envelope
-    assert env["status"] == "partial"
+    assert env["status"] == "error" and env["code"] == "MODEL_ERROR"
     assert env["coverage"]["omitted"][0]["reason"] == "MODEL_ERROR"
     assert env["answer"] == ""
 

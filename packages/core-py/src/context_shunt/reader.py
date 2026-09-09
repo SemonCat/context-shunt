@@ -40,7 +40,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import envelope as E
@@ -107,6 +107,7 @@ class ChunkOutcome:
     legacy_answer: str = ""
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
+    availability_only: bool = True
     # An empty accumulator, not an attempt that reported nothing. `Usage()` defaults to
     # `UNKNOWN`, which is the right answer for a *bridge* that returned no counts - but as
     # a starting value it poisoned the merge: `UNKNOWN + EXACT` is `UNKNOWN`, so exact
@@ -163,18 +164,29 @@ class _AttemptLedger:
     might be the one to notice the call is over.
     """
 
-    __slots__ = ("_outcome", "_recorded", "per_call_prompt_bytes")
+    __slots__ = ("_outcome", "_recorded", "_extra_counted", "per_call_prompt_bytes")
 
     def __init__(self, outcome: ChunkOutcome):
         self._outcome = outcome
         self._recorded = False
+        self._extra_counted = 0
         #: Bytes one candidate's prompt occupies. Set once the prompt exists; a fallback
         #: re-sends the same prompt to every candidate it tries, so each extra attempt
         #: costs this again.
         self.per_call_prompt_bytes = 0
 
+    def record_extra_attempts(self, count: int) -> None:
+        # A timed-out chain may not have delivered its aggregate yet. Budget debits
+        # already prove which extra prompts started; reconcile, never add both counts.
+        extra = max(0, count - self._extra_counted)
+        self._extra_counted += extra
+        self._outcome.calls += extra
+        self._outcome.prompt_bytes += self.per_call_prompt_bytes * extra
+
     def record_success(self, response: Any) -> None:
         """What a returned response cost, whether or not its answer can be published."""
+        # Even late or malformed delivered output is conservatively not unavailability.
+        self._outcome.availability_only = False
         if self._recorded or not isinstance(response, ModelResponse):
             return
         self._recorded = True
@@ -183,8 +195,7 @@ class _AttemptLedger:
         # and every one of them reached a provider and was billed. `calls` was already
         # incremented once by the caller for the attempt it started.
         extra_attempts = max(0, response.attempts - 1)
-        outcome.calls += extra_attempts
-        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        self.record_extra_attempts(extra_attempts)
         # Output the reader never saw: a failed candidate returned no text to measure, so
         # its reported tokens are the only evidence of what it produced. Disjoint from
         # `completion_bytes` by construction.
@@ -224,8 +235,7 @@ class _AttemptLedger:
         outcome = self._outcome
         attempts = response.attempts if isinstance(response.attempts, int) else 1
         extra_attempts = max(0, attempts - 1)
-        outcome.calls += extra_attempts
-        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        self.record_extra_attempts(extra_attempts)
         outcome.completion_bytes += min(
             len(response.text.encode("utf-8")), limits.max_tool_result_bytes
         )
@@ -268,8 +278,7 @@ class _AttemptLedger:
         # before giving up. `calls` was incremented once by the caller for the invocation;
         # the rest are the ones the chain made and was billed for.
         extra_attempts = max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
-        outcome.calls += extra_attempts
-        outcome.prompt_bytes += self.per_call_prompt_bytes * extra_attempts
+        self.record_extra_attempts(extra_attempts)
         # Every physical call behind this failure still happened. Whatever the provider
         # observed is taken; the rest are unobserved, which is the truthful record for a
         # call that returned nothing.
@@ -344,6 +353,7 @@ class ReaderResult(dict):
     provenance: Provenance
     cost: ReaderCost
     source_ids: tuple[str, ...] = ()
+    availability_failure: str | None = None
 
     def __post_init__(self) -> None:
         # Carry the envelope's own contents, so a pre-1.1 caller can subscript it, pass it
@@ -386,9 +396,21 @@ class _PerCallDebit:
 
     budget: _InputTokenBudget
     tokens: int
+    _extra_calls: int = field(default=0, init=False)
+    _closed: bool = field(default=False, init=False)
+    _lock: Any = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def debit_call(self) -> None:
-        self.budget.spend(self.tokens)
+        with self._lock:
+            if self._closed:
+                raise DeadlineExceeded("MODEL_CALL")
+            self.budget.spend(self.tokens)
+            object.__setattr__(self, "_extra_calls", self._extra_calls + 1)
+
+    def close(self) -> int:
+        with self._lock:
+            object.__setattr__(self, "_closed", True)
+            return self._extra_calls
 
 
 class Reader:
@@ -656,6 +678,45 @@ class Reader:
                 unseen_usage=unseen_usage,
             )
         )
+
+        # Only a wholly unavailable read qualifies. A delivered response (even malformed)
+        # or a non-availability failure prevents automatic disclosure. Preserve chunk order
+        # when naming a mixed MODEL_ERROR/TIMEOUT failure; there is no error ranking.
+        if (
+            total_calls
+            and not deadline.cancelled
+            and outcomes
+            and all(
+                o.availability_only
+                and not o.responses_seen
+                and o.failed_reason in ("MODEL_ERROR", "TIMEOUT")
+                for o in outcomes
+            )
+        ):
+            category = next(o.failed_reason for o in outcomes if o.calls)
+            exc = ShuntError(category, "AVAILABILITY_EXHAUSTED")
+            failed = replace(
+                self._failure_provenance(exc, attempts_started=total_calls),
+                call_identities=tuple(call_identities),
+                fallback_used=fallback_used,
+                usage_complete=usage_complete_calls == total_calls,
+            )
+            env = E.error_envelope(
+                request_id,
+                exc,
+                accounting_id=accounting_id,
+                provenance=failed,
+                sources=handles,
+                handles_valid=True,
+            )
+            env["coverage"] = coverage.to_dict()
+            return ReaderResult(
+                envelope=env,
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+                availability_failure=category,
+            )
 
         verified, rejected = self._verify_all(session_id, raw_citations)
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
@@ -1081,14 +1142,18 @@ class Reader:
                 )
                 outcome.prompt_bytes += per_call_prompt_bytes
                 ledger.per_call_prompt_bytes = per_call_prompt_bytes
-                response = self._complete_with_deadline(
-                    system=READER_SYSTEM_PROMPT,
-                    user=user,
-                    max_output_tokens=self._limits.max_output_tokens_per_call,
-                    deadline=deadline,
-                    ledger=ledger,
-                    input_budget=input_budget.per_call(per_call_tokens),
-                )
+                debit = input_budget.per_call(per_call_tokens)
+                try:
+                    response = self._complete_with_deadline(
+                        system=READER_SYSTEM_PROMPT,
+                        user=user,
+                        max_output_tokens=self._limits.max_output_tokens_per_call,
+                        deadline=deadline,
+                        ledger=ledger,
+                        input_budget=debit,
+                    )
+                finally:
+                    ledger.record_extra_attempts(debit.close())
                 try:
                     _validate_model_response(response, self._limits)
                 except ShuntError:
@@ -1176,6 +1241,10 @@ class Reader:
                 # way out - a late response, or a cancellation that landed between the
                 # provider returning and this frame seeing it.
                 ledger.record_failure(exc)
+                outcome.availability_only = outcome.availability_only and (
+                    exc.code == "TIMEOUT"
+                    or (exc.code == "MODEL_ERROR" and exc.detail != "MODEL_SUBSTITUTED")
+                )
                 can_retry_transient = (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable

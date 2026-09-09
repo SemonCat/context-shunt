@@ -23,6 +23,8 @@ adding fake keys to either plugin `config` block.
 | `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
 | `reader.attribution_policy` | `allow_unverified` | What to do when the host cannot prove which model answered. See below. |
 | `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
+| `reader.automatic_extract` | `true` | Exact extraction escape hatch after exhausted availability; also requires inspect. |
+| `reader.fallback_max_bytes` | `2048` | 1–4096 source bytes, narrowed by all existing limits. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
 | `suma_post_tool.enabled` | `false` | Optional oversized post-tool spill request. Both adapters report it unsupported, so `true` does not activate the mode. |

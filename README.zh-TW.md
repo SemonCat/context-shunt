@@ -280,7 +280,13 @@ semantic evidence support、mechanical citation validity（檢索 lane 不產生
 ## 設定與帳務
 
 Reader 預設模型為 `gpt-5.6-luna`；`reader.model` 與 `reader.provider` 都可設定，provider 留空時
-交由 host routing。`fallback_chain` 只處理可用性，不會補救品質不佳的答案。所有數值 limits
+交由 host routing。`fallback_chain` 只處理可用性，不會補救品質不佳的答案。
+可用性重試全部失敗後，預設自動回傳第一個來源的精確 UTF-8 位元組前綴（2 KiB，
+最多 4 KiB），明確標示為 escape hatch，並非 LLM 摘要。此擷取不依問題或 reader selector
+選文，且沿用 inspect 的累計揭露與輸出限制；`reader.automatic_extract: false` 或
+`inspect.enabled: false` 可停用，`reader.fallback_max_bytes` 可調整上限。
+格式錯誤、引用無效、取消及有效但較弱的答案不會觸發。詳見
+[設定與相容性](docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)。所有數值 limits
 只能縮小，不能放寬。
 
 `artifact_import` 預設關閉，且沒有預設的 root 與 producer schema；只開啟旗標而未同時設定

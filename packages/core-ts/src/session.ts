@@ -232,12 +232,28 @@ export class ShuntSession {
       signal,
       operationId,
     );
-    const published = enforceOrFixed(result.envelope, this.config.limits);
+    let candidate = result.envelope;
+    if (result.availabilityFailure && this.config.readerAutomaticExtract !== false
+        && this.config.inspectEnabled && !signal?.aborted) {
+      try {
+        candidate = this.automaticExtract(request, result, requestId, operationId);
+      } catch (err) {
+        // Keep the original bounded failure and recovery actions, never exception bodies.
+        candidate = result.envelope;
+        if (isShuntError(err) && ["SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE"].includes(err.code)) {
+          candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
+        }
+      }
+    }
+    const published = enforceOrFixed(candidate, this.config.limits);
     const refined = Boolean(
       typeof request === "object" && request !== null
         && (request as Record<string, unknown>)["refined"],
     );
-    const { baseline, creditedBytes } = this.baselineFor(result.sourceIds);
+    let baseline = noBaseline();
+    let creditedBytes = 0;
+    try { ({ baseline, creditedBytes } = this.baselineFor(result.sourceIds)); }
+    catch (err) { if (!isShuntError(err)) throw err; }
     this.record({
       operationId,
       kind: refined ? "refined_read" : "read",
@@ -246,9 +262,34 @@ export class ShuntSession {
       baselineCredited: creditedBytes > 0,
       creditedBytes,
       reader: result.cost,
-      boundary: "envelope",
+      boundary: published.code === "EXTRACTED" ? "extraction" : "envelope",
     });
     return published;
+  }
+
+  private automaticExtract(request: unknown, result: ReaderResult, requestId: string, operationId: string): Envelope {
+    const input = request as { sources: Array<{ source_id: string; snapshot_id: string }>;
+      budgets: { max_answer_bytes: number } };
+    // Revalidate all handles after the provider wait before disclosing any bytes.
+    for (const source of input.sources) {
+      const entry = this.registry.resolve(this.sessionId, source.source_id);
+      if (entry.snapshot.snapshotId !== source.snapshot_id) {
+        throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH");
+      }
+    }
+    const first = input.sources[0]!;
+    const entry = this.registry.resolve(this.sessionId, first.source_id);
+    const limits = this.config.limits;
+    const budget = Math.min(this.config.readerFallbackMaxBytes ?? 2048, 4096, entry.snapshot.bytesLen - 1,
+      input.budgets.max_answer_bytes, limits.maxAnswerBytes,
+      limits.inspectMaxResultBytes, limits.maxExtractionBytes);
+    if (budget <= 0) throw new ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK");
+    return this.runInspect({
+      schema_version: EMITTED_SCHEMA_VERSION, request_id: requestId, operation: "inspect",
+      source_id: first.source_id, snapshot_id: first.snapshot_id,
+      selector: { kind: "bytes", start: 0, end: entry.snapshot.bytesLen },
+      budgets: { max_result_bytes: budget, max_scan_lines: limits.inspectMaxScanLines },
+    }, requestId, operationId, result);
   }
 
   /**
@@ -305,7 +346,7 @@ export class ShuntSession {
     }
   }
 
-  private runInspect(request: unknown, requestId: string, operationId: string): Envelope {
+  private runInspect(request: unknown, requestId: string, operationId: string, fallback?: ReaderResult): Envelope {
     const validated = validateRequest(request, INSPECT_OPERATIONS) as InspectRequest;
     const sourceId = validated.source_id;
     const snapshotId = validated.snapshot_id;
@@ -330,7 +371,7 @@ export class ShuntSession {
     const requestedBudget = validated.budgets.max_result_bytes;
     const budget = Math.min(requestedBudget, remaining);
     const clippedByAllowance = remaining < requestedBudget;
-    const handles: SourceHandle[] = [
+    let handles: SourceHandle[] = [
       {
         source_id: entry.sourceId,
         snapshot_id: entry.snapshot.snapshotId,
@@ -341,9 +382,12 @@ export class ShuntSession {
     ];
 
     if (remaining <= 0 || budget <= 0) {
+      if (fallback) throw new ShuntError("DISCLOSURE_EXHAUSTED");
       return this.disclosureExhausted(requestId, operationId, entry, selector, handles, allowance);
     }
 
+    // Reserve room for all handles, omissions and escape-hatch guidance. The full
+    // composed envelope is still guarded before any disclosure is charged.
     const extraction = this.inspector.extract(
       entry.snapshot.data,
       entry.snapshot.lineIndex,
@@ -351,7 +395,8 @@ export class ShuntSession {
       {
         maxResultBytes: budget,
         maxScanLines: validated.budgets.max_scan_lines,
-        maxWireBytes: this.extractionWireBudget(requestId, operationId, entry, selector, handles),
+        maxWireBytes: this.extractionWireBudget(requestId, operationId, entry, selector, handles)
+          - (fallback ? 4096 : 0),
         state,
       },
     );
@@ -371,11 +416,12 @@ export class ShuntSession {
       throw new ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_PAGE_BUDGET", false);
     }
 
+    if (fallback && !extraction.resultBytes) throw new ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK");
     const nextCursor =
       extraction.nextCursorState !== undefined
         ? encodeCursor(key, sourceId, snapshotId, selector, extraction.nextCursorState)
         : null;
-    const coverage = new Coverage();
+    let coverage = new Coverage();
     coverage.upstreamTruncated = false;
     coverage.complete = extraction.complete;
     if (!extraction.complete) {
@@ -384,6 +430,13 @@ export class ShuntSession {
         omissionSelector(selector),
         extraction.scanBudgetExhausted ? "SCAN_BUDGET_EXHAUSTED" : "UNKNOWN_REMAINDER",
       );
+    }
+    if (fallback) {
+      coverage = new Coverage();
+      for (const handle of fallback.envelope.sources) {
+        coverage.omit(handle.source_id, { kind: "all" }, "UNKNOWN_REMAINDER");
+      }
+      handles = fallback.envelope.sources;
     }
     const compose = (sourceUsed: number, sessionUsed: number, limitReached: boolean): Envelope => {
       const block: ExtractionShape = {
@@ -406,13 +459,24 @@ export class ShuntSession {
       };
       return buildEnvelope({
         requestId,
-        status: extraction.complete ? "ok" : "partial",
+        status: extraction.complete && !fallback ? "ok" : "partial",
         code: "EXTRACTED",
         coverage,
         sources: handles,
         retryable: false,
         resultKind: "deterministic_extraction",
-        provenance: deterministicProvenance("deterministic_extraction"),
+        provenance: {
+          ...deterministicProvenance("deterministic_extraction"),
+          attemptsStarted: fallback?.cost.attemptsStarted ?? 0,
+          usageComplete: fallback ? fallback.cost.attemptsUsageComplete === fallback.cost.attemptsStarted : true,
+        },
+        ...(fallback ? {
+          guidance: "Escape hatch: exact deterministic fallback extraction; not model-derived "
+            + "and not an LLM summary. Original failure: " + fallback.availabilityFailure
+            + ". Selection: byte prefix of first requested source, independent of question "
+            + "and reader selectors; other sources and unreturned bytes omitted.",
+          recovery: recoveryFor(fallback.availabilityFailure!),
+        } : {}),
         accountingId: operationId,
         extraction: block,
       });
@@ -440,6 +504,7 @@ export class ShuntSession {
       this.identity, sourceId, extraction.mode, extraction.resultBytes,
     );
     if (!charge.granted) {
+      if (fallback) throw new ShuntError("DISCLOSURE_EXHAUSTED");
       return this.disclosureExhausted(requestId, operationId, entry, selector, handles, allowance);
     }
 
@@ -447,6 +512,7 @@ export class ShuntSession {
       compose(charge.disclosedBytesSource, charge.disclosedBytesSession, charge.limitReached),
       this.config.limits,
     );
+    if (fallback) return published;
     this.record({
       operationId,
       kind: "inspect",

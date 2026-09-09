@@ -49,6 +49,13 @@ npm install
 `scripts/verify` exits `0` on pass, `1` on failure, and `2` for `NOT_RUN` — a gate whose
 prerequisite is absent. `NOT_RUN` is never a pass.
 
+Reader availability failures now default to a labelled, bounded exact-text escape hatch
+(2 KiB prefix of the first source), using the existing inspector and disclosure ceilings.
+Set `reader.automatic_extract: false` for error-only recovery, or
+`reader.fallback_max_bytes` (1–4096) to narrow/tune it. `inspect.enabled: false` also disables
+it. No database migration is needed; the 1.1 wire schema is unchanged. See
+[trigger and compatibility details](configuration.md#automatic-exact-extraction-after-reader-unavailability).
+
 ## Hermes
 
 The plugin is a directory containing `plugin.yaml` and `__init__.py`, which is what Hermes

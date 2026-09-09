@@ -103,7 +103,7 @@ const SNAKE_LIMITS: Record<string, keyof Limits> = {
 const MAX_MODEL_REF_BYTES = 128;
 const MAX_FALLBACK_ENTRIES = 4;
 const READER_KEYS = new Set([
-  "enabled", "model", "provider", "attribution_policy", "fallback_chain",
+  "enabled", "model", "provider", "attribution_policy", "fallback_chain", "automatic_extract", "fallback_max_bytes",
 ]);
 const ENABLED_SECTION_KEYS = new Set(["enabled"]);
 const CONFIG_KEYS = new Set([
@@ -127,6 +127,8 @@ export interface Config {
   readonly readerModel: string;
   readonly readerProvider: string;
   readonly readerAttributionPolicy: AttributionPolicy;
+  readonly readerAutomaticExtract?: boolean;
+  readonly readerFallbackMaxBytes?: number;
   readonly readerFallbackChain: readonly ProviderRef[];
   readonly inspectEnabled: boolean;
   readonly statsEnabled: boolean;
@@ -145,6 +147,8 @@ export interface RawConfig {
     model?: string;
     provider?: string;
     attribution_policy?: string;
+    automatic_extract?: boolean;
+    fallback_max_bytes?: number;
     fallback_chain?: Array<{ model?: string; provider?: string }>;
   };
   inspect?: { enabled?: boolean };
@@ -198,6 +202,7 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   for (const value of [
     cfg.gate_enabled,
     cfg.reader?.enabled,
+    cfg.reader?.automatic_extract,
     cfg.inspect?.enabled,
     cfg.stats?.enabled,
     cfg.suma_post_tool?.enabled,
@@ -223,6 +228,11 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   const policyRaw = cfg.reader?.attribution_policy ?? "allow_unverified";
   if (policyRaw !== "allow_unverified" && policyRaw !== "require_match") {
     throw new ShuntError("INVALID_REQUEST", "BAD_ATTRIBUTION_POLICY", false);
+  }
+  const fallbackMaxBytes = cfg.reader?.fallback_max_bytes === undefined
+    ? 2048 : cfg.reader.fallback_max_bytes;
+  if (!Number.isSafeInteger(fallbackMaxBytes) || fallbackMaxBytes < 1 || fallbackMaxBytes > 4096) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   }
   const chainRaw = cfg.reader?.fallback_chain ?? [];
   if (!Array.isArray(chainRaw) || chainRaw.length > MAX_FALLBACK_ENTRIES) {
@@ -289,6 +299,8 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     readerProvider: provider,
     readerAttributionPolicy: policyRaw as AttributionPolicy,
     readerFallbackChain: fallbackChain,
+    readerAutomaticExtract: cfg.reader?.automatic_extract ?? true,
+    readerFallbackMaxBytes: fallbackMaxBytes,
     inspectEnabled: cfg.inspect?.enabled ?? true,
     statsEnabled: cfg.stats?.enabled ?? true,
     sumaPostToolEnabled: cfg.suma_post_tool?.enabled ?? false,

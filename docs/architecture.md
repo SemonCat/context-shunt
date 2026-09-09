@@ -36,6 +36,7 @@ Hermes adapter                         OpenClaw adapter
         shared contract and independent policy cores
           gate -> snapshot/store -> chunk planner
           reader -> citation verifier -> output guard
+          exhausted availability -> bounded exact inspect -> output guard
           inspect/stats -> output guard
                          |
                          v
@@ -208,6 +209,18 @@ known. Incomplete or unknown coverage cannot be published as complete. If a seri
 answer would exceed its envelope, evidence is dropped deterministically and the assertions
 that depended on it are removed; an empty result is a refusal, not a false `NO_MATCH`.
 
+## Automatic availability escape hatch
+
+`ShuntSession.read` uses the existing inspector only after a wholly unavailable reader
+result. It extracts a nonempty, strictly shorter byte prefix of the first source (2 KiB by
+default, at most 4 KiB), revalidates every handle, guards before charging disclosure, and
+records one delivery with both failed LLM cost and extraction egress. It publishes
+`partial/EXTRACTED`, explicit escape-hatch guidance, deterministic provenance and conservative
+omissions, never a summary. The 1.1 envelope and store schemas are unchanged. Wholly failed
+reads now report `MODEL_ERROR`/`TIMEOUT` rather than partial `NO_MATCH` when extraction cannot
+run. See [configuration](configuration.md#automatic-exact-extraction-after-reader-unavailability)
+for exact triggers, selector-independent prefix selection, limits and compatibility.
+
 ## Exact inspection and disclosure
 
 `context_shunt_inspect` returns exact text with no provider call. `lines` uses 1-based
@@ -247,7 +260,7 @@ reader provider and constrain roots. The system refuses instead of redacting and
 modified text as an original quote.
 
 Raw payloads and provider exception bodies are excluded from envelopes, logs, traces,
-metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments and short
+metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments (including automatic availability escape hatches) and short
 verified citation quotes are the only deliberate source-text disclosures to the main
 context. The no-raw-leak gates inject sentinels and failures across every stage.
 

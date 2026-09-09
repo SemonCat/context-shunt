@@ -12,7 +12,7 @@ This adapter registers up to four read-only tools and no writer:
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
-| `context_shunt_read` | a cited answer — generated text, not source bytes | at least one per processed chunk; retries/fallback can add more |
+| `context_shunt_read` | a cited answer, or a labelled bounded exact prefix after exhausted availability | at least one per processed chunk; retries/fallback can add more |
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 | `context_shunt_import` | a handle and bounded metadata for a producer's already-persisted artifact — never its bytes | zero |
@@ -35,3 +35,10 @@ The effective reader target uses `auxiliary.context_shunt_reader` over the plugi
 chosen overrides. This host can report only `attribution_status: unverified`, never
 provider-authoritative `actual`. See the checked
 [`hermes.config.yaml`](../../examples/config/hermes.config.yaml).
+
+The automatic exact-text escape hatch defaults on (`reader.automatic_extract: true`,
+`reader.fallback_max_bytes: 2048`, range 1–4096). Disabling inspect also disables it.
+It selects the first source's byte prefix, independently of the question, with all handles,
+locators, omissions and disclosure accounting retained. It is never an LLM summary.
+See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)
+for trigger exclusions, bounds and the 1.1 behavioral compatibility change.

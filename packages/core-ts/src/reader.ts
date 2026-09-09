@@ -118,6 +118,7 @@ interface ChunkOutcome {
   legacyAnswer: string;
   citations: Array<Record<string, unknown>>;
   failedReason: string | null;
+  availabilityOnly: boolean;
   calls: number;
   usageCompleteCalls: number;
   usage: Usage;
@@ -161,6 +162,7 @@ export interface ReaderResult {
   provenance: Provenance;
   cost: ReaderCost;
   sourceIds: string[];
+  availabilityFailure?: "MODEL_ERROR" | "TIMEOUT";
 }
 
 class InputTokenBudget {
@@ -185,8 +187,17 @@ class InputTokenBudget {
    * handle before it starts each extra candidate, so the count of debits equals the count
    * of physical calls, and a candidate whose prompt no longer fits is never started.
    */
-  perCall(tokens: number): CallInputBudget {
-    return { debitCall: (): void => this.spend(tokens) };
+  perCall(tokens: number): CallInputBudget & { close(): number } {
+    let extraCalls = 0;
+    let closed = false;
+    return {
+      debitCall: (): void => {
+        if (closed) throw new ShuntError("TIMEOUT", "MODEL_CALL", true);
+        this.spend(tokens);
+        extraCalls++;
+      },
+      close: (): number => { closed = true; return extraCalls; },
+    };
   }
 }
 
@@ -205,6 +216,7 @@ class InputTokenBudget {
  */
 class AttemptLedger {
   private recorded = false;
+  private extraCounted = 0;
   /**
    * Bytes one candidate's prompt occupies. Set once the prompt exists; a fallback re-sends
    * the same prompt to every candidate it tries, so each extra attempt costs this again.
@@ -213,8 +225,19 @@ class AttemptLedger {
 
   constructor(private readonly outcome: ChunkOutcome) {}
 
+  recordExtraAttempts(count: number): void {
+    // A timed-out chain may not have returned its aggregate. Budget debits already
+    // prove which extra prompts started; reconcile, never add both counts.
+    const extra = Math.max(0, count - this.extraCounted);
+    this.extraCounted += extra;
+    this.outcome.calls += extra;
+    this.outcome.promptBytes += this.perCallPromptBytes * extra;
+  }
+
   /** What a returned response cost, whether or not its answer can be published. */
   recordSuccess(response: ModelResponse): void {
+    // Even late or malformed delivered output is conservatively not unavailability.
+    this.outcome.availabilityOnly = false;
     if (this.recorded) return;
     this.recorded = true;
     const outcome = this.outcome;
@@ -222,8 +245,7 @@ class AttemptLedger {
     // every one of them reached a provider and was billed. `calls` was already incremented
     // once by the caller for the attempt it started.
     const extraAttempts = Math.max(0, (response.attempts ?? 1) - 1);
-    outcome.calls += extraAttempts;
-    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    this.recordExtraAttempts(extraAttempts);
     outcome.completionBytes += new TextEncoder().encode(response.text).length;
     outcome.callIdentities.push(...responseIdentities(response));
     // Output the reader never saw: a failed candidate returned no text to measure, so its
@@ -258,8 +280,7 @@ class AttemptLedger {
     this.recorded = true;
     const outcome = this.outcome;
     const extraAttempts = Math.max(0, (candidate.attempts ?? 1) - 1);
-    outcome.calls += extraAttempts;
-    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    this.recordExtraAttempts(extraAttempts);
     outcome.completionBytes += Math.min(
       new TextEncoder().encode(candidate.text).length,
       limits.maxToolResultBytes,
@@ -304,8 +325,7 @@ class AttemptLedger {
       0,
       ((err as { internalAttempts?: number })?.internalAttempts ?? 1) - 1,
     );
-    outcome.calls += extraAttempts;
-    outcome.promptBytes += this.perCallPromptBytes * extraAttempts;
+    this.recordExtraAttempts(extraAttempts);
     // Every physical call behind this failure still happened. Whatever the provider
     // observed is taken; the rest are unobserved, which is the truthful record for a call
     // that returned nothing.
@@ -648,6 +668,23 @@ export class Reader {
     // Visible to the error path from here on: a failure at PUBLISH must still report what
     // the completed calls cost.
     spent.cost = cost;
+
+    // Delivered or malformed output is not unavailability. Keep chunk order, not an
+    // error priority heuristic, when naming a mixed availability failure.
+    if (totalCalls && !deadline.isCancelled() && outcomes.length && outcomes.every((o) =>
+      o.availabilityOnly && !o.responsesSeen
+      && (o.failedReason === "MODEL_ERROR" || o.failedReason === "TIMEOUT")
+    )) {
+      const category = outcomes.find((o) => o.calls)!.failedReason as "MODEL_ERROR" | "TIMEOUT";
+      const failure = new ShuntError(category, "AVAILABILITY_EXHAUSTED");
+      const provenance = { ...this.failureProvenance(failure, totalCalls),
+        callIdentities, fallbackUsed, usageComplete: usageCompleteCalls === totalCalls };
+      const envelope = errorEnvelope(requestId, failure, {
+        ...(accountingId ? { accountingId } : {}), provenance, sources: handles, handlesValid: true,
+      });
+      envelope.coverage = coverage.toShape();
+      return { envelope, provenance, cost, sourceIds, availabilityFailure: category };
+    }
 
     const { verified, rejected } = this.verifyAll(sessionId, rawCitations);
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
@@ -1020,6 +1057,7 @@ export class Reader {
       legacyAnswer: "",
       citations: [],
       failedReason: null,
+      availabilityOnly: true,
       calls: 0,
       usageCompleteCalls: 0,
       // An empty accumulator, not an attempt that reported nothing. `NO_USAGE` is
@@ -1081,13 +1119,19 @@ export class Reader {
           + new TextEncoder().encode(user).length;
         outcome.promptBytes += perCallPromptBytes;
         ledger.perCallPromptBytes = perCallPromptBytes;
-        const response = await this.completeWithinDeadline({
-          system: READER_SYSTEM_PROMPT,
-          user,
-          maxOutputTokens: this.limits.maxOutputTokensPerCall,
-          ledger,
-          inputBudget: inputBudget.perCall(perCallTokens),
-        }, deadline);
+        const debit = inputBudget.perCall(perCallTokens);
+        let response: ModelResponse;
+        try {
+          response = await this.completeWithinDeadline({
+            system: READER_SYSTEM_PROMPT,
+            user,
+            maxOutputTokens: this.limits.maxOutputTokensPerCall,
+            ledger,
+            inputBudget: debit,
+          }, deadline);
+        } finally {
+          ledger.recordExtraAttempts(debit.close());
+        }
         try {
           validateModelResponse(response, this.limits);
         } catch (err) {
@@ -1175,6 +1219,10 @@ export class Reader {
         // It is a no-op when the call was already accounted for on the way out - a late
         // response, or a cancellation that won the race against the provider.
         ledger.recordFailure(safe);
+        outcome.availabilityOnly = outcome.availabilityOnly && (
+          safe.code === "TIMEOUT"
+          || (safe.code === "MODEL_ERROR" && safe.detail !== "MODEL_SUBSTITUTED")
+        );
         const canRetryTransient =
           safe.code === "MODEL_ERROR"
           && safe.retryable

@@ -73,7 +73,15 @@ _CONFIG_KEYS = {
     "operations",
     "limits",
 }
-_READER_KEYS = {"enabled", "model", "provider", "attribution_policy", "fallback_chain"}
+_READER_KEYS = {
+    "enabled",
+    "model",
+    "provider",
+    "attribution_policy",
+    "fallback_chain",
+    "automatic_extract",
+    "fallback_max_bytes",
+}
 _ARTIFACT_IMPORT_KEYS = {"enabled", "roots", "accepted_manifest_schemas"}
 _ENABLED_SECTION_KEYS = {"enabled"}
 _MAX_FALLBACK_ENTRIES = 4
@@ -121,6 +129,8 @@ class ReaderConfig:
     provider: str = ""
     attribution_policy: AttributionPolicy = AttributionPolicy.ALLOW_UNVERIFIED
     fallback_chain: tuple[ProviderRef, ...] = ()
+    automatic_extract: bool = True
+    fallback_max_bytes: int = 2048
 
 
 @dataclass(frozen=True)
@@ -191,6 +201,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     for value in (
         raw.get("gate_enabled"),
         reader_raw.get("enabled"),
+        reader_raw.get("automatic_extract"),
         (raw.get("inspect") or {}).get("enabled"),
         (raw.get("stats") or {}).get("enabled"),
         (raw.get("suma_post_tool") or {}).get("enabled"),
@@ -284,7 +295,14 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
             raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
         chain.append(ProviderRef(model=entry_model.strip(), provider=entry_provider.strip()))
 
+    if "automatic_extract" in reader_raw and type(reader_raw["automatic_extract"]) is not bool:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
+    fallback_bytes = reader_raw.get("fallback_max_bytes", 2048)
+    if type(fallback_bytes) is not int or not 1 <= fallback_bytes <= 4096:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     return ReaderConfig(
+        automatic_extract=reader_raw.get("automatic_extract", True),
+        fallback_max_bytes=fallback_bytes,
         enabled=reader_raw.get("enabled", True),
         model=model.strip(),
         provider=provider.strip(),

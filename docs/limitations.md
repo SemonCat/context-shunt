@@ -250,3 +250,14 @@ truthful provenance, not a silent loosening.
 
 The store needs `node:sqlite`, so the TypeScript side requires Node ≥22.22.3 (which is also
 OpenClaw's own floor). Python requires ≥3.11.
+
+## Automatic extraction is a prefix, not an answer
+
+After wholly exhausted reader availability, the default escape hatch returns at most
+2 KiB of the first source's exact bytes, independently of question/reader selectors.
+It never returns the entire source. Useful evidence may be elsewhere; all other sources
+and remaining bytes are explicitly omitted. This does not rescue malformed/citation-invalid
+or weak valid answers. Disabling `reader.automatic_extract` or inspect restores error-only
+recovery. Existing disclosure, output, scope and secret checks may also prevent extraction.
+The bounded local inspection can add latency after a model timeout; failed attempt costs
+remain accounted even when usage is unknown. See [full semantics](configuration.md#automatic-exact-extraction-after-reader-unavailability).

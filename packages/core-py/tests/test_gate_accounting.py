@@ -693,7 +693,9 @@ def test_a_stable_provider_error_is_not_reingested_across_the_outer_retry(tmp_pa
     assert result.cost.output_tokens == 10
 
 
-def test_a_late_composite_response_is_charged_for_every_prompt_and_unseen_token(tmp_path):
+def test_a_late_composite_response_is_charged_for_every_prompt_and_unseen_token(
+    tmp_path, monkeypatch
+):
     """A response that arrives after the deadline is refused, but it was still paid for.
 
     The late branch recorded only the winner's own usage, so the prompt every earlier
@@ -702,6 +704,20 @@ def test_a_late_composite_response_is_charged_for_every_prompt_and_unseen_token(
     from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
 
     clock = FakeClock()
+    # Expire only once the aggregate has actually been delivered. Advancing inside the
+    # bridge raced its return against the reader's nonblocking late-result check, so the
+    # test sometimes asserted delivered usage while the response was still in flight.
+    from queue import Queue
+
+    import context_shunt.reader as reader_module
+
+    class DeliveredLateQueue(Queue):
+        def get(self, *args, **kwargs):
+            value = super().get(*args, **kwargs)
+            clock.advance(70_000)
+            return value
+
+    monkeypatch.setattr(reader_module.queue, "Queue", DeliveredLateQueue)
     seen = {"calls": 0, "prompt_bytes": 0}
 
     def count(body):
@@ -716,7 +732,6 @@ def test_a_late_composite_response_is_charged_for_every_prompt_and_unseen_token(
         raise _billed_error(5, 3)
 
     def late():
-        clock.advance(70_000)
         return {"text": _ANSWER_TEXT}
 
     chain = FallbackChainProvider(

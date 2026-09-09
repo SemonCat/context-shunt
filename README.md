@@ -85,7 +85,8 @@ must disable any uncontrolled raw-read tools.
 
 - **Nothing is summarized unasked.** The reader runs only for an explicit question. There
   is no automatic generic summary anywhere in this system, and no heuristic fallback to
-  produce one when the reader fails.
+  produce one when the reader fails. Exhausted availability instead returns a labelled,
+  deterministic exact-text escape hatch: a bounded prefix of the first source, never a summary.
 - **Question-aware reading.** Every processed chunk receives the original question. The
   reader gets an authorized excerpt, not the host conversation or a set of tools.
 - **Reader output is evidence, not a verdict.** An answer arrives with quotes, coverage,
@@ -97,7 +98,9 @@ must disable any uncontrolled raw-read tools.
   quotation exists at the cited location; it does not prove that the quote supports the
   model's reasoning.
 - **An exact-text escape hatch.** `context_shunt_inspect` returns bounded line, byte, or
-  literal-search results without a model call.
+  literal-search results without a model call. A wholly unavailable reader automatically
+  uses the same guarded disclosure path for a 2 KiB prefix (`reader.automatic_extract`,
+  `reader.fallback_max_bytes`; [semantics and limits](docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)).
 - **Immutable, scoped snapshots.** `workspace_roots` and `artifact_import.roots` are
   separate allowlists, so brokering a producer's artifacts never widens what an ordinary
   read may capture. Secret, binary, and unsafe sources are refused. Private blobs expire through TTL and session cleanup.

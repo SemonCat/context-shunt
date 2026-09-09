@@ -19,6 +19,8 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.provider` | string, at most 128 UTF-8 bytes | `""` | Provider request; empty delegates routing to the host. |
 | `reader.attribution_policy` | enum | `allow_unverified` | `allow_unverified` publishes the host's truthful attribution status; `require_match` refuses below actual/resolved agreement. |
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
+| `reader.automatic_extract` | boolean | `true` | Enable exact extraction after wholly exhausted availability; also requires `inspect.enabled`. |
+| `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
 | `suma_post_tool.enabled` | boolean | `false` | Requests the optional oversized post-tool path. Both current adapters report it unsupported, so it is not activated. |
@@ -191,3 +193,57 @@ split an over-wide single line; use a byte selector if exact pieces are acceptab
 Store quotas reject new capture instead of evicting a live handle. TTL readability is a
 SQL predicate, so an expired or revoked handle is unusable before physical sweep. The store
 is local and SQLite-backed; do not place it on a network filesystem.
+
+### Automatic exact extraction after reader unavailability
+
+`reader.automatic_extract` defaults to `true`; `reader.fallback_max_bytes` defaults to
+2048 and accepts integers from 1 through 4096. `inspect.enabled: false` disables automatic
+extraction as well. No opt-in is needed because this reuses the authorized snapshot,
+secret guard, transactional disclosure ceilings and exact inspector already enabled by default.
+
+The trigger is a **wholly unavailable read** after the normal retry/provider chain has
+stopped: at least one physical attempt started, every planned chunk outcome failed with
+`MODEL_ERROR` or `TIMEOUT`, and no response or non-availability failure was observed.
+Quota, provider and network failures qualify through the existing availability boundary.
+A safe model-call/request timeout qualifies; cancellation, model substitution, provenance
+refusal, malformed output (including malformed-then-outage), citation-invalid output,
+valid empty/weak answers and partial model answers do not. Budget exhaustion before model
+availability is established does not qualify. Timeouts stop model work; the subsequent
+bounded local inspection can add store/guard latency beyond the model request deadline.
+Even a delivered late response is conservatively excluded.
+The first attempted failing chunk in request order supplies the bounded original category
+(`MODEL_ERROR` or `TIMEOUT`); no provider body or error-priority ranking is published.
+
+Selection is always one UTF-8-safe **byte prefix of the first requested source**, independent
+of the question and reader selectors, including JSON record selectors. It never ranks
+semantic importance or pretends to answer the question. Other sources remain listed and
+omitted. The prefix is capped by the configured bytes, request `max_answer_bytes`, deployed
+answer/inspect/extraction caps, serialized headroom and remaining source/session disclosure.
+It must be nonempty and strictly shorter than the source, even if a line-oversized source
+fits the byte cap. Repeated automatic reads select the same prefix and charge it each time.
+Use explicit inspect for a different range; automatic extraction never follows a cursor.
+
+The wire shape remains revision **1.1**, with no new required field, status, code, schema
+or store migration: `partial/EXTRACTED`, `result_kind: deterministic_extraction`,
+`provenance.derived: false`, no model attribution, empty `answer`/`citations`, and fixed
+`guidance` saying “Escape hatch: exact deterministic fallback extraction; not model-derived
+and not an LLM summary”, plus the original category and selection rule. The existing
+`extraction` block carries exact half-open byte locators, immutable snapshot identity,
+charged disclosure totals and an authenticated inspect cursor. Outer coverage is always
+incomplete, conservatively lists each source as `UNKNOWN_REMAINDER`, and makes no assertion
+about upstream truncation. Sources and recovery actions are retained.
+
+The session records **one read operation** with all failed physical LLM attempts/costs and
+the actual serialized extraction egress (`delivery_boundary: extraction`). If a timeout
+interrupts a chain before its aggregate returns, observed budget debits retain already
+started physical attempts and repeated prompt costs; the debit handle is closed to
+prevent later attempts. Unreported usage remains explicitly estimated/unknown. Provenance
+attempt counts describe the failed read; no requested/resolved/reported model is attached
+to the exact text. Direct low-level `Reader` calls return the availability error and cost;
+automatic disclosure belongs to `ShuntSession.read`, which owns disclosure accounting.
+
+Compatibility change: wholly unavailable reads formerly capable of returning partial
+`NO_MATCH` now return truthful `MODEL_ERROR`/`TIMEOUT`. With automatic extraction disabled,
+exhausted disclosure, unusable/expired handles, failed storage, an empty prefix or a guard
+refusal, the original bounded availability error and recovery guidance are returned.
+If handle validation fails, recovery truthfully marks handles invalid and requests recapture.

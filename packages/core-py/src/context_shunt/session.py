@@ -30,6 +30,7 @@ depends on.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 from typing import Any
 
 from . import envelope as E
@@ -252,9 +253,34 @@ class ShuntSession:
         result: ReaderResult = self._reader.answer(
             self.session_id, request, accounting_id=operation_id
         )
-        published = enforce_or_fixed(result.envelope, self.config.limits)
+        candidate = result.envelope
+        if (
+            result.availability_failure
+            and self.config.reader.automatic_extract
+            and self.config.tools.inspect_enabled
+        ):
+            try:
+                candidate = self._automatic_extract(request, result, request_id, operation_id)
+            except Exception as exc:
+                # Recovery must retain the original bounded failure, never a store or
+                # provider exception body. No extraction is delivered on this path.
+                candidate = result.envelope
+                if isinstance(exc, ShuntError) and exc.code in (
+                    "SOURCE_EXPIRED",
+                    "SOURCE_CHANGED",
+                    "STORE_FAILED",
+                    "UNSAFE_SOURCE",
+                ):
+                    candidate = {
+                        **candidate,
+                        "recovery": E.recovery_for(exc.code, handles_valid=False),
+                    }
+        published = enforce_or_fixed(candidate, self.config.limits)
         refined = bool((request or {}).get("refined"))
-        baseline, credited_bytes = self._baseline_for(result.source_ids)
+        try:
+            baseline, credited_bytes = self._baseline_for(result.source_ids)
+        except ShuntError:
+            baseline, credited_bytes = Baseline.none(), 0
         self._record(
             operation_id=operation_id,
             kind=OperationKind.REFINED_READ if refined else OperationKind.READ,
@@ -263,9 +289,54 @@ class ShuntSession:
             baseline_credited=credited_bytes > 0,
             credited_bytes=credited_bytes,
             reader=result.cost,
-            boundary=DeliveryBoundary.ENVELOPE,
+            boundary=(
+                DeliveryBoundary.EXTRACTION
+                if published.get("code") == "EXTRACTED"
+                else DeliveryBoundary.ENVELOPE
+            ),
         )
         return published
+
+    def _automatic_extract(
+        self, request: dict[str, Any], result: ReaderResult, request_id: str, operation_id: str
+    ) -> dict[str, Any]:
+        # Revalidate every handle after the provider wait; expiry/reset/store failures
+        # must not turn a partially resolvable request into a disclosure.
+        for source in request["sources"]:
+            entry = self._registry.resolve(self.session_id, source["source_id"])
+            if entry.snapshot.snapshot_id != source["snapshot_id"]:
+                raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+        first = request["sources"][0]
+        entry = self._registry.resolve(self.session_id, first["source_id"])
+        limits = self.config.limits
+        budget = min(
+            self.config.reader.fallback_max_bytes,
+            4096,
+            entry.snapshot.bytes_len - 1,
+            request["budgets"]["max_answer_bytes"],
+            limits.max_answer_bytes,
+            limits.inspect_max_result_bytes,
+            limits.max_extraction_bytes,
+        )
+        if budget <= 0:
+            raise ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK")
+        return self._inspect(
+            {
+                "schema_version": EMITTED_SCHEMA_VERSION,
+                "request_id": request_id,
+                "operation": "inspect",
+                "source_id": first["source_id"],
+                "snapshot_id": first["snapshot_id"],
+                "selector": {"kind": "bytes", "start": 0, "end": entry.snapshot.bytes_len},
+                "budgets": {
+                    "max_result_bytes": budget,
+                    "max_scan_lines": limits.inspect_max_scan_lines,
+                },
+            },
+            request_id,
+            operation_id,
+            fallback=result,
+        )
 
     def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, int]:
         """The withheld-payload baseline, and how many of its bytes this read may claim.
@@ -310,7 +381,12 @@ class ShuntSession:
             )
 
     def _inspect(
-        self, request: dict[str, Any], request_id: str, operation_id: str
+        self,
+        request: dict[str, Any],
+        request_id: str,
+        operation_id: str,
+        *,
+        fallback: ReaderResult | None = None,
     ) -> dict[str, Any]:
         validated = validate_request(request, operations=_INSPECT_OPERATIONS)
         source_id = validated["source_id"]
@@ -344,10 +420,14 @@ class ShuntSession:
         ]
 
         if allowance.exhausted or budget <= 0:
+            if fallback is not None:
+                raise ShuntError("DISCLOSURE_EXHAUSTED")
             return self._disclosure_exhausted(
                 request_id, operation_id, entry, selector, handles, allowance
             )
 
+        # Reserve extra room for all handles, omissions and escape-hatch guidance.
+        # The full composed envelope is still guarded before any disclosure is charged.
         extraction = self._inspector.extract(
             entry.snapshot.data,
             entry.snapshot.line_index,
@@ -356,7 +436,8 @@ class ShuntSession:
             max_scan_lines=int(budgets["max_scan_lines"]),
             max_wire_bytes=self._extraction_wire_budget(
                 request_id, operation_id, entry, selector, handles
-            ),
+            )
+            - (4096 if fallback is not None else 0),
             state=state,
         )
         if extraction.stalled:
@@ -373,6 +454,8 @@ class ShuntSession:
                 )
             raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_PAGE_BUDGET", retryable=False)
 
+        if fallback is not None and not extraction.result_bytes:
+            raise ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK")
         next_cursor = (
             encode_cursor(key, source_id, snapshot_id, selector, extraction.next_cursor_state)
             if extraction.next_cursor_state is not None
@@ -387,6 +470,12 @@ class ShuntSession:
                 if extraction.scan_budget_exhausted
                 else "UNKNOWN_REMAINDER",
             )
+
+        if fallback is not None:
+            coverage = E.Coverage(upstream_truncated=None)
+            for handle in fallback.envelope["sources"]:
+                coverage.omit(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
+            handles = fallback.envelope["sources"]
 
         def compose(source_used: int, session_used: int, limit_reached: bool) -> dict[str, Any]:
             block: dict[str, Any] = {
@@ -408,13 +497,31 @@ class ShuntSession:
                 block["matches_found"] = extraction.matches_found
             return E.build(
                 request_id=request_id,
-                status="ok" if extraction.complete else "partial",
+                status="ok" if extraction.complete and fallback is None else "partial",
                 code="EXTRACTED",
                 coverage=coverage,
                 sources=handles,
                 retryable=False,
                 result_kind=ResultKind.DETERMINISTIC_EXTRACTION,
-                provenance=deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+                provenance=replace(
+                    deterministic(ProvenanceLabel.DETERMINISTIC_EXTRACTION),
+                    attempts_started=fallback.cost.attempts_started if fallback else 0,
+                    usage_complete=(
+                        fallback.cost.attempts_usage_complete == fallback.cost.attempts_started
+                    )
+                    if fallback
+                    else True,
+                ),
+                guidance=(
+                    "Escape hatch: exact deterministic fallback extraction; not model-derived "
+                    "and not an LLM summary. Original failure: "
+                    + fallback.availability_failure
+                    + ". Selection: byte prefix of first requested source, independent of question "
+                    "and reader selectors; other sources and unreturned bytes omitted."
+                )
+                if fallback
+                else None,
+                recovery=E.recovery_for(fallback.availability_failure) if fallback else None,
                 accounting_id=operation_id,
                 extraction=block,
             )
@@ -444,6 +551,8 @@ class ShuntSession:
             self._identity, source_id, extraction.mode, extraction.result_bytes
         )
         if not charge.granted:
+            if fallback is not None:
+                raise ShuntError("DISCLOSURE_EXHAUSTED")
             return self._disclosure_exhausted(
                 request_id, operation_id, entry, selector, handles, allowance
             )
@@ -452,6 +561,8 @@ class ShuntSession:
             charge.disclosed_bytes_source, charge.disclosed_bytes_session, charge.limit_reached
         )
         published = enforce_or_fixed(env, self.config.limits)
+        if fallback is not None:
+            return published
         self._record(
             operation_id=operation_id,
             kind=OperationKind.INSPECT,

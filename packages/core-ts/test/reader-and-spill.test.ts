@@ -128,7 +128,8 @@ describe("reader gate", () => {
     ]);
     const env = await new Reader(registry, luna).answer("sess", request(entry));
     expect(luna.callCount).toBe(2);
-    expect(env.status).toBe("partial");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("MODEL_ERROR");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
   });
 
@@ -145,7 +146,8 @@ describe("reader gate", () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
     const env = await new Reader(registry, new UnavailableProvider()).answer("sess", request(entry));
-    expect(env.status).toBe("partial");
+    expect(env.status).toBe("error");
+    expect(env.code).toBe("MODEL_ERROR");
     expect(env.coverage.omitted[0]!.reason).toBe("MODEL_ERROR");
     expect(env.answer).toBe("");
   });

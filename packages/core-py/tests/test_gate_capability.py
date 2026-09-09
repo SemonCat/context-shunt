@@ -647,3 +647,25 @@ def test_the_hermes_adapter_keeps_the_host_auxiliary_target_as_the_primary(tmp_p
     session = module._session(session_id="s2")
     assert session._provider.target.model == model
     assert session._provider.target.provider == provider
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_hermes_automatic_extract_config_reaches_delivery(tmp_path, enabled):
+    class UnavailableLlm(FakeLlm):
+        def complete(self, *args, **kwargs):
+            raise RuntimeError("PRIVATE_PROVIDER_BODY")
+
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["reader"] = {"automatic_extract": enabled, "fallback_max_bytes": 64}
+    module.register(FakeCtx(config, llm=UnavailableLlm()))
+    path = tmp_path / "ws" / "outage.txt"
+    path.write_text("source line\n" * 400)
+    out = json.loads(
+        module.context_shunt_read(question="What is here?", paths=[str(path)], task_id="tauto")
+    )
+    assert out["code"] == ("EXTRACTED" if enabled else "MODEL_ERROR")
+    assert "PRIVATE_PROVIDER_BODY" not in json.dumps(out)
+    if enabled:
+        assert out["extraction"]["result_bytes"] <= 64
+        assert out["provenance"]["derived"] is False

@@ -11,3 +11,9 @@ with `python3 -m venv .venv` and
 `./scripts/verify unit all`. Public behavior, configuration, and accounting are documented
 in [`README.md`](../../README.md), [`docs/configuration.md`](../../docs/configuration.md),
 and [`docs/metrics.md`](../../docs/metrics.md).
+
+`ShuntSession.read` automatically returns a labelled deterministic exact prefix after
+wholly exhausted reader availability, using the existing inspector and disclosure ledger.
+Defaults: `reader.automatic_extract: true`, `reader.fallback_max_bytes: 2048` (1–4096).
+Direct `Reader` calls return the truthful availability error without automatic disclosure.
+See [configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability).

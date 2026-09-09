@@ -82,7 +82,10 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "no-writes": ("gate_no_writes", [(CORE_TS, "test/reader-and-spill.test.ts")]),
     "capability": ("gate_capability", [(OPENCLAW_ADAPTER, "test/adapter.test.ts")]),
     "store": ("gate_store", [(CORE_TS, "test/store.test.ts")]),
-    "inspect": ("gate_inspect", [(CORE_TS, "test/inspect.test.ts")]),
+    "inspect": (
+        "gate_inspect",
+        [(CORE_TS, "test/inspect.test.ts"), (CORE_TS, "test/automatic-extract.test.ts")],
+    ),
     "accounting": ("gate_accounting", [(CORE_TS, "test/accounting.test.ts")]),
     # Python-only: the import boundary lives in the Python core, and the OpenClaw
     # capability report says so rather than implying a TypeScript twin exists.
