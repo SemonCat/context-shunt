@@ -117,7 +117,7 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 若 compaction 停用或無法安全回傳，而 reader 完全無法使用，可在相關設定啟用時，
 改用第二層受防護的精確前綴擷取。若兩層都無法安全回傳，回應只包含有界 pointer／失敗訊息
 與復原指引，絕不放行過大的原始內容。可用有效 handle 縮小問題重問，或檢視有界範圍。
-OpenClaw 已使用 TypeScript 移植的 legacy compactor，在模型可用性重試耗盡後回傳有界且清楚標示的備援。
+OpenClaw 已使用 TypeScript 移植的 legacy compactor，在模型可用性重試耗盡或引用無效／缺失後回傳有界且清楚標示的備援。
 詳見[備援語意與限制](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)。
 
 ## 快速開始
@@ -164,7 +164,7 @@ OpenClaw 2026.9.3 透過官方 `api.registerAgentToolResultMiddleware` 擷取符
 預設關閉；額外 MCP 工具需列出確切唯讀 ID，啟用時必須在同一設定交易停用 Tokenjuice 與其他 reducer。
 Host 在 middleware 前已有 200 blocks／每段聚合文字 100,000 字元／details 100,000 bytes 等限制。
 邊界不明的結果會被攔下、不提供 handle；低於上限也只保證 middleware 可見內容的不可變快照，
-不宣稱原始 producer 輸出完整。擷取時不呼叫 Luna；模型以實際問題讀取 handle，可用性耗盡則回傳
+不宣稱原始 producer 輸出完整。擷取時不呼叫 Luna；模型以實際問題讀取 handle，可用性耗盡或引用驗證失敗則回傳
 標示 `LEGACY_COMPACTED`／`legacy_compaction` 的有界備援。未知、寫入與控制工具不在涵蓋範圍內。
 參見[能力與限制](docs/capability-matrix.md#openclaw)及[原子切換](docs/acceptance.md#openclaw-middleware-cutover)。
 

@@ -141,7 +141,7 @@ describe("automatic deterministic escape hatch", () => {
   });
 });
 
-describe("explicit legacy availability fallback", () => {
+describe("explicit legacy reader fallback", () => {
   it("publishes a partial, deterministic legacy summary after availability is exhausted", async () => {
     const first = new FakeLuna([], outage());
     const second = new FakeLuna([], outage());
@@ -207,14 +207,18 @@ describe("explicit legacy availability fallback", () => {
     expect(env.legacy_compaction!.summary).toContain("日本語");
   });
 
-  it("does not raw-fail-open when the opted-in compactor fails", async () => {
+  it.each(["availability", "citations"])("does not raw-fail-open when compaction fails after %s", async (failure) => {
     const sentinel = "LEGACY_COMPACTOR_PRIVATE_SENTINEL";
     const spy = vi.spyOn(legacyCompact, "compactToolResult")
       .mockImplementation(() => { throw new Error(sentinel); });
     try {
-      const { session, request, body } = setup(undefined, {}, { legacyCompaction: true });
+      const provider = failure === "citations"
+        ? new FakeLuna([], JSON.stringify({ answer: "UNVERIFIED_MODEL_SENTINEL", citations: [] }))
+        : undefined;
+      const { session, request, body } = setup(provider, {}, { legacyCompaction: true });
       const env = await session.read(request);
-      expect(env.code).toBe("MODEL_ERROR");
+      expect(env.code).toBe(failure === "citations" ? "CITATION_INVALID" : "MODEL_ERROR");
+      expect(JSON.stringify(env)).not.toContain("UNVERIFIED_MODEL_SENTINEL");
       expect(env.legacy_compaction).toBeUndefined();
       expect(env.extraction).toBeUndefined();
       expect(JSON.stringify(env)).not.toContain(sentinel);
@@ -254,6 +258,14 @@ describe("explicit legacy availability fallback", () => {
     expect(env.coverage.omitted.map((omission) => omission.source_id))
       .toEqual(expect.arrayContaining([entry.sourceId, second.sourceId]));
     expect(JSON.stringify(env)).not.toContain("SECOND_SOURCE_ONLY_CANARY");
+  });
+
+  it.each([new ShuntError("CANCELLED"), new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false),
+    "not JSON"])("does not extend legacy fallback to unrelated failure %s", async (reply) => {
+    const { session, request } = setup(new FakeLuna([], reply), {}, { legacyCompaction: true });
+    const env = await session.read(request);
+    expect(env.code).not.toBe("LEGACY_COMPACTED");
+    expect(env.extraction).toBeUndefined();
   });
 
   it("preserves the old exact-prefix availability fallback when legacy mode is omitted", async () => {
