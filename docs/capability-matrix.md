@@ -221,14 +221,13 @@ Whether the gate passed a particular checkout comes from that run's result eithe
 
 ## Legacy-compaction fallback
 
-`legacy_compaction` is not a capability-gated mode — it needs no host proof, only the
-reader's own snapshot store, so it is core session behavior rather than something a
-capability report enables or disables per host. `context_shunt_read` uses it when a reader
-(model) call fails in a way `deterministic_extraction`'s narrower, wholly-unavailable-only
-trigger does not already cover: `CITATION_INVALID` (every offered citation failed
-mechanical verification) always, and `MODEL_ERROR`/`TIMEOUT` when the automatic-extract
-tier did not already claim the request (a partial response was seen, or automatic_extract
-itself is disabled). It is a direct, function-for-function port of the text/JSON-shaping
+`legacy_compaction` is Python/Hermes core session behavior, not a capability-gated mode;
+it needs the reader's snapshot store, not a host hook. After retries and the model fallback
+chain are exhausted, `context_shunt_read` tries it first for terminal `MODEL_ERROR`,
+`TIMEOUT`, or `CITATION_INVALID`, including wholly unavailable readers. If disabled or
+unsafe, the narrower availability-only `automatic_extract` tier may run next; otherwise
+the original bounded failure remains. TypeScript/OpenClaw has not ported this compactor.
+It is a direct, function-for-function port of the text/JSON-shaping
 half of the incumbent `oversize-tool-result-compactor` plugin (v0.3.0, read read-only from
 the same live host on 2026-09-09; see `packages/core-py/src/context_shunt/legacy_compact.py`'s
 module docstring for exactly what was and was not ported). It always publishes
