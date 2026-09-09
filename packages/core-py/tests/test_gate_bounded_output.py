@@ -569,15 +569,15 @@ def test_an_answer_a_cap_emptied_is_limit_exceeded_not_no_match(tmp_path):
     assert env["recovery"]["handles_valid"] is True
 
 
-def test_a_source_that_says_nothing_is_still_no_match(tmp_path):
-    """The control: an empty answer with nothing dropped is still NO_MATCH."""
+def test_citation_empty_model_output_is_rejected_even_when_nothing_was_dropped(tmp_path):
+    """A delivered model response with no usable evidence is not a source no-match."""
     registry, entry = _cap_fixture(tmp_path)
     env = (
         Reader(registry, FakeLuna(replies=[_claims_reply([], [])]))
         .answer("sess", _cap_request(entry))
         .envelope
     )
-    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
 
 
 # -- the shared input budget covers every physical call ---------------------------------

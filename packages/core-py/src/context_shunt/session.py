@@ -966,6 +966,15 @@ class ShuntSession:
             ),
         )
         published = enforce_or_fixed(env, self.config.limits)
+        pointer_delivered = (
+            published.get("status") == "ok"
+            and published.get("code") == "IMPORTED"
+            and bool(published.get("pointer"))
+            and any(
+                handle.get("source_id") == entry.source_id
+                for handle in published.get("sources", [])
+            )
+        )
         baseline = (
             # A producer that already shortened the payload only lets us observe the
             # shortened size; crediting the full artifact there would be invented.
@@ -973,7 +982,14 @@ class ShuntSession:
             if normalized.upstream_truncated
             else Baseline.withheld_payload(outcome.byte_count, limits=self.config.limits)
         )
-        credited = self._store.credit_baseline(self._identity, entry.source_id)
+        # The output guard may reject a valid import envelope after the artifact has been
+        # adopted. In that case the effective adapter egress is the fixed error envelope:
+        # no pointer reached the caller, so it cannot claim pointer delivery or consume
+        # the one-time baseline credit. Keep the immutable snapshot intact for TTL cleanup
+        # just as the spill path does for its rejected pointer.
+        credited = bool(
+            pointer_delivered and self._store.credit_baseline(self._identity, entry.source_id)
+        )
         self._record(
             operation_id=operation_id,
             kind=OperationKind.CAPTURE,
@@ -981,9 +997,15 @@ class ShuntSession:
             baseline=baseline,
             baseline_credited=credited,
             reader=ReaderCost.none(),
-            boundary=DeliveryBoundary.POINTER,
+            boundary=(DeliveryBoundary.POINTER if pointer_delivered else DeliveryBoundary.ENVELOPE),
         )
-        self._metrics.count("artifact_import", {"result": "imported", "code": "IMPORTED"})
+        self._metrics.count(
+            "artifact_import",
+            {
+                "result": "imported" if pointer_delivered else "refused",
+                "code": published.get("code", "LIMIT_EXCEEDED"),
+            },
+        )
         return published
 
     # -- optional oversized-tool-result capture ----------------------------

@@ -71,7 +71,9 @@ invoke the import, which on Hermes is `ctx.register_tool`.
 | OpenClaw | **unsupported**, reason `IMPORT_UNIMPLEMENTED` | The import boundary exists only in the Python core. This is a repository gap, not a host limitation — OpenClaw can register the tool, so the mode becomes supportable without any host change. The reason is named separately so it is not read as a host constraint OpenClaw does not have. |
 
 Enabling `artifact_import` says nothing about `tool_result_capture`, and the envelope keeps the
-two apart at the wire level too: an import publishes `IMPORTED`, never `SPILLED`.
+two apart at the wire level too: a successful import publishes `IMPORTED`, never `SPILLED`.
+If the output guard rejects its pointer envelope, the effective result is an error with
+`delivery_boundary=envelope` and zero baseline credit. Adoption alone does not prove delivery.
 
 ## Why `local_gate` and `reader` are supported
 

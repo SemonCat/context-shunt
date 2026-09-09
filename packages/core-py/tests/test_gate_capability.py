@@ -9,6 +9,7 @@ host is absent.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -750,6 +751,64 @@ def test_the_openclaw_capability_source_reports_the_tool_it_does_not_declare():
     """
     source = (REPO / "adapters" / "openclaw" / "src" / "capability.ts").read_text(encoding="utf-8")
     assert 'unsupported("artifact_import", ["IMPORT_UNIMPLEMENTED"]' in source
+
+
+def test_hermes_import_handler_reports_guarded_error_without_pointer_credit(tmp_path):
+    """The registered Hermes handler accounts for the envelope the host receives.
+
+    This drives the adapter's actual ``context_shunt_import`` handler with a valid
+    manifest and a deliberately narrow output cap. It reproduces the host-facing path
+    without requiring a live Hermes process or touching a user's configuration.
+    """
+    module = _load_adapter()
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    artifact = import_root / "artifact.log"
+    body = b"synthetic adapter import\n"
+    artifact.write_bytes(body)
+    manifest = import_root / "artifact.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "import_contract": "context_shunt.artifact_import.v1",
+                "producer": {
+                    "id": "synthetic-adapter",
+                    "manifest_schema": "context_shunt.artifact_import.v1",
+                },
+                "artifact": {
+                    "path": str(artifact),
+                    "bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                    "media_type": "text/plain",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path)
+    config["limits"] = {"max_envelope_bytes": 1024}
+    config["artifact_import"] = {
+        "enabled": True,
+        "roots": [str(import_root)],
+        "accepted_manifest_schemas": ["context_shunt.artifact_import.v1"],
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+
+    delivered = json.loads(
+        module.context_shunt_import({"manifest_path": str(manifest)}, task_id="adapter-import")
+    )
+    assert delivered["status"] == "error"
+    assert delivered["code"] == "LIMIT_EXCEEDED"
+    assert "pointer" not in delivered
+    assert delivered["sources"] == []
+
+    session = module._session(task_id="adapter-import")
+    rows = session.store.operation_page(session.identity, page=1, page_size=8)
+    record = next(row for row in rows if row.kind == "capture")
+    assert record.status == "error"
+    assert record.code == "LIMIT_EXCEEDED"
+    assert record.baseline_credit_tokens == 0
+    assert record.delivery_boundary == "envelope"
 
 
 # -- the documented fallback chain is actually wired ------------------------

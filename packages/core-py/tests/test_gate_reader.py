@@ -222,12 +222,12 @@ def test_require_match_policy_refuses_an_unverified_attribution(tmp_path):
     assert "CONFIGURE_READER_MODEL" in env["recovery"]["actions"]
 
 
-def test_no_match_is_ok_only_for_the_range_actually_searched(tmp_path):
+def test_delivered_empty_model_reply_is_citation_failure(tmp_path):
     registry, entry, luna, reader = _fixture(tmp_path, answer_json("", []))
     env = reader.answer("sess", _request(entry, {"kind": "lines", "start": 1, "end": 2})).envelope
-    assert env["status"] == "ok" and env["code"] == "NO_MATCH"
-    assert env["coverage"]["complete"] is True
-    assert env["coverage"]["processed_chunks"] == env["coverage"]["planned_chunks"] == 1
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
+    assert env["answer"] == "" and env["citations"] == []
+    assert env["coverage"]["complete"] is False
 
 
 def test_search_with_no_hits_is_no_match_without_a_model_call(tmp_path):
@@ -243,7 +243,12 @@ def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
     body = "".join(f"line {i} value\n" for i in range(1, 5000))
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(body.encode()))
-    luna = FakeLuna(default_reply=answer_json("", []))
+    luna = FakeLuna(
+        default_reply=answer_json(
+            "The first value is documented [c1].",
+            [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "line 1 value"}],
+        )
+    )
     env = (
         Reader(registry, luna)
         .answer(

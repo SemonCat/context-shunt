@@ -104,13 +104,13 @@ class LineIndex:
     def line_count(self) -> int:
         return self._line_count
 
-    def line_bytes(self, ordinal: int) -> bytes:
-        """Line content without its terminating LF. ``ordinal`` is 1-based."""
+    def line_bytes(self, ordinal: int, *, include_lf: bool = False) -> bytes:
+        """1-based line content; optionally include its actual terminating LF."""
         if ordinal < 1 or ordinal > self.line_count:
             raise IndexError("line out of range")
         start = self._line_start(ordinal)
         end = self._data.find(_LF, start)
-        return self._data[start : len(self._data) if end == -1 else end]
+        return self._data[start : len(self._data) if end == -1 else end + int(include_lf)]
 
     def line_start(self, ordinal: int) -> int:
         """Absolute byte offset of the first byte in a 1-based physical line."""

@@ -210,7 +210,7 @@ describe("pagination and cursors", () => {
       if (extraction.complete || !extraction.next_cursor) break;
       req["cursor"] = extraction.next_cursor;
     }
-    expect(seen.join("\n") + "\n").toBe(text);
+    expect(seen.join("") + "\n").toBe(text);
   });
 
   it("refuses a tampered cursor before any scan", () => {
@@ -553,21 +553,17 @@ describe("utf-8 boundaries on a byte page", () => {
     });
   }
 
-  it("drops only the character the cut splits", () => {
-    const dir = tmp();
-    const s = session(dir);
-    const entry = captured(dir, s, "日本");
-    // 3 bytes = exactly `日`; 4 and 5 bytes split `本` and must still keep `日`.
-    for (const [end, expected] of [
-      [3, "日"],
-      [4, "日"],
-      [5, "日"],
-      [6, "日本"],
-    ] as const) {
-      const env = s.inspect(request(entry, { kind: "bytes", start: 0, end })) as {
-        extraction: { segments: { text: string }[] };
-      };
-      expect(env.extraction.segments.map((seg) => seg.text).join("")).toBe(expected);
+  it("explicitly rejects a byte selector cut inside a codepoint", () => {
+    const dir = tmp(); const s = session(dir); const entry = captured(dir, s, "日本");
+    for (const end of [3, 4, 5, 6]) {
+      const env = s.inspect(request(entry, { kind: "bytes", start: 0, end }));
+      if (end === 4 || end === 5) {
+        expect(env.code).toBe("INVALID_REQUEST");
+        expect(env.extraction).toBeUndefined();
+      } else {
+        expect(env.extraction!.segments.map((segment) => segment.text).join(""))
+          .toBe("日本".slice(0, end / 3));
+      }
     }
   });
 });
@@ -584,4 +580,96 @@ it("never claims full matching-line coverage for an oversized search window", ()
   expect(env.coverage.omitted.length).toBeGreaterThan(0);
   expect(env.extraction!.complete).toBe(false);
   expect(env.guidance).toContain("bytes selector");
+});
+
+it.each([["éA", 1, 2], ["éA", 1, 3], ["é", 0, 1]] as const)(
+  "rejects partial UTF-8 selector %s [%i,%i) without disclosure", (text, start, end) => {
+    const dir = tmp(); const s = session(dir); const entry = captured(dir, s, text);
+    const env = s.inspect(request(entry, { kind: "bytes", start, end }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.extraction).toBeUndefined();
+    expect(s.store.disclosureAllowance(s.identity, entry.sourceId).perSourceRemaining)
+      .toBe(L.disclosureMaxPerSourceBytes);
+  },
+);
+
+it("cannot skip an undisclosed UTF-8 codepoint when the byte budget is too small", () => {
+  const dir = tmp(); const s = session(dir); const entry = captured(dir, s, "é");
+  const req = request(entry, { kind: "bytes", start: 0, end: 2 }, { maxResultBytes: 1 });
+  const env = s.inspect(req);
+  expect(env.code).toBe("LIMIT_EXCEEDED");
+  expect(env.extraction).toBeUndefined();
+  expect(s.store.disclosureAllowance(s.identity, entry.sourceId).perSourceRemaining)
+    .toBe(L.disclosureMaxPerSourceBytes);
+  const recovered = s.inspect(request(entry, { kind: "bytes", start: 0, end: 2 }, { maxResultBytes: 2 }));
+  expect(recovered.extraction!.segments[0]!.text).toBe("é");
+  expect(recovered.extraction!.complete).toBe(true);
+});
+
+for (const suffix of ["\nB\n", "\nB", "\n\nB\n", "\nB\nC\n", "\r\nB\r\n"]) {
+  it.each([[20000, 16384], [16384, 16384], [10, 10]])(
+    `preserves all selected LF bytes across pages with suffix ${JSON.stringify(suffix)}, width %i budget %i`,
+    (width, budget) => {
+      const dir = tmp(); const s = session(dir); const text = "A".repeat(width!) + suffix;
+      const entry = captured(dir, s, text);
+      const req = request(entry, { kind: "lines", start: 1, end: entry.snapshot.lineIndex.lineCount }, { maxResultBytes: budget! });
+      const parts: string[] = [];
+      let done = false;
+      let disclosed = 0;
+      for (let i = 0; i < 32; i++) {
+        const env = s.inspect({ ...req });
+        expect(env.code).toBe("EXTRACTED");
+        parts.push(...env.extraction!.segments.map((segment) => segment.text));
+        disclosed = env.extraction!.disclosed_bytes_source;
+        if (env.extraction!.complete) { done = true; break; }
+        req["cursor"] = env.extraction!.next_cursor;
+      }
+      expect(done).toBe(true);
+      const expected = text.endsWith("\n") ? text.slice(0, -1) : text;
+      expect(parts.join("")).toBe(expected);
+      expect(disclosed).toBe(Buffer.byteLength(expected));
+    },
+  );
+}
+
+it("makes every small UTF-8 range exact or explicitly unable to progress", () => {
+  const raw = enc("éA🎯\nB"); const index = new LineIndex(raw); const inspector = new Inspector();
+  const boundaries = new Set([0, 2, 3, 7, 8, 9]);
+  for (let start = 0; start <= raw.length; start++) {
+    for (let end = start; end <= raw.length; end++) {
+      for (let budget = 1; budget <= 5; budget++) {
+        let state = {}; let returned = ""; let stopped = false;
+        for (let n = 0; n <= raw.length; n++) {
+          let page;
+          try {
+            page = inspector.extract(raw, index, { kind: "bytes", start, end }, {
+              maxResultBytes: budget, maxScanLines: 1, maxWireBytes: WIRE, state,
+            });
+          } catch (error) {
+            expect(error).toBeInstanceOf(ShuntError);
+            expect((error as ShuntError).code).toBe("INVALID_REQUEST");
+            expect(start !== end && (!boundaries.has(start) || !boundaries.has(end))).toBe(true);
+            expect(returned).toBe(""); stopped = true; break;
+          }
+          for (const segment of page.segments) {
+            expect(segment.start).toBeGreaterThanOrEqual(start);
+            expect(segment.end).toBeLessThanOrEqual(end);
+            expect(enc(segment.text)).toEqual(raw.subarray(segment.start, segment.end));
+            returned += segment.text;
+          }
+          if (page.stalled) {
+            expect(page.complete).toBe(false); expect(page.segments).toEqual([]);
+            expect(page.nextCursorState).toEqual({ offset: start + Buffer.byteLength(returned) });
+            stopped = true; break;
+          }
+          if (page.complete) {
+            expect(enc(returned)).toEqual(raw.subarray(start, end)); stopped = true; break;
+          }
+          expect(page.nextCursorState).toEqual({ offset: start + Buffer.byteLength(returned) });
+          state = page.nextCursorState!;
+        }
+        expect(stopped).toBe(true);
+      }
+    }
+  }
 });

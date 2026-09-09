@@ -107,6 +107,9 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 保留的 `source_id`／`snapshot_id` 可供 `context_shunt_inspect` 以 lines／bytes 範圍或 search
 選擇器查證；依 `next_cursor` 接續，仍受 TTL 與累計揭露上限約束。預設 inspect 會縮小頁面並提供接續資訊，
 不會只因剩餘資料較多而回傳 `LIMIT_EXCEEDED`。
+行範圍的各頁文字可直接串接；所選行之間的 LF 會完整保留，最後一個所選行的結尾 LF 不包含在內。
+非空 byte 範圍的起訖位置必須位於 UTF-8 字元邊界，否則回傳 `INVALID_REQUEST`。
+若頁面預算不足以容納一個字元，會明確失敗，不前移游標或計入揭露量；可提高預算後重試。
 
 在 Python／Hermes 上，reader 重試與模型備援耗盡後，符合條件的 `MODEL_ERROR`、`TIMEOUT`
 會觸發 **context-shunt 內部**移植的有界 legacy compactor

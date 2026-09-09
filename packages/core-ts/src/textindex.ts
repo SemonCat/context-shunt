@@ -73,12 +73,12 @@ export class LineIndex {
     return this.count;
   }
 
-  /** Line content without its terminating LF. */
-  lineBytes(ordinal: number): Uint8Array {
+  /** Line content, optionally including its actual terminating LF. */
+  lineBytes(ordinal: number, includeLf = false): Uint8Array {
     if (ordinal < 1 || ordinal > this.lineCount) throw new RangeError("line out of range");
     const start = this.lineStart(ordinal);
     const newline = this.data.indexOf(LF, start);
-    return this.data.subarray(start, newline === -1 ? this.data.length : newline);
+    return this.data.subarray(start, newline === -1 ? this.data.length : newline + Number(includeLf));
   }
 
   lineText(ordinal: number): string {

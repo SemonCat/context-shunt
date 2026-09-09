@@ -211,8 +211,13 @@ The internal tool-argument contract allows `max_result_bytes` and `max_scan_line
 a single inspect call. The current OpenClaw registered schema does not expose those two
 optional fields, so portable host calls rely on configured limits. Continuation uses an
 authenticated `cursor`; the same source, snapshot, and selector must be supplied again.
-Wire-size escaping can make a page smaller than the source-byte cap. A line selector cannot
-split an over-wide single line; use a byte selector if exact pieces are acceptable.
+Wire-size escaping can make a page smaller than the source-byte cap. Oversized lines page
+as exact byte segments. Concatenate page text without inserting separators: LF bytes
+between selected lines are included, but the final selected line’s terminating LF is excluded.
+Nonempty byte selectors must start and end on UTF-8 boundaries (`INVALID_REQUEST` otherwise).
+A budget too small for one code point returns `LIMIT_EXCEEDED` without disclosure or cursor
+advancement; retry with a larger budget. Exhausted disclosure allowance remains
+`DISCLOSURE_EXHAUSTED`.
 
 ### Store, TTL, JSON, and stats
 

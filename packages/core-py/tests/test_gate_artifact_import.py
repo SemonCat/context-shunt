@@ -243,6 +243,8 @@ class World:
                 "accepted_manifest_schemas": list(schemas),
             },
         }
+        if overrides.get("limits") is not None:
+            raw["limits"] = dict(overrides["limits"])
         config = load_config(raw, default_spill_dir=self.cache)
         capability = make_capability(
             artifact_import=bool(overrides.get("capability_supported", True))
@@ -416,6 +418,43 @@ def test_an_import_is_accounted_as_a_capture_not_as_a_spill(tmp_path):
         assert session.registry.handle("sess-import", envelope["pointer"]["source_id"]).kind == (
             "spilled_tool"
         )
+    finally:
+        session.close()
+
+
+def test_guard_rejected_import_has_no_pointer_credit_or_pointer_boundary(tmp_path):
+    """A guarded pointer is not delivered, so its operation cannot claim savings.
+
+    The manifest and artifact are valid, but a deliberately narrow envelope cap rejects
+    the otherwise valid ``IMPORTED`` envelope. The immutable snapshot may remain in the
+    private store for normal TTL cleanup; the caller receives no pointer and accounting
+    describes only the fixed error that actually crossed the adapter boundary.
+    """
+    body = "synthetic imported body\n"
+    world = World(
+        tmp_path,
+        {
+            "setup": {"artifact": {"content": body}},
+            "manifest": {},
+            "config": {"limits": {"max_envelope_bytes": 1024}},
+        },
+    )
+    session = world.session()
+    try:
+        envelope = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
+        assert envelope["status"] == "error"
+        assert envelope["code"] == "LIMIT_EXCEEDED"
+        assert "pointer" not in envelope
+        assert envelope["sources"] == []
+
+        page = session.store.operation_page(session.identity, page=1, page_size=8)
+        record = next(r for r in page if r.operation_id != envelope["accounting_id"])
+        assert record.kind == "capture"
+        assert record.status == "error"
+        assert record.code == "LIMIT_EXCEEDED"
+        assert record.raw_input_bytes == len(body.encode("utf-8"))
+        assert record.baseline_credit_tokens == 0
+        assert record.delivery_boundary == "envelope"
     finally:
         session.close()
 

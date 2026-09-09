@@ -165,7 +165,11 @@ normally; only the page size changes.
 Oversized physical lines (including single-line JSON receipts) now page as exact byte
 segments with an authenticated continuation bound to the original selector. The segment's
 `kind`, `start`, and `end` identify byte offsets; do not treat a partial line as a complete
-record. UTF-8 characters are never split. Oversized search hits may instead return an exact byte
+record. Concatenate page text directly: every LF between selected lines is included once;
+the final selected line’s terminating LF is excluded. UTF-8 characters are never split.
+Nonempty byte selectors with endpoints inside a code point return `INVALID_REQUEST`. A
+budget that cannot fit one code point cannot advance the cursor or consume disclosure.
+Oversized search hits may instead return an exact byte
 window around the literal hit, with partial coverage and omitted context. Use the returned
 byte offsets with a bytes selector for surrounding evidence; a search cursor visits later
 hits, not the omitted context. Deliberately tiny budgets that cannot fit one

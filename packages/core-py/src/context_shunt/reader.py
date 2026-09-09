@@ -719,6 +719,11 @@ class Reader:
             )
 
         verified, rejected = self._verify_all(session_id, raw_citations)
+        # Keep the complete verified set for failure classification. The published set
+        # below is narrowed to citations actually used by the rendered answer; treating
+        # that display set as evidence availability would turn a valid but unreferenced
+        # citation into a false ``CITATION_INVALID``.
+        verified_evidence = verified
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
         self._metrics.observe("citations_rejected", rejected, {"result": "rejected"})
 
@@ -893,6 +898,27 @@ class Reader:
                 # one - the cap is not what emptied that answer.
                 exc = ShuntError("LIMIT_EXCEEDED", "ANSWER_OVER_CAP", retryable=False)
                 self._metrics.count("reader_error", {"code": exc.code})
+                failed = _as_failure_provenance(provenance)
+                return ReaderResult(
+                    envelope=E.error_envelope(
+                        request_id,
+                        exc,
+                        accounting_id=accounting_id,
+                        provenance=failed,
+                        sources=handles,
+                        handles_valid=True,
+                    ),
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+            # A delivered, parsed model reply with no verifiable citations is missing
+            # evidence, not proof that the source had no answer. Keep deterministic
+            # no-hit searches (which made no model call) and cap/format failures distinct.
+            if not verified_evidence and any(
+                o.responses_seen > 0 and not o.failed_reason for o in outcomes
+            ):
+                exc = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE")
                 failed = _as_failure_provenance(provenance)
                 return ReaderResult(
                     envelope=E.error_envelope(

@@ -58,3 +58,27 @@ For any future OpenClaw capture seam, a model-visible pointer must carry a usabl
 the reader must resolve that handle in the same session, and raw sentinel bytes must be
 absent from effective model input and persisted tool history. Until then capture stays
 unsupported. Live-only gates remain `NOT_RUN`.
+
+## P1 follow-up to `fbabdae`
+
+Synthetic regressions reproduced four defects from independent review:
+
+- UTF-8 byte extraction computed its length before moving the start boundary. This could
+  disclose beyond the selector or silently skip a character that did not fit. Both cores
+  now reject nonempty ranges with split-code-point endpoints and preserve the exact cursor
+  when a page cannot fit a character. Session errors disclose nothing and consume no budget.
+- Oversized-line continuation omitted LF bytes before advancing to the next line. Both
+  cores now include every actual LF between selected lines, including page boundaries and
+  empty lines. Concatenated pages equal the selected source bytes; the final selected
+  line’s terminating LF remains excluded. CRLF and exact-budget boundaries are covered.
+- Python treated a nonempty model answer with an empty citation array as successful
+  `NO_MATCH`. It now returns `CITATION_INVALID`, matching TypeScript, while retaining source
+  handles, paid provider cost, and post-provider TTL checks. Unverified answer text is absent.
+- Python artifact import recorded pointer delivery and consumed baseline credit after the
+  output guard replaced the pointer with an error. Accounting and metrics now follow the
+  effective guarded envelope. Core and registered Hermes handler regressions require an
+  envelope boundary and zero baseline credit on rejection. TypeScript artifact import is
+  unimplemented; OpenClaw continues to report `IMPORT_UNIMPLEMENTED`.
+
+All fixtures contain invented content. This follow-up changes no live capability or
+configuration and does not supply the remaining live proof described above.

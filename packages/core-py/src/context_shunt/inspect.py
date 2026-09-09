@@ -289,7 +289,9 @@ class Inspector:
                 line = index.line_text(ordinal)
             except (IndexError, UnicodeDecodeError):
                 break
-            chunk = line if not emitted else "\n" + line
+            # LF belongs to the selected range except after its final physical line.
+            # Charge and deliver it here, including when this is the page's last line.
+            chunk = line + ("\n" if ordinal < end else "")
             size = len(chunk.encode("utf-8"))
             if used + size > budget:
                 if not emitted:
@@ -315,7 +317,7 @@ class Inspector:
                     )
                 stopped_on_wire = True
                 break
-            emitted.append(line)
+            emitted.append(chunk)
             used += size
             wire_used += wire_size
             out.lines_scanned += 1
@@ -323,7 +325,7 @@ class Inspector:
 
         if emitted:
             out.segments.append(
-                Segment(kind="lines", start=start, end=ordinal - 1, text="\n".join(emitted))
+                Segment(kind="lines", start=start, end=ordinal - 1, text="".join(emitted))
             )
         out.result_bytes = used
         out.scan_budget_exhausted = out.lines_scanned >= page_lines and ordinal <= end
@@ -352,7 +354,7 @@ class Inspector:
         segments without inventing a newline between pages. ``offset`` is relative to the
         selected physical line and is only produced by this method.
         """
-        raw = index.line_bytes(ordinal)
+        raw = index.line_bytes(ordinal, include_lf=ordinal < requested_end)
         offset = min(max(0, offset), len(raw))
         out = Extraction(mode="bytes")
         if offset >= len(raw):
@@ -442,21 +444,24 @@ class Inspector:
         if start >= end:
             return out
 
-        take = min(end - start, budget, self._limits.inspect_max_bytes_per_page)
-        # A byte range can land inside a multi-byte character. Both edges are pulled to a
-        # UTF-8 boundary so the emitted text is exactly a substring of the snapshot and
-        # never a mojibake fragment; the cursor resumes from the boundary actually used.
-        begin = _forward_to_boundary(data, start)
+        # A text extraction cannot represent fragments of UTF-8 code points. Reject
+        # misaligned selectors instead of disclosing outside the range or dropping bytes.
+        if (
+            _forward_to_boundary(data, requested_start) != requested_start
+            or _forward_to_boundary(data, start) != start
+            or _forward_to_boundary(data, end) != end
+        ):
+            raise ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", retryable=False)
+        begin = start
+        take = min(end - begin, budget, self._limits.inspect_max_bytes_per_page)
         finish = _back_to_boundary(data, begin, begin + take)
         if finish <= begin:
-            if end <= begin:
-                # Nothing remains to emit, so the empty page is a complete answer.
-                return out
-            # Nothing fits without splitting a character; advancing is the only honest move.
+            # No character fits. Preserve the position; the session reports a bounded
+            # limit/disclosure error without charging bytes or returning a looping cursor.
             out.complete = False
-            advanced = min(end, begin + 1)
-            out.next_cursor_state = {"offset": advanced}
-            out.stalled = advanced <= start
+            out.next_cursor_state = {"offset": begin}
+            out.stalled = True
+            out.stall_reason = "content"
             return out
         text = data[begin:finish].decode("utf-8", errors="strict")
         # A byte range may be cut at any character boundary, so the wire budget shortens the

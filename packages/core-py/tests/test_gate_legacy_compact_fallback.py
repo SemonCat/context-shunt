@@ -239,8 +239,35 @@ def test_retired_canary_citation_failure_preserves_evidence_not_a_prefix(tmp_pat
     assert record["attempts_started"] > 0
 
 
+def test_uncited_semantic_reply_is_citation_failure_with_cost_and_handle(tmp_path):
+    reply = json.dumps({"answer": "UNVERIFIED_SENTINEL", "citations": []})
+    session, entry, request, body = setup(
+        tmp_path,
+        FakeLuna(replies=[reply]),
+        reader={"legacy_compaction": False, "automatic_extract": False},
+    )
+    env = session.read(request)
+    assert env["code"] == "CITATION_INVALID"
+    assert env["status"] == "error"
+    assert env["answer"] == "" and env["citations"] == []
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert env["recovery"]["handles_valid"] is True
+    assert env["provenance"]["derived"] is False
+    assert env["provenance"]["attempts_started"] > 0
+    assert body not in json.dumps(env)
+    assert "UNVERIFIED_SENTINEL" not in json.dumps(env)
+    rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
+    record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
+    assert record["code"] == "CITATION_INVALID"
+    assert record["attempts_started"] == 1
+    assert record["attempts_usage_complete"] == 1
+    assert record["reader_input_tokens"] == 10
+    assert record["reader_output_tokens"] == 5
+
+
 def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, monkeypatch):
-    session, _, request, _ = setup(tmp_path, _no_evidence_luna())
+    reply = json.dumps({"answer": "UNVERIFIED_SENTINEL", "citations": []})
+    session, _, request, _ = setup(tmp_path, FakeLuna(replies=[reply]))
     original = session._registry.resolve
     calls = 0
 

@@ -204,7 +204,7 @@ def test_paging_walks_the_range_in_order_without_gaps_or_repeats(tmp_path):
         if extraction["complete"] or not extraction["next_cursor"]:
             break
         request["cursor"] = extraction["next_cursor"]
-    joined = "\n".join(seen) + "\n"
+    joined = "".join(seen) + "\n"
     assert joined == body
 
 
@@ -556,15 +556,16 @@ def test_a_byte_page_keeps_every_character_that_fits(tmp_path, text):
     assert "".join(s["text"] for s in env["extraction"]["segments"]) == text
 
 
-def test_a_byte_page_cut_mid_character_drops_only_the_split_character(tmp_path):
-    """Cutting inside a character drops that character - and nothing before it."""
+def test_a_byte_selector_cut_mid_character_is_explicitly_rejected(tmp_path):
     session = _session(tmp_path)
     entry = _captured(tmp_path, session, body="日本")
-    # 3 bytes = exactly `日`; 4 and 5 bytes split `本` and must still keep `日`.
-    for end, expected in ((3, "日"), (4, "日"), (5, "日"), (6, "日本")):
+    for end in (3, 4, 5, 6):
         env = session.inspect(_request(entry, {"kind": "bytes", "start": 0, "end": end}))
-        got = "".join(s["text"] for s in env["extraction"]["segments"])
-        assert got == expected, f"end={end} gave {got!r}, expected {expected!r}"
+        if end in (4, 5):
+            assert env["code"] == "INVALID_REQUEST"
+            assert "extraction" not in env
+        else:
+            assert "".join(s["text"] for s in env["extraction"]["segments"]) == "日本"[: end // 3]
 
 
 def test_boundary_helper_only_retreats_across_an_incomplete_character():
@@ -706,3 +707,103 @@ def test_oversized_search_window_never_claims_full_matching_line_coverage(tmp_pa
     assert not env["coverage"]["complete"]
     assert env["coverage"]["omitted"]
     assert not env["extraction"]["complete"]
+
+
+@pytest.mark.parametrize("text,start,end", [("éA", 1, 2), ("éA", 1, 3), ("é", 0, 1)])
+def test_byte_selector_rejects_partial_utf8_codepoints_without_disclosure(
+    tmp_path, text, start, end
+):
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, text)
+    env = session.inspect(_request(entry, {"kind": "bytes", "start": start, "end": end}))
+    assert env["code"] == "INVALID_REQUEST"
+    assert "extraction" not in env
+    assert (
+        session.store.disclosure_allowance(session.identity, entry.source_id).per_source_remaining
+        == L.disclosure_max_per_source_bytes
+    )
+
+
+def test_byte_budget_cannot_skip_an_undisclosed_utf8_codepoint(tmp_path):
+    session = _session(tmp_path)
+    entry = _captured(tmp_path, session, "é")
+    request = _request(entry, {"kind": "bytes", "start": 0, "end": 2}, max_result_bytes=1)
+    env = session.inspect(request)
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert "extraction" not in env
+    assert (
+        session.store.disclosure_allowance(session.identity, entry.source_id).per_source_remaining
+        == L.disclosure_max_per_source_bytes
+    )
+    request["budgets"]["max_result_bytes"] = 2
+    recovered = session.inspect(request)
+    assert recovered["extraction"]["segments"][0]["text"] == "é"
+    assert recovered["extraction"]["complete"] is True
+
+
+@pytest.mark.parametrize("suffix", ["\nB\n", "\nB", "\n\nB\n", "\nB\nC\n", "\r\nB\r\n"])
+@pytest.mark.parametrize("width,budget", [(20000, 16384), (16384, 16384), (10, 10)])
+def test_line_pages_preserve_every_selected_lf(tmp_path, suffix, width, budget):
+    session = _session(tmp_path)
+    body = "A" * width + suffix
+    entry = _captured(tmp_path, session, body)
+    last = entry.snapshot.line_index.line_count
+    req = _request(entry, {"kind": "lines", "start": 1, "end": last}, max_result_bytes=budget)
+    collected = bytearray()
+    for _ in range(32):
+        env = session.inspect(dict(req))
+        assert env["code"] == "EXTRACTED"
+        page = env["extraction"]
+        for segment in page["segments"]:
+            collected.extend(segment["text"].encode())
+        if page["complete"]:
+            break
+        req["cursor"] = page["next_cursor"]
+    else:
+        pytest.fail("pagination did not finish")
+    expected = body.removesuffix("\n").encode()
+    assert bytes(collected) == expected
+    assert page["disclosed_bytes_source"] == len(expected)
+
+
+def test_all_small_utf8_ranges_are_exact_or_explicitly_cannot_progress():
+    raw = "éA🎯\nB".encode()
+    inspector = Inspector()
+    index = LineIndex(raw)
+    boundaries = {0, 2, 3, 7, 8, 9}
+    for start in range(len(raw) + 1):
+        for end in range(start, len(raw) + 1):
+            for budget in range(1, 6):
+                state = {}
+                returned = bytearray()
+                for _ in range(len(raw) + 1):
+                    try:
+                        page = inspector.extract(
+                            raw,
+                            index,
+                            {"kind": "bytes", "start": start, "end": end},
+                            max_result_bytes=budget,
+                            max_scan_lines=1,
+                            max_wire_bytes=L.max_extended_envelope_bytes,
+                            state=state,
+                        )
+                    except ShuntError as exc:
+                        assert start != end and (start not in boundaries or end not in boundaries)
+                        assert exc.code == "INVALID_REQUEST"
+                        assert not returned
+                        break
+                    for segment in page.segments:
+                        assert start <= segment.start < segment.end <= end
+                        assert segment.text.encode() == raw[segment.start : segment.end]
+                        returned.extend(segment.text.encode())
+                    if page.stalled:
+                        assert not page.complete and not page.segments
+                        assert page.next_cursor_state == {"offset": start + len(returned)}
+                        break
+                    if page.complete:
+                        assert returned == raw[start:end]
+                        break
+                    assert page.next_cursor_state == {"offset": start + len(returned)}
+                    state = page.next_cursor_state
+                else:
+                    pytest.fail("byte pagination did not terminate or report no progress")

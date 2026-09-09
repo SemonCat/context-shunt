@@ -117,6 +117,10 @@ enabled. No heuristic or byte prefix substitutes for an answer. Retained `source
 `snapshot_id` handles support `context_shunt_inspect` with lines/bytes or search selectors;
 follow `next_cursor` within TTL and disclosure limits. Evidence still needs verification.
 Normal inspection clamps pages to the available envelope budget and returns continuation.
+Concatenate line-page text directly; internal LF bytes are preserved and the final selected
+line’s terminating LF is excluded. Nonempty byte ranges require UTF-8-aligned endpoints
+(`INVALID_REQUEST` otherwise). If a page cannot fit one code point, it fails without
+advancing or charging disclosure; retry with a larger budget.
 
 On Python/Hermes, exhausted reader retries/model fallbacks ending in eligible `MODEL_ERROR` or
 `TIMEOUT` trigger the ported bounded legacy compactor **inside

@@ -154,7 +154,7 @@ def test_a_claim_with_no_citations_never_survives(tmp_path):
         [{"text": "An assertion nobody backed with evidence.", "citation_ids": []}], []
     )
     env = Reader(registry, FakeLuna(replies=[reply])).answer("sess", _request([entry])).envelope
-    assert env["code"] == "NO_MATCH"
+    assert env["code"] == "CITATION_INVALID"
     assert env["answer"] == ""
 
 

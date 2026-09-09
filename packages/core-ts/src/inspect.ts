@@ -314,7 +314,8 @@ export class Inspector {
       } catch {
         break;
       }
-      const chunk = emitted.length === 0 ? line : `\n${line}`;
+      // Deliver and charge the LF between selected lines, including page boundaries.
+      const chunk = line + (ordinal < end ? "\n" : "");
       const size = utf8Length(chunk);
       if (used + size > budget) {
         if (emitted.length === 0) {
@@ -330,7 +331,7 @@ export class Inspector {
         stoppedOnWire = true;
         break;
       }
-      emitted.push(line);
+      emitted.push(chunk);
       used += size;
       wireUsed += wireSize;
       out.linesScanned += 1;
@@ -338,7 +339,7 @@ export class Inspector {
     }
 
     if (emitted.length > 0) {
-      out.segments.push({ kind: "lines", start, end: ordinal - 1, text: emitted.join("\n") });
+      out.segments.push({ kind: "lines", start, end: ordinal - 1, text: emitted.join("") });
     }
     out.resultBytes = used;
     out.scanBudgetExhausted = out.linesScanned >= pageLines && ordinal <= end;
@@ -367,7 +368,8 @@ export class Inspector {
     budget: number,
     wireBudget: number,
   ): Extraction {
-    const raw = index.lineBytes(ordinal);
+    // Include the selected separator as a zero-copy slice; exclude the final range LF.
+    const raw = index.lineBytes(ordinal, ordinal < requestedEnd);
     const clampedOffset = Math.min(Math.max(0, offset), raw.length);
     const out = emptyExtraction("bytes");
     if (clampedOffset >= raw.length) {
@@ -466,19 +468,21 @@ export class Inspector {
     const out = emptyExtraction("bytes");
     if (start >= end) return out;
 
-    const take = Math.min(end - start, budget, this.limits.inspectMaxBytesPerPage);
-    // A byte range can land inside a multi-byte character. Both edges are pulled to a
-    // UTF-8 boundary so the emitted text is exactly a substring of the snapshot and never
-    // a mojibake fragment; the cursor resumes from the boundary actually used.
-    const begin = forwardToBoundary(data, start);
+    // Text cannot represent fragments of UTF-8 code points. Never adjust a selector
+    // past undisclosed bytes or widen it beyond the caller's half-open interval.
+    if (forwardToBoundary(data, requestedStart) !== requestedStart
+        || forwardToBoundary(data, start) !== start || forwardToBoundary(data, end) !== end) {
+      throw new ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", false);
+    }
+    const begin = start;
+    const take = Math.min(end - begin, budget, this.limits.inspectMaxBytesPerPage);
     let finish = backToBoundary(data, begin, begin + take);
     if (finish <= begin) {
-      out.complete = end <= begin;
-      if (out.complete) return out;
-      // Nothing fits without splitting a character; advancing is the only honest move.
-      const advanced = Math.min(end, begin + 1);
-      out.nextCursorState = { offset: advanced };
-      out.stalled = advanced <= start;
+      // Let the session report no progress without charging bytes or skipping a character.
+      out.complete = false;
+      out.nextCursorState = { offset: begin };
+      out.stalled = true;
+      out.stallReason = "content";
       return out;
     }
     let text = new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(begin, finish));
