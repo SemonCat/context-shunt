@@ -101,8 +101,9 @@ must disable any uncontrolled raw-read tools.
   quotation exists at the cited location; it does not prove that the quote supports the
   model's reasoning.
 - **An exact-text escape hatch.** `context_shunt_inspect` returns bounded line, byte, or
-  literal-search results without a model call. A wholly unavailable reader automatically
-  uses the same guarded disclosure path for a 2 KiB prefix (`reader.automatic_extract`,
+  literal-search results without a model call. Python/Hermes first tries bounded legacy
+  compaction after reader availability failure; if disabled or unsafe, it can use the
+  same guarded disclosure path for a 2 KiB prefix (`reader.automatic_extract`,
   `reader.fallback_max_bytes`; [semantics and limits](docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)).
 - **Immutable, scoped snapshots.** `workspace_roots` and `artifact_import.roots` are
   separate allowlists, so brokering a producer's artifacts never widens what an ordinary

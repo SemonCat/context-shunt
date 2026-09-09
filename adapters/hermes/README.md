@@ -47,6 +47,8 @@ provider-authoritative `actual`. See the checked
 
 The automatic exact-text escape hatch defaults on (`reader.automatic_extract: true`,
 `reader.fallback_max_bytes: 2048`, range 1–4096). Disabling inspect also disables it.
+It is secondary to guarded legacy compaction for exhausted MODEL_ERROR/TIMEOUT;
+legacy compaction also handles terminal CITATION_INVALID, while policy refusals remain excluded.
 It selects the first source's byte prefix, independently of the question, with all handles,
 locators, omissions and disclosure accounting retained. It is never an LLM summary.
 See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)

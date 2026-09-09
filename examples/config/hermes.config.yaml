@@ -56,18 +56,16 @@ plugins:
           # working either way; neither touches a model.
           attribution_policy: allow_unverified
 
-          # Availability-only fallback. Never a remedy for a poor-quality answer: the
-          # honest remedy for that is a refined question over the same snapshot. Each
-          # attempt keeps its own reported provenance, and reaching one sets fallback_used.
+          # Secondary availability-only exact prefix if legacy compaction is disabled
+          # or cannot safely deliver; inspect/disclosure limits still apply.
           automatic_extract: true
           fallback_max_bytes: 2048 # 1..4096; also bounded by inspect/disclosure limits
           # fallback_chain:
           #   - model: gpt-5.6-luna
           #     provider: openrouter
 
-          # Legacy-compaction: a second, disjoint fallback for a reader failure
-          # automatic_extract does not cover (a citation-empty result, or a
-          # malformed/partial response). On by default; a ported, deterministic
+          # First fallback after exhausted MODEL_ERROR/TIMEOUT, and for terminal
+          # CITATION_INVALID. On by default; a ported, deterministic
           # heuristic summary, never exact bytes and never model output. See
           # docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover.
           legacy_compaction: true

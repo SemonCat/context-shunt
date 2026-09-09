@@ -160,10 +160,9 @@ class ReaderConfig:
     fallback_chain: tuple[ProviderRef, ...] = ()
     automatic_extract: bool = True
     fallback_max_bytes: int = 2048
-    #: The broader deterministic fallback: a ported heuristic compaction of the source,
-    #: covering reader outcomes automatic_extract was never asked to (malformed output,
-    #: citation-empty, or an availability failure when automatic_extract is off). See
-    #: `session.py`'s `_LEGACY_COMPACTION_TRIGGER_CODES` for the exact ordering.
+    #: First bounded fallback for terminal availability/citation failures; automatic
+    #: extraction is secondary when this is disabled or cannot safely deliver.
+    #: Model-identity mismatch and provenance-policy refusals remain excluded.
     legacy_compaction: bool = True
     #: Character budget handed to the compaction algorithm before the envelope's own byte
     #: cap is enforced. Kept below `limits.max_extraction_bytes` (16 KiB) by default so the

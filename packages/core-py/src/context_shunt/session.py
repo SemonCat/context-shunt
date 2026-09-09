@@ -81,18 +81,9 @@ from .store import ScopeIdentity, SnapshotStore
 
 _INSPECT_OPERATIONS = frozenset({"inspect"})
 _STATS_OPERATIONS = frozenset({"stats"})
-#: Reader outcomes the legacy-compaction fallback may cover: provider/timeout failures the
-#: automatic-extract escape hatch did not already handle (a partial response was seen, or
-#: automatic_extract/inspect is off), plus a citation-empty result (every citation offered
-#: failed mechanical verification). `INVALID_MODEL_OUTPUT` is deliberately absent: reader.py
-#: never publishes it as a terminal envelope `code` - a chunk that fails to parse becomes a
-#: `coverage.omitted` reason on an otherwise `NO_MATCH` envelope, not a `status: error`
-#: envelope this fallback could intercept. `PROVENANCE_UNAVAILABLE` is also deliberately
-#: absent: it is a deployment's own `require_match` policy refusing an unprovable
-#: attribution, and a heuristic summary is not a remedy for a policy the operator chose -
-#: same reasoning as excluding a reported-model mismatch below. See `read`'s ordering
-#: comment for why this is disjoint from, not a replacement of, the narrower and
-#: already-tested automatic-extract trigger.
+#: Legacy compaction runs first for terminal availability and citation failures.
+#: Malformed output published as NO_MATCH and provenance-policy refusals are excluded.
+#: A reported-model mismatch is excluded separately even when its code is MODEL_ERROR.
 _LEGACY_COMPACTION_TRIGGER_CODES = frozenset({"MODEL_ERROR", "TIMEOUT", "CITATION_INVALID"})
 #: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
 #: a cursor of exactly this length so a real one can never overshoot the budget it set.
@@ -278,7 +269,25 @@ class ShuntSession:
         )
         candidate = result.envelope
         if (
-            result.availability_failure
+            candidate.get("status") == "error"
+            and candidate.get("code") in _LEGACY_COMPACTION_TRIGGER_CODES
+            and candidate.get("provenance", {}).get("attribution_status") != "mismatch"
+            and self.config.reader.legacy_compaction
+        ):
+            # Prefer a bounded heuristic summary after exhausted reader attempts. Policy
+            # refusals are not availability failures and must never receive a soft landing.
+            try:
+                candidate = enforce(
+                    self._legacy_compaction_fallback(request, result, request_id, operation_id),
+                    self.config.limits,
+                )
+            except Exception:
+                # An unsafe/unusable summary is no delivery. Availability-only extraction
+                # may still run below; otherwise retain the original bounded failure.
+                candidate = result.envelope
+        if (
+            candidate is result.envelope
+            and result.availability_failure
             and self.config.reader.automatic_extract
             and self.config.tools.inspect_enabled
         ):
@@ -298,34 +307,6 @@ class ShuntSession:
                         **candidate,
                         "recovery": E.recovery_for(exc.code, handles_valid=False),
                     }
-        elif (
-            not result.availability_failure
-            and candidate.get("status") == "error"
-            and candidate.get("code") in _LEGACY_COMPACTION_TRIGGER_CODES
-            and candidate.get("provenance", {}).get("attribution_status") != "mismatch"
-            and self.config.reader.legacy_compaction
-        ):
-            # `not result.availability_failure` keeps this disjoint from the branch above
-            # rather than merely falling through to it via `elif`: a wholly-unavailable
-            # failure stays governed by `automatic_extract`'s own on/off switch, even when
-            # that switch is off, exactly as before this fallback existed. This branch picks
-            # up what automatic_extract was never asked to cover at all - a partial/
-            # malformed response, or a citation failure with no surviving evidence - and it
-            # is always a richer, ported heuristic summary rather than a bare byte prefix.
-            # A reported-model mismatch is excluded on purpose: `enforce_policy` already
-            # treats a contradicted model identity as a wrong answer, not a weak one, and a
-            # deterministic summary is not a remedy for that - it would look like a softer
-            # landing for exactly the failure this project refuses to paper over.
-            try:
-                candidate = self._legacy_compaction_fallback(
-                    request, result, request_id, operation_id
-                )
-            except Exception:
-                # Compaction itself failed (unreadable snapshot, expired handle, anything
-                # unexpected): keep the original bounded reader failure. Never raw, never a
-                # half-built compaction block - requirement is pointer/failure, not a
-                # best-effort partial write.
-                candidate = result.envelope
         published = enforce_or_fixed(candidate, self.config.limits)
         refined = bool((request or {}).get("refined"))
         try:
@@ -429,9 +410,15 @@ class ShuntSession:
             raise ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN")
 
         source_handles = list(result.envelope.get("sources") or [])
-        coverage = E.Coverage(upstream_truncated=None)
+        coverage = E.Coverage(
+            **{
+                **result.envelope["coverage"],
+                "omitted": list(result.envelope["coverage"]["omitted"]),
+            }
+        )
+        coverage.complete = False
         for handle in source_handles:
-            coverage.omit(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
+            coverage.omit_once(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
 
         attempts = result.cost.attempts_started
         return E.build(

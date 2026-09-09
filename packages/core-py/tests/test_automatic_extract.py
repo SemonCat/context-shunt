@@ -18,6 +18,8 @@ pytestmark = pytest.mark.gate_inspect
 
 
 def setup(tmp_path, provider=None, **config):
+    # Exercise the secondary extraction tier independently of legacy compaction.
+    config["reader"] = {"legacy_compaction": False, **config.get("reader", {})}
     session = ShuntSession(
         "sess",
         make_config(tmp_path, **config),

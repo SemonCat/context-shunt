@@ -1,21 +1,4 @@
-"""unit legacy-compaction-fallback: session-level wiring for the ported compaction.
-
-Companion to ``test_gate_legacy_compact.py`` (the pure algorithm) and
-``test_automatic_extract.py`` (the narrower, unchanged byte-prefix escape hatch). These
-tests cover exactly the new surface: which reader failures newly get a richer deterministic
-summary instead of a bare error, which ones deliberately still do not, that the summary is
-never mistaken for a model answer or exact bytes, and that a compaction failure degrades to
-the original bounded failure rather than ever leaking raw source.
-
-``CITATION_INVALID`` (every citation offered failed mechanical verification) is the
-trigger used throughout: it is the one code in
-``session._LEGACY_COMPACTION_TRIGGER_CODES`` reachable as a terminal ``status: error``
-envelope from a single chunk without also tripping the wholly-unavailable path
-``automatic_extract`` already owns. ``INVALID_MODEL_OUTPUT`` is deliberately not in that
-trigger set - ``reader.py`` never publishes it as a terminal envelope code, only as a
-``coverage.omitted`` reason on an otherwise ``NO_MATCH`` envelope - so there is no envelope
-shape for a test to construct there.
-"""
+"""Session fallback ordering, bounded delivery and preserved reader accounting."""
 
 from __future__ import annotations
 
@@ -34,8 +17,13 @@ def setup(tmp_path, provider=None, body=None, **config):
     session = ShuntSession(
         "sess", make_config(tmp_path, **config), make_capability(), provider=provider
     )
-    body = body if body is not None else (
-        "row 0 ERROR: connection refused\n" + "row %d ordinary line\n" * 300 % tuple(range(1, 301))
+    body = (
+        body
+        if body is not None
+        else (
+            "row 0 ERROR: connection refused\n"
+            + "row %d ordinary line\n" * 300 % tuple(range(1, 301))
+        )
     )
     path = tmp_path / "ws" / "source.txt"
     path.write_text(body)
@@ -98,9 +86,7 @@ def test_legacy_compaction_disabled_by_config_keeps_bare_failure(tmp_path):
 
 
 def test_reader_disabled_config_keeps_bare_failure_and_never_runs_compaction(tmp_path):
-    session, _, request, _ = setup(
-        tmp_path, _no_evidence_luna(), **{"reader": {"enabled": False}}
-    )
+    session, _, request, _ = setup(tmp_path, _no_evidence_luna(), **{"reader": {"enabled": False}})
     env = session.read(request)
     assert env["code"] == "INVALID_REQUEST" and "legacy_compaction" not in env
 
@@ -160,24 +146,82 @@ def test_legacy_compaction_only_covers_the_first_requested_source(tmp_path):
     assert env["coverage"]["complete"] is False
 
 
-def test_wholesale_provider_outage_still_prefers_deterministic_extraction(tmp_path):
-    """The narrower, already-tested escape hatch keeps precedence when it applies."""
-    from context_shunt.provider import TransientProviderError
+@pytest.mark.parametrize("failure_code", ["MODEL_ERROR", "TIMEOUT"])
+@pytest.mark.parametrize("legacy_mode", ["enabled", "disabled", "raises", "unsafe"])
+def test_availability_fallback_precedence(tmp_path, monkeypatch, failure_code, legacy_mode):
+    from context_shunt.errors import ShuntError
+    from context_shunt.provenance import TokenMethod, Usage
+    from context_shunt.provider import FallbackChainProvider, TransientProviderError
 
-    failure = TransientProviderError("PRIVATE_BODY")
-    session, _, request, _ = setup(tmp_path, FakeLuna(default_reply=failure))
+    failure = (
+        TransientProviderError("PRIVATE_BODY")
+        if failure_code == "MODEL_ERROR"
+        else ShuntError("TIMEOUT", "MODEL_CALL", retryable=True)
+    )
+    failure.billed_usage = Usage(input_tokens=10, output_tokens=5, method=TokenMethod.EXACT)
+    first, second = FakeLuna(default_reply=failure), FakeLuna(default_reply=failure)
+    session, entry, request, body = setup(
+        tmp_path,
+        FallbackChainProvider(first, [second]),
+        reader={"automatic_extract": True, "legacy_compaction": legacy_mode != "disabled"},
+    )
+    original_answer = session._reader.answer
+    observed = []
+
+    def answer(*args, **kwargs):
+        result = original_answer(*args, **kwargs)
+        observed.append(result)
+        return result
+
+    monkeypatch.setattr(session._reader, "answer", answer)
+    if legacy_mode == "raises":
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("PRIVATE_COMPACTOR_BODY")
+
+        monkeypatch.setattr(session, "_legacy_compaction_fallback", broken)
+    elif legacy_mode == "unsafe":
+        monkeypatch.setattr(
+            "context_shunt.session.compact_tool_result",
+            lambda *a, **k: "-----BEGIN PRIVATE KEY-----",
+        )
     env = session.read(request)
-    assert env["code"] == "EXTRACTED"
-    assert env["result_kind"] == "deterministic_extraction"
+    enforce(env)
+    expected = "LEGACY_COMPACTED" if legacy_mode == "enabled" else "EXTRACTED"
+    assert env["code"] == expected
+    assert observed[0].availability_failure
+    assert env["status"] == "partial" and not env["provenance"]["derived"]
+    assert env["sources"] == observed[0].envelope["sources"]
+    assert env["recovery"]["handles_valid"]
+    assert env["provenance"]["attempts_started"] == first.call_count + second.call_count > 0
+    assert env["answer"] == "" and env["citations"] == []
+    assert body not in json.dumps(env) and "PRIVATE_BODY" not in json.dumps(env)
+    assert "PRIVATE_COMPACTOR_BODY" not in json.dumps(env)
+    assert "-----BEGIN PRIVATE KEY-----" not in json.dumps(env)
+    if legacy_mode == "enabled":
+        assert env["legacy_compaction"]["original_failure"] == failure_code
+        assert env["result_kind"] == "legacy_compaction"
+        assert "not model-derived" in env["guidance"] and "not an LLM summary" in env["guidance"]
+        for omission in observed[0].envelope["coverage"]["omitted"]:
+            assert omission in env["coverage"]["omitted"]
+        for key in ("processed_chunks", "planned_chunks", "upstream_truncated"):
+            assert env["coverage"][key] == observed[0].envelope["coverage"][key]
+    stats = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
+    rows = [r for r in stats["stats"]["records"] if r["operation_id"] == env["accounting_id"]]
+    assert len(rows) == 1
+    assert rows[0]["attempts_started"] == first.call_count + second.call_count
+    assert rows[0]["reader_input_tokens"] == observed[0].cost.input_tokens
 
 
-def test_wholesale_outage_with_automatic_extract_disabled_gets_no_soft_landing(tmp_path):
-    """Disabling automatic_extract must not silently reroute through legacy_compaction."""
-    from context_shunt.provider import TransientProviderError
+@pytest.mark.parametrize("failure_code", ["MODEL_ERROR", "TIMEOUT"])
+def test_both_fallbacks_disabled_preserve_failure(tmp_path, failure_code):
+    from context_shunt.errors import ShuntError
 
-    failure = TransientProviderError("PRIVATE_BODY")
     session, _, request, _ = setup(
-        tmp_path, FakeLuna(default_reply=failure), **{"reader": {"automatic_extract": False}}
+        tmp_path,
+        FakeLuna(default_reply=ShuntError(failure_code)),
+        reader={"legacy_compaction": False, "automatic_extract": False},
     )
     env = session.read(request)
-    assert env["code"] == "MODEL_ERROR" and "legacy_compaction" not in env and "extraction" not in env
+    assert env["code"] == failure_code
+    assert "legacy_compaction" not in env and "extraction" not in env

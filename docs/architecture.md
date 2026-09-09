@@ -238,18 +238,18 @@ for exact triggers, selector-independent prefix selection, limits and compatibil
 
 ## Legacy-compaction fallback
 
-A second, disjoint fallback tier - `reader.legacy_compaction`, default on - checks only
-where the automatic-extraction tier above did not already fire: `CITATION_INVALID` always,
-and `MODEL_ERROR`/`TIMEOUT` when the failure was not a wholly-unavailable one automatic
-extraction already claimed. It publishes a deterministic, ported heuristic summary of the
+On Python/Hermes, `reader.legacy_compaction` (default on) is tried before automatic
+extraction for terminal `CITATION_INVALID`, `MODEL_ERROR`, and `TIMEOUT`, including
+wholly unavailable readers after retries and model fallback. It publishes a deterministic, ported heuristic summary of the
 first requested source - signal lines, head/tail sampling, repeated-line collapsing, JSON
 structure, secret redaction - never exact bytes and never model output, as
 `partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`,
 `provenance.derived: false`, and a dedicated `legacy_compaction` block distinct from
 `extraction`'s "never a summary" contract. A reported-model mismatch is deliberately
 excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
-heuristic summary is not a remedy for it. Compaction failure of any kind returns the
-original bounded reader failure unchanged, never raw. See
+heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
+extraction; otherwise the original bounded failure remains, never raw. Coverage and
+failed-attempt accounting are preserved. TypeScript/OpenClaw precedence is unchanged. See
 [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
 for the exact trigger set, caps and wire shape.
 
