@@ -190,6 +190,26 @@ still strengthen this further (it would not depend on any per-tool self-truncati
 assumption), but building one means changing how the host produces MCP results, which is
 out of scope for a plugin and remains [future work](#future-work-stated-plainly).
 
+### Hermes authoritative skill boundary
+
+Exact identity evidence was inspected in the already-present local `hermes-agent-skill-insights`
+checkout at `a4c6b23ba1be20aa469921b59b9abede80053191`:
+`tools/skills_tool.py` registers `name="skill_view"` with `SKILL_VIEW_SCHEMA` and
+`_skill_view_with_bump`; `website/docs/user-guide/features/skills.md` identifies
+`skill_view(name)` as full content plus metadata and `skill_view(name, path)` as a
+specific reference file. The dispatch evidence above forwards `function_name` to the
+result hook. The exemption therefore uses tool identity, not a payload path heuristic.
+
+Hermes authoritative skill loading is exempt from both the pre-read gate and result
+capture: the host-supplied tool name, after whitespace trimming and lowercasing, must
+be exactly `skill_view`. Its complete result passes unchanged to the main model before
+capture session/provider construction, with no spill artifact or accounting event.
+Neither an auxiliary-model summary nor deterministic compaction substitutes for skill
+instructions. This trusts the host tool identity only: `/skills/`, `SKILL.md`,
+`_source_path`, and claimed tool names inside output or arguments confer no exemption.
+A generic `read_file` of a large `SKILL.md` remains subject to the normal gate and capture.
+Other oversized results retain bounded failure handling; OpenClaw behavior is unchanged.
+
 ### OpenClaw
 
 The 2026-09-10 retirement evidence supersedes the earlier middleware capability claim.

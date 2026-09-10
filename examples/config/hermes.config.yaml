@@ -34,7 +34,9 @@ plugins:
           - "secrets/*"
           - "**/*.local.yaml"
 
-        # Block oversized and unprovable reads before they run.
+        # Block positively established oversized unbounded reads before they run.
+        # Authoritative skill_view always passes verbatim, including result capture.
+        # This is host tool identity, not a SKILL.md or /skills/ path exemption.
         gate_enabled: true
 
         reader:

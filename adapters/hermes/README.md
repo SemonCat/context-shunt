@@ -57,3 +57,14 @@ It selects the first source's byte prefix, independently of the question, with a
 locators, omissions and disclosure accounting retained. It is never an LLM summary.
 See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)
 for trigger exclusions, bounds and the 1.1 behavioral compatibility change.
+
+
+Hermes authoritative skill loading is exempt from both the pre-read gate and result
+capture: the host-supplied tool name, after whitespace trimming and lowercasing, must
+be exactly `skill_view`. Its complete result passes unchanged to the main model before
+capture session/provider construction, with no spill artifact or accounting event.
+Neither an auxiliary-model summary nor deterministic compaction substitutes for skill
+instructions. This trusts the host tool identity only: `/skills/`, `SKILL.md`,
+`_source_path`, and claimed tool names inside output or arguments confer no exemption.
+A generic `read_file` of a large `SKILL.md` remains subject to the normal gate and capture.
+Other oversized results retain bounded failure handling; OpenClaw behavior is unchanged.

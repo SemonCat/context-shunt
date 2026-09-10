@@ -606,7 +606,9 @@ def transform_tool_result(
     explicit question - answers it afterward, exactly like the artifact-import boundary's
     own capture-then-ask shape.
 
-    Never raises, and never returns ``None`` for a result already known to be oversized:
+    Authoritative ``skill_view`` results pass verbatim: neither reader summaries nor
+    deterministic compaction can substitute for skill instructions. For all other tools,
+    never raises, and never returns ``None`` for a result already known to be oversized:
     Hermes wraps this dispatch in try/except and lets a raising handler's *original, raw*
     result through unchanged (host-level fail-open, confirmed at 0.21.1 too) - this handler
     must never depend on that safety net. The size check below is done directly, before
@@ -615,6 +617,10 @@ def transform_tool_result(
     oversized result that then fails internally still returns a bounded failure envelope,
     never falls through to the host's raw passthrough.
     """
+    # Trust only Hermes' exact tool identity, normalized as in normalize_tool_call.
+    # Payload text and paths (including SKILL.md) cannot opt out of capture.
+    if isinstance(tool_name, str) and tool_name.strip().lower() == "skill_view":
+        return None
     if _config is None or not _capability.enabled("tool_result_capture"):
         return None
     if not isinstance(result, str):

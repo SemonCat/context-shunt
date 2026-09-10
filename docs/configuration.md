@@ -323,3 +323,14 @@ omissions, and adds bounded `UNKNOWN_REMAINDER` omissions for requested sources;
 established simplification. Compaction and secondary extraction retain the read operation’s accounting ID, failed
 physical-attempt costs, original failure category and artifact handles. Both are explicitly
 partial, deterministic, and not model-derived or an LLM summary.
+
+
+Hermes authoritative skill loading is exempt from both the pre-read gate and result
+capture: the host-supplied tool name, after whitespace trimming and lowercasing, must
+be exactly `skill_view`. Its complete result passes unchanged to the main model before
+capture session/provider construction, with no spill artifact or accounting event.
+Neither an auxiliary-model summary nor deterministic compaction substitutes for skill
+instructions. This trusts the host tool identity only: `/skills/`, `SKILL.md`,
+`_source_path`, and claimed tool names inside output or arguments confer no exemption.
+A generic `read_file` of a large `SKILL.md` remains subject to the normal gate and capture.
+Other oversized results retain bounded failure handling; OpenClaw behavior is unchanged.

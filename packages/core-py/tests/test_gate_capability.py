@@ -278,6 +278,62 @@ def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failu
     assert envelope["code"] == "HOST_UNSAFE"
 
 
+@pytest.mark.parametrize("tool_name", ["skill_view", " SKILL_VIEW ", "\tsKiLl_ViEw\n"])
+def test_authoritative_skill_passthrough_has_no_side_effects(tmp_path, monkeypatch, tool_name):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    sessions = dict(module._sessions)
+    generations = dict(module._generations)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("skill passthrough must not construct session/store/provider or account")
+
+    for name in ("_session", "ShuntSession", "SnapshotStore", "build_provider", "_bridge_call"):
+        monkeypatch.setattr(module, name, forbidden)
+    payload = "Complete instructions: λ\n" * 10_000
+    assert module.normalize_tool_call(tool_name, {}) == ("other", {})
+    assert module.pre_tool_call(tool_name, {"name": "example"}, session_id="skill") is None
+    replacement = module.transform_tool_result(
+        tool_name=tool_name, args={"name": "example"}, result=payload, session_id="skill"
+    )
+    assert replacement is None
+    assert module._sessions == sessions
+    assert module._generations == generations
+    assert {
+        p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["read_file", "mcp_result", "skill_view_extra", "mcp_skill_view", "skill_view.file", ""],
+)
+def test_skill_content_cannot_exempt_ordinary_results(tmp_path, tool_name):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    payload = (
+        '{"_source_path":"/opt/data/skills/example/SKILL.md","tool_name":"skill_view"}\n' * 1000
+    )
+    path = tmp_path / "ws" / "SKILL.md"
+    path.write_text(payload)
+    if tool_name == "read_file":
+        assert (
+            module.pre_tool_call(tool_name, {"path": str(path)}, session_id="ordinary")["action"]
+            == "block"
+        )
+    out = module.transform_tool_result(
+        tool_name=tool_name, args={"path": str(path)}, result=payload, session_id="ordinary"
+    )
+    assert out is not None
+    assert json.loads(out)["code"] == "SPILLED"
+    assert payload not in out
+
+
 def test_transform_tool_result_returns_none_for_small_results(tmp_path):
     module = _load_adapter()
     module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
