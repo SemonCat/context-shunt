@@ -1,13 +1,18 @@
 /** Map an OpenClaw tool call onto the core's `(tool, args)` shape. */
 import { READ_TOOLS, SEARCH_TOOLS, SHELL_TOOLS } from "./capability.js";
 
+/** Exact host identity normalization; preserve punctuation and repeated underscores. */
+export function normalizeToolIdentity(toolName: string): string {
+  return (toolName ?? "").trim().toLowerCase();
+}
+
 export type CoreTool = "read" | "search" | "shell" | "other";
 
 export function normalizeToolCall(
   toolName: string,
   params: Record<string, unknown> | undefined,
 ): { tool: CoreTool; args: Record<string, unknown> } {
-  const name = (toolName ?? "").trim().toLowerCase();
+  const name = normalizeToolIdentity(toolName);
   const args = params ?? {};
   if (name in READ_TOOLS) {
     return {

@@ -106,6 +106,16 @@ prefixes), and legacy ordering fields remain validated for configuration compati
 but cannot enable capture. No middleware handler is installed and raw results pass through
 without pointer accounting. See [current evidence](capability-matrix.md#openclaw).
 
+The synthetic engine classifies exact trim/lowercase identities before capture work.
+Defaults are `read`, `web_fetch`, `web_search`, and `read_mcp_resource`; exact configured
+IDs such as `mcp__docs__read_resource` extend them. Generated MCP resource-read names
+have no automatic provenance and require operator configuration. Protected host
+instructions, controls, resource/prompt catalogs and prompt retrieval override that
+configuration. Repeated underscores remain intact, and payload/path text never grants
+eligibility. The existing 100-entry and 1–128-character ID schema remains unchanged.
+See the [synthetic classifier contract](../adapters/openclaw/README.md#synthetic-trust-boundary-classification).
+These settings cannot enable live capture.
+
 OpenClaw selects non-semantic legacy compaction only after exhausted availability.
 Citation failures always preserve `CITATION_INVALID`, usable source handles, and deterministic
 inspection guidance. The older `reader.automatic_extract` and `reader.fallback_max_bytes`

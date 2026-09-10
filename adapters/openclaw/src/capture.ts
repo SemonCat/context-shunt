@@ -1,8 +1,8 @@
-/** Official OpenClaw 2026.9.3 middleware boundary; never a persistence hook. */
+/** Synthetic OpenClaw capture engine; live middleware remains retired/unregistered. */
 import {
   type Limits, type ShuntSession, ShuntError, enforceOrFixed, fixedError,
 } from "@context-shunt/core";
-import { requestIdFrom } from "./normalize.js";
+import { normalizeToolIdentity, requestIdFrom } from "./normalize.js";
 
 export interface AgentToolResult {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -28,9 +28,40 @@ export type AgentToolResultMiddleware = (
   event: ToolResultEvent, ctx: MiddlewareContext,
 ) => { result: AgentToolResult } | void;
 
-const DEFAULT_READ_ONLY_TOOLS = ["read", "web_fetch", "web_search"];
-// These host-owned controls cannot be opted in by a mistaken read-only declaration.
-const CONTROL_TOOLS = /^(?:context_shunt_|sessions_|message$|.*(?:send|spawn|write|edit|delete|remove|update|create|terminate)(?:_|$))/i;
+const DEFAULT_READ_ONLY_TOOLS = ["read", "web_fetch", "web_search", "read_mcp_resource"];
+const PROTECTED_TOOLS = new Set([
+  "skill_view", "skills_list", "ask_user", "clarify", "todo",
+  "context_shunt_read", "context_shunt_inspect", "context_shunt_stats",
+  "list_mcp_resources", "list_mcp_resource_templates", "message",
+]);
+const MCP_CATALOG_TOOLS = new Set(["list_resources", "list_prompts", "get_prompt"]);
+// Preserve the adapter's session/message/mutation guards as delimited identity families,
+// not substring guesses (e.g. "rewrite" does not mean "write").
+const CONTROL_ACTIONS = new Set([
+  "send", "spawn", "write", "edit", "delete", "remove", "update", "create", "terminate",
+]);
+
+export type ToolResultClassification = "protected" | "eligible" | "passthrough";
+
+/** Identity only, before payload access or session/store/provider/accounting work.
+ * A native MCP tool can shadow a generated read utility. Without immutable executed-
+ * handler provenance, mcp__<server>__read_resource requires exact operator opt-in.
+ */
+export function classifyToolResult(
+  toolName: string, eligible: ReadonlySet<string> = new Set(DEFAULT_READ_ONLY_TOOLS),
+): ToolResultClassification {
+  const name = normalizeToolIdentity(toolName);
+  const parts = name.split("_");
+  const mcp = /^mcp__([a-z0-9_]+)__(list_resources|list_prompts|get_prompt)$/.exec(name);
+  if (PROTECTED_TOOLS.has(name)
+    || (mcp && MCP_CATALOG_TOOLS.has(mcp[2]!))
+    || (name.startsWith("sessions_") && name.length > "sessions_".length)
+    || parts.some((part) => CONTROL_ACTIONS.has(part))) return "protected";
+  if (name && (DEFAULT_READ_ONLY_TOOLS.includes(name)
+    || [...eligible].some((entry) => normalizeToolIdentity(entry) === name))) return "eligible";
+  return "passthrough";
+}
+
 const CONTROL_DETAILS = ["messageDelivery", "deliveryStatus", "messageId", "deliveryId",
   "childSessionKey", "runId", "termination", "terminate", "sideEffects"];
 
@@ -82,7 +113,7 @@ export function captureToolResult(
   event: ToolResultEvent, ctx: MiddlewareContext, eligible: ReadonlySet<string>,
   session: () => ShuntSession, limits: Limits,
 ): { result: AgentToolResult } | void {
-  if (!eligible.has(event.toolName) || CONTROL_TOOLS.test(event.toolName)) return;
+  if (classifyToolResult(event.toolName, eligible) !== "eligible") return;
   const requestId = requestIdFrom(event.toolCallId);
   // Throws intentionally reach the host's bounded error and delivered-message fallback.
   // Do not catch and return event.result, including when any property getter throws.

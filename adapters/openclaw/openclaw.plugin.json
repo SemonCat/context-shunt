@@ -151,7 +151,7 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
             },
-            "description": "Retained for configuration compatibility and validation only. OpenClaw capture is retired; IDs do not enable it."
+            "description": "Exact IDs retained for compatibility and synthetic classifier tests (trim/lowercase normalization). Protected instructions, controls and MCP catalogs/prompts override eligibility. Generated MCP resource reads require exact operator opt-in. Live capture remains retired and unregistered; IDs do not enable it."
           }
         }
       },

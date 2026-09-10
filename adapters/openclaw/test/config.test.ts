@@ -12,7 +12,7 @@ import { join } from "node:path";
 import Ajv from "ajv";
 import { expect, it } from "vitest";
 import { ContextShuntPlugin } from "../index.js";
-import { captureToolsFrom } from "../src/capture.js";
+import { classifyToolResult, captureToolsFrom } from "../src/capture.js";
 
 it("loads the documented config through the actual adapter and host manifest schema", () => {
   const example = JSON.parse(readFileSync(new URL("../../../examples/config/openclaw.json", import.meta.url), "utf8"));
@@ -97,5 +97,15 @@ it("preserves exact configured MCP tool IDs while stripping only the adapter mig
   const tools = captureToolsFrom(raw);
   expect(tools).toContain("mcp__logs__query");
   expect(tools).toContain("MCP__Logs__Query");
+  expect(tools).toContain("read_mcp_resource");
+  expect(classifyToolResult(" MCP__LOGS__QUERY ", tools)).toBe("eligible");
   expect(raw.tool_result_capture).toEqual({ enabled: true });
+});
+
+it.each([["bad name"], [""], ["x".repeat(129)], [42], "read", Array(101).fill("read")].map((names) => ({ names })))("rejects invalid capture IDs in both schema and adapter: %j", ({ names }) => {
+  const manifest = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
+  const validate = new Ajv({ strict: false }).compile(manifest.configSchema);
+  const raw = { tool_result_capture: { read_only_tools: names } };
+  expect(validate(raw)).toBe(false);
+  expect(() => captureToolsFrom(raw)).toThrow();
 });

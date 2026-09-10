@@ -69,3 +69,38 @@ The `read_only_tools` configuration field remains validated for migration compat
 does not opt any OpenClaw tool into capture while this mode is retired. The local gate,
 question-driven reader, deterministic inspector and session stats continue to use their own
 supported seams.
+
+### Synthetic trust-boundary classification
+
+`classifyToolResult` is independently tested and runs before result access or
+session/store/provider/accounting work in the synthetic engine. Identities are trimmed
+and lowercased; punctuation and repeated underscores are preserved. Payload text,
+paths (including `SKILL.md`), and details text never grant identity or eligibility.
+
+Protected identities override even mistaken `tool_result_capture.read_only_tools`
+entries: `skill_view`, `skills_list`, `ask_user`, `clarify`, `todo`, the three
+`context_shunt_*` tools listed above, `message`, `list_mcp_resources`, and
+`list_mcp_resource_templates`. Full generated MCP catalog/prompt identities
+`mcp__<server>__list_resources`, `mcp__<server>__list_prompts`, and
+`mcp__<server>__get_prompt` are protected for nonempty normalized server names using
+letters, digits, or underscores. Session identities beginning `sessions_` and control
+families with an underscore-delimited `send`, `spawn`, `write`, `edit`, `delete`,
+`remove`, `update`, `create`, or `terminate` token are also protected. Arbitrary
+substrings such as `rewrite` do not establish control identity.
+
+Default eligible identities are exactly `read`, `web_fetch`, `web_search`, and
+`read_mcp_resource` (the resource-read identity in this adapter's OpenClaw/Codex
+synthetic contract). Additional exact configured identities are eligible after
+normalization. In particular, `mcp__docs__read_resource` requires operator opt-in:
+a native MCP tool may shadow a generated utility, and this adapter has no immutable
+executed-handler provenance seam. Unknown, interactive, control and write results
+pass through by default, regardless of size. Spoofs such as `skills_list_extra`,
+`context_shunt_read_fake`, and `mcp__x__read_resource_extra` have neither protected
+status nor default eligibility; an operator can explicitly configure these unknown IDs.
+
+Eligible candidates retain the existing small-result and structured/multimodal rules,
+control-details veto, ingress ceilings, and bounded failure with no raw fallback.
+Synthetic tests cover oversized resource capture, inspect/read recovery, and one-time
+baseline credit. None of this proves live protection or capture: the real middleware
+remains **unregistered**, capability remains **unsupported / ORDERING_UNPROVEN**, and
+activation still requires the proof-bearing host seam described above.

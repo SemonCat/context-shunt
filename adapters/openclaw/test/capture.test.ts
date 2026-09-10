@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { modeEnabled, ScopeIdentity, ShuntSession, validateEnvelope } from "@context-shunt/core";
 import { ContextShuntPlugin } from "../index.js";
-import { captureToolResult, type AgentToolResult, type AgentToolResultMiddleware, type ToolResultEvent } from "../src/capture.js";
+import { classifyToolResult, captureToolsFrom, captureToolResult, type AgentToolResult, type AgentToolResultMiddleware, type ToolResultEvent } from "../src/capture.js";
 
 const SENTINEL = "RAW_CAPTURE_SENTINEL_";
 const text = (value = SENTINEL.repeat(2500)): AgentToolResult => ({ content: [{ type: "text", text: value }] });
@@ -48,21 +48,22 @@ function setup(options: { enabled?: boolean; seam?: boolean; version?: string; t
       generation: 1,
     }),
   });
+  const acquireSession = vi.fn((context: typeof ctx) => {
+    if (!context.sessionKey) throw new Error("Capture requires session identity");
+    return engineSession;
+  });
   const engineHandler: AgentToolResultMiddleware = (event, context) => captureToolResult(
     event,
     context,
-    new Set(["read", "web_fetch", "web_search", ...(options.tools ?? ["mcp__logs__query"])]),
-    () => {
-      if (!context.sessionKey) throw new Error("Capture requires session identity");
-      return engineSession;
-    },
+    captureToolsFrom({ tool_result_capture: { read_only_tools: options.tools ?? ["mcp__logs__query"] } }),
+    () => acquireSession(context as typeof ctx),
     p.config.limits,
   );
   const call = (result = text(), name = "mcp__logs__query", extra: Partial<ToolResultEvent> = {}) => {
     const event = { toolCallId: "tc1", toolName: name, args: {}, result, ...extra };
     return engineHandler(event, { ...ctx })?.result ?? result;
   };
-  return { p, handlers, registrations, complete, call, engineHandler, engineSession };
+  return { p, handlers, registrations, complete, call, engineHandler, engineSession, acquireSession };
 }
 function envelope(result: AgentToolResult) {
   const value = JSON.parse(result.content[0]!.text!);
@@ -70,7 +71,78 @@ function envelope(result: AgentToolResult) {
   return value;
 }
 
+describe("exact tool-result identity classification", () => {
+  it.each(["read", "web_fetch", "web_search", "read_mcp_resource"])("defaults %s to eligible", (name) => {
+    expect(classifyToolResult(` ${name.toUpperCase()} `)).toBe("eligible");
+  });
+  it.each([
+    "skills_list_extra", "context_shunt_read_fake", "mcp__x__read_resource_extra",
+    "mcp__docs__read_resource", "unknown_tool", "rewrite", "mcp__x__get_prompt_extra",
+    "mcp____list_resources", "mcp__bad-server__list_prompts",
+  ])("gives %s neither protection nor default eligibility", (name) => {
+    expect(classifyToolResult(name)).toBe("passthrough");
+    expect(classifyToolResult(name, new Set([name.toUpperCase()]))).toBe("eligible");
+    const f = setup({ tools: [] });
+    const input = text("SKILL.md read_resource /skills/review\n".repeat(1000));
+    expect(f.call(input, name)).toBe(input);
+    expect(f.acquireSession).not.toHaveBeenCalled();
+  });
+  it.each(["skill_view", "skills_list", "ask_user", "clarify", "todo", "message",
+    "sessions_send", "sessions_spawn", "sessions_history", "write_file", "delete_file",
+    "spawn_agent", "mcp__db__update", "context_shunt_read", "context_shunt_inspect",
+    "context_shunt_stats", "list_mcp_resources", "list_mcp_resource_templates",
+    "mcp__a___b__list_resources", "mcp__a____b__list_prompts", "mcp__a___b__get_prompt",
+  ])("protected precedence defeats configuration for %s", (name) => {
+    expect(classifyToolResult(` ${name.toUpperCase()} `, new Set([name]))).toBe("protected");
+  });
+  it("treats prompt-delivery syntax as literal payload data", () => {
+    const fixture = "single 'quote', double \"quote\", backtick `text`, literal $(touch /tmp/openclaw/openclaw-trust-classifier/SHOULD_NOT_EXIST), and semicolon ; end.";
+    const f = setup({ tools: [] });
+    const input = text(fixture.repeat(150));
+    expect(f.call(input, "unknown_tool")).toBe(input);
+    expect(f.acquireSession).not.toHaveBeenCalled();
+    expect(envelope(f.call(input, "read_mcp_resource")).code).toBe("SPILLED");
+  });
+});
+
 describe("capture engine (synthetic capability only)", () => {
+  it.each([
+    "skills_list", "skill_view", "ask_user", "clarify", "todo",
+    "context_shunt_read", "context_shunt_inspect", "context_shunt_stats",
+    "list_mcp_resources", "list_mcp_resource_templates",
+    "mcp__docs__list_resources", "mcp__docs__list_prompts", "mcp__docs__get_prompt",
+    "MCP__Docs___Team__List_Resources", "mcp__docs____team__get_prompt",
+    "message", "sessions_spawn", "sessions_history", "write", "edit", "mcp__db__update",
+  ])("protects %s before touching payload or session, even if configured", (name) => {
+    const f = setup({ tools: [name] });
+    const input = text(JSON.stringify({
+      instructions: "Follow the host instructions. ".repeat(700),
+      skills: [{ name: "review", description: "Review the current change" }],
+      answer: "Keep capture retired", todos: [{ task: "Verify", status: "pending" }],
+    }));
+    expect(Buffer.byteLength(JSON.stringify(input))).toBeGreaterThan(16 * 1024);
+    const session = vi.fn(() => { throw new Error("must not create session"); });
+    const event = { toolCallId: "protected", toolName: ` ${name} `, args: {}, result: input };
+    const register = vi.spyOn(f.engineSession.registry, "register");
+    const account = vi.spyOn((f.p as any).store, "recordOperation");
+    const before = JSON.stringify(input);
+    expect(captureToolResult(event, ctx, captureToolsFrom({
+      tool_result_capture: { read_only_tools: [name] },
+    }), session, f.p.config.limits)).toBeUndefined();
+    expect(f.call(input, name)).toBe(input);
+    expect(JSON.stringify(input)).toBe(before);
+    Object.defineProperty(event, "result", { get() { throw new Error("payload touched"); } });
+    expect(captureToolResult(event, ctx, new Set([name]), session, f.p.config.limits)).toBeUndefined();
+    expect(session).not.toHaveBeenCalled();
+    expect(f.acquireSession).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
+    expect(account).not.toHaveBeenCalled();
+    expect(f.complete).not.toHaveBeenCalled();
+  });
+  it.each(["read_mcp_resource", "mcp__docs__read_resource"])("captures exact resource identity %s", (name) => {
+    const f = setup({ tools: name.startsWith("mcp__") ? [name] : [] });
+    expect(envelope(f.call(text(), name)).code).toBe("SPILLED");
+  });
   it("does not register the unverified official seam even when enabled", () => {
     const f = setup(); f.p.register();
     expect(f.handlers).toHaveLength(0);
@@ -110,13 +182,18 @@ describe("capture engine (synthetic capability only)", () => {
     const other = JSON.parse(f.p.onInspectTool({ ...a.pointer, selector: { kind: "bytes", start: 0, end: 100 } }, { sessionKey: "other" }));
     expect(other.code).not.toBe("EXTRACTED");
   });
-  it("passes a real follow-up question and the captured source to the isolated reader", async () => {
-    const f = setup();
-    const captured = envelope(f.call(text("max_retries = 3\n" + "detail\n".repeat(3000))));
+  it.each(["read_mcp_resource", "mcp__docs__read_resource"])("recovers %s through inspect/read with truthful accounting", async (name) => {
+    const f = setup({ tools: name.startsWith("mcp__") ? [name] : [] });
+    const captured = envelope(f.call(text("max_retries = 3\n" + "detail\n".repeat(3000)), name));
+    const inspected = JSON.parse(f.p.onInspectTool({ ...captured.pointer,
+      selector: { kind: "bytes", start: 0, end: 100 } }, ctx));
+    expect(inspected.code).toBe("EXTRACTED");
+    expect(JSON.stringify(inspected)).toContain("max_retries = 3");
+    expect(f.complete).not.toHaveBeenCalled();
     f.complete.mockResolvedValue({ text: JSON.stringify({
       answer: "The retry ceiling is three [c1].",
       citations: [{ id: "c1", line_start: 1, line_end: 1, quote: "max_retries = 3" }],
-    }), provider: "openai", model: "gpt-5.6-luna" });
+    }), provider: "openai", model: "gpt-5.6-luna", usage: { inputTokens: 12, outputTokens: 8 } });
     const response = JSON.parse(await f.p.onReaderTool({
       question: "What is the retry ceiling?", handles: [{ source_id: captured.pointer.source_id, snapshot_id: captured.pointer.snapshot_id }],
     }, { sessionKey: "s1", toolCallId: "followup" }));
@@ -128,6 +205,18 @@ describe("capture engine (synthetic capability only)", () => {
     expect(options.execution.mode).toBe("isolated-agent-runtime");
     expect(response.code).toBe("ANSWERED");
     expect(response.provenance.derived).toBe(true);
+    const records = JSON.parse(f.p.onStatsTool({}, ctx)).stats.records;
+    const capturedRecord = records.find((row: any) => row.kind === "spill");
+    expect(capturedRecord.delivery_boundary).toBe("pointer");
+    expect(capturedRecord.baseline_credit_tokens).toBeGreaterThan(0);
+    for (const output of [inspected, response]) {
+      const row = records.find((row: any) => row.operation_id === output.accounting_id);
+      expect(row.baseline_credit_tokens).toBe(0);
+    }
+    const readRecord = records.find((row: any) => row.operation_id === response.accounting_id);
+    expect(readRecord.attempts_started).toBe(1);
+    expect(readRecord.reader_input_tokens).toBe(12);
+    expect(readRecord.reader_output_tokens).toBe(8);
   });
   it("uses labelled legacy compaction when reader availability is exhausted", async () => {
     const f = setup();

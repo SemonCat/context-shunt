@@ -381,3 +381,20 @@ is deployable and unproven at production equivalence — not that it is better.
   facade gains a `task=` parameter, that indirection can go away.
 - Adapter registration schemas that expose the shared optional read selector and inspect
   per-call budget fields consistently on both hosts.
+
+## OpenClaw synthetic trust-boundary classifier (2026-09-11)
+
+The owned capture engine now classifies normalized exact identities before result,
+session, store, provider or accounting work. Protected instruction/control identities
+and MCP resource/prompt catalogs override configured eligibility. Defaults include
+`read`, `web_fetch`, `web_search`, and `read_mcp_resource`; generated MCP resource
+reads require exact operator configuration because native tools can shadow utilities.
+Unknown identities pass through regardless of payload size. See the
+[full classification contract](../adapters/openclaw/README.md#synthetic-trust-boundary-classification).
+
+Deterministic regressions cover protected oversized verbatim passthrough with zero
+capture side effects, spoof names, repeated server underscores, and resource
+capture/inspect/read with truthful accounting. This is synthetic coverage for a future
+proof-bearing seam. Live capture remains retired, unsupported (`ORDERING_UNPROVEN`),
+and unregistered; no new live protection or effective model-visible replacement is
+claimed. The existing host-proof gaps and retirement evidence remain unchanged.
