@@ -124,6 +124,46 @@ READ_TOOLS = {"read_file": "read"}
 SEARCH_TOOLS = {"search_files": "search"}
 SHELL_TOOLS = {"terminal": "shell"}
 
+
+def normalize_tool_identity(tool_name: Any) -> str:
+    """Use the same exact host identity for the pre-read gate and result classifier."""
+    return tool_name.strip().lower() if isinstance(tool_name, str) else ""
+
+
+def classify_tool_result(
+    tool_name: Any, capture_allowlist: frozenset[str] = frozenset()
+) -> str:
+    """Classify identity only; never inspect arguments, paths, or result content.
+
+    Additional capture identities require operator configuration. In particular, an MCP
+    read_resource name alone cannot prove generated-utility provenance: the hook does not
+    carry the executed handler and a server-native tool can occupy that identity. Registry
+    metadata queried after execution cannot establish which handler produced the result.
+    Protected identities take precedence over configuration; unknown tools fail closed.
+    """
+    name = normalize_tool_identity(tool_name)
+    if name in {"skill_view", "skills_list", "clarify", "todo"} or name in {
+        schema["name"] for schema, _handler, _mode in TOOLS
+    }:
+        return "protected"
+    # Match the full generated MCP identity, not an arbitrary substring or read suffix.
+    server, separator, utility = name.removeprefix("mcp__").rpartition("__")
+    if (
+        name.startswith("mcp__")
+        and separator
+        and server
+        and all(c in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in server)
+        and utility in {"list_resources", "list_prompts", "get_prompt"}
+    ):
+        return "protected"
+    if name and (
+        name in READ_TOOLS or name in SEARCH_TOOLS or name in capture_allowlist
+    ):
+        return "eligible"
+    return "passthrough"
+
+
+_capture_tool_allowlist: frozenset[str] = frozenset()
 _sessions: dict[str, ShuntSession] = {}
 _generations: dict[str, int] = {}
 _config = None
@@ -296,6 +336,10 @@ def _tool_result_capture_mode() -> ModeCapability:
                 "_apply_transform_tool_result_hook, no truncation call visible between "
                 "execute and the hook at that dispatch layer (docs/capability-matrix.md); "
                 "per-tool self-truncation upstream of that layer was not audited",
+                "capture classifier: read_file/search_files plus operator exact "
+                "capture_tool_allowlist only; protected instructions/control/catalogs "
+                "and unknown tools pass verbatim; MCP read_resource requires allowlisting "
+                "because executed-utility provenance is unavailable at the hook",
                 fail_open_evidence,
             ),
         )
@@ -399,7 +443,7 @@ def normalize_tool_call(
     tool_name: str, args: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
     """Map a Hermes tool call onto the core's ``(tool, args)`` shape."""
-    name = (tool_name or "").strip().lower()
+    name = normalize_tool_identity(tool_name)
     args = args or {}
     if name in READ_TOOLS:
         return "read", {
@@ -606,9 +650,9 @@ def transform_tool_result(
     explicit question - answers it afterward, exactly like the artifact-import boundary's
     own capture-then-ask shape.
 
-    Authoritative ``skill_view`` results pass verbatim: neither reader summaries nor
-    deterministic compaction can substitute for skill instructions. For all other tools,
-    never raises, and never returns ``None`` for a result already known to be oversized:
+    Protected and unclassified identities pass verbatim before any capture work. Only
+    explicitly eligible results reach measurement. For these candidates, never raises,
+    and never returns ``None`` for an internal failure after measurement as oversized:
     Hermes wraps this dispatch in try/except and lets a raising handler's *original, raw*
     result through unchanged (host-level fail-open, confirmed at 0.21.1 too) - this handler
     must never depend on that safety net. The size check below is done directly, before
@@ -617,9 +661,7 @@ def transform_tool_result(
     oversized result that then fails internally still returns a bounded failure envelope,
     never falls through to the host's raw passthrough.
     """
-    # Trust only Hermes' exact tool identity, normalized as in normalize_tool_call.
-    # Payload text and paths (including SKILL.md) cannot opt out of capture.
-    if isinstance(tool_name, str) and tool_name.strip().lower() == "skill_view":
+    if classify_tool_result(tool_name, _capture_tool_allowlist) != "eligible":
         return None
     if _config is None or not _capability.enabled("tool_result_capture"):
         return None
@@ -1048,12 +1090,24 @@ TOOLS = (
 
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
-    global _config, _capability, _llm, _store
+    global _config, _capability, _llm, _store, _capture_tool_allowlist
 
     for session in _sessions.values():
         session.close()
     _sessions.clear()
-    raw = _load_plugin_config(ctx)
+    raw = dict(_load_plugin_config(ctx))
+    _capture_tool_allowlist = frozenset()
+    allowlist = raw.pop("capture_tool_allowlist", [])
+    if not isinstance(allowlist, list) or any(
+        not isinstance(name, str) or not normalize_tool_identity(name)
+        for name in allowlist
+    ):
+        raise ValueError(
+            "capture_tool_allowlist must be a list of nonempty exact tool identities"
+        )
+    _capture_tool_allowlist = frozenset(
+        normalize_tool_identity(name) for name in allowlist
+    )
     import os
 
     default_cache = Path(

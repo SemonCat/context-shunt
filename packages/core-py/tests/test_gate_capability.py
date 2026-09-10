@@ -309,7 +309,7 @@ def test_authoritative_skill_passthrough_has_no_side_effects(tmp_path, monkeypat
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["read_file", "mcp_result", "skill_view_extra", "mcp_skill_view", "skill_view.file", ""],
+    ["read_file", "search_files"],
 )
 def test_skill_content_cannot_exempt_ordinary_results(tmp_path, tool_name):
     module = _load_adapter()
@@ -944,3 +944,174 @@ def test_openclaw_post_tool_release_gate_cannot_certify_a_retired_seam(monkeypat
     assert result.status == verify.STATUS_EXPECTED_UNSUPPORTED
     assert result.cases == 0
     assert "effective" in result.detail
+
+
+PROTECTED_RESULTS = [
+    "skill_view",
+    "skills_list",
+    "clarify",
+    "todo",
+    "context_shunt_read",
+    "context_shunt_inspect",
+    "context_shunt_import",
+    "context_shunt_stats",
+    "mcp__x__list_resources",
+    "mcp__x__list_prompts",
+    "mcp__x__get_prompt",
+    "mcp__team__docs__get_prompt",
+]
+UNKNOWN_RESULTS = [
+    "skills_list_extra",
+    "context_shunt_read_fake",
+    "mcp__x__read_resource_extra",
+    "mcp__x__read_resource",
+    "skill_view_extra",
+    "mcp_skill_view",
+    "skill_view.file",
+    "mcp_result",
+    "write_file",
+    "terminal",
+    "some_read_tool",
+    "",
+    None,
+]
+
+
+@pytest.mark.parametrize("tool_name", PROTECTED_RESULTS + UNKNOWN_RESULTS)
+def test_classifier_passthrough_has_zero_effects(tmp_path, monkeypatch, tool_name):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    llm = FakeLlm()
+    module.register(FakeCtx(config, llm=llm))
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("passthrough attempted session/store/provider/accounting work")
+
+    for name in ("_session", "ShuntSession", "SnapshotStore", "build_provider", "_bridge_call"):
+        monkeypatch.setattr(module, name, forbidden)
+    payload = json.dumps(
+        [
+            {
+                "id": f"item-{i}",
+                "status": status,
+                "description": "human answer SKILL.md read_resource " * 250,
+            }
+            for i, status in enumerate(["pending", "in_progress", "completed"])
+        ]
+    )
+    if tool_name == "skills_list":
+        payload = json.dumps(
+            {
+                "skills": [
+                    {
+                        "name": f"workflow-{i}",
+                        "description": "Use for repository maintenance and review.",
+                        "path": f"/skills/workflow-{i}/SKILL.md",
+                    }
+                    for i in range(200)
+                ]
+            }
+        )
+    elif tool_name == "clarify":
+        payload = "My answer: " + "Please preserve these requirements. " * 600
+    assert len(payload.encode()) > 20 * 1024
+    replacement = module.transform_tool_result(tool_name=tool_name, result=payload, session_id="p")
+    delivered = payload if replacement is None else replacement
+    assert delivered == payload
+    assert not module._sessions and not module._generations and not llm.calls
+    assert {
+        p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("tool_name", PROTECTED_RESULTS)
+def test_protected_classification_wins_over_allowlist(tool_name):
+    module = _load_adapter()
+    assert module.classify_tool_result(" " + tool_name.upper() + " ", {tool_name}) == "protected"
+
+
+@pytest.mark.parametrize("tool_name", UNKNOWN_RESULTS)
+def test_unknown_classification_is_exact(tool_name):
+    module = _load_adapter()
+    assert module.classify_tool_result(tool_name) == "passthrough"
+    if tool_name:
+        assert module.classify_tool_result(tool_name, {tool_name}) == "eligible"
+
+
+def test_mcp_allowlist_configuration_resets(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["capture_tool_allowlist"] = [" MCP__X__READ_RESOURCE "]
+    module.register(FakeCtx(config))
+    assert module._capture_tool_allowlist == frozenset({"mcp__x__read_resource"})
+    module.register(FakeCtx(_config(tmp_path)))
+    assert not module._capture_tool_allowlist
+
+
+@pytest.mark.parametrize("bad", ["read_file", [None], [" "], {"read_file": True}])
+def test_capture_allowlist_rejects_non_exact_configuration(tmp_path, bad):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["capture_tool_allowlist"] = bad
+    with pytest.raises(ValueError, match="exact tool identities"):
+        module.register(FakeCtx(config))
+
+
+def test_allowlisted_mcp_resource_capture_recovery_and_accounting(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["capture_tool_allowlist"] = [" MCP__X__READ_RESOURCE "]
+    llm = FakeLlm()
+    module.register(FakeCtx(config, llm=llm))
+    payload = "max_retries = 3\n" + "resource data line\n" * 2000
+    pointer = json.loads(
+        module.transform_tool_result(
+            tool_name="mcp__x__read_resource", result=payload, session_id="resource"
+        )
+    )
+    assert pointer["code"] == "SPILLED"
+    assert not llm.calls
+    handle = {key: pointer["sources"][0][key] for key in ("source_id", "snapshot_id")}
+    inspected = json.loads(
+        module.context_shunt_inspect(
+            **handle, selector={"kind": "lines", "start": 1, "end": 1}, session_id="resource"
+        )
+    )
+    assert "max_retries = 3" in json.dumps(inspected)
+    assert not llm.calls
+    answer = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?", handles=[handle], session_id="resource"
+        )
+    )
+    assert answer["code"] == "ANSWERED"
+    assert llm.calls
+    assert answer["sources"][0]["snapshot_id"] == handle["snapshot_id"]
+    records = json.loads(module.context_shunt_stats(session_id="resource"))["stats"]["records"]
+    assert len(records) == 3
+    credits = [row["baseline_credit_tokens"] for row in records]
+    assert sum(credit > 0 for credit in credits) == 1
+    spill = next(row for row in records if row["kind"] == "spill")
+    assert spill["baseline_credit_tokens"] > 0
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "mcp__x__read_resource"])
+def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch, tool_name):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["capture_tool_allowlist"] = ["mcp__x__read_resource"]
+    module.register(FakeCtx(config))
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("capture construction failed")
+
+    monkeypatch.setattr(module, "_session", broken)
+    for value in ("small", {"image": "x" * 30_000}):
+        assert module.transform_tool_result(tool_name=tool_name, result=value) is None
+    out = module.transform_tool_result(tool_name=tool_name, result="x" * 30_000)
+    assert json.loads(out)["code"] == "HOST_UNSAFE"
+    assert len(out.encode()) <= module._config.limits.max_envelope_bytes

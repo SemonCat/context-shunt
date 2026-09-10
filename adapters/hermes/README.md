@@ -59,12 +59,31 @@ See [shared configuration](../../docs/configuration.md#automatic-exact-extractio
 for trigger exclusions, bounds and the 1.1 behavioral compatibility change.
 
 
-Hermes authoritative skill loading is exempt from both the pre-read gate and result
-capture: the host-supplied tool name, after whitespace trimming and lowercasing, must
-be exactly `skill_view`. Its complete result passes unchanged to the main model before
-capture session/provider construction, with no spill artifact or accounting event.
-Neither an auxiliary-model summary nor deterministic compaction substitutes for skill
-instructions. This trusts the host tool identity only: `/skills/`, `SKILL.md`,
-`_source_path`, and claimed tool names inside output or arguments confer no exemption.
-A generic `read_file` of a large `SKILL.md` remains subject to the normal gate and capture.
-Other oversized results retain bounded failure handling; OpenClaw behavior is unchanged.
+Hermes result capture uses an exact identity classifier before session, artifact,
+provider, or accounting work. Names are trimmed and lowercased consistently with the
+pre-read gate. Protected results pass verbatim: `skill_view`, `skills_list`, `clarify`,
+`todo`, every registered `context_shunt_*` tool, and full generated MCP identities
+`mcp__<server>__list_resources`, `list_prompts`, and `get_prompt`. Catalog/prompt
+identities stay protected even when explicitly allowlisted.
+
+Only `read_file`, `search_files`, and additional identities in the Hermes-only
+`capture_tool_allowlist` configuration are eligible. Unknown, interaction, control,
+and write tools (including unrestricted `terminal`) default to passthrough. An exact
+operator allowlist entry can opt an additional tool into capture, but cannot override
+protected identities. Similar names such as `context_shunt_read_fake` have neither
+protected status nor default capture eligibility. Paths, `SKILL.md`, payload text,
+and arbitrary name substrings never determine classification.
+
+MCP `read_resource` requires an explicit exact allowlist entry, for example
+`capture_tool_allowlist: [mcp__docs__read_resource]`. Hermes can register a server-native
+tool under the same identity. Its registry exposes the current handler, but the result
+hook does not supply the executed handler or immutable utility provenance. Looking up
+the current registry after execution cannot prove which handler produced the result.
+The allowlist is an operator assertion about the intended identity, not automatic
+provenance verification; verify server configuration/collisions before adding an entry
+and recheck when that configuration changes. No Hermes/package patch is required.
+
+Small and structured/multimodal results remain unchanged. Once an eligible string is
+measured oversized, an internal capture failure still returns bounded `HOST_UNSAFE`.
+`skill_view` also remains exempt from the pre-read gate; a generic `read_file` of a large
+`SKILL.md` remains subject to the normal gate and capture. OpenClaw behavior is unchanged.

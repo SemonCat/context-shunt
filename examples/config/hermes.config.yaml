@@ -90,6 +90,11 @@ plugins:
         # see docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not
         # and docs/acceptance.md#tool_result_capture-cutover-on-hermes before setting this.
         # `enabled: true` alone changes nothing without the attestation below.
+        # Hermes-only exact capture additions; empty by default. Verify this identity
+        # is the intended protocol utility, not a server-native namesake. Protected
+        # catalogs/prompts/control tools cannot be opted in. No wildcard matching.
+        capture_tool_allowlist: []
+        # capture_tool_allowlist: [mcp__docs__read_resource]
         tool_result_capture:
           enabled: false
           # host_ordering_verified_locally: true

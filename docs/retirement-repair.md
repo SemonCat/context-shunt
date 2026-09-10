@@ -104,3 +104,22 @@ for semantic failure classification. Empty no-match replies, citation validation
 cited answers, budget-limit errors, and cost/handle/TTL behavior retain their contracts.
 Legacy and structured regressions use the invented source line `alpha`; unused-citation
 and recovery-TTL cases fail against `cb1bce9`, with empty and properly cited controls.
+
+## Trust-boundary classifier repair (2026-09-11)
+
+Replaced capture-by-size-except-skill_view with an exact identity classifier in the
+Hermes adapter. Protected instructions, catalogs, interaction/control results and
+context-shunt recovery tools pass verbatim before capture side effects; unknown and
+write tools default to passthrough. Only read_file/search_files and operator-configured
+exact additions are eligible. Existing oversized eligible failure envelopes are retained.
+
+Read-only inspection of local Hermes tools/mcp_tool.py, tools/registry.py and
+model_tools.py found shared MCP utility/native naming and current-handler metadata,
+but no executed-handler provenance in transform_tool_result. Consequently generated
+read_resource is supported through the adapter-owned capture_tool_allowlist, empty by
+default, with collision verification owned by the operator. No third-party files or
+live services were changed. See the Hermes README for the full classification contract.
+
+Deterministic regressions cover zero-effect protected/unknown passthrough, exact
+classification and configuration, resource pointer/inspect/read recovery and one-time
+accounting. These are not live Hermes delivery or real-provider attribution proof.
