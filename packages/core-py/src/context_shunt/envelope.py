@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from .errors import RETRYABLE_CODES, ShuntError
+from .errors import RETRYABLE_CODES, ShuntError, safe_failure_detail
 from .limits import EMITTED_SCHEMA_VERSION, legal_pair
 from .provenance import Provenance, ProvenanceLabel, ResultKind, deterministic
 
@@ -61,6 +61,7 @@ RECOVERY_ACTIONS = frozenset(
         "RECAPTURE_SOURCE",
         "CONFIGURE_READER_MODEL",
         "REVIEW_DISCLOSURE_BUDGET",
+        "REUSE_POINTER_PAIR",
         "NONE",
     }
 )
@@ -77,11 +78,11 @@ _HANDLES_SURVIVE = frozenset(
         "LIMIT_EXCEEDED",
         "DISCLOSURE_EXHAUSTED",
         "PROVENANCE_UNAVAILABLE",
-        "INVALID_REQUEST",
     }
 )
 
 _RECOVERY_BY_CODE: dict[str, tuple[str, ...]] = {
+    "INVALID_REQUEST": ("REUSE_POINTER_PAIR",),
     "MODEL_ERROR": ("RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"),
     "INVALID_MODEL_OUTPUT": ("RETRY_SAME_QUESTION", "INSPECT_HANDLE"),
     "CITATION_INVALID": ("REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"),
@@ -162,6 +163,7 @@ def build(
     accounting_id: str | None = None,
     extraction: dict[str, Any] | None = None,
     legacy_compaction: dict[str, Any] | None = None,
+    failure_detail: str | None = None,
     stats: dict[str, Any] | None = None,
     recovery: dict[str, Any] | None = None,
     import_receipt: dict[str, Any] | None = None,
@@ -225,6 +227,8 @@ def build(
     prov = provenance or _default_provenance(kind)
     if prov.derived != (kind is ResultKind.MODEL_DERIVED):
         raise ValueError("provenance.derived must agree with result_kind")
+    if failure_detail is not None:
+        env["failure_detail"] = safe_failure_detail(failure_detail)
     env["result_kind"] = kind.value
     env["provenance"] = prov.to_dict()
     env["accounting_id"] = accounting_id or _PLACEHOLDER_ACCOUNTING_ID
@@ -318,11 +322,19 @@ def error_envelope(
         status=status,
         code=exc.code,
         retryable=exc.retryable,
-        guidance=guidance,
+        failure_detail=safe_failure_detail(exc.detail),
+        guidance=guidance
+        or (
+            "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema."
+            if exc.code == "INVALID_REQUEST"
+            else None
+        ),
         sources=sources,
         accounting_id=accounting_id,
         provenance=provenance,
-        recovery=recovery_for(exc.code, handles_valid=handles_valid),
+        recovery=recovery_for(
+            exc.code, handles_valid=False if exc.code == "INVALID_REQUEST" else handles_valid
+        ),
         schema_version=schema_version,
     )
 

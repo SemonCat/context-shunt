@@ -520,6 +520,21 @@ export class FallbackChainProvider implements ReaderProvider {
   }
 
   /**
+   * Return a unique leaf for a previously observed requested identity.
+   *
+   * Citation repair is a semantic operation, so it cannot advance this availability
+   * chain to a different target. A target is selectable only when exactly one leaf
+   * declares the same provider/model pair; ambiguity is reported to the reader as an
+   * instruction to skip repair. The ordinary read path continues to use `complete`.
+   */
+  repairProviderFor(identity: ModelIdentity): ReaderProvider | undefined {
+    const matches = this.chain.filter((candidate) =>
+      sameIdentity(providerTargetOf(candidate), identity),
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  /**
    * Try each target in turn, inside *one* shared budget.
    *
    * The chain sees `timeoutMs`, not the request deadline, so it has to police the budget
@@ -704,6 +719,11 @@ export class FallbackChainProvider implements ReaderProvider {
     }
     throw chainFailure(last, () => new ShuntError("MODEL_ERROR", "NO_PROVIDER", false));
   }
+}
+
+function sameIdentity(target: ProviderTarget, identity: ModelIdentity): boolean {
+  return target.provider === (identity.provider ?? "")
+    && target.model === (identity.model ?? "");
 }
 
 /**

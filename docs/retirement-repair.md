@@ -1,5 +1,8 @@
 # Retirement canary implementation repair
 
+> Historical repair record: its citation-error and availability-only fallback decisions are superseded by the mandatory Shunt-owned fallback invariant documented in [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover). The mechanical citation and source-safety checks described here remain in force.
+
+
 The private 2026-09-10 retirement archive is authoritative. It was read only; no logs,
 questions, source contents, credentials, or runtime configs are copied into this repository.
 The fixtures use invented text and reproduce structural failure conditions only.

@@ -2,8 +2,8 @@
 
 > Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
 > Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
-> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
-> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> live canary. OpenClaw automatic capture is unsupported; Shunt-owned citation failures now use mandatory
+> bounded legacy compaction after at most one citation repair. Do not use the historical cutover steps to re-enable capture.
 > See [current capabilities](capability-matrix.md#openclaw).
 
 
@@ -242,7 +242,7 @@ step 1 below is a precondition-check, not a suggestion.
    host).
 2. The operator has personally reviewed [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
    — the attestation below is *their* claim, not this adapter's.
-3. `reader.legacy_compaction` is `true` (the default) in the deployment's config, so a
+3. Legacy compaction is mandatory regardless of the deprecated config key, so a
    reader failure on a captured handle degrades to a bounded summary rather than a bare
    pointer with no further recourse.
 4. A rollback path exists: the incumbent plugin's files are untouched by this cutover (only
@@ -268,7 +268,7 @@ plugins:
           enabled: true
           host_ordering_verified_locally: true   # <-- the operator's own attestation
         reader:
-          legacy_compaction: true                # default; explicit here for clarity
+          legacy_compaction: false               # deprecated no-op; fallback remains mandatory
 ```
 
 Two things this repository verified and two it did not, stated plainly:
@@ -373,3 +373,17 @@ as remaining operator/live gates, not completed work:
 Codex-native PostToolUse replacement and complete-original capture above ingress sanitization
 caps are outside this seam. The latter needs an upstream host change or producer-side design;
 no OpenClaw source patch is required for the supported middleware-visible scope.
+
+## Mandatory fallback acceptance
+
+Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
+
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
+
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
+
+Deployment is separate from these deterministic checks: Ruby owns live drift checks, session drain/restart approval, deployment, and canaries. This change does not modify live configuration or restart a host. Existing sessions remain untouched.

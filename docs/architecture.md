@@ -100,8 +100,8 @@ pass through without capture savings claims. See [capability evidence](capabilit
 The pre-read gate blocks only known large unbounded reads on allowed sources. Unknown,
 unclassifiable, search, and safe bounded calls pass through. Strict source authorization
 still applies when a source is explicitly registered for the question-aware reader.
-Citation-invalid results retain the error and evidence handles; availability-only recovery
-may provide explicitly non-semantic compaction or exact extraction.
+Citation-invalid results retain diagnostics and evidence handles through mandatory legacy recovery; provider availability recovery
+provides explicitly non-semantic bounded legacy compaction.
 
 ## Artifact import boundary
 
@@ -222,34 +222,17 @@ known. Incomplete or unknown coverage cannot be published as complete. If a seri
 answer would exceed its envelope, evidence is dropped deterministically and the assertions
 that depended on it are removed; an empty result is a refusal, not a false `NO_MATCH`.
 
-## Automatic availability escape hatch
-
-`ShuntSession.read` uses the existing inspector only after a wholly unavailable reader
-result. It extracts a nonempty, strictly shorter byte prefix of the first source (2 KiB by
-default, at most 4 KiB), revalidates every handle, guards before charging disclosure, and
-records one delivery with both failed LLM cost and extraction egress. It publishes
-`partial/EXTRACTED`, explicit escape-hatch guidance, deterministic provenance and conservative
-omissions, never a summary. The 1.1 envelope and store schemas are unchanged. Wholly failed
-reads now report `MODEL_ERROR`/`TIMEOUT` rather than partial `NO_MATCH` when extraction cannot
-run. See [configuration](configuration.md#automatic-exact-extraction-after-reader-unavailability)
-for exact triggers, selector-independent prefix selection, limits and compatibility.
-
 ## Legacy-compaction fallback
 
-On Python/Hermes, `reader.legacy_compaction` (default on) is tried before automatic
-extraction for terminal `MODEL_ERROR` and `TIMEOUT`, including
-wholly unavailable readers after retries and model fallback. It publishes a deterministic, ported heuristic summary of the
-first requested source - signal lines, head/tail sampling, repeated-line collapsing, JSON
-structure, secret redaction - never exact bytes and never model output, as
-`partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`,
-`provenance.derived: false`, and a dedicated `legacy_compaction` block distinct from
-`extraction`'s "never a summary" contract. A reported-model mismatch is deliberately
-excluded: `enforce_policy` already treats that as a wrong answer, not a weak one, and a
-heuristic summary is not a remedy for it. If compaction is disabled or unsafe, wholly unavailable reads may use secondary exact
-extraction; otherwise the original bounded failure remains, never raw. Coverage and
-failed-attempt accounting are preserved. OpenClaw selects the TypeScript port on exhausted availability; generic TypeScript sessions retain automatic extraction unless this session option is selected. See
-[configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)
-for the exact trigger set, caps and wire shape.
+Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
+
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
+
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
 
 The algorithm itself (`context_shunt.legacy_compact`) is a function-for-function port of
 the text/JSON-shaping half of the incumbent tool-result compactor plugin this project

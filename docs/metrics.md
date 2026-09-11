@@ -162,10 +162,8 @@ reduction, and memory. The provider half of `benchmark all` measures live reader
 and tokens only when a bridge is configured; otherwise it is `NOT_RUN`. No versioned price
 table exists in this repository, so documentation must not translate tokens into money.
 
-Automatic availability extraction records one `read`/`refined_read` operation with
-`delivery_boundary: extraction`: failed reader attempt costs plus final serialized
-extraction egress. It does not create a second inspect delivery or discard failed LLM
-attempts. Budget debits retain started fallback calls even when timeout prevents the
-chain from returning its aggregate; unreported usage stays estimated/unknown. Exact text
-has deterministic provenance and no model attribution. See
-[automatic extraction configuration](configuration.md#automatic-exact-extraction-after-reader-unavailability).
+Mandatory legacy compaction records one `read`/`refined_read` operation with
+`delivery_boundary: extraction`: all physical reader and citation-repair call costs plus
+final serialized compaction egress. It does not create a second inspect delivery or discard
+failed attempts. Missing provider usage remains estimated/unknown. The deterministic output
+retains paid-call identity history but never claims model derivation or verified citations.

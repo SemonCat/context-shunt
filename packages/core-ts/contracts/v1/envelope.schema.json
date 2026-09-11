@@ -42,6 +42,7 @@
     "import_receipt": { "$ref": "#/$defs/importReceipt" },
     "extraction": { "$ref": "#/$defs/extraction" },
     "legacy_compaction": { "$ref": "#/$defs/legacyCompaction" },
+    "failure_detail": {"description": "Fixed diagnostic only; unknown internal tokens map to OTHER. Never source or provider text.", "enum": ["ACCOUNTING_FAILED", "AMBIGUOUS_RESPONSE_SHAPE", "ANSWER_OVER_CAP", "ANSWER_OVER_ENVELOPE", "ARTIFACT_HASH_MISMATCH", "ARTIFACT_IMPORT_DISABLED", "ARTIFACT_SIZE_MISMATCH", "ATTRIBUTION_UNPROVEN", "AVAILABILITY_EXHAUSTED", "BAD_ATTRIBUTION_POLICY", "BAD_BLOB_HASH", "BAD_BRIDGE_SHAPE", "BAD_BYTE_RANGE", "BAD_CONFIGURATION", "BAD_CURSOR", "BAD_DISCLOSURE_BYTES", "BAD_DISCLOSURE_KIND", "BAD_HANDLE_KIND", "BAD_JSON", "BAD_LIMIT_OVERRIDE", "BAD_LINE_RANGE", "BAD_POINTER", "BAD_RESPONSE_SHAPE", "BAD_SCHEMA_VERSION", "BAD_SELECTOR", "BAD_USAGE", "BASELINE_FAILED", "BATCH_TOO_LARGE", "BINARY_CONTENT", "BLOB_CONTENT_MISMATCH", "BLOB_METADATA_CONFLICT", "BLOB_MISSING", "BLOB_READ_FAILED", "BLOB_STAT_FAILED", "CACHE_INSIDE_IMPORT_ROOT", "CHUNK_BOUNDARY_INVALID", "CHUNK_OVER_TOKEN_CAP", "CURSOR_KEY_MISSING", "DDL_VERSION_MISMATCH", "DISCLOSURE_FAILED", "EMPTY_FALLBACK", "EMPTY_QUESTION", "EXTRACTION_REFUSED", "FIELD_REQUIRES_1_1", "HARDLINKED", "IDENTITY_CHANGED", "IMPORT_FAILED", "INSPECT_DISABLED", "INTERNAL_ERROR", "INVALID_ENCODING", "INVALID_JSON", "INVALID_SNAPSHOT_ID", "JSON_CYCLE", "JSON_TOO_DEEP", "JSON_TOO_MANY_NODES", "JSON_UNSUPPORTED_VALUE", "LEGACY_COMPACTION_FAILURE_UNKNOWN", "LIMIT_MAY_ONLY_NARROW", "LINE_OUT_OF_RANGE", "MANIFEST_NOT_JSON", "MANIFEST_NOT_OBJECT", "MANIFEST_OVER_BYTE_CAP", "MANIFEST_SCHEMA_NOT_ALLOWED", "MANIFEST_SCHEMA_UNDECLARED", "MANIFEST_SCHEMA_UNKNOWN", "MANIFEST_SCHEMA_VIOLATION", "MANIFEST_SOURCE_AMBIGUOUS", "MANIFEST_UNSUPPORTED_URI", "MARKER_NOT_PUBLISHED", "MIGRATION_FAILED", "MODEL_CALL", "MODEL_OUTPUT_OVER_CAP", "MODEL_SUBSTITUTED", "MODIFIED_DURING_READ", "NEEDLE_OVER_CAP", "NESTED_CHAIN_LIMITS_DIFFER", "NOT_FOUND", "NOT_JSON", "NOT_OBJECT", "NOT_REGULAR_FILE", "NO_ENVELOPE_HEADROOM", "NO_IMPORT_ROOT", "NO_PROVIDER", "NO_SOURCE", "NO_VALID_EVIDENCE", "NO_WORKSPACE_ROOT", "OPEN_FAILED", "OPERATION_NOT_ACCEPTED_HERE", "OPERATION_REQUIRES_1_1", "OTHER", "OUTSIDE_WORKSPACE_ROOT", "PERMISSION_FAILED", "PLAN", "POINTER_NOT_FOUND", "PROBE", "PROVIDER_CALL_FAILED", "PUBLISH", "PUBLISH_FAILED", "QUESTION_OVER_BYTE_CAP", "READER_DISABLED", "RECORD_OUT_OF_RANGE", "RELATIVE_PATH", "REQUEST_OVER_TOKEN_CAP", "RESOLVE", "RESULT_OVER_SOURCE_CAP", "REVOKE_FAILED", "SCHEMA_VIOLATION", "SCOPE_CLOSED", "SCOPE_CLOSE_FAILED", "SCOPE_INCOMPLETE", "SCOPE_OPEN_FAILED", "SEARCH_INDEX_MISMATCH", "SECRET_IN_ANSWER", "SECRET_IN_QUESTION", "SECRET_IN_QUOTE", "SECRET_IN_SOURCE", "SECRET_PATH", "SERIALIZE_FAILED", "SNAPSHOT_MISMATCH", "SOURCE_OVER_BYTE_CAP", "SPILL_INSIDE_WORKSPACE", "STALE_GENERATION", "STATS_DISABLED", "STORE_BYTE_QUOTA", "STORE_ENTRY_QUOTA", "SWEEP_FAILED", "SYMLINK", "TEMP_RECORD_FAILED", "TOOL_ARGS_VIOLATION", "TOOL_RESULT_CAPTURE_CONFIG_CONFLICT", "TOO_MANY_SOURCES", "UNIT_OVER_PAGE_BUDGET", "UNIT_OVER_WIRE_BUDGET", "UNKNOWN_BLOCK", "UNKNOWN_HANDLE", "UNKNOWN_LIMIT_OVERRIDE", "UNKNOWN_OPERATION", "UNSAFE_BLOB_PATH", "UNSAFE_CACHE_PATH", "UNSERIALIZABLE_RESULT", "UNSPECIFIED", "UNSUPPORTED_BLOCK", "UNSUPPORTED_SELECTOR", "UTF8_RANGE_BOUNDARY", "WRITER_OPERATION_UNSUPPORTED", "WRITER_UNSUPPORTED_CONFIGURATION", "WRITE_FAILED", "ZERO_RESULT_BUDGET"]},
     "stats": { "$ref": "#/$defs/stats" },
     "recovery": { "$ref": "#/$defs/recovery" }
   },
@@ -60,6 +61,7 @@
       "then": { "properties": { "answer": { "const": "" }, "citations": { "maxItems": 0 } }, "required": ["extraction", "result_kind"] } },
     { "if": { "properties": { "code": { "const": "LEGACY_COMPACTED" } }, "required": ["code"] },
       "then": { "properties": { "answer": { "const": "" }, "citations": { "maxItems": 0 } }, "required": ["legacy_compaction", "result_kind"] } },
+    {"if": {"properties": {"legacy_compaction": {"not": {"required": ["source_id"]}}}, "required": ["legacy_compaction"]}, "then": {"properties": {"sources": {"maxItems": 0}, "recovery": {"properties": {"handles_valid": {"const": false}}}}, "required": ["recovery"]}},
     { "if": { "properties": { "code": { "const": "STATS" } }, "required": ["code"] },
       "then": { "properties": { "answer": { "const": "" }, "citations": { "maxItems": 0 } }, "required": ["stats", "result_kind"] } },
     { "if": { "properties": { "code": { "const": "IMPORTED" } }, "required": ["code"] },
@@ -75,6 +77,7 @@
         { "not": { "required": ["accounting_id"] } },
         { "not": { "required": ["extraction"] } },
         { "not": { "required": ["legacy_compaction"] } },
+        { "not": { "required": ["failure_detail"] } },
         { "not": { "required": ["import_receipt"] } },
         { "not": { "required": ["stats"] } },
         { "not": { "required": ["recovery"] } }
@@ -271,22 +274,65 @@
       }
     },
     "legacyCompaction": {
-      "description": "1.1: a deterministic heuristic summary produced only after a reader (model) failure, ported from the incumbent tool-result compactor. Never exact snapshot bytes (see extraction for that) and never model-derived - provenance.derived is always false for this block. original_failure names the reader outcome this summary stands in for.",
+      "description": "Bounded deterministic incumbent compaction after a Shunt-owned failure. Always partial and never model-derived. Handle pair is absent when capture failed before publication; sources must then be empty.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["deterministic", "source_id", "snapshot_id", "summary", "summary_bytes", "original_bytes", "hard_cap_chars", "original_failure"],
+      "required": [
+        "deterministic",
+        "summary",
+        "summary_bytes",
+        "original_bytes",
+        "hard_cap_chars",
+        "original_failure"
+      ],
       "properties": {
-        "deterministic": { "const": true },
-        "source_id": { "$ref": "#/$defs/sourceId" },
-        "snapshot_id": { "$ref": "#/$defs/snapshotId" },
-        "summary": { "type": "string", "maxLength": 16384 },
-        "summary_bytes": { "type": "integer", "minimum": 0, "maximum": 16384 },
-        "original_bytes": { "type": "integer", "minimum": 0 },
-        "hard_cap_chars": { "type": "integer", "minimum": 1 },
+        "deterministic": {
+          "const": true
+        },
+        "source_id": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/snapshotId"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "summary_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384
+        },
+        "original_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hard_cap_chars": {
+          "type": "integer",
+          "minimum": 1
+        },
         "original_failure": {
           "description": "The reader outcome this deterministic summary stands in for. Never a provider error body or free text.",
-          "enum": ["MODEL_ERROR", "TIMEOUT", "INVALID_MODEL_OUTPUT", "CITATION_INVALID"]
+          "enum": [
+            "MODEL_ERROR",
+            "TIMEOUT",
+            "INVALID_MODEL_OUTPUT",
+            "CITATION_INVALID",
+            "STORE_FAILED",
+            "SPILL_FAILED",
+            "LIMIT_EXCEEDED",
+            "HOST_UNSAFE"
+          ]
         }
+      },
+      "dependentRequired": {
+        "source_id": [
+          "snapshot_id"
+        ],
+        "snapshot_id": [
+          "source_id"
+        ]
       }
     },
     "stats": {
@@ -365,7 +411,7 @@
           "items": {
             "enum": ["RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE",
               "NARROW_SELECTOR", "WAIT_AND_RETRY", "RECAPTURE_SOURCE", "CONFIGURE_READER_MODEL",
-              "REVIEW_DISCLOSURE_BUDGET", "NONE"]
+              "REVIEW_DISCLOSURE_BUDGET", "REUSE_POINTER_PAIR", "NONE"]
           }
         }
       }

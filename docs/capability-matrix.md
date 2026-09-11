@@ -225,7 +225,7 @@ provenance verification; verify server configuration/collisions before adding an
 and recheck when that configuration changes. No Hermes/package patch is required.
 
 Small and structured/multimodal results remain unchanged. Once an eligible string is
-measured oversized, an internal capture failure still returns bounded `HOST_UNSAFE`.
+measured oversized, a Shunt-owned internal capture failure returns bounded `LEGACY_COMPACTED` after source safety checks.
 `skill_view` also remains exempt from the pre-read gate; a generic `read_file` of a large
 `SKILL.md` remains subject to the normal gate and capture. OpenClaw behavior is unchanged.
 
@@ -263,23 +263,9 @@ Whether the gate passed a particular checkout comes from that run's result eithe
 
 ## Legacy-compaction fallback
 
-`legacy_compaction` is core session behavior, not a capability-gated mode;
-it needs the reader's snapshot store, not a host hook. After retries and the model fallback
-chain are exhausted, `context_shunt_read` tries it first for terminal `MODEL_ERROR` or
-`TIMEOUT`, including wholly unavailable readers. If disabled or
-unsafe, the narrower availability-only `automatic_extract` tier may run next; otherwise
-the original bounded failure remains. TypeScript ports the same algorithm; OpenClaw selects it on exhausted reader availability. The Python configuration/extra trigger codes below remain Hermes-specific.
-It is a direct, function-for-function port of the text/JSON-shaping
-half of the incumbent `oversize-tool-result-compactor` plugin (v0.3.0, read read-only from
-the same live host on 2026-09-09; see `packages/core-py/src/context_shunt/legacy_compact.py`'s
-module docstring for exactly what was and was not ported). It always publishes
-`result_kind: legacy_compaction`, `provenance.derived: false`, and `status: partial` — a
-heuristic summary, never claimed as exact bytes and never claimed as a model's own reading
-of the source. `reader.legacy_compaction` (default `true`) and
-`reader.legacy_compaction_max_chars` (default `16000`, range 1000–60000) control it; see
-[`configuration.md`](configuration.md). A reported-model mismatch and a `require_match`
-policy refusal are both deliberately excluded from this fallback — see the code comment
-next to `_LEGACY_COMPACTION_TRIGGER_CODES` in `session.py` for why.
+Legacy compaction is mandatory core behavior in both languages. Shunt-owned capture, store, reader, citation, inspection, and output-capacity failures use the incumbent bounded deterministic compactor when authorized source bytes are available. The deprecated `reader.legacy_compaction` key cannot disable it. `reader.legacy_compaction_max_chars` still narrows the character ceiling; all byte, wire, and applicable disclosure caps remain enforced.
+
+Caller errors, unsafe/binary/secret sources, unsupported operations/versions, binding mismatches, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. See [configuration](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover) for diagnostics, repair limits, and wire semantics. No live capability attestation is inferred from this core behavior.
 
 ## Tool coverage
 

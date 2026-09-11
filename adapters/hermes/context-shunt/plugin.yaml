@@ -4,8 +4,8 @@ description: >-
   Read-only context shunt. Blocks oversized full reads before they run and answers
   questions about large sources with a configurable reader model, returning a bounded,
   citation-verified envelope instead of the file. Exhausted or malformed reader outcomes
-  automatically fall back to a labelled deterministic escape hatch - an exact-text prefix,
-  or a broader ported legacy-shaped compaction - never a raw payload. Adds a zero-model
+  automatically fall back to mandatory bounded deterministic legacy compaction for
+  Shunt-owned failures; caller and safety refusals stay explicit. Never raw passthrough. Adds a zero-model
   exact inspector under a cumulative disclosure ceiling, a read-only session accounting
   view, an opt-in boundary that adopts oversized tool-result artifacts an external producer
   already persisted, and an opt-in, operator-attested oversized-tool-result capture hook.

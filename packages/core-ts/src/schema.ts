@@ -132,7 +132,7 @@ export function validateRequest(
     }
   }
   if (!requestValidator()(request)) {
-    throw new ShuntError("INVALID_REQUEST", "SCHEMA_VIOLATION", false);
+    throw new ShuntError("INVALID_REQUEST", invalidSnapshotId(req) ? "INVALID_SNAPSHOT_ID" : "SCHEMA_VIOLATION", false);
   }
   if (operation === "read") assertQuestion(String(req["question"] ?? ""));
   return request as unknown as CoreRequest;
@@ -144,7 +144,7 @@ export function validateToolArgs(args: unknown): Record<string, unknown> {
     throw new ShuntError("INVALID_REQUEST", "NOT_OBJECT", false);
   }
   if (!toolArgsValidator()(args)) {
-    throw new ShuntError("INVALID_REQUEST", "TOOL_ARGS_VIOLATION", false);
+    throw new ShuntError("INVALID_REQUEST", invalidSnapshotId(args as Record<string, unknown>) ? "INVALID_SNAPSHOT_ID" : "TOOL_ARGS_VIOLATION", false);
   }
   const question = (args as Record<string, unknown>)["question"];
   if (typeof question === "string") assertQuestion(question);
@@ -168,4 +168,18 @@ export function envelopeErrors(envelope: unknown): string[] {
   const validate = envelopeValidator();
   validate(envelope);
   return (validate.errors ?? []).map((error) => error.message ?? "invalid");
+}
+
+
+function invalidSnapshotId(value: Record<string, unknown>): boolean {
+  const candidates: unknown[] = [value];
+  for (const key of ["sources", "handles"]) {
+    const items = value[key];
+    if (Array.isArray(items)) candidates.push(...items.slice(0, 8));
+  }
+  return candidates.some((item) => {
+    if (typeof item !== "object" || item === null || !("snapshot_id" in item)) return false;
+    const id = (item as Record<string, unknown>)["snapshot_id"];
+    return typeof id !== "string" || id.length !== 71 || !/^sha256:[0-9a-f]{64}$/.test(id);
+  });
 }

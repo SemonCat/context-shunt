@@ -82,6 +82,8 @@ from __future__ import annotations
 
 import json
 import sys
+from copy import deepcopy
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -101,11 +103,13 @@ from context_shunt.config import load as load_config  # noqa: E402
 from context_shunt.errors import ShuntError  # noqa: E402
 from context_shunt.guard import enforce_or_fixed, fixed_error  # noqa: E402
 from context_shunt.limits import (  # noqa: E402
+    CONTRACTS_DIR,
     EMITTED_SCHEMA_VERSION,
     READER_MODEL,
 )
 from context_shunt.provider import UnavailableProvider  # noqa: E402
 from context_shunt.session import build_provider  # noqa: E402
+from context_shunt.fallback import compact_failure, compact_paths_failure  # noqa: E402
 from context_shunt.schema import validate_tool_args  # noqa: E402
 from context_shunt.session import ShuntSession  # noqa: E402
 from context_shunt.store import ScopeIdentity, SnapshotStore  # noqa: E402
@@ -688,11 +692,21 @@ def transform_tool_result(
     try:
         session = _session(task_id, session_id)
         outcome = session.post_tool_result(request_id, result)
-    except Exception:
-        # This result was already measured oversized, so returning None here would fall
-        # through to Hermes' own fail-open and leak it raw. An internal failure past this
-        # point must still return a bounded string.
-        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
+    except Exception as raw_exc:
+        failure = (
+            raw_exc
+            if isinstance(raw_exc, ShuntError)
+            else ShuntError("HOST_UNSAFE", "INTERNAL_ERROR")
+        )
+        return _block_message(
+            compact_failure(
+                request_id,
+                result.encode("utf-8"),
+                failure,
+                limits=_config.limits,
+                hard_chars=_config.reader.legacy_compaction_max_chars,
+            )
+        )
     if outcome is None or outcome.action == "passthrough":
         # `None` means the mode is disabled at the session level (config.enabled=false,
         # already excluded above via the capability check, kept as defense in depth);
@@ -703,7 +717,15 @@ def transform_tool_result(
     if outcome.envelope is None:
         # Every non-passthrough SpillOutcome carries a bounded envelope; this should be
         # unreachable, but refuse rather than pass anything unbounded through if it isn't.
-        return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
+        return _block_message(
+            compact_failure(
+                request_id,
+                result.encode("utf-8"),
+                ShuntError("HOST_UNSAFE", "INTERNAL_ERROR"),
+                limits=_config.limits,
+                hard_chars=_config.reader.legacy_compaction_max_chars,
+            )
+        )
     return _block_message(outcome.envelope)
 
 
@@ -749,19 +771,36 @@ def context_shunt_read(args: dict[str, Any] | None = None, **kwargs) -> str:
     the named immutable snapshot and never recaptures the source.
     """
     params = {**(args or {}), **kwargs}
-    session = _session(
-        str(params.get("task_id") or ""), str(params.get("session_id") or "")
-    )
     request_id = _request_id(params)
 
     try:
-        tool_args = validate_tool_args(_read_args(params))
+        tool_args = _validate_tool_args(_read_args(params))
     except ShuntError as exc:
         return _error(request_id, exc)
 
     try:
+        session = _session(
+            str(params.get("task_id") or ""), str(params.get("session_id") or "")
+        )
+    except Exception as raw_exc:
+        failure = (
+            raw_exc
+            if isinstance(raw_exc, ShuntError)
+            else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
+        )
         if "paths" in tool_args:
-            entries = session.register_paths([str(p) for p in tool_args["paths"]])
+            return _block_message(
+                compact_paths_failure(request_id, tool_args["paths"], failure, _config)
+            )
+        return _error(request_id, failure)
+
+    try:
+        if "paths" in tool_args:
+            entries = session.capture_read_paths(
+                request_id, [str(p) for p in tool_args["paths"]]
+            )
+            if isinstance(entries, dict):
+                return _block_message(entries)
             sources = [
                 {
                     "source_id": entry.source_id,
@@ -806,21 +845,21 @@ def context_shunt_read(args: dict[str, Any] | None = None, **kwargs) -> str:
         return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
 
 
-def _read_args(params: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "tool": "context_shunt_read",
-        "question": params.get("question"),
+def _public_tool_args(params: dict[str, Any], tool: str) -> dict[str, Any]:
+    # Host routing metadata is outside the model-visible arguments contract.
+    metadata = {"task_id", "session_id", "tool_call_id", "turn_id"}
+    return {
+        "tool": tool,
+        **{key: value for key, value in params.items() if key not in metadata},
     }
-    paths = params.get("paths")
-    if isinstance(paths, str):
-        paths = [paths]
-    if paths is not None:
-        out["paths"] = paths
-    if params.get("handles") is not None:
-        out["handles"] = params["handles"]
-    if params.get("selector") is not None:
-        out["selector"] = params["selector"]
-    return out
+
+
+def _read_args(params: dict[str, Any]) -> dict[str, Any]:
+    return _public_tool_args(params, "context_shunt_read")
+
+
+def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
+    return validate_tool_args(args)
 
 
 def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
@@ -831,15 +870,8 @@ def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
     )
     request_id = _request_id(params)
     try:
-        tool_args = validate_tool_args(
-            {
-                "tool": "context_shunt_inspect",
-                **{
-                    key: params[key]
-                    for key in ("source_id", "snapshot_id", "selector", "cursor")
-                    if params.get(key) is not None
-                },
-            }
+        tool_args = _validate_tool_args(
+            _public_tool_args(params, "context_shunt_inspect")
         )
     except ShuntError as exc:
         return _error(request_id, exc)
@@ -888,15 +920,15 @@ def context_shunt_stats(args: dict[str, Any] | None = None, **kwargs) -> str:
         "request_id": request_id,
         "operation": "stats",
     }
+    try:
+        tool_args = _validate_tool_args(
+            _public_tool_args(params, "context_shunt_stats")
+        )
+    except ShuntError as exc:
+        return _error(request_id, exc)
     for key in ("page", "page_size"):
-        if params.get(key) is not None:
-            try:
-                request[key] = int(params[key])
-            except (TypeError, ValueError):
-                return _error(
-                    request_id,
-                    ShuntError("INVALID_REQUEST", "BAD_PAGE", retryable=False),
-                )
+        if key in tool_args:
+            request[key] = tool_args[key]
     try:
         return _block_message(session.stats(request))
     except Exception:
@@ -916,15 +948,8 @@ def context_shunt_import(args: dict[str, Any] | None = None, **kwargs) -> str:
     )
     request_id = _request_id(params)
     try:
-        tool_args = validate_tool_args(
-            {
-                "tool": "context_shunt_import",
-                **{
-                    key: params[key]
-                    for key in ("manifest_path",)
-                    if params.get(key) is not None
-                },
-            }
+        tool_args = _validate_tool_args(
+            _public_tool_args(params, "context_shunt_import")
         )
     except ShuntError as exc:
         return _error(request_id, exc)
@@ -943,9 +968,83 @@ def context_shunt_import(args: dict[str, Any] | None = None, **kwargs) -> str:
 def _error(request_id: str, exc: ShuntError) -> str:
     from context_shunt import envelope as E
 
+    guidance = None
+    if exc.code == "INVALID_REQUEST" and exc.detail == "INVALID_SNAPSHOT_ID":
+        guidance = "Reuse the exact source_id/snapshot_id pair from the pointer."
     return _block_message(
-        enforce_or_fixed(E.error_envelope(request_id, exc), _config.limits)
+        enforce_or_fixed(
+            E.error_envelope(request_id, exc, guidance=guidance), _config.limits
+        )
     )
+
+
+@cache
+def _tool_args_contract() -> dict[str, Any]:
+    """Load the synchronized canonical tool contract used by both cores."""
+    with (CONTRACTS_DIR / "tool-args.schema.json").open("rb") as fh:
+        return json.load(fh)
+
+
+def _inline_contract_refs(
+    value: Any, definitions: dict[str, Any], active: tuple[str, ...] = ()
+) -> Any:
+    """Inline local ``$defs`` references for hosts that validate parameters in isolation."""
+    if isinstance(value, list):
+        return [_inline_contract_refs(item, definitions, active) for item in value]
+    if not isinstance(value, dict):
+        return value
+    ref = value.get("$ref")
+    if ref is not None:
+        prefix = "#/$defs/"
+        if not isinstance(ref, str) or not ref.startswith(prefix):
+            raise ValueError("tool-args contract contains an unsupported reference")
+        name = ref[len(prefix) :]
+        if name not in definitions or name in active:
+            raise ValueError("tool-args contract contains an invalid reference")
+        resolved = _inline_contract_refs(
+            deepcopy(definitions[name]), definitions, (*active, name)
+        )
+        if len(value) > 1:
+            if not isinstance(resolved, dict):
+                raise ValueError(
+                    "tool-args contract reference has unsupported siblings"
+                )
+            resolved.update(
+                {
+                    key: _inline_contract_refs(item, definitions, active)
+                    for key, item in value.items()
+                    if key != "$ref"
+                }
+            )
+        return resolved
+    return {
+        key: _inline_contract_refs(item, definitions, active)
+        for key, item in value.items()
+    }
+
+
+def _registered_tool_parameters(definition_name: str) -> dict[str, Any]:
+    """Project one canonical tool definition onto Hermes' arguments-only schema."""
+    contract = _tool_args_contract()
+    definitions = contract.get("$defs")
+    if not isinstance(definitions, dict) or definition_name not in definitions:
+        raise ValueError("tool-args contract is missing the registered tool definition")
+    parameters = _inline_contract_refs(
+        deepcopy(definitions[definition_name]), definitions
+    )
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict) or "tool" not in properties:
+        raise ValueError("tool-args contract tool definition has no discriminator")
+    properties.pop("tool")
+    parameters["properties"] = properties
+    required = parameters.get("required")
+    if isinstance(required, list):
+        required = [name for name in required if name != "tool"]
+        if required:
+            parameters["required"] = required
+        else:
+            parameters.pop("required", None)
+    return parameters
 
 
 READER_TOOL_SCHEMA = {
@@ -953,43 +1052,11 @@ READER_TOOL_SCHEMA = {
     "description": (
         "Answer a question about one or more large files without pulling them into this "
         "conversation. Returns a bounded, citation-verified answer that is generated by a "
-        "reader model. After exhausted availability, may return a labelled bounded exact-text "
-        "escape hatch instead of a summary. Read-only. Pass paths for a first look, or "
+        "reader model. Shunt-owned failures automatically return labelled bounded deterministic "
+        "legacy compaction with incomplete coverage. Read-only. Pass paths for a first look, or "
         "handles to ask a sharper question about a snapshot you already hold."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "question": {
-                "type": "string",
-                "description": "The question to answer. Required.",
-            },
-            "paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Absolute paths inside a configured workspace root. Use this OR handles, "
-                    "never both."
-                ),
-            },
-            "handles": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "source_id": {"type": "string"},
-                        "snapshot_id": {"type": "string"},
-                    },
-                    "required": ["source_id", "snapshot_id"],
-                },
-                "description": (
-                    "Handles from an earlier reply, to refine the question against the same "
-                    "immutable snapshot. Use this OR paths, never both."
-                ),
-            },
-        },
-        "required": ["question"],
-    },
+    "parameters": _registered_tool_parameters("readArgs"),
 }
 
 INSPECT_TOOL_SCHEMA = {
@@ -1001,32 +1068,7 @@ INSPECT_TOOL_SCHEMA = {
         "cumulative disclosure budget, so a large file cannot be paged into a full copy; a "
         "file small enough to fit that budget can be returned in full."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "source_id": {
-                "type": "string",
-                "description": "Handle from an earlier reply.",
-            },
-            "snapshot_id": {
-                "type": "string",
-                "description": "The snapshot hash you were given. A mismatch is refused.",
-            },
-            "selector": {
-                "type": "object",
-                "description": (
-                    'Exactly one of {"kind":"lines","start":N,"end":N}, '
-                    '{"kind":"bytes","start":N,"end":N}, or '
-                    '{"kind":"search","needle":"...","max_matches":N}.'
-                ),
-            },
-            "cursor": {
-                "type": "string",
-                "description": "Opaque next_cursor from a previous inspect result.",
-            },
-        },
-        "required": ["source_id", "snapshot_id", "selector"],
-    },
+    "parameters": _registered_tool_parameters("inspectArgs"),
 }
 
 STATS_TOOL_SCHEMA = {
@@ -1036,20 +1078,7 @@ STATS_TOOL_SCHEMA = {
         "spent, and per-operation records. Read-only - it cannot reset a counter, change "
         "retention, see another session, or reveal any source content."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "page": {
-                "type": "integer",
-                "description": "1-based page of operation records.",
-            },
-            "page_size": {
-                "type": "integer",
-                "description": "Records per page, at most 8.",
-            },
-        },
-        "required": [],
-    },
+    "parameters": _registered_tool_parameters("statsArgs"),
 }
 
 IMPORT_TOOL_SCHEMA = {
@@ -1062,19 +1091,7 @@ IMPORT_TOOL_SCHEMA = {
         "and metadata - never the artifact's contents. Read it afterwards with "
         "context_shunt_read for a cited answer, or context_shunt_inspect for exact lines."
     ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "manifest_path": {
-                "type": "string",
-                "description": (
-                    "Absolute path of the producer manifest, inside a configured "
-                    "artifact_import root."
-                ),
-            },
-        },
-        "required": ["manifest_path"],
-    },
+    "parameters": _registered_tool_parameters("importArgs"),
 }
 
 TOOLS = (
@@ -1134,13 +1151,12 @@ def register(ctx: Any) -> None:
             # plugin's own defaults; it just loses the config surface.
             pass
 
-    _store = SnapshotStore(_config.cache_root, _config.limits)
-    # Deterministic recovery first: clear staged temps and unreferenced content from a
-    # previous crash before any new handle is published.
+    # A store outage must not prevent registration of the capture fallback hook.
     try:
+        _store = SnapshotStore(_config.cache_root, _config.limits)
         _store.recover()
-    except ShuntError:
-        pass
+    except Exception:
+        _store = None
 
     if _capability.enabled("local_gate"):
         ctx.register_hook("pre_tool_call", pre_tool_call)

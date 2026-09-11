@@ -23,7 +23,7 @@ the cutover plan.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
-| `context_shunt_read` | a cited answer, or a labelled bounded exact prefix after exhausted availability | at least one per processed chunk; retries/fallback can add more |
+| `context_shunt_read` | a cited answer, or mandatory bounded legacy compaction for Shunt-owned failures | at least one per processed chunk; retries/fallback can add more |
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 | `context_shunt_import` | a handle and bounded metadata for a producer's already-persisted artifact — never its bytes | zero |
@@ -49,14 +49,9 @@ chosen overrides. This host can report only `attribution_status: unverified`, ne
 provider-authoritative `actual`. See the checked
 [`hermes.config.yaml`](../../examples/config/hermes.config.yaml).
 
-The automatic exact-text escape hatch defaults on (`reader.automatic_extract: true`,
-`reader.fallback_max_bytes: 2048`, range 1–4096). Disabling inspect also disables it.
-It is secondary to guarded legacy compaction for exhausted MODEL_ERROR/TIMEOUT;
-citation failure preserves CITATION_INVALID with source handles and bounded inspect/search recovery; it never substitutes legacy compaction. Policy refusals remain excluded.
-It selects the first source's byte prefix, independently of the question, with all handles,
-locators, omissions and disclosure accounting retained. It is never an LLM summary.
-See [shared configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability)
-for trigger exclusions, bounds and the 1.1 behavioral compatibility change.
+Shunt-owned read, capture/store, and eligible inspection failures automatically return bounded deterministic `partial/LEGACY_COMPACTED` output. This invariant cannot be disabled: former legacy-compaction switches are deprecated no-ops. The output preserves the original failure code and bounded `failure_detail`, marks incomplete coverage, and never claims model derivation or verified citations. Safe representative excerpts are expected; full raw passthrough is forbidden.
+
+Caller errors, unsupported operations/versions, unsafe/binary/secret content, immutable binding or session mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. `LIMIT_EXCEEDED` qualifies only for enumerated Shunt implementation/store capacity details, never safety or disclosure caps. Citation failures receive at most one pinned, deadline- and budget-preserving repair; accounting includes both physical calls. An attribution-policy refusal spends no repair call. See [configuration](../../docs/configuration.md) for migration and limits.
 
 
 Hermes result capture uses an exact identity classifier before session, artifact,
@@ -84,6 +79,6 @@ provenance verification; verify server configuration/collisions before adding an
 and recheck when that configuration changes. No Hermes/package patch is required.
 
 Small and structured/multimodal results remain unchanged. Once an eligible string is
-measured oversized, an internal capture failure still returns bounded `HOST_UNSAFE`.
+measured oversized, a Shunt-owned internal capture failure returns bounded `LEGACY_COMPACTED` after independent source safety checks.
 `skill_view` also remains exempt from the pre-read gate; a generic `read_file` of a large
 `SKILL.md` remains subject to the normal gate and capture. OpenClaw behavior is unchanged.

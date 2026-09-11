@@ -345,8 +345,21 @@ export function compactToolResult(
     : options.hardChars ?? DEFAULT_LEGACY_HARD_CHARS;
   const redacted = redactSecretValues(text);
   const parsed = tryParseJson(redacted);
-  const compacted = parsed === undefined
-    ? compactLogText(redacted)
-    : compactJsonText(redacted, parsed);
+  let compacted: string;
+  try {
+    compacted = parsed === undefined
+      ? compactLogText(redacted)
+      : compactJsonText(redacted, parsed);
+  } catch (err) {
+    // A deeply nested but otherwise valid JSON value can exhaust JavaScript's call stack
+    // in the incumbent structural walk/snippet dumper. Preserve the deterministic bounded
+    // behavior by using the line compactor; never let that implementation detail escape as
+    // a Shunt failure or expose the original body.
+    if (!(err instanceof RangeError)) throw err;
+    compacted = compactLogText(redacted);
+  }
   return capText(compacted, hardChars);
 }
+
+// Stable pure entry point for recovery when a wrapper around the compactor fails.
+export const incumbentCompactToolResult = compactToolResult;

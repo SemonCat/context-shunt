@@ -19,9 +19,9 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.provider` | string, at most 128 UTF-8 bytes | `""` | Provider request; empty delegates routing to the host. |
 | `reader.attribution_policy` | enum | `allow_unverified` | `allow_unverified` publishes the host's truthful attribution status; `require_match` refuses below actual/resolved agreement. |
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
-| `reader.automatic_extract` | boolean | `true` | Secondary exact extraction after wholly exhausted availability when legacy compaction is disabled or unsafe; also requires `inspect.enabled`. |
+| `reader.automatic_extract` | boolean | `true` | Compatibility setting for exact extraction; does not disable or replace mandatory legacy fallback. |
 | `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
-| `reader.legacy_compaction` | boolean | `true` | Python/Hermes: prefer bounded deterministic compaction for terminal `MODEL_ERROR` and `TIMEOUT`, before automatic extraction. Model-identity and provenance-policy refusals remain excluded. |
+| `reader.legacy_compaction` | boolean | `true` | Deprecated no-op; false cannot disable mandatory fallback. |
 | `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
@@ -116,33 +116,7 @@ eligibility. The existing 100-entry and 1–128-character ID schema remains unch
 See the [synthetic classifier contract](../adapters/openclaw/README.md#synthetic-trust-boundary-classification).
 These settings cannot enable live capture.
 
-OpenClaw selects non-semantic legacy compaction only after exhausted availability.
-Citation failures always preserve `CITATION_INVALID`, usable source handles, and deterministic
-inspection guidance. The older `reader.automatic_extract` and `reader.fallback_max_bytes`
-remain accepted but do not control this adapter fallback.
-
-### OpenClaw reader fallback precedence (1.2.1)
-
-Mechanical citation verification runs first and is unchanged. A delivered, parsed model
-reply with no verifiable citations now fails with `CITATION_INVALID`, including empty
-`answer`/`claims` with an empty citation array. A deterministic search with no hits and no
-model call still returns `NO_MATCH`.
-
-1. OpenClaw enables the session's legacy tier. An availability-exhausted `MODEL_ERROR`/`TIMEOUT` attempts bounded legacy compaction.
-   Citation failure is not provider unavailability and does not advance the model chain.
-2. Revalidate every source handle, compact the first source, and publish
-   `partial/LEGACY_COMPACTED` with `result_kind: legacy_compaction`, `derived: false`,
-   empty answer/citations, original failure code, all source handles and omissions, and
-   the original paid-attempt accounting. The complete envelope remains at most 16 KiB.
-3. If that attempt cannot safely publish, retain the bounded original reader failure;
-   never downgrade to raw output or an exact prefix.
-4. Only when legacy was not attempted may the existing availability-only exact-extraction
-   tier run, subject to its config and inspect gates. It never covers citation failures.
-
-Cancellation, attribution mismatch/policy refusal, malformed JSON, and unrelated source or
-budget errors are not new legacy triggers. Citation failures always remain bounded `CITATION_INVALID` errors with retained
-handles and inspection guidance, regardless of legacy configuration. No mechanical verifier
-or citation acceptance rule was relaxed.
+Both cores use the mandatory fallback described below.
 
 ### OpenClaw host keys
 
@@ -225,8 +199,9 @@ Wire-size escaping can make a page smaller than the source-byte cap. Oversized l
 as exact byte segments. Concatenate page text without inserting separators: LF bytes
 between selected lines are included, but the final selected line’s terminating LF is excluded.
 Nonempty byte selectors must start and end on UTF-8 boundaries (`INVALID_REQUEST` otherwise).
-A budget too small for one code point returns `LIMIT_EXCEEDED` without disclosure or cursor
-advancement; retry with a larger budget. Exhausted disclosure allowance remains
+A budget too small for one code point is a Shunt page-capacity failure and returns bounded
+`LEGACY_COMPACTED` within the requested byte budget, with incomplete coverage and charged disclosure.
+Use a larger budget for exact inspection; no extraction cursor is advanced by compaction. Exhausted disclosure allowance remains
 `DISCLOSURE_EXHAUSTED`.
 
 ### Store, TTL, JSON, and stats
@@ -250,90 +225,19 @@ is local and SQLite-backed; do not place it on a network filesystem.
 
 ### Automatic exact extraction after reader unavailability
 
-`reader.automatic_extract` defaults to `true`; `reader.fallback_max_bytes` defaults to
-2048 and accepts integers from 1 through 4096. On Python/Hermes this is the secondary tier: enabled legacy compaction is tried and guarded first. `inspect.enabled: false` disables automatic
-extraction as well. No opt-in is needed because this reuses the authorized snapshot,
-secret guard, transactional disclosure ceilings and exact inspector already enabled by default.
-
-The trigger is a **wholly unavailable read** after the normal retry/provider chain has
-stopped: at least one physical attempt started, every planned chunk outcome failed with
-`MODEL_ERROR` or `TIMEOUT`, and no response or non-availability failure was observed.
-Quota, provider and network failures qualify through the existing availability boundary.
-A safe model-call/request timeout qualifies; cancellation, model substitution, provenance
-refusal, malformed output (including malformed-then-outage), citation-invalid output,
-valid empty/weak answers and partial model answers do not. Budget exhaustion before model
-availability is established does not qualify. Timeouts stop model work; the subsequent
-bounded local inspection can add store/guard latency beyond the model request deadline.
-Even a delivered late response is conservatively excluded.
-The first attempted failing chunk in request order supplies the bounded original category
-(`MODEL_ERROR` or `TIMEOUT`); no provider body or error-priority ranking is published.
-
-Selection is always one UTF-8-safe **byte prefix of the first requested source**, independent
-of the question and reader selectors, including JSON record selectors. It never ranks
-semantic importance or pretends to answer the question. Other sources remain listed and
-omitted. The prefix is capped by the configured bytes, request `max_answer_bytes`, deployed
-answer/inspect/extraction caps, serialized headroom and remaining source/session disclosure.
-It must be nonempty and strictly shorter than the source, even if a line-oversized source
-fits the byte cap. Repeated automatic reads select the same prefix and charge it each time.
-Use explicit inspect for a different range; automatic extraction never follows a cursor.
-
-The wire shape remains revision **1.1**, with no new required field, status, code, schema
-or store migration: `partial/EXTRACTED`, `result_kind: deterministic_extraction`,
-`provenance.derived: false`, no model attribution, empty `answer`/`citations`, and fixed
-`guidance` saying “Escape hatch: exact deterministic fallback extraction; not model-derived
-and not an LLM summary”, plus the original category and selection rule. The existing
-`extraction` block carries exact half-open byte locators, immutable snapshot identity,
-charged disclosure totals and an authenticated inspect cursor. Outer coverage is always
-incomplete, conservatively lists each source as `UNKNOWN_REMAINDER`, and makes no assertion
-about upstream truncation. Sources and recovery actions are retained.
-
-The session records **one read operation** with all failed physical LLM attempts/costs and
-the actual serialized extraction egress (`delivery_boundary: extraction`). If a timeout
-interrupts a chain before its aggregate returns, observed budget debits retain already
-started physical attempts and repeated prompt costs; the debit handle is closed to
-prevent later attempts. Unreported usage remains explicitly estimated/unknown. Provenance
-attempt counts describe the failed read; no requested/resolved/reported model is attached
-to the exact text. Direct low-level `Reader` calls return the availability error and cost;
-automatic disclosure belongs to `ShuntSession.read`, which owns disclosure accounting.
-
-Compatibility change: wholly unavailable reads formerly capable of returning partial
-`NO_MATCH` now return truthful `MODEL_ERROR`/`TIMEOUT`. When neither legacy compaction nor automatic extraction can safely deliver,
-exhausted disclosure, unusable/expired handles, failed storage, an empty prefix or a guard
-refusal, the original bounded availability error and recovery guidance are returned.
-If handle validation fails, recovery truthfully marks handles invalid and requests recapture.
+The historical `reader.automatic_extract` and `reader.fallback_max_bytes` settings remain accepted for configuration compatibility. They do not replace, disable, or narrow mandatory legacy compaction. Explicit `context_shunt_inspect` remains the zero-model exact-range tool, with its existing selector, cursor, and disclosure contracts. The internal exact-prefix helper remains covered by regression tests for compatibility with existing integrations.
 
 ### Legacy-compaction fallback for reader outcomes automatic extraction does not cover
 
-On Python/Hermes, `reader.legacy_compaction` (default `true`) is the first bounded
-fallback tier after the reader has exhausted retries and its model fallback chain.
-A terminal `status: error` with `MODEL_ERROR` or `TIMEOUT` qualifies,
-including wholly unavailable readers. A reported-model mismatch and
-`PROVENANCE_UNAVAILABLE` remain excluded. Malformed output published as `NO_MATCH`
-is not reclassified as an availability error.
+Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
 
-If compaction is disabled, raises, or fails the output guard, a wholly unavailable
-read may use the secondary `automatic_extract` tier if enabled together with inspect.
-If neither tier can safely deliver, the original bounded failure remains; raw source
-is never used as a fail-open result. This precedence change is scoped to Python/Hermes;
-OpenClaw selects the TypeScript legacy compactor on exhausted availability. The Python-only legacy configuration keys and additional failure triggers described here do not expand OpenClaw triggers; generic TypeScript sessions keep the prior automatic-extraction default.
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-Unlike automatic extraction, this is not an exact byte prefix — it is
-`legacy_compact.compact_tool_result`, a ported, deterministic heuristic summary of the
-**first requested source's full text**: signal lines (error/exception/failure/timeout/5xx),
-head/tail sampling, repeated-line collapsing, JSON structure and secret-value redaction. It
-is capped first by `reader.legacy_compaction_max_chars` (1000–60000, default 16000) and then
-by the envelope's own `max_extraction_bytes` (16 KiB) at a UTF-8-safe boundary, whichever is
-smaller. The wire shape is revision **1.1**: `partial/LEGACY_COMPACTED`,
-`result_kind: legacy_compaction`, `provenance.derived: false`,
-`provenance.label: legacy_compaction`, empty `answer`/`citations`, and a dedicated
-`legacy_compaction` envelope block (`summary`, `summary_bytes`, `original_bytes`,
-`hard_cap_chars`, `original_failure`) — deliberately not the `extraction` block, whose
-schema description says "never a summary". Coverage preserves the reader’s processed/planned counts, upstream truncation and
-omissions, and adds bounded `UNKNOWN_REMAINDER` omissions for requested sources; only the first source is covered, matching automatic extraction's own
-established simplification. Compaction and secondary extraction retain the read operation’s accounting ID, failed
-physical-attempt costs, original failure category and artifact handles. Both are explicitly
-partial, deterministic, and not model-derived or an LLM summary.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
 
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
 
 Hermes authoritative skill loading is exempt from both the pre-read gate and result
 capture: the host-supplied tool name, after whitespace trimming and lowercasing, must
@@ -344,3 +248,7 @@ instructions. This trusts the host tool identity only: `/skills/`, `SKILL.md`,
 `_source_path`, and claimed tool names inside output or arguments confer no exemption.
 A generic `read_file` of a large `SKILL.md` remains subject to the normal gate and capture.
 Other oversized results retain bounded failure handling; OpenClaw behavior is unchanged.
+
+### Migration and rollout
+
+Existing request versions and existing valid envelopes remain accepted. The `reader.legacy_compaction` boolean is accepted and type-checked as a deprecated no-op; both `true` and `false` select the mandatory invariant. No SQLite migration is required. The 1.1 envelope now admits a fixed `failure_detail`, additional explicit Shunt-owned `original_failure` values, and a handle-free legacy block when capture did not publish a capability. Older strict 1.1 validators will reject these new outputs: upgrade the Python/TypeScript packages and their synchronized first-party contract copies together. `scripts/sync-contracts --check` proves repository parity; it does not certify an installed host. Ruby owns live drift checks, session drain/restart approval, deployment, and canaries after code acceptance.

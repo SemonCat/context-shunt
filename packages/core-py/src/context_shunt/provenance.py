@@ -233,7 +233,11 @@ class Provenance:
 
 def deterministic(label: ProvenanceLabel = ProvenanceLabel.DETERMINISTIC_EXTRACTION) -> Provenance:
     """Provenance for a result no model touched."""
-    return Provenance(derived=False, label=label)
+    return Provenance(
+        derived=False,
+        label=label,
+        citations_mechanically_verified=label is not ProvenanceLabel.LEGACY_COMPACTION,
+    )
 
 
 def classify(

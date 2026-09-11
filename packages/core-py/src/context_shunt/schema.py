@@ -15,6 +15,7 @@ Version handling is deliberately strict in both directions:
 from __future__ import annotations
 
 import json
+import re
 from functools import cache
 from typing import Any
 
@@ -81,7 +82,11 @@ def validate_request(
     if request_validator().is_valid(request):
         _byte_guards(request)
         return request
-    raise ShuntError("INVALID_REQUEST", "SCHEMA_VIOLATION", retryable=False)
+    raise ShuntError(
+        "INVALID_REQUEST",
+        "INVALID_SNAPSHOT_ID" if invalid_snapshot_id(request) else "SCHEMA_VIOLATION",
+        retryable=False,
+    )
 
 
 def validate_tool_args(args: Any) -> dict[str, Any]:
@@ -89,7 +94,11 @@ def validate_tool_args(args: Any) -> dict[str, Any]:
     if not isinstance(args, dict):
         raise ShuntError("INVALID_REQUEST", "NOT_OBJECT", retryable=False)
     if not tool_args_validator().is_valid(args):
-        raise ShuntError("INVALID_REQUEST", "TOOL_ARGS_VIOLATION", retryable=False)
+        raise ShuntError(
+            "INVALID_REQUEST",
+            "INVALID_SNAPSHOT_ID" if invalid_snapshot_id(args) else "TOOL_ARGS_VIOLATION",
+            retryable=False,
+        )
     question = args.get("question")
     if isinstance(question, str):
         _assert_question(question)
@@ -115,3 +124,21 @@ def validate_envelope(envelope: Any) -> bool:
 
 def envelope_errors(envelope: Any) -> list[str]:
     return [e.message for e in envelope_validator().iter_errors(envelope)]
+
+
+def invalid_snapshot_id(value: dict[str, Any]) -> bool:
+    """Classify a bounded selection without publishing or repairing caller values."""
+    candidates = [value]
+    for key in ("sources", "handles"):
+        items = value.get(key)
+        if isinstance(items, list):
+            candidates.extend(items[:8])
+    return any(
+        isinstance(item, dict)
+        and "snapshot_id" in item
+        and (
+            not isinstance(item["snapshot_id"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", item["snapshot_id"]) is None
+        )
+        for item in candidates
+    )

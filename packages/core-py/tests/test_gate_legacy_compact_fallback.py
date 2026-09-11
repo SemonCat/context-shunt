@@ -8,6 +8,7 @@ import pytest
 
 from context_shunt.errors import ShuntError
 from context_shunt.guard import enforce
+from context_shunt.legacy_compact import compact_tool_result
 from context_shunt.session import ShuntSession
 from tests.support import FakeLuna, claims_json, make_capability, make_config
 
@@ -56,12 +57,15 @@ def _no_evidence_luna(quote: str = "ERROR: connection refused") -> FakeLuna:
     return FakeLuna(replies=[reply])
 
 
-def test_legacy_compaction_disabled_by_config_keeps_bare_failure(tmp_path):
-    session, _, request, _ = setup(
+def test_legacy_compaction_false_cannot_disable_mandatory_fallback(tmp_path):
+    session, _, request, body = setup(
         tmp_path, _no_evidence_luna(), **{"reader": {"legacy_compaction": False}}
     )
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID" and "legacy_compaction" not in env
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
+    assert env["failure_detail"] == "NO_VALID_EVIDENCE"
+    assert env["legacy_compaction"]["summary"] == compact_tool_result(body, hard_chars=16000)
 
 
 def test_reader_disabled_config_keeps_bare_failure_and_never_runs_compaction(tmp_path):
@@ -79,9 +83,11 @@ def test_compaction_failure_degrades_to_original_bounded_failure_never_raw(tmp_p
     monkeypatch.setattr("context_shunt.session.compact_tool_result", _boom)
     env = session.read(request)
     enforce(env)
-    # Falls back to the reader's own bounded failure envelope, unchanged.
-    assert env["code"] == "CITATION_INVALID"
-    assert "legacy_compaction" not in env
+    # The independent incumbent path still provides the mandatory fallback when the
+    # normal wrapper itself fails.
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
+    assert env["legacy_compaction"]["summary"] == compact_tool_result(body, hard_chars=16000)
     assert body not in json.dumps(env)
 
 
@@ -166,8 +172,7 @@ def test_availability_fallback_precedence(tmp_path, monkeypatch, failure_code, l
         )
     env = session.read(request)
     enforce(env)
-    expected = "LEGACY_COMPACTED" if legacy_mode == "enabled" else "EXTRACTED"
-    assert env["code"] == expected
+    assert env["code"] == "LEGACY_COMPACTED"
     assert observed[0].availability_failure
     assert env["status"] == "partial" and not env["provenance"]["derived"]
     assert env["sources"] == observed[0].envelope["sources"]
@@ -177,14 +182,13 @@ def test_availability_fallback_precedence(tmp_path, monkeypatch, failure_code, l
     assert body not in json.dumps(env) and "PRIVATE_BODY" not in json.dumps(env)
     assert "PRIVATE_COMPACTOR_BODY" not in json.dumps(env)
     assert "-----BEGIN PRIVATE KEY-----" not in json.dumps(env)
-    if legacy_mode == "enabled":
-        assert env["legacy_compaction"]["original_failure"] == failure_code
-        assert env["result_kind"] == "legacy_compaction"
-        assert "not model-derived" in env["guidance"] and "not an LLM summary" in env["guidance"]
-        for omission in observed[0].envelope["coverage"]["omitted"]:
-            assert omission in env["coverage"]["omitted"]
-        for key in ("processed_chunks", "planned_chunks", "upstream_truncated"):
-            assert env["coverage"][key] == observed[0].envelope["coverage"][key]
+    assert env["legacy_compaction"]["original_failure"] == failure_code
+    assert env["result_kind"] == "legacy_compaction"
+    assert "not model-derived" in env["guidance"] and "not an LLM summary" in env["guidance"]
+    for omission in observed[0].envelope["coverage"]["omitted"]:
+        assert omission in env["coverage"]["omitted"]
+    for key in ("processed_chunks", "planned_chunks", "upstream_truncated"):
+        assert env["coverage"][key] == observed[0].envelope["coverage"][key]
     stats = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
     rows = [r for r in stats["stats"]["records"] if r["operation_id"] == env["accounting_id"]]
     assert len(rows) == 1
@@ -193,7 +197,7 @@ def test_availability_fallback_precedence(tmp_path, monkeypatch, failure_code, l
 
 
 @pytest.mark.parametrize("failure_code", ["MODEL_ERROR", "TIMEOUT"])
-def test_both_fallbacks_disabled_preserve_failure(tmp_path, failure_code):
+def test_legacy_fallback_is_mandatory_when_all_optional_switches_are_false(tmp_path, failure_code):
     from context_shunt.errors import ShuntError
 
     session, _, request, _ = setup(
@@ -202,21 +206,23 @@ def test_both_fallbacks_disabled_preserve_failure(tmp_path, failure_code):
         reader={"legacy_compaction": False, "automatic_extract": False},
     )
     env = session.read(request)
-    assert env["code"] == failure_code
-    assert "legacy_compaction" not in env and "extraction" not in env
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["original_failure"] == failure_code
+    assert "extraction" not in env
 
 
-def test_retired_canary_citation_failure_preserves_evidence_not_a_prefix(tmp_path):
+def test_citation_failure_uses_legacy_compaction_and_preserves_evidence(tmp_path):
     session, entry, request, body = setup(tmp_path, _no_evidence_luna())
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID"
-    assert env["status"] == "error"
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["status"] == "partial"
     assert env["answer"] == "" and env["citations"] == []
-    assert "legacy_compaction" not in env and "extraction" not in env
+    assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
+    assert env["failure_detail"] == "NO_VALID_EVIDENCE"
     assert env["sources"][0]["source_id"] == entry.source_id
     assert env["recovery"]["handles_valid"] is True
     assert "INSPECT_HANDLE" in env["recovery"]["actions"]
-    assert "needs verification" in env["guidance"]
+    assert "not model-derived" in env["guidance"]
     assert body not in json.dumps(env)
 
     inspected = session.inspect(
@@ -234,8 +240,8 @@ def test_retired_canary_citation_failure_preserves_evidence_not_a_prefix(tmp_pat
     assert "connection refused" in json.dumps(inspected["extraction"])
     rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
     record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
-    assert record["code"] == "CITATION_INVALID"
-    assert record["delivery_boundary"] == "envelope"
+    assert record["code"] == "LEGACY_COMPACTED"
+    assert record["delivery_boundary"] == "extraction"
     assert record["attempts_started"] > 0
 
 
@@ -252,22 +258,23 @@ def test_uncited_semantic_reply_is_citation_failure_with_cost_and_handle(tmp_pat
         reader={"legacy_compaction": False, "automatic_extract": False},
     )
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID"
-    assert env["status"] == "error"
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["status"] == "partial"
     assert env["answer"] == "" and env["citations"] == []
     assert env["sources"][0]["source_id"] == entry.source_id
     assert env["recovery"]["handles_valid"] is True
     assert env["provenance"]["derived"] is False
+    assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
     assert env["provenance"]["attempts_started"] > 0
     assert body not in json.dumps(env)
     assert "UNVERIFIED_SENTINEL" not in json.dumps(env)
     rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
     record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
-    assert record["code"] == "CITATION_INVALID"
-    assert record["attempts_started"] == 1
-    assert record["attempts_usage_complete"] == 1
-    assert record["reader_input_tokens"] == 10
-    assert record["reader_output_tokens"] == 5
+    assert record["code"] == "LEGACY_COMPACTED"
+    assert record["attempts_started"] == 2
+    assert record["attempts_usage_complete"] == 2
+    assert record["reader_input_tokens"] == 20
+    assert record["reader_output_tokens"] == 10
 
 
 @pytest.mark.parametrize("shape", ["legacy", "claims"])
@@ -290,7 +297,7 @@ def test_citation_recovery_revalidates_handles_after_provider_wait(tmp_path, mon
 
     monkeypatch.setattr(session._registry, "resolve", resolve)
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID"
+    assert env["code"] == "SOURCE_EXPIRED"
     assert env["recovery"]["handles_valid"] is False
     assert "RECAPTURE_SOURCE" in env["recovery"]["actions"]
     assert "legacy_compaction" not in env and "extraction" not in env
@@ -322,7 +329,8 @@ def test_empty_semantic_reply_is_valid_no_match(tmp_path, reply):
 def test_empty_reply_with_malformed_citations_is_not_valid_no_match(tmp_path, reply):
     session, _, request, _ = setup(tmp_path, FakeLuna(replies=[json.dumps(reply)]))
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID"
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
     assert env["coverage"]["complete"] is False
 
 
@@ -356,25 +364,32 @@ def test_semantic_support_requires_referenced_evidence(tmp_path, shape, case):
         tmp_path, FakeLuna(replies=[json.dumps(reply)]), body="alpha\n"
     )
     env = session.read(request)
-    expected = (
+    reader_expected = (
         "NO_MATCH"
         if case in ("empty", "verified_empty")
         else "ANSWERED"
         if case == "cited"
         else "CITATION_INVALID"
     )
+    expected = "LEGACY_COMPACTED" if reader_expected == "CITATION_INVALID" else reader_expected
     assert env["code"] == expected
-    assert env["status"] == ("error" if expected == "CITATION_INVALID" else "ok")
-    assert env["coverage"]["complete"] is (expected != "CITATION_INVALID")
+    assert env["status"] == ("partial" if expected == "LEGACY_COMPACTED" else "ok")
+    assert env["coverage"]["complete"] is (expected != "LEGACY_COMPACTED")
     assert env["sources"][0]["source_id"] == entry.source_id
     assert "UNVERIFIED_SENTINEL" not in json.dumps(env)
-    if expected == "CITATION_INVALID":
+    if expected == "LEGACY_COMPACTED":
         assert env["answer"] == "" and env["citations"] == []
         assert env["recovery"]["handles_valid"] is True
+        assert env["legacy_compaction"]["original_failure"] == "CITATION_INVALID"
     rows = session.stats({"schema_version": "1.1", "request_id": "stats", "operation": "stats"})
     record = next(r for r in rows["stats"]["records"] if r["operation_id"] == env["accounting_id"])
     assert record["code"] == expected
-    assert record["reader_input_tokens"] == 10 and record["reader_output_tokens"] == 5
+    attempts = 2 if case in ("uncited", "unused") else 1
+    assert record["attempts_started"] == attempts
+    assert (
+        record["reader_input_tokens"] == 10 * attempts
+        and record["reader_output_tokens"] == 5 * attempts
+    )
 
 
 @pytest.mark.parametrize("shape", ["legacy", "claims"])
@@ -401,7 +416,7 @@ def test_unused_valid_citation_recovery_revalidates_ttl(tmp_path, monkeypatch, s
 
     monkeypatch.setattr(session._registry, "resolve", resolve)
     env = session.read(request)
-    assert env["code"] == "CITATION_INVALID"
+    assert env["code"] == "SOURCE_EXPIRED"
     assert calls >= 3
     assert env["recovery"]["handles_valid"] is False
     assert "RECAPTURE_SOURCE" in env["recovery"]["actions"]

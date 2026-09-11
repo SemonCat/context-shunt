@@ -57,7 +57,7 @@ Hermes hook 目前擷取過大的**字串**結果；結構化／多模態區塊�
 事先截掉的內容。Hook 順序僅在一台 Hermes 0.21.1 host 上確認過，其他安裝環境仍需驗證。
 新部署必須自行確認順序，並同時設定 `tool_result_capture.enabled: true` 與
 `tool_result_capture.host_ordering_verified_locally: true`。符合條件的過大結果若擷取失敗，
-adapter 只回傳有界失敗訊息，不會以原始結果作為 fail-open 備援。
+若故障屬於 Shunt，adapter 必須回傳舊版有界決定性壓縮；不安全來源仍明確拒絕，絕不回傳完整原文作為備援。
 詳見[能力證據](docs/capability-matrix.md)與[切換程序](docs/acceptance.md#tool_result_capture-cutover-on-hermes)。
 
 `suma_post_tool` 只是已棄用的設定遷移別名，並非產品名稱。
@@ -103,32 +103,13 @@ Workspace 與 import 根目錄使用不同白名單。不安全、含機密或�
 
 ## Reader 失敗時
 
-兩個核心遇到 `CITATION_INVALID` 都明確回傳錯誤，不用啟發式摘要或固定前綴代替答案。
-非空語意回覆若未引用通過驗證的證據，屬於引文錯誤；無關但有效的引文不能替它背書。合法的空 `answer` 或空 `claims` 陣列搭配空引文，
-仍回傳 `ok/NO_MATCH`。
-保留的 `source_id`／`snapshot_id` 可供 `context_shunt_inspect` 以 lines／bytes 範圍或 search
-選擇器查證；依 `next_cursor` 接續，仍受 TTL 與累計揭露上限約束。預設 inspect 會縮小頁面並提供接續資訊，
-不會只因剩餘資料較多而回傳 `LIMIT_EXCEEDED`。
-行範圍的各頁文字可直接串接；所選行之間的 LF 會完整保留，最後一個所選行的結尾 LF 不包含在內。
-非空 byte 範圍的起訖位置必須位於 UTF-8 字元邊界，否則回傳 `INVALID_REQUEST`。
-若頁面預算不足以容納一個字元，會明確失敗，不前移游標或計入揭露量；可提高預算後重試。
+Context Shunt 是保護可用性的最佳化層。只要故障屬於 Shunt，且已授權的來源位元組或不可變快照仍可使用，Python 與 TypeScript 都必須自動回傳舊版 compactor 的有界、決定性摘要。這是不可停用的不變條件；`reader.legacy_compaction` 與 TypeScript 的 `legacyCompaction` 保留為已棄用的相容鍵，設定 `false` 也不會停用備援。
 
-在 Python／Hermes 上，reader 重試與模型備援耗盡後，符合條件的 `MODEL_ERROR`、`TIMEOUT`
-會觸發 **context-shunt 內部**移植的有界 legacy compactor
-（`reader.legacy_compaction` 預設為 `true`）。模型身分不符與 provenance 政策拒絕不適用。
-它會針對請求中的第一個來源，以訊號行、頭尾取樣、合併重複行與整理 JSON 產生決定性啟發式摘要，
-不是 Luna 的答案，也不是精確來源範圍。
+`MODEL_ERROR`、`TIMEOUT`、`INVALID_MODEL_OUTPUT`、`CITATION_INVALID`、擷取／儲存故障及安全的內部例外都適用。`LIMIT_EXCEEDED` 依固定 detail 分類：儲存容量與實作輸出容量故障適用，來源安全與揭露政策上限不適用。無效參數、不支援的版本／操作、不安全／二進位／含機密來源、跨 session 或快照不符、過期或變更來源、provenance 政策拒絕、模型身分不符、取消與揭露額度耗盡仍明確拒絕。
 
-回應的 envelope 標示 `status: partial`、`code: LEGACY_COMPACTED`、
-`result_kind: legacy_compaction` 與 `provenance.derived: false`。摘要放在
-`legacy_compaction`，`answer` 與 `citations` 留空；涵蓋範圍仍標為部分，失敗的模型嘗試
-仍列入統計。這是非語意備援，不計為成功的語意摘要。
+輸出一律標示 `partial/LEGACY_COMPACTED`、`result_kind: legacy_compaction`、`provenance.derived: false`；`answer` 與 `citations` 留空。`original_failure` 保留原始錯誤代碼，固定列舉的 `failure_detail` 區分引文、參數與容量問題，不含提示、供應商回應、原文、路徑或任意例外文字。涵蓋範圍不完整，只摘要第一個來源，且不依賴問題。擷取失敗而尚未發布 handle 時，`sources` 為空且 `handles_valid: false`。inspect 備援仍受累計揭露上限約束。
 
-若 compaction 停用或無法安全回傳，而 reader 完全無法使用，可在相關設定啟用時，
-改用第二層受防護的精確前綴擷取。若兩層都無法安全回傳，回應只包含有界 pointer／失敗訊息
-與復原指引，絕不放行過大的原始內容。可用有效 handle 縮小問題重問，或檢視有界範圍。
-OpenClaw 已使用 TypeScript 移植的 legacy compactor，在模型可用性重試耗盡後回傳有界且清楚標示的備援。
-詳見[備援語意與限制](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover)。
+每個請求最多進行一次有界引文修復，只使用安全的驗證回饋與已授權區塊，保留原本期限、額度、provenance 與精確用量記帳。修復失敗會使用強制 legacy 備援，不會把未驗證的模型答案標為已驗證。合法空答案仍為 `NO_MATCH`。Hermes 工具 schema 由共用契約產生；錯誤的 snapshot ID 會明確拒絕，並指引重用 pointer 中原封不動的 ID 配對，不猜測或修補雜湊。
 
 ## 快速開始
 
@@ -180,7 +161,7 @@ OpenClaw 自動工具結果擷取不支援，即使設定啟用仍原樣放行�
 | 本機 pre-read gate、reader、精確 inspect、session stats／生命週期 | 支援（相容性基準為 0.18.2） | 支援 |
 | 工具結果擷取 | 需驗證 host 順序；live 部署已退役 | 不支援；原樣放行 |
 | 外部 artifact 匯入 | 支援；設定前關閉 | 不支援（`IMPORT_UNIMPLEMENTED`） |
-| 內建 legacy compaction | 支援，為預設 reader 失敗備援 | 支援模型可用性耗盡後的備援 |
+| 內建 legacy compaction | 支援，為預設 reader 失敗備援 | Shunt 自身故障時強制備援 |
 | Reader 歸屬證據上限 | `unverified` | `resolved` |
 | Writer／`propose_patch` | 尚未實作 | 尚未實作 |
 

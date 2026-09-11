@@ -1,9 +1,11 @@
+> Historical verification record. Current mandatory Shunt-owned fallback behavior supersedes the fallback expectations below; see [configuration](configuration.md).
+
 # OpenClaw 1.2.0 verification
 
 > Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
 > Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
-> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
-> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> live canary. OpenClaw automatic capture is unsupported; Shunt-owned citation failures now use mandatory
+> bounded legacy compaction after at most one citation repair. Do not use the historical cutover steps to re-enable capture.
 > See [current capabilities](capability-matrix.md#openclaw).
 
 

@@ -36,7 +36,8 @@ from typing import Any
 
 from . import envelope as E
 from .binaryguard import assert_supported_blocks
-from .errors import ShuntError
+from .errors import ShuntError, fallback_allowed
+from .fallback import compact_failure
 from .limits import DEFAULT_LIMITS, Limits
 from .provenance import ProvenanceLabel, ResultKind, deterministic
 from .registry import SourceRegistry
@@ -121,11 +122,12 @@ class SpillEngine:
                 session_id, snapshot, internal=True, kind="spilled_tool"
             )
         except ShuntError as exc:
-            code = (
-                exc.code
-                if exc.code in ("SPILL_FAILED", "UNSAFE_SOURCE", "STORE_FAILED", "LIMIT_EXCEEDED")
-                else "SPILL_FAILED"
-            )
+            if fallback_allowed(exc.code, exc.detail):
+                env = compact_failure(request_id, serialized, exc, limits=self._limits)
+                return SpillOutcome(
+                    action="error", envelope=env, code=env["code"], bytes_measured=size
+                )
+            code = exc.code
             safe = ShuntError(code, exc.detail, retryable=False)
             return SpillOutcome(
                 action="error",
@@ -137,8 +139,8 @@ class SpillEngine:
             safe = ShuntError("SPILL_FAILED", "WRITE_FAILED", retryable=False)
             return SpillOutcome(
                 action="error",
-                envelope=E.error_envelope(request_id, safe),
-                code=safe.code,
+                envelope=compact_failure(request_id, serialized, safe, limits=self._limits),
+                code="LEGACY_COMPACTED",
                 bytes_measured=size,
             )
 

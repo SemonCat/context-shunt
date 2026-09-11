@@ -58,6 +58,7 @@ _ALLOWED_KEYS = frozenset(
         "accounting_id",
         "extraction",
         "legacy_compaction",
+        "failure_detail",
         "stats",
         "recovery",
         "import_receipt",
@@ -171,7 +172,14 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
     """
     present_v11 = {key for key in _ALLOWED_KEYS if key in envelope} & (
         _REQUIRED_V11_KEYS
-        | {"extraction", "legacy_compaction", "stats", "recovery", "import_receipt"}
+        | {
+            "failure_detail",
+            "extraction",
+            "legacy_compaction",
+            "stats",
+            "recovery",
+            "import_receipt",
+        }
     )
     if version == "1.0":
         if present_v11:

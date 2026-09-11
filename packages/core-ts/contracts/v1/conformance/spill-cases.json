@@ -373,8 +373,8 @@
       "store_quota_bytes": 1024,
       "expect": {
         "action": "error",
-        "code": "LIMIT_EXCEEDED",
-        "reason": "1.1: the store byte quota refuses the publish, so no handle exists and the raw payload still never passes through"
+        "code": "LEGACY_COMPACTED",
+        "reason": "Shunt-owned capture failure returns bounded incumbent compaction without an invented handle."
       }
     },
     {
@@ -389,7 +389,8 @@
       "inject": "publish_write_failure",
       "expect": {
         "action": "error",
-        "code": "STORE_FAILED"
+        "code": "LEGACY_COMPACTED",
+        "reason": "Shunt-owned capture failure returns bounded incumbent compaction without an invented handle."
       }
     },
     {

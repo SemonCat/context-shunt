@@ -34,13 +34,13 @@ const ALLOWED_KEYS = new Set([
   "sources", "retryable", "guidance", "pointer",
   // -- 1.1 --
   "result_kind", "provenance", "accounting_id", "extraction", "stats", "recovery",
-  "legacy_compaction", "import_receipt",
+  "legacy_compaction", "failure_detail", "import_receipt",
 ]);
 const ALLOWED_SOURCE_KEYS = new Set([
   "source_id", "snapshot_id", "media_type", "bytes", "expires_at",
 ]);
 const REQUIRED_V11_KEYS = ["result_kind", "provenance", "accounting_id"] as const;
-const OPTIONAL_V11_KEYS = ["extraction", "legacy_compaction", "stats", "recovery", "import_receipt"] as const;
+const OPTIONAL_V11_KEYS = ["failure_detail", "extraction", "legacy_compaction", "stats", "recovery", "import_receipt"] as const;
 const SAFE_ACCOUNTING_ID = /^acc_[0-9a-f]{16}$/;
 
 export class OutputGuardError extends Error {}

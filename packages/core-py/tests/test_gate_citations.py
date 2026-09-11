@@ -15,6 +15,8 @@ from context_shunt.citations import (
     unpublished_marker_ids,
 )
 from context_shunt.limits import DEFAULT_LIMITS
+from context_shunt.provenance import AttributionPolicy, TokenMethod
+from context_shunt.provider import FallbackChainProvider
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
@@ -116,6 +118,138 @@ def test_assertions_without_valid_evidence_are_removed_but_valid_ones_survive(tm
     assert env["code"] == "ANSWERED"
     assert "alpha" in env["answer"] and "gamma" not in env["answer"]
     assert [c["id"] for c in env["citations"]] == ["c1"]
+
+
+def test_one_bounded_citation_repair_preserves_exact_usage_and_safe_feedback(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    rejected = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "not-present"}],
+    )
+    repaired = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}],
+    )
+    luna = FakeLuna(replies=[rejected, repaired])
+    result = Reader(registry, luna).answer("sess", _req(entry))
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["citations"][0]["verified"] is True
+    assert luna.call_count == 2
+    assert "CITATION REPAIR" in luna.calls[1].user
+    assert "QUOTE_NOT_FOUND" in luna.calls[1].user
+    assert "not-present" not in luna.calls[1].user
+    assert "alpha" in luna.calls[1].user
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 20
+    assert result.cost.output_tokens == 10
+    assert result.cost.attempts_started == 2
+    assert result.cost.attempts_usage_complete == 2
+    assert result.provenance.attempts_started == 2
+    assert len(result.provenance.call_identities) == 2
+
+
+def test_citation_repair_failure_is_citation_invalid_and_attempted_once(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    rejected = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "wrong"}],
+    )
+    luna = FakeLuna(replies=[rejected, rejected, answer_json("unused [c1].", [])])
+    result = Reader(registry, luna).answer("sess", _req(entry))
+
+    assert result.envelope["code"] == "CITATION_INVALID"
+    assert result.envelope["answer"] == ""
+    assert result.envelope["citations"] == []
+    assert luna.call_count == 2
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.attempts_started == 2
+    assert result.cost.attempts_usage_complete == 2
+    assert result.provenance.attempts_started == 2
+
+
+@pytest.mark.parametrize(
+    ("first", "feedback"),
+    [
+        (answer_json("The first line is alpha.", []), "NO_VALID_EVIDENCE"),
+        (
+            answer_json(
+                "The first line is alpha.",
+                [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}],
+            ),
+            "MARKER_NOT_PUBLISHED",
+        ),
+    ],
+)
+def test_repairs_no_evidence_with_fixed_safe_feedback(tmp_path, first, feedback):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    repaired = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}],
+    )
+    luna = FakeLuna(replies=[first, repaired])
+    result = Reader(registry, luna).answer("sess", _req(entry))
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert luna.call_count == 2
+    assert feedback in luna.calls[1].user
+    assert "alpha" in luna.calls[1].user
+
+
+def test_attribution_policy_refusal_does_not_spend_citation_repair(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    rejected = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "wrong"}],
+    )
+    luna = FakeLuna(replies=[rejected], confirms_generation=False, report_model=False)
+    from dataclasses import replace
+
+    from context_shunt.provenance import ModelIdentity
+
+    complete = luna.complete
+
+    def unproven(**kwargs):
+        return replace(
+            complete(**kwargs),
+            resolved=ModelIdentity(),
+            reported=ModelIdentity(),
+            provider_confirms_generation=False,
+        )
+
+    luna.complete = unproven
+    result = Reader(registry, luna, attribution_policy=AttributionPolicy.REQUIRE_MATCH).answer(
+        "sess", _req(entry)
+    )
+
+    assert result.envelope["code"] == "PROVENANCE_UNAVAILABLE"
+    assert luna.call_count == 1
+
+
+def test_pins_citation_repair_to_the_unique_chain_leaf(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    rejected = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "wrong"}],
+    )
+    repaired = answer_json(
+        "The first line is alpha [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha"}],
+    )
+    primary = FakeLuna(replies=[rejected, repaired], model="primary-model")
+    alternative = FakeLuna(replies=[repaired], model="alternative-model")
+    result = Reader(registry, FallbackChainProvider(primary, [alternative])).answer(
+        "sess", _req(entry)
+    )
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert primary.call_count == 2
+    assert alternative.call_count == 0
 
 
 def test_uncited_sentences_do_not_survive():
@@ -259,3 +393,29 @@ def _req(entry, selector=None):
         ],
         "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
     }
+
+
+@pytest.mark.parametrize(
+    "code,detail",
+    [
+        ("TIMEOUT", "CALL_DEADLINE"),
+        ("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP"),
+        ("PROVENANCE_UNAVAILABLE", "ATTRIBUTION_UNPROVEN"),
+    ],
+)
+def test_repair_terminal_boundaries_keep_both_physical_calls(tmp_path, code, detail):
+    from context_shunt.errors import ShuntError
+    from context_shunt.provenance import Usage
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha\nbeta\n"))
+    failure = ShuntError(code, detail)
+    failure.billed_usage = Usage(input_tokens=7, output_tokens=3, method=TokenMethod.EXACT)
+    luna = FakeLuna(replies=[answer_json("Unverified", []), failure])
+    result = Reader(registry, luna).answer("sess", _req(entry))
+    assert result.envelope["code"] == code
+    assert luna.call_count == 2
+    assert result.cost.attempts_started == 2
+    assert result.cost.input_tokens == 17
+    assert result.cost.output_tokens == 8
+    assert result.cost.method is TokenMethod.EXACT

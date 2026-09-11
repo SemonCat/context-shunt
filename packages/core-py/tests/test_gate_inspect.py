@@ -729,11 +729,13 @@ def test_byte_budget_cannot_skip_an_undisclosed_utf8_codepoint(tmp_path):
     entry = _captured(tmp_path, session, "é")
     request = _request(entry, {"kind": "bytes", "start": 0, "end": 2}, max_result_bytes=1)
     env = session.inspect(request)
-    assert env["code"] == "LIMIT_EXCEEDED"
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["failure_detail"] == "UNIT_OVER_PAGE_BUDGET"
+    assert env["legacy_compaction"]["summary_bytes"] <= 1
     assert "extraction" not in env
     assert (
         session.store.disclosure_allowance(session.identity, entry.source_id).per_source_remaining
-        == L.disclosure_max_per_source_bytes
+        == L.disclosure_max_per_source_bytes - env["legacy_compaction"]["summary_bytes"]
     )
     request["budgets"]["max_result_bytes"] = 2
     recovered = session.inspect(request)

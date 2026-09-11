@@ -49,6 +49,7 @@ from .accounting import estimate_tokens as accounting_tokens
 from .chunking import Chunk, estimate_tokens, plan
 from .citations import (
     CitationVerifier,
+    Reason,
     normalize_claims,
     referenced_ids,
     render_claims,
@@ -56,7 +57,7 @@ from .citations import (
     unpublished_marker_ids,
 )
 from .clock import Clock, Deadline, MonotonicClock
-from .errors import CancelledError, DeadlineExceeded, ShuntError
+from .errors import CancelledError, DeadlineExceeded, ShuntError, fallback_allowed
 from .limits import DEFAULT_LIMITS, Limits, envelope_byte_cap
 from .metrics import MetricsSink, NullMetrics
 from .paths import assert_no_secret
@@ -75,6 +76,7 @@ from .provenance import (
 from .provider import (
     READER_SYSTEM_PROMPT,
     CallIdentity,
+    FallbackChainProvider,
     ModelResponse,
     ProviderTarget,
     ReaderProvider,
@@ -94,6 +96,13 @@ _FORMAT_RETRY_DETAILS = frozenset(
     {"NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE"}
 )
 
+# Citation repair is deliberately narrower than the ordinary format/transient retry
+# budgets: one request gets at most one extra provider invocation, and that invocation
+# receives only fixed verifier reasons plus the already-authorized chunk. The count cap
+# keeps the feedback deterministic and prevents a model-controlled citation list from
+# becoming a prompt-sized side channel.
+_MAX_CITATION_REPAIR_REASONS = 8
+
 
 @dataclass
 class ChunkOutcome:
@@ -109,6 +118,11 @@ class ChunkOutcome:
     semantic_content: bool = False
     citations: list[dict[str, Any]] = field(default_factory=list)
     failed_reason: str | None = None
+    #: The bounded contract failure behind ``failed_reason``. Kept separately because
+    #: coverage uses a small omission vocabulary while the envelope must preserve the
+    #: precise safe Shunt detail for callers and fallback classification.
+    failure_code: str | None = None
+    failure_detail: str | None = None
     availability_only: bool = True
     # An empty accumulator, not an attempt that reported nothing. `Usage()` defaults to
     # `UNKNOWN`, which is the right answer for a *bridge* that returned no counts - but as
@@ -473,7 +487,12 @@ class Reader:
         spent = _CostSink()
         try:
             return self._answer(session_id, request, request_id, deadline, accounting_id, spent)
-        except ShuntError as exc:
+        except Exception as raw_exc:
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, ShuntError)
+                else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
+            )
             self._metrics.count("reader_error", {"code": exc.code})
             provenance = self._failure_provenance(exc, attempts_started=spent.attempts)
             return ReaderResult(
@@ -577,11 +596,12 @@ class Reader:
                 source_ids=tuple(source_ids),
             )
 
+        input_budget = _InputTokenBudget(self._limits.max_request_input_tokens)
         outcomes = self._run_chunks(
             question,
             the_plan.chunks,
             deadline,
-            _InputTokenBudget(self._limits.max_request_input_tokens),
+            input_budget,
         )
 
         all_claims: list[dict[str, Any]] = []
@@ -611,7 +631,17 @@ class Reader:
         #: call count credits failed candidates with the winner's identity.
         call_identities: list[CallIdentity] = []
 
-        for outcome in outcomes:
+        def add_outcome(outcome: ChunkOutcome, *, include_content: bool = True) -> None:
+            """Merge one outcome's bounded facts into this request's aggregates.
+
+            Citation repair is a second physical call for an already-planned chunk. Its
+            spend and provenance must join the request totals, while its content is
+            selected explicitly below after the repair response is verified; otherwise a
+            failed first citation set could leak into the rebuilt answer.
+            """
+            nonlocal total_calls, usage_complete_calls, usage
+            nonlocal unseen_usage, prompt_bytes, completion_bytes, fallback_used
+            nonlocal attribution, confidence, cap_dropped, next_citation
             total_calls += outcome.calls
             usage_complete_calls += outcome.usage_complete_calls
             usage = usage.merge(outcome.usage)
@@ -629,14 +659,16 @@ class Reader:
                 resolved_seen.append(outcome.resolved)
                 reported_seen.append(outcome.reported)
             dropped_by_ceiling = outcome.claims_over_cap + outcome.citations_over_cap
-            if dropped_by_ceiling:
+            if include_content and dropped_by_ceiling:
                 cap_dropped += dropped_by_ceiling
                 coverage.omit_once(
                     outcome.chunk.source_id, outcome.chunk.locator, "BUDGET_EXCEEDED"
                 )
+            if not include_content:
+                return
             if outcome.failed_reason:
                 coverage.omit(outcome.chunk.source_id, outcome.chunk.locator, outcome.failed_reason)
-                continue
+                return
             coverage.processed_chunks += 1
             namespaced_claims, namespaced_legacy, namespaced_citations, allocated = (
                 _namespace_outcome(outcome, next_citation)
@@ -647,25 +679,37 @@ class Reader:
                 legacy_parts.append(namespaced_legacy)
             raw_citations.extend(namespaced_citations)
 
+        for outcome in outcomes:
+            add_outcome(outcome)
+
         target = _target_of(self._provider)
+        requested = UNKNOWN
+        resolved = UNKNOWN
+        reported = UNKNOWN
+
         # One answer, one identity - or none. Each side is published only when every
         # answering call agreed on it; a request whose calls disagree cannot be described
         # by any single value, and picking one would certify a model that produced part of
         # the answer as the model that produced all of it. Divergence also drops the
         # attribution to `unknown`, because a status is a claim *about* the requested
         # identity and there is no longer one to make it about.
-        agreed_requested = _agreed_identity(requested_seen)
-        agreed_resolved = _agreed_identity(resolved_seen)
-        agreed_reported = _agreed_identity(reported_seen)
-        if None in (agreed_requested, agreed_resolved, agreed_reported):
-            attribution, confidence = _weakest(
-                attribution, confidence, Attribution.UNKNOWN, Confidence.NONE
-            )
-        # No answering call at all: the strongest truthful statement is what was asked
-        # for, which is what the pre-1.1 envelope always published.
-        requested = target.identity() if not requested_seen else (agreed_requested or UNKNOWN)
-        resolved = agreed_resolved or UNKNOWN
-        reported = agreed_reported or UNKNOWN
+        def refresh_identity() -> None:
+            """Recompute identity after every answering call, including repair."""
+            nonlocal attribution, confidence, requested, resolved, reported
+            agreed_requested = _agreed_identity(requested_seen)
+            agreed_resolved = _agreed_identity(resolved_seen)
+            agreed_reported = _agreed_identity(reported_seen)
+            if None in (agreed_requested, agreed_resolved, agreed_reported):
+                attribution, confidence = _weakest(
+                    attribution, confidence, Attribution.UNKNOWN, Confidence.NONE
+                )
+            # No answering call at all: the strongest truthful statement is what was
+            # asked for, which is what the pre-1.1 envelope always published.
+            requested = target.identity() if not requested_seen else (agreed_requested or UNKNOWN)
+            resolved = agreed_resolved or UNKNOWN
+            reported = agreed_reported or UNKNOWN
+
+        refresh_identity()
         self._metrics.observe("reader_model_calls", total_calls)
         self._metrics.observe("reader_attempts_usage_complete", usage_complete_calls)
 
@@ -720,12 +764,313 @@ class Reader:
                 availability_failure=category,
             )
 
-        verified, rejected = self._verify_all(session_id, raw_citations)
+        # Attribution and provenance policy are caller boundaries. Judge them before the
+        # optional semantic repair so a refused answer never spends a second provider
+        # call. A call with no response has no attribution to judge; its explicit reader
+        # failure remains eligible for the ordinary failure path below.
+        if any(outcome.responses_seen for outcome in outcomes):
+            pre_repair = Provenance(
+                derived=True,
+                label=ProvenanceLabel.MODEL_GENERATED_ANSWER,
+                attribution_status=attribution,
+                attribution_confidence=confidence,
+                attribution_policy=self._policy,
+                attempts_started=total_calls,
+                usage_complete=bool(total_calls) and usage_complete_calls == total_calls,
+                citations_mechanically_verified=True,
+                requested=requested,
+                resolved=resolved,
+                reported=reported,
+                fallback_used=fallback_used if total_calls else None,
+                call_identities=tuple(call_identities),
+            )
+            try:
+                enforce_policy(pre_repair, self._policy)
+            except ShuntError as exc:
+                self._metrics.count("reader_error", {"code": exc.code})
+                refused = _as_failure_provenance(pre_repair)
+                return ReaderResult(
+                    envelope=E.error_envelope(
+                        request_id,
+                        exc,
+                        accounting_id=accounting_id,
+                        provenance=refused,
+                        sources=handles,
+                        handles_valid=True,
+                    ),
+                    provenance=refused,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+
+        if outcomes and all(outcome.failed_reason for outcome in outcomes):
+            # A chunk that never produced publishable content still has a concrete reader
+            # failure. Returning NO_MATCH here erased malformed model output (and its safe
+            # detail), which made the outer session unable to apply the mandatory failure
+            # fallback. Valid empty replies have ``failed_reason is None`` and therefore
+            # stay on the normal NO_MATCH path below.
+            terminal = next(
+                (outcome for outcome in outcomes if outcome.failure_code is not None),
+                outcomes[0],
+            )
+            code = terminal.failure_code or "MODEL_ERROR"
+            detail = terminal.failure_detail
+            failure = ShuntError(code, detail, retryable=False)
+            failed = Provenance(
+                derived=False,
+                label=ProvenanceLabel.NO_MODEL_OUTPUT,
+                attribution_status=attribution,
+                attribution_confidence=confidence,
+                attribution_policy=self._policy,
+                attempts_started=total_calls,
+                usage_complete=usage_complete_calls == total_calls,
+                citations_mechanically_verified=True,
+                requested=requested,
+                resolved=resolved,
+                reported=reported,
+                fallback_used=fallback_used if total_calls else None,
+                call_identities=tuple(call_identities),
+            )
+            env = E.error_envelope(
+                request_id,
+                failure,
+                accounting_id=accounting_id,
+                provenance=failed,
+                sources=handles,
+                handles_valid=True,
+            )
+            env["coverage"] = coverage.to_dict()
+            return ReaderResult(
+                envelope=env,
+                provenance=failed,
+                cost=cost,
+                source_ids=tuple(source_ids),
+            )
+
+        verified, rejected, rejection_reasons = self._verify_all(session_id, raw_citations)
         # Keep mechanical verification separate from the evidence actually used below.
         # Unrelated citations cannot support semantic content stripped from the answer.
         verified_evidence = verified
         self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
         self._metrics.observe("citations_rejected", rejected, {"result": "rejected"})
+
+        # A citation failure is the one reader-owned quality failure that gets a focused
+        # repair opportunity. It is deliberately request-wide (one extra provider
+        # invocation total), has no transient/format retry budget of its own, and targets
+        # the first affected planned chunk in deterministic order. A valid answer already
+        # exists whenever any normalized claim or legacy sentence is backed by a verified
+        # citation, so a partial result never spends this extra call.
+        verified_ids = {citation["id"] for citation in verified}
+        supported_claims = any(
+            claim["citation_ids"] and set(claim["citation_ids"]) <= verified_ids
+            for claim in all_claims
+        )
+        supported_legacy = bool(strip_unsupported_assertions(" ".join(legacy_parts), verified_ids))
+        repair_target = next(
+            (
+                outcome
+                for outcome in outcomes
+                if not outcome.failed_reason
+                and outcome.requires_evidence
+                and outcome.semantic_content
+            ),
+            None,
+        )
+        repair_provider = (
+            self._repair_provider_for(repair_target.requested)
+            if repair_target is not None
+            else None
+        )
+        if (
+            repair_target is not None
+            and repair_provider is not None
+            and not supported_claims
+            and not supported_legacy
+            and cap_dropped == 0
+        ):
+            repair_question = _citation_repair_question(
+                question,
+                _citation_repair_feedback(
+                    _repair_feedback_reasons(rejection_reasons, len(raw_citations), len(verified))
+                ),
+            )
+            for source in request["sources"]:
+                current = self._registry.resolve(session_id, source["source_id"])
+                if current.snapshot.snapshot_id != source["snapshot_id"]:
+                    raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+            repaired = self._run_chunk(
+                repair_question,
+                repair_target.chunk,
+                deadline,
+                input_budget,
+                allow_retries=False,
+                provider=repair_provider,
+            )
+            # The repair call is part of this request's cost and provenance, even though
+            # its content is selected only after a second mechanical verification pass.
+            add_outcome(repaired, include_content=False)
+            refresh_identity()
+            if repaired.claims_over_cap or repaired.citations_over_cap:
+                cap_dropped += repaired.claims_over_cap + repaired.citations_over_cap
+                coverage.omit_once(
+                    repaired.chunk.source_id, repaired.chunk.locator, "BUDGET_EXCEEDED"
+                )
+            cost = spent.record(
+                _reader_cost(
+                    usage,
+                    attempts=total_calls,
+                    usage_complete=usage_complete_calls,
+                    prompt_bytes=prompt_bytes,
+                    completion_bytes=completion_bytes,
+                    limits=self._limits,
+                    unseen_usage=unseen_usage,
+                )
+            )
+            if repaired.responses_seen > 0 and (
+                repaired.fallback_used or repaired.requested != repair_target.requested
+            ):
+                # Availability fallback is valid for the original read, but a semantic
+                # citation repair must stay with the provider that produced the rejected
+                # evidence. Otherwise the repaired answer would be attributed to a
+                # different target (and potentially several physical calls).
+                failure = ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
+                failed = replace(
+                    self._failure_provenance(failure, attempts_started=total_calls),
+                    call_identities=tuple(call_identities),
+                    fallback_used=fallback_used,
+                    usage_complete=usage_complete_calls == total_calls,
+                )
+                env = E.error_envelope(
+                    request_id,
+                    failure,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                )
+                env["coverage"] = coverage.to_dict()
+                return ReaderResult(
+                    envelope=env,
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+            if (
+                repaired.failure_code == "MODEL_ERROR"
+                and repaired.failure_detail == "MODEL_SUBSTITUTED"
+            ):
+                # A provider identity mismatch is an explicit provenance refusal. It is
+                # never turned into a citation fallback merely because repair was active.
+                failure = ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
+                failed = replace(
+                    self._failure_provenance(failure, attempts_started=total_calls),
+                    call_identities=tuple(call_identities),
+                    fallback_used=fallback_used,
+                    usage_complete=usage_complete_calls == total_calls,
+                )
+                env = E.error_envelope(
+                    request_id,
+                    failure,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                )
+                env["coverage"] = coverage.to_dict()
+                return ReaderResult(
+                    envelope=env,
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+            if repaired.failure_code in ("LIMIT_EXCEEDED", "TIMEOUT", "CANCELLED") or (
+                repaired.failure_code is not None
+                and not fallback_allowed(repaired.failure_code, repaired.failure_detail)
+            ):
+                # Capacity and caller deadline/cancellation boundaries remain explicit.
+                # The original citation failure stays visible in coverage; the outer
+                # session can classify this bounded stage failure without guessing.
+                code = repaired.failure_code
+                detail = repaired.failure_detail
+                failure = ShuntError(code, detail, retryable=False)
+                failed = replace(
+                    self._failure_provenance(failure, attempts_started=total_calls),
+                    call_identities=tuple(call_identities),
+                    fallback_used=fallback_used,
+                    usage_complete=usage_complete_calls == total_calls,
+                )
+                env = E.error_envelope(
+                    request_id,
+                    failure,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                )
+                env["coverage"] = coverage.to_dict()
+                return ReaderResult(
+                    envelope=env,
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+            if repaired.failed_reason or not repaired.semantic_content:
+                # The request still has no verified evidence. Preserve that stable reason
+                # for the caller and the mandatory deterministic fallback; the repair
+                # attempt's own bounded cost is carried above.
+                failure = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", retryable=False)
+                failed = replace(
+                    self._failure_provenance(failure, attempts_started=total_calls),
+                    call_identities=tuple(call_identities),
+                    fallback_used=fallback_used,
+                    usage_complete=usage_complete_calls == total_calls,
+                )
+                env = E.error_envelope(
+                    request_id,
+                    failure,
+                    accounting_id=accounting_id,
+                    provenance=failed,
+                    sources=handles,
+                    handles_valid=True,
+                )
+                env["coverage"] = coverage.to_dict()
+                return ReaderResult(
+                    envelope=env,
+                    provenance=failed,
+                    cost=cost,
+                    source_ids=tuple(source_ids),
+                )
+
+            # Replace only the affected chunk's answer material. Its first response is
+            # retained in the aggregates above for truthful spend/identity accounting;
+            # only the evidence set used for publication is rebuilt from the repaired
+            # response and the untouched chunks.
+            repair_target.claims = repaired.claims
+            repair_target.legacy_answer = repaired.legacy_answer
+            repair_target.requires_evidence = repaired.requires_evidence
+            repair_target.semantic_content = repaired.semantic_content
+            repair_target.citations = repaired.citations
+            repair_target.claims_over_cap = repaired.claims_over_cap
+            repair_target.citations_over_cap = repaired.citations_over_cap
+            all_claims.clear()
+            legacy_parts.clear()
+            raw_citations.clear()
+            next_citation = 1
+            for outcome in outcomes:
+                if outcome.failed_reason:
+                    continue
+                namespaced_claims, namespaced_legacy, namespaced_citations, allocated = (
+                    _namespace_outcome(outcome, next_citation)
+                )
+                next_citation += allocated
+                all_claims.extend(namespaced_claims)
+                if namespaced_legacy:
+                    legacy_parts.append(namespaced_legacy)
+                raw_citations.extend(namespaced_citations)
+            verified, rejected, rejection_reasons = self._verify_all(session_id, raw_citations)
+            verified_evidence = verified
+            self._metrics.observe("citations_verified", len(verified), {"result": "verified"})
+            self._metrics.observe("citations_rejected", rejected, {"result": "rejected"})
 
         # The citation ceiling is applied to a *prioritized* list, not to whatever order
         # the model happened to emit. Truncating arbitrarily lost twice over: the citation
@@ -1108,6 +1453,14 @@ class Reader:
             requested=_target_of(self._provider).identity(),
         )
 
+    def _repair_provider_for(self, identity: ModelIdentity) -> ReaderProvider | None:
+        """Pin semantic repair to the provider that produced the rejected answer."""
+        if not identity.known:
+            return None
+        if isinstance(self._provider, FallbackChainProvider):
+            return self._provider.repair_provider_for(identity)
+        return self._provider
+
     # -- chunk execution ---------------------------------------------------
 
     def _run_chunks(
@@ -1131,8 +1484,12 @@ class Reader:
         chunk: Chunk,
         deadline: Deadline,
         input_budget: _InputTokenBudget,
+        *,
+        allow_retries: bool = True,
+        provider: ReaderProvider | None = None,
     ) -> ChunkOutcome:
         outcome = ChunkOutcome(chunk=chunk)
+        active_provider = provider if provider is not None else self._provider
         # Two independent, separately bounded retry budgets: a transient provider failure
         # and a schema failure on the same chunk can each spend their own allotted retry,
         # and both may fire for the same chunk. "Independent" means neither budget can
@@ -1141,12 +1498,18 @@ class Reader:
         # (1 + max_transient_retries + max_format_retries), never more.
         transient_used = 0
         format_used = 0
-        max_attempts = 1 + self._limits.max_transient_retries + self._limits.max_format_retries
+        max_attempts = (
+            1 + self._limits.max_transient_retries + self._limits.max_format_retries
+            if allow_retries
+            else 1
+        )
         for _attempt in range(max_attempts):
             try:
                 deadline.check("MODEL_CALL")
             except (DeadlineExceeded, CancelledError) as exc:
                 outcome.failed_reason = "TIMEOUT" if exc.code == "TIMEOUT" else "CANCELLED"
+                outcome.failure_code = exc.code
+                outcome.failure_detail = exc.detail
                 return outcome
             # One ledger per physical invocation, created before anything can fail.
             # Ordinary, late and cancelled outcomes all report through it, and it counts
@@ -1180,6 +1543,7 @@ class Reader:
                         deadline=deadline,
                         ledger=ledger,
                         input_budget=debit,
+                        provider=active_provider,
                     )
                 finally:
                     ledger.record_extra_attempts(debit.close())
@@ -1280,6 +1644,8 @@ class Reader:
                     exc.code == "TIMEOUT"
                     or (exc.code == "MODEL_ERROR" and exc.detail != "MODEL_SUBSTITUTED")
                 )
+                outcome.failure_code = exc.code
+                outcome.failure_detail = exc.detail
                 can_retry_transient = (
                     exc.code == "MODEL_ERROR"
                     and exc.retryable
@@ -1290,7 +1656,11 @@ class Reader:
                     and exc.detail in _FORMAT_RETRY_DETAILS
                     and format_used < self._limits.max_format_retries
                 )
-                if (can_retry_transient or can_retry_format) and not deadline.expired():
+                if (
+                    allow_retries
+                    and (can_retry_transient or can_retry_format)
+                    and not deadline.expired()
+                ):
                     if can_retry_transient:
                         transient_used += 1
                     else:
@@ -1298,6 +1668,8 @@ class Reader:
                     continue
                 outcome.failed_reason = _omission_reason(exc)
                 return outcome
+        outcome.failure_code = "MODEL_ERROR"
+        outcome.failure_detail = "CHUNK_FAILED"
         outcome.failed_reason = "CHUNK_FAILED"
         return outcome
 
@@ -1310,6 +1682,7 @@ class Reader:
         deadline: Deadline,
         ledger: _AttemptLedger,
         input_budget: _PerCallDebit | None = None,
+        provider: ReaderProvider | None = None,
     ) -> ModelResponse:
         """Run an untrusted host bridge behind a real hard wall-clock deadline.
 
@@ -1329,12 +1702,14 @@ class Reader:
 
         result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
+        active_provider = provider if provider is not None else self._provider
+
         def invoke() -> None:
             try:
                 result_queue.put_nowait(
                     (
                         True,
-                        self._provider.complete(
+                        active_provider.complete(
                             system=system,
                             user=user,
                             max_output_tokens=max_output_tokens,
@@ -1344,13 +1719,13 @@ class Reader:
                             # passed to a provider that accepts it: `deadline` is a
                             # widening of a published protocol, and a provider written
                             # against the previous signature must keep working.
-                            **deadline_kwarg(self._provider, deadline),
+                            **deadline_kwarg(active_provider, deadline),
                             # The same widening, for the same reason: a composite provider
                             # debits the shared request input budget before every extra
                             # candidate it starts, so no chain can transmit more than the
                             # request's ceiling. A provider that ignores it makes one
                             # call, which this frame has already debited.
-                            **input_budget_kwarg(self._provider, input_budget),
+                            **input_budget_kwarg(active_provider, input_budget),
                         ),
                     )
                 )
@@ -1434,21 +1809,24 @@ class Reader:
 
     def _verify_all(
         self, session_id: str, citations: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
         verified: list[dict[str, Any]] = []
         rejected = 0
+        rejection_reasons: dict[str, int] = {}
         seen: set[str] = set()
         for citation in citations:
             result = self._verifier.verify(session_id, citation)
             if not result.verified:
                 rejected += 1
+                reason = result.reason.value
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 continue
             cid = citation["id"]
             if cid in seen:
                 continue
             seen.add(cid)
             verified.append({**citation, "verified": True})
-        return verified, rejected
+        return verified, rejected, rejection_reasons
 
 
 # -- helpers ----------------------------------------------------------------
@@ -1458,6 +1836,50 @@ UNKNOWN = ModelIdentity()
 
 #: The coarsest legal locator, for an omission whose material had no narrower one.
 _WHOLE_SOURCE: dict[str, Any] = {"kind": "all"}
+
+
+def _citation_repair_feedback(reasons: dict[str, int]) -> str:
+    """Render only bounded, fixed verifier reasons for the one repair prompt."""
+    if not reasons:
+        return "NO_VALID_EVIDENCE"
+    entries = []
+    for reason, count in sorted(reasons.items())[:_MAX_CITATION_REPAIR_REASONS]:
+        # ``Reason`` is an enum owned by the verifier. The check documents the trust
+        # boundary and prevents a future verifier change from turning a diagnostic into
+        # arbitrary model-visible text.
+        if reason not in (
+            {member.value for member in Reason} | {"NO_VALID_EVIDENCE", "MARKER_NOT_PUBLISHED"}
+        ) or not isinstance(count, int):
+            continue
+        entries.append(f"{reason} x{min(count, 64)}")
+    return "; ".join(entries) or "NO_VALID_EVIDENCE"
+
+
+def _repair_feedback_reasons(
+    reasons: dict[str, int], citation_count: int, verified_count: int
+) -> dict[str, int]:
+    """Supply a fixed reason when verification had no rejected citation entry."""
+    if reasons:
+        return reasons
+    # A valid citation that did not back any surviving assertion means the marker/evidence
+    # relationship was not published. With no citation at all, the only safe feedback is
+    # the bounded absence-of-evidence reason.
+    return (
+        {"MARKER_NOT_PUBLISHED": 1}
+        if citation_count > 0 and verified_count > 0
+        else {"NO_VALID_EVIDENCE": 1}
+    )
+
+
+def _citation_repair_question(question: str, feedback: str) -> str:
+    """Augment the original question with safe feedback, never prior model bytes."""
+    return (
+        f"{question}\n\n"
+        "CITATION REPAIR: The previous evidence did not pass the bounded verifier. "
+        f"Fixed verifier feedback: {feedback}. "
+        "Answer the original question using only the SOURCE EXCERPT above. "
+        "Return JSON with claims and exact citations; every claim must cite evidence."
+    )
 
 
 def _agreed_identity(values: list[ModelIdentity]) -> ModelIdentity | None:

@@ -301,8 +301,19 @@ describe("capture engine (synthetic capability only)", () => {
     if (kind === "serialization") { const cyclic: any = { raw: SENTINEL }; cyclic.self = cyclic; input = { ...input, details: cyclic }; }
     const output = f.call(input);
     expect(envelope(output).pointer).toBeUndefined();
-    expect(JSON.stringify(output)).not.toContain(SENTINEL);
-    expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThan(4096);
+    if (kind === "store") {
+      const env = envelope(output);
+      expect(env.code).toBe("LEGACY_COMPACTED");
+      expect(env.status).toBe("partial");
+      expect(env.coverage.complete).toBe(false);
+      expect(env.legacy_compaction.summary).toContain(SENTINEL);
+      expect(env.legacy_compaction.summary_bytes).toBeLessThanOrEqual(16384);
+      expect(env.legacy_compaction.summary).not.toContain(SENTINEL.repeat(2000));
+      expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThan(32768);
+    } else {
+      expect(JSON.stringify(output)).not.toContain(SENTINEL);
+      expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThan(4096);
+    }
   });
   it.each([null, {}, { content: null }, { content: [{ type: "text", text: 1 }] }])("fails closed on malformed payload", (input) => {
     const f = setup();

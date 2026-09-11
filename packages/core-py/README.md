@@ -12,8 +12,6 @@ with `python3 -m venv .venv` and
 in [`README.md`](../../README.md), [`docs/configuration.md`](../../docs/configuration.md),
 and [`docs/metrics.md`](../../docs/metrics.md).
 
-`ShuntSession.read` automatically returns a labelled deterministic exact prefix after
-wholly exhausted reader availability, using the existing inspector and disclosure ledger.
-Defaults: `reader.automatic_extract: true`, `reader.fallback_max_bytes: 2048` (1–4096).
-Direct `Reader` calls return the truthful availability error without automatic disclosure.
-See [configuration](../../docs/configuration.md#automatic-exact-extraction-after-reader-unavailability).
+Shunt-owned read, capture/store, and eligible inspection failures automatically return bounded deterministic `partial/LEGACY_COMPACTED` output. This invariant cannot be disabled: former legacy-compaction switches are deprecated no-ops. The output preserves the original failure code and bounded `failure_detail`, marks incomplete coverage, and never claims model derivation or verified citations. Safe representative excerpts are expected; full raw passthrough is forbidden.
+
+Caller errors, unsupported operations/versions, unsafe/binary/secret content, immutable binding or session mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. `LIMIT_EXCEEDED` qualifies only for enumerated Shunt implementation/store capacity details, never safety or disclosure caps. Citation failures receive at most one pinned, deadline- and budget-preserving repair; accounting includes both physical calls. An attribution-policy refusal spends no repair call. See [configuration](../../docs/configuration.md) for migration and limits.

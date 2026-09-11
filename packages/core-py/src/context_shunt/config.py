@@ -160,8 +160,7 @@ class ReaderConfig:
     fallback_chain: tuple[ProviderRef, ...] = ()
     automatic_extract: bool = True
     fallback_max_bytes: int = 2048
-    #: First bounded fallback for terminal availability/citation failures; automatic
-    #: extraction is secondary when this is disabled or cannot safely deliver.
+    #: Deprecated compatibility key; never controls mandatory fallback.
     #: Model-identity mismatch and provenance-policy refusals remain excluded.
     legacy_compaction: bool = True
     #: Character budget handed to the compaction algorithm before the envelope's own byte
@@ -375,7 +374,7 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
     return ReaderConfig(
         automatic_extract=reader_raw.get("automatic_extract", True),
         fallback_max_bytes=fallback_bytes,
-        legacy_compaction=reader_raw.get("legacy_compaction", True),
+        legacy_compaction=True,
         legacy_compaction_max_chars=legacy_compaction_max_chars,
         enabled=reader_raw.get("enabled", True),
         model=model.strip(),

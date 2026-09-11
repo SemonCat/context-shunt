@@ -40,6 +40,7 @@ import { Config, ProviderRef } from "./config.js";
 import {
   Coverage,
   Envelope,
+  type LegacyCompactionShape,
   type ExtractionShape,
   type SourceHandle,
   buildEnvelope,
@@ -48,19 +49,20 @@ import {
   recoveryFor,
   serializedBytes,
 } from "./envelope.js";
-import { ShuntError, isShuntError } from "./errors.js";
+import { ShuntError, fallbackAllowed, isShuntError } from "./errors.js";
 import { GateDecision, PreReadGate, guidanceFor } from "./gate.js";
 import { enforce, enforceOrFixed, fixedError } from "./guard.js";
-import { EMITTED_SCHEMA_VERSION } from "./limits.js";
 import { CURSOR_PREFIX, Inspector, decodeCursor, encodeCursor } from "./inspect.js";
 import {
   compactToolResult,
+  incumbentCompactToolResult,
   DEFAULT_LEGACY_SESSION_HARD_CHARS,
 } from "./legacy-compact.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
+import { EMITTED_SCHEMA_VERSION } from "./limits.js";
 import { authorize, pathPolicy, readAuthorizedBounded } from "./paths.js";
 import { fileProber } from "./probe.js";
-import { deterministicProvenance } from "./provenance.js";
+import { deterministicProvenance, type Provenance } from "./provenance.js";
 import {
   FallbackChainProvider,
   HostBridgeProvider,
@@ -71,7 +73,15 @@ import {
 import { Reader, type ReaderResult } from "./reader.js";
 import { RegisteredSource, SourceRegistry } from "./registry.js";
 import { INSPECT_OPERATIONS, STATS_OPERATIONS, type InspectRequest, type StatsRequest, validateRequest } from "./schema.js";
-import { JSON_MEDIA_TYPE, Snapshot, TEXT_MEDIA_TYPE, snapshotBytes } from "./snapshot.js";
+import {
+  JSON_MEDIA_TYPE,
+  Snapshot,
+  TEXT_MEDIA_TYPE,
+  assertNoSecret,
+  recordCount,
+  resolvePointer,
+  snapshotBytes,
+} from "./snapshot.js";
 import { SpillEngine, SpillOutcome } from "./spill.js";
 import { ScopeIdentity, SnapshotStore } from "./store.js";
 
@@ -81,9 +91,6 @@ import { ScopeIdentity, SnapshotStore } from "./store.js";
  */
 const MAX_CURSOR_CHARS = 512;
 const SEARCH_WINDOW_GUIDANCE = 'Oversized search hit: exact byte window only; surrounding context is omitted. Use context_shunt_inspect with a bytes selector and the retained source_id/snapshot_id to read a specific range.';
-/** Only exhausted availability may use the legacy fallback; citation failures retain evidence. */
-const LEGACY_COMPACTION_TRIGGER_CODES = new Set(["MODEL_ERROR", "TIMEOUT"]);
-
 export class ShuntSession {
   private readonly gate: PreReadGate;
   private readonly reader: Reader;
@@ -95,7 +102,6 @@ export class ShuntSession {
   readonly identity: ScopeIdentity;
   readonly registry: SourceRegistry;
   readonly spill: SpillEngine;
-  private readonly legacyCompactionEnabled: boolean;
   private readonly legacyCompactionMaxChars: number;
 
   constructor(
@@ -108,7 +114,7 @@ export class ShuntSession {
       metrics?: MetricsSink;
       store?: SnapshotStore;
       identity?: ScopeIdentity;
-      /** Enable non-semantic compaction for exhausted availability only. */
+      /** @deprecated accepted for source compatibility; mandatory fallback ignores it. */
       legacyCompaction?: boolean;
       /** Character ceiling handed to the deterministic compactor before byte capping. */
       legacyCompactionMaxChars?: number;
@@ -129,7 +135,9 @@ export class ShuntSession {
     this.registry = new SourceRegistry(this.store, this.identity, config.limits);
     this.gate = new PreReadGate(fileProber(config.limits), config.limits, this.clock);
     this.provider = opts.provider ?? new UnavailableProvider();
-    this.legacyCompactionEnabled = opts.legacyCompaction ?? false;
+    // The fallback is an availability invariant. Keep accepting the former option so
+    // callers can upgrade without a config parse break, but it cannot disable fallback.
+    void opts.legacyCompaction;
     this.legacyCompactionMaxChars = opts.legacyCompactionMaxChars === undefined
       ? DEFAULT_LEGACY_SESSION_HARD_CHARS
       : opts.legacyCompactionMaxChars;
@@ -153,6 +161,7 @@ export class ShuntSession {
       this.registry,
       config.limits,
       config.toolResultCaptureEnabled && modeEnabled(capability, "tool_result_capture"),
+      this.legacyCompactionMaxChars,
     );
   }
 
@@ -254,47 +263,53 @@ export class ShuntSession {
       );
     }
     const operationId = newOperationId();
-    const result: ReaderResult = await this.reader.answerDetailed(
+    let result: ReaderResult;
+    try { result = await this.reader.answerDetailed(
       this.sessionId,
       request,
       undefined,
       signal,
       operationId,
-    );
+    ); } catch (raw) {
+      let failure = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
+      try { validateRequest(request); } catch (invalid) {
+        if (isShuntError(invalid)) failure = invalid;
+      }
+      result = { envelope: errorEnvelope(requestId, failure),
+        provenance: deterministicProvenance("no_model_output"), cost: noReaderCost(), sourceIds: [] };
+    }
     let candidate = result.envelope;
-    let legacyAttempted = false;
     if (
-      this.legacyCompactionEnabled
-      && !signal?.aborted
+      !signal?.aborted
       && result.envelope.status === "error"
-      && result.availabilityFailure !== undefined
-      && result.envelope.code === result.availabilityFailure
+      && fallbackAllowed(result.envelope.code, result.envelope.failure_detail)
       && result.envelope.provenance?.attribution_status !== "mismatch"
     ) {
-      legacyAttempted = true;
       try {
         candidate = enforce(this.legacyCompactionFallback(request, result, requestId, operationId), this.config.limits);
       } catch (err) {
-        // A malformed/unsafe summary is no delivery. In opted-in mode this must not
-        // downgrade to the old exact-prefix fallback, which would hide the failure class.
+        // A malformed/unsafe summary is no delivery. Mandatory fallback never degrades to
+        // raw passthrough or the retired exact-prefix extraction path.
         candidate = result.envelope;
-        if (isShuntError(err) && ["SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE"].includes(err.code)) {
-          candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
+        if (isShuntError(err)) {
+          const handlesValid = !["SOURCE_EXPIRED", "SOURCE_CHANGED", "UNSAFE_SOURCE", "STORE_FAILED"].includes(err.code);
+          candidate = errorEnvelope(requestId, err, {
+            accountingId: operationId,
+            provenance: result.provenance,
+            sources: result.envelope.sources,
+            handlesValid,
+          });
+          candidate.coverage = result.envelope.coverage;
+        } else {
+          candidate = ShuntSession.prototype.legacyCompactionFallback.call(
+            this, request, result, requestId, operationId, undefined, incumbentCompactToolResult,
+          );
         }
       }
     }
-    if (!legacyAttempted && result.availabilityFailure && this.config.readerAutomaticExtract !== false
-        && this.config.inspectEnabled && !signal?.aborted) {
-      try {
-        candidate = this.automaticExtract(request, result, requestId, operationId);
-      } catch (err) {
-        // Keep the original bounded failure and recovery actions, never exception bodies.
-        candidate = result.envelope;
-        if (isShuntError(err) && ["SOURCE_EXPIRED", "SOURCE_CHANGED", "STORE_FAILED", "UNSAFE_SOURCE"].includes(err.code)) {
-          candidate = { ...candidate, recovery: recoveryFor(err.code, false) };
-        }
-      }
-    }
+    // The historical automatic exact-prefix extraction route is retained as an internal
+    // helper for compatibility with callers that import the class, but is deliberately not
+    // a secondary answer path: Shunt-owned failures must produce incumbent compaction.
     if (candidate.code === "CITATION_INVALID") {
       // Preserve evidence and cost instead of substituting a heuristic answer.
       try {
@@ -322,7 +337,7 @@ export class ShuntSession {
     let baseline = noBaseline();
     let creditedBytes = 0;
     try { ({ baseline, creditedBytes } = this.baselineFor(result.sourceIds)); }
-    catch (err) { if (!isShuntError(err)) throw err; }
+    catch { /* Accounting must not prevent a bounded response. */ }
     this.record({
       operationId,
       kind: refined ? "refined_read" : "read",
@@ -337,50 +352,41 @@ export class ShuntSession {
     return published;
   }
 
-  private automaticExtract(request: unknown, result: ReaderResult, requestId: string, operationId: string): Envelope {
-    const input = request as { sources: Array<{ source_id: string; snapshot_id: string }>;
-      budgets: { max_answer_bytes: number } };
-    // Revalidate all handles after the provider wait before disclosing any bytes.
-    for (const source of input.sources) {
-      const entry = this.registry.resolve(this.sessionId, source.source_id);
-      if (entry.snapshot.snapshotId !== source.snapshot_id) {
-        throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH");
-      }
-    }
-    const first = input.sources[0]!;
-    const entry = this.registry.resolve(this.sessionId, first.source_id);
-    const limits = this.config.limits;
-    const budget = Math.min(this.config.readerFallbackMaxBytes ?? 2048, 4096, entry.snapshot.bytesLen - 1,
-      input.budgets.max_answer_bytes, limits.maxAnswerBytes,
-      limits.inspectMaxResultBytes, limits.maxExtractionBytes);
-    if (budget <= 0) throw new ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK");
-    return this.runInspect({
-      schema_version: EMITTED_SCHEMA_VERSION, request_id: requestId, operation: "inspect",
-      source_id: first.source_id, snapshot_id: first.snapshot_id,
-      selector: { kind: "bytes", start: 0, end: entry.snapshot.bytesLen },
-      budgets: { max_result_bytes: budget, max_scan_lines: limits.inspectMaxScanLines },
-    }, requestId, operationId, result);
-  }
-
   private legacyCompactionFallback(
     request: unknown,
     result: ReaderResult,
     requestId: string,
     operationId: string,
+    byteCap?: number,
+    compactor = compactToolResult,
   ): Envelope {
-    const input = request as {
+    const validated = validateRequest(request);
+    const input = validated as {
       sources: Array<{ source_id: string; snapshot_id: string }>;
+      question?: unknown;
     };
+    if (typeof input.question === "string") assertNoSecret(input.question, "QUESTION");
     // Revalidate every handle after the provider wait, before the summary reads any bytes.
+    const entries: RegisteredSource[] = [];
     for (const source of input.sources) {
+      const selector = (source as { selector?: Record<string, unknown> }).selector;
+      if (selector?.["kind"] === "lines" && Number(selector["end"]) < Number(selector["start"]))
+        throw new ShuntError("INVALID_REQUEST", "BAD_RANGE");
       const entry = this.registry.resolve(this.sessionId, source.source_id);
+      if (selector?.["kind"] === "lines" && Number(selector["start"]) > Math.min(Number(selector["end"]), entry.snapshot.lineCount))
+        throw new ShuntError("INVALID_REQUEST", "LINE_OUT_OF_RANGE");
+      if (selector?.["kind"] === "records") {
+        const node = resolvePointer(entry.snapshot.jsonValue, String(selector["pointer"]));
+        if (Number(selector["end"]) < Number(selector["start"]) || Number(selector["end"]) > recordCount(node))
+          throw new ShuntError("INVALID_REQUEST", "RECORD_OUT_OF_RANGE");
+      }
       if (entry.snapshot.snapshotId !== source.snapshot_id) {
         throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
       }
+      entries.push(entry);
     }
-    const first = input.sources[0];
-    if (!first) throw new ShuntError("INVALID_REQUEST", "NO_SOURCE", false);
-    const entry = this.registry.resolve(this.sessionId, first.source_id);
+    const entry = entries[0];
+    if (!entry) throw new ShuntError("INVALID_REQUEST", "NO_SOURCE", false);
     let text: string;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(entry.snapshot.data);
@@ -388,16 +394,25 @@ export class ShuntSession {
       throw new ShuntError("UNSAFE_SOURCE", "INVALID_ENCODING", false);
     }
 
-    const compacted = utf8SafeCap(
-      compactToolResult(text, { hardChars: this.legacyCompactionMaxChars }),
-      this.config.limits.maxExtractionBytes,
-    );
     const originalFailure = result.envelope.code;
-    if (!LEGACY_COMPACTION_TRIGGER_CODES.has(originalFailure)) {
+    if (!fallbackAllowed(originalFailure, result.envelope.failure_detail)) {
       throw new ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN", false);
     }
+    const allowance = this.store.disclosureAllowance(this.identity, entry.sourceId);
+    const remaining = Math.min(
+      allowance.perSourceRemaining,
+      allowance.perSessionRemaining,
+    );
+    if (remaining <= 0) throw new ShuntError("DISCLOSURE_EXHAUSTED");
+    const compacted = utf8SafeCap(
+      compactor(text, { hardChars: this.legacyCompactionMaxChars }),
+      Math.min(this.config.limits.maxExtractionBytes, remaining, byteCap ?? Infinity),
+    );
 
-    const sourceHandles = result.envelope.sources.map((handle) => ({ ...handle }));
+    // A reader failure can legitimately carry an empty source list. Rebuild the handles
+    // from the revalidated immutable entries so the fallback still identifies and charges
+    // the authorized snapshots it discloses.
+    const sourceHandles = entries.map((item) => sourceHandle(item));
     const sourceCoverage = result.envelope.coverage;
     const coverage = new Coverage();
     coverage.complete = false;
@@ -411,7 +426,6 @@ export class ShuntSession {
       coverage.omitOnce(handle.source_id, { kind: "all" }, "UNKNOWN_REMAINDER");
     }
 
-    const attempts = result.cost.attemptsStarted;
     const buildLegacyEnvelope = (summary: string): Envelope => buildEnvelope({
       requestId,
       status: "partial",
@@ -420,11 +434,13 @@ export class ShuntSession {
       sources: sourceHandles,
       retryable: false,
       resultKind: "legacy_compaction",
-      provenance: {
-        ...deterministicProvenance("legacy_compaction"),
-        attemptsStarted: attempts,
-        usageComplete: attempts === 0 || result.cost.attemptsUsageComplete === attempts,
-      },
+      // Preserve provider identity, attempts and usage truth from the failed call while
+      // making the deterministic replacement's non-model status explicit.
+      provenance: legacyFallbackProvenance(
+        result.provenance,
+        result.cost.attemptsStarted,
+        result.cost.attemptsUsageComplete,
+      ),
       guidance:
         "Escape hatch: deterministic legacy-shaped compaction of the source, ported from "
         + "the incumbent tool-result compactor; not model-derived and not an LLM summary. "
@@ -433,6 +449,9 @@ export class ShuntSession {
         + "sources and structure the heuristic dropped are omitted.",
       recovery: recoveryFor(originalFailure, true),
       accountingId: operationId,
+      ...(result.envelope.failure_detail !== undefined
+        ? { failureDetail: result.envelope.failure_detail }
+        : {}),
       legacyCompaction: {
         deterministic: true,
         source_id: entry.sourceId,
@@ -441,33 +460,70 @@ export class ShuntSession {
         summary_bytes: new TextEncoder().encode(summary).length,
         original_bytes: entry.snapshot.bytesLen,
         hard_cap_chars: this.legacyCompactionMaxChars,
-        original_failure: originalFailure as "MODEL_ERROR" | "TIMEOUT" | "CITATION_INVALID",
+        original_failure: originalFailure as LegacyCompactionShape["original_failure"],
       },
     });
 
-    // Legacy compaction remains under the ordinary 16 KiB envelope cap. The heuristic's
-    // character cap controls its own output, but escaped metadata and retained handles also
-    // consume wire bytes, so trim the summary by complete Unicode code points until the
-    // complete envelope fits. If the metadata alone cannot fit, preserve the original
-    // bounded reader failure rather than publishing an invalid envelope.
-    let candidate = buildLegacyEnvelope(compacted);
-    if (serializedBytes(candidate) > this.config.limits.maxEnvelopeBytes) {
-      const empty = buildLegacyEnvelope("");
-      if (serializedBytes(empty) > this.config.limits.maxEnvelopeBytes) {
-        throw new ShuntError("LIMIT_EXCEEDED", "LEGACY_COMPACTION_ENVELOPE_OVER_CAP", false);
-      }
-      const chars = Array.from(compacted);
-      let low = 0;
-      let high = chars.length;
-      while (low < high) {
-        const midpoint = Math.ceil((low + high) / 2);
-        const trial = buildLegacyEnvelope(chars.slice(0, midpoint).join(""));
-        if (serializedBytes(trial) <= this.config.limits.maxEnvelopeBytes) low = midpoint;
-        else high = midpoint - 1;
-      }
-      candidate = buildLegacyEnvelope(chars.slice(0, low).join(""));
+    // Legacy compaction remains under the ordinary wire cap. Trim by the measured UTF-8
+    // excess, matching the Python incumbent fallback when JSON escaping consumes headroom.
+    const candidate = fitLegacyEnvelope(
+      buildLegacyEnvelope,
+      compacted,
+      this.config.limits.maxEnvelopeBytes,
+    );
+    // A legacy summary still discloses source bytes. Enforce the same per-source and
+    // per-session disclosure ceilings as inspect, and charge only after the complete
+    // envelope has passed the output guard so a rejected delivery cannot consume budget.
+    let published: Envelope;
+    try {
+      published = enforce(candidate, this.config.limits);
+    } catch {
+      throw new ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM", false);
     }
-    return candidate;
+    const summaryBytes = published.legacy_compaction?.summary_bytes ?? 0;
+    const charge = this.store.chargeDisclosure(
+      this.identity,
+      entry.sourceId,
+      "bytes",
+      summaryBytes,
+    );
+    if (!charge.granted) throw new ShuntError("DISCLOSURE_EXHAUSTED");
+    return published;
+  }
+
+  /** Compact a successfully captured snapshot when its pointer cannot be published. */
+  private legacyCompactionFallbackForHandle(
+    sourceId: string | undefined,
+    requestId: string,
+    operationId: string,
+  ): Envelope {
+    if (sourceId === undefined) throw new ShuntError("STORE_FAILED", "UNKNOWN_HANDLE", false);
+    const entry = this.registry.resolve(this.sessionId, sourceId);
+    const handle: SourceHandle = {
+      source_id: entry.sourceId,
+      snapshot_id: entry.snapshot.snapshotId,
+      media_type: entry.snapshot.mediaType,
+      bytes: entry.snapshot.bytesLen,
+      expires_at: new Date(entry.expiresAtEpoch * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"),
+    };
+    const failure = new ShuntError("SPILL_FAILED", "INTERNAL_ERROR", false);
+    const failed = errorEnvelope(requestId, failure, {
+      accountingId: operationId,
+      sources: [handle],
+      handlesValid: true,
+    });
+    const result: ReaderResult = {
+      envelope: failed,
+      provenance: deterministicProvenance("no_model_output"),
+      cost: noReaderCost(),
+      sourceIds: [entry.sourceId],
+    };
+    return this.legacyCompactionFallback(
+      { schema_version: "1.1", operation: "read", request_id: requestId, question: "Bounded compaction", budgets: {max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000}, sources: [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: {kind: "all"} }] },
+      result,
+      requestId,
+      operationId,
+    );
   }
 
   /**
@@ -518,9 +574,39 @@ export class ShuntSession {
     const operationId = newOperationId();
     try {
       return this.runInspect(request, requestId, operationId);
-    } catch (err) {
-      if (!isShuntError(err)) throw err;
-      return this.publishFailure(requestId, err, "inspect", operationId);
+    } catch (raw) {
+      let failure = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
+      if (fallbackAllowed(failure.code, failure.detail)) {
+        try {
+          const args = validateRequest(request, INSPECT_OPERATIONS) as InspectRequest;
+          const entry = this.registry.resolve(this.sessionId, args.source_id);
+          if (entry.snapshot.snapshotId !== args.snapshot_id) throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH");
+          const sel = args.selector;
+          if ((sel["kind"] === "lines" || sel["kind"] === "bytes") && Number(sel["end"]) < Number(sel["start"]))
+            throw new ShuntError("INVALID_REQUEST", "BAD_RANGE");
+          if (sel["kind"] === "bytes") {
+            for (const offset of [Number(sel["start"]), Number(sel["end"])]) {
+              const byte = entry.snapshot.data[offset];
+              if (byte !== undefined && (byte & 0xc0) === 0x80) throw new ShuntError("INVALID_REQUEST", "BAD_RANGE");
+            }
+          }
+          if (sel["kind"] === "search" && Buffer.byteLength(String(sel["needle"])) > this.config.limits.inspectMaxNeedleBytes)
+            throw new ShuntError("INVALID_REQUEST", "NEEDLE_OVER_CAP");
+          const state = args.cursor === undefined ? {} : decodeCursor(this.store.cursorKey(), args.cursor, args.source_id, args.snapshot_id, sel);
+          if (sel["kind"] === "bytes") {
+            const offset = Math.max(Number(sel["start"]), Number(state["offset"] ?? sel["start"]));
+            const byte = entry.snapshot.data[offset];
+            if (byte !== undefined && (byte & 0xc0) === 0x80) throw new ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY");
+          }
+          const failed = errorEnvelope(requestId, failure);
+          const result: ReaderResult = { envelope: failed, provenance: deterministicProvenance("no_model_output"), cost: noReaderCost(), sourceIds: [entry.sourceId] };
+          const synthetic = { schema_version: "1.1", operation: "read", request_id: requestId, question: "Bounded compaction", sources: [{source_id: args.source_id, snapshot_id: args.snapshot_id, selector: {kind: "all"}}], budgets: {max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000} };
+          const envelope = this.legacyCompactionFallback(synthetic, result, requestId, operationId, args.budgets.max_result_bytes);
+          this.record({operationId, kind: "inspect", envelope, baseline: noBaseline(), baselineCredited: false, reader: noReaderCost(), boundary: "extraction"});
+          return envelope;
+        } catch (err) { failure = isShuntError(err) ? err : new ShuntError("STORE_FAILED", "INTERNAL_ERROR"); }
+      }
+      return this.publishFailure(requestId, failure, "inspect", operationId);
     }
   }
 
@@ -668,11 +754,11 @@ export class ShuntSession {
     // published envelope is therefore never larger than the probe and never differs from it
     // anywhere the guard looks, so a probe that passes cannot become a failure below.
     const limits = this.config.limits;
+    const probe = compose(limits.disclosureMaxPerSourceBytes, limits.disclosureMaxPerSessionBytes, false);
+    if (serializedBytes(probe) > limits.maxExtendedEnvelopeBytes)
+      throw new ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM");
     try {
-      enforce(
-        compose(limits.disclosureMaxPerSourceBytes, limits.disclosureMaxPerSessionBytes, false),
-        limits,
-      );
+      enforce(probe, limits);
     } catch {
       throw new ShuntError("LIMIT_EXCEEDED", "EXTRACTION_REFUSED", false);
     }
@@ -893,15 +979,36 @@ export class ShuntSession {
     const operationId = newOperationId();
     let outcome: SpillOutcome;
     try {
-      outcome = this.spill.evaluate(this.sessionId, requestId, result, opts.internalSourceId);
+      outcome = this.spill.evaluate(
+        this.sessionId,
+        requestId,
+        result,
+        opts.internalSourceId,
+        operationId,
+      );
     } catch (err) {
-      if (!isShuntError(err)) throw err;
-      outcome = {
-        action: "error",
-        envelope: errorEnvelope(requestId, new ShuntError("SPILL_FAILED", err.detail, false)),
-        code: "SPILL_FAILED",
-        bytesMeasured: 0,
-      };
+      if (isShuntError(err)) {
+        outcome = {
+          action: "error",
+          envelope: errorEnvelope(
+            requestId,
+            new ShuntError("SPILL_FAILED", err.detail, false),
+            { accountingId: operationId },
+          ),
+          code: "SPILL_FAILED",
+          bytesMeasured: 0,
+        };
+      } else {
+        // The adapter boundary can throw after handing us a complete result (for example
+        // while bootstrapping the capture/store). Give the spill engine one private retry
+        // over the original bytes so a Shunt-owned failure retains incumbent availability.
+        outcome = this.spill.recoverUnexpected(
+          this.sessionId,
+          requestId,
+          result,
+          operationId,
+        );
+      }
     }
     let guarded: SpillOutcome = outcome;
     if (outcome.envelope) {
@@ -910,11 +1017,34 @@ export class ShuntSession {
         && Boolean(envelope.pointer)
         && envelope.sources.some((handle) => handle.source_id === outcome.sourceId);
       // Guard rejection cannot retain a spill action or consume an undelivered handle's credit.
-      if (outcome.action === "spill" && !pointerDelivered && envelope.code === "SPILLED") {
-        envelope = fixedError(requestId, "SPILL_FAILED");
+      if (outcome.action === "spill" && !pointerDelivered) {
+        // The complete serialized result is no longer in this method, but a successful
+        // capture left an immutable snapshot behind. Compact that snapshot before exposing
+        // the guard failure; a raw post-tool result must never reach the host because the
+        // pointer envelope itself was rejected.
+        try {
+          envelope = enforce(
+            this.legacyCompactionFallbackForHandle(
+              outcome.sourceId,
+              requestId,
+              operationId,
+            ),
+            this.config.limits,
+          );
+        } catch {
+          envelope = fixedError(requestId, "SPILL_FAILED");
+        }
       }
       guarded = outcome.action === "spill" && !pointerDelivered
-        ? { action: "error", envelope, code: envelope.code, bytesMeasured: outcome.bytesMeasured }
+        ? {
+          action: "error",
+          envelope,
+          code: envelope.code,
+          bytesMeasured: outcome.bytesMeasured,
+          ...(envelope.code === "LEGACY_COMPACTED" && outcome.sourceId !== undefined
+            ? { sourceId: outcome.sourceId }
+            : {}),
+        }
         : { ...outcome, envelope };
       const baseline = opts.upstreamTruncated
         // A host that already truncated the upstream result only lets us observe the
@@ -931,7 +1061,9 @@ export class ShuntSession {
         baseline,
         baselineCredited: credited,
         reader: noReaderCost(),
-        boundary: pointerDelivered ? "pointer" : "envelope",
+        boundary: pointerDelivered
+          ? "pointer"
+          : envelope.code === "LEGACY_COMPACTED" ? "extraction" : "envelope",
       });
     }
     this.metrics.count("tool_result_capture_outcome", { result: guarded.action });
@@ -971,8 +1103,7 @@ export class ShuntSession {
     });
     try {
       this.store.recordOperation(this.identity, record);
-    } catch (err) {
-      if (!isShuntError(err)) throw err;
+    } catch {
       // Losing a metric must never fail the caller's operation, and it must never be
       // papered over as a zero: the operation simply has no record.
       this.metrics.count("accounting_dropped", { stage: input.kind });
@@ -1043,7 +1174,6 @@ export class ShuntSession {
       metrics: this.metrics,
       store: this.store,
       identity: this.identity.withGeneration(generation),
-      legacyCompaction: this.legacyCompactionEnabled,
       legacyCompactionMaxChars: this.legacyCompactionMaxChars,
     });
   }
@@ -1131,4 +1261,60 @@ function utf8SafeCap(text: string, maxBytes: number): string {
   // than letting TextDecoder insert U+FFFD into a deterministic summary.
   while (end > 0 && (data[end] as number) >= 0x80 && (data[end] as number) <= 0xbf) end -= 1;
   return new TextDecoder().decode(data.subarray(0, end));
+}
+
+function sourceHandle(entry: RegisteredSource): SourceHandle {
+  return {
+    source_id: entry.sourceId,
+    snapshot_id: entry.snapshot.snapshotId,
+    media_type: entry.snapshot.mediaType,
+    bytes: entry.snapshot.bytesLen,
+    expires_at: isoExpiry(entry.expiresAtEpoch),
+  };
+}
+
+function legacyFallbackProvenance(
+  base: Provenance,
+  attemptsStarted: number,
+  usageCompleteAttempts: number,
+): Provenance {
+  return {
+    ...base,
+    derived: false,
+    label: "legacy_compaction",
+    citationsMechanicallyVerified: false,
+    attemptsStarted,
+    usageComplete: attemptsStarted === 0 || usageCompleteAttempts === attemptsStarted,
+  };
+}
+
+function fitLegacyEnvelope(
+  build: (summary: string) => Envelope,
+  summary: string,
+  maxEnvelopeBytes: number,
+): Envelope {
+  let candidate = build(summary);
+  if (serializedBytes(candidate) <= maxEnvelopeBytes) return candidate;
+  const empty = build("");
+  if (serializedBytes(empty) > maxEnvelopeBytes) {
+    throw new ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM", false);
+  }
+  // Match the incumbent fallback's wire-fit behavior: remove the measured excess in
+  // UTF-8 bytes, then repeat because JSON escaping can make the reduction smaller than the
+  // first estimate. This keeps summary bytes and charged disclosure in sync.
+  let bounded = summary;
+  while (serializedBytes(candidate) > maxEnvelopeBytes && bounded.length > 0) {
+    const excess = serializedBytes(candidate) - maxEnvelopeBytes;
+    const data = new TextEncoder().encode(bounded);
+    const keep = Math.max(0, data.length - excess);
+    const next = new TextDecoder().decode(data.subarray(0, keep));
+    bounded = next === bounded && data.length > 0
+      ? new TextDecoder().decode(data.subarray(0, data.length - 1))
+      : next;
+    candidate = build(bounded);
+  }
+  if (serializedBytes(candidate) > maxEnvelopeBytes) {
+    throw new ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM", false);
+  }
+  return candidate;
 }

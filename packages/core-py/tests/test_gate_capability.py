@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from context_shunt.capability import (
     CapabilityReport,
@@ -275,7 +276,8 @@ def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failu
     assert out is not None
     assert oversized not in out
     envelope = json.loads(out)
-    assert envelope["code"] == "HOST_UNSAFE"
+    assert envelope["code"] == "LEGACY_COMPACTED"
+    assert envelope["failure_detail"] == "INTERNAL_ERROR"
 
 
 @pytest.mark.parametrize("tool_name", ["skill_view", " SKILL_VIEW ", "\tsKiLl_ViEw\n"])
@@ -678,9 +680,12 @@ def test_tool_schemas_declare_no_write_surface_and_no_full_retrieval():
         "handles",
         "paths",
         "question",
+        "selector",
     ]
     assert sorted(module.INSPECT_TOOL_SCHEMA["parameters"]["properties"]) == [
         "cursor",
+        "max_result_bytes",
+        "max_scan_lines",
         "selector",
         "snapshot_id",
         "source_id",
@@ -689,9 +694,109 @@ def test_tool_schemas_declare_no_write_surface_and_no_full_retrieval():
     # No tool may name a mutating or full-retrieval capability in its own surface.
     names = [schema["name"] for schema, _h, _m in module.TOOLS]
     parameters = json.dumps([schema["parameters"] for schema, _h, _m in module.TOOLS]).lower()
-    for forbidden in ("write", "patch", "apply", "content", "full", "all", "raw", "payload"):
+    for forbidden in ("write", "patch", "apply", "full", "raw", "payload"):
         assert not any(forbidden in name for name in names)
         assert forbidden not in parameters
+
+
+def test_registered_tool_schemas_are_strict_canonical_parameters():
+    """Hermes must reject the same malformed tool arguments as the core contract."""
+    module = _load_adapter()
+    schemas = {schema["name"]: schema["parameters"] for schema, _h, _m in module.TOOLS}
+
+    assert set(schemas) == {
+        "context_shunt_read",
+        "context_shunt_inspect",
+        "context_shunt_stats",
+        "context_shunt_import",
+    }
+    for parameters in schemas.values():
+        assert parameters["type"] == "object"
+        assert parameters["additionalProperties"] is False
+        assert "$ref" not in json.dumps(parameters)
+
+    read = Draft202012Validator(schemas["context_shunt_read"])
+    valid_handle = {"source_id": "src_abcd", "snapshot_id": "sha256:" + "a" * 64}
+    assert read.is_valid({"question": "What is it?", "paths": ["/tmp/a"]})
+    assert read.is_valid({"question": "What is it?", "handles": [valid_handle]})
+    assert not read.is_valid(
+        {"question": "What is it?", "paths": ["/tmp/a"], "handles": [valid_handle]}
+    )
+    assert not read.is_valid({"question": "What is it?", "paths": ["/tmp/a"], "unexpected": 1})
+    assert not read.is_valid(
+        {
+            "question": "What is it?",
+            "handles": [{**valid_handle, "snapshot_id": "sha256:" + "b" * 71}],
+        }
+    )
+    assert not read.is_valid(
+        {
+            "question": "What is it?",
+            "paths": ["/tmp/a"],
+            "selector": {"kind": "all", "extra": 1},
+        }
+    )
+
+    inspect = Draft202012Validator(schemas["context_shunt_inspect"])
+    valid_inspect = {
+        "source_id": "src_abcd",
+        "snapshot_id": "sha256:" + "a" * 64,
+        "selector": {"kind": "lines", "start": 1, "end": 2},
+    }
+    assert inspect.is_valid(valid_inspect)
+    assert not inspect.is_valid({**valid_inspect, "unexpected": True})
+    assert not inspect.is_valid(
+        {
+            **valid_inspect,
+            "selector": {"kind": "lines", "start": 1, "end": 2, "needle": "x"},
+        }
+    )
+    assert not inspect.is_valid({**valid_inspect, "max_result_bytes": 16385})
+
+    stats = Draft202012Validator(schemas["context_shunt_stats"])
+    assert stats.is_valid({})
+    assert stats.is_valid({"page": 1, "page_size": 8})
+    assert not stats.is_valid({"page": 0})
+    assert not stats.is_valid({"unknown": 1})
+
+    imported = Draft202012Validator(schemas["context_shunt_import"])
+    assert imported.is_valid({"manifest_path": "/tmp/manifest.json"})
+    assert not imported.is_valid({"manifest_path": "/tmp/manifest.json", "unknown": 1})
+
+
+def test_malformed_snapshot_id_has_actionable_safe_failure(tmp_path):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    invalid_snapshot = "sha256:" + "a" * 71
+    out = json.loads(
+        module.context_shunt_read(
+            question="What is it?",
+            handles=[{"source_id": "src_abcd", "snapshot_id": invalid_snapshot}],
+            task_id="bad-snapshot",
+        )
+    )
+
+    assert out["status"] == "error"
+    assert out["code"] == "INVALID_REQUEST"
+    assert out["failure_detail"] == "INVALID_SNAPSHOT_ID"
+    assert out["recovery"]["handles_valid"] is False
+    assert "REUSE_POINTER_PAIR" in out["recovery"]["actions"]
+    assert "exact source_id/snapshot_id pair" in out["guidance"]
+    assert invalid_snapshot not in json.dumps(out)
+
+    inspected = json.loads(
+        module.context_shunt_inspect(
+            source_id="src_abcd",
+            snapshot_id=invalid_snapshot,
+            selector={"kind": "lines", "start": 1, "end": 1},
+            task_id="bad-snapshot-inspect",
+        )
+    )
+    assert inspected["code"] == "INVALID_REQUEST"
+    assert inspected["failure_detail"] == "INVALID_SNAPSHOT_ID"
+    assert inspected["recovery"]["handles_valid"] is False
+    assert "REUSE_POINTER_PAIR" in inspected["recovery"]["actions"]
+    assert invalid_snapshot not in json.dumps(inspected)
 
 
 def test_capture_mode_stays_off_even_when_configuration_asks_for_it(tmp_path):
@@ -925,13 +1030,10 @@ def test_hermes_automatic_extract_config_reaches_delivery(tmp_path, enabled, leg
     out = json.loads(
         module.context_shunt_read(question="What is here?", paths=[str(path)], task_id="tauto")
     )
-    assert out["code"] == (
-        "LEGACY_COMPACTED" if legacy else "EXTRACTED" if enabled else "MODEL_ERROR"
-    )
+    assert out["code"] == "LEGACY_COMPACTED"
     assert "PRIVATE_PROVIDER_BODY" not in json.dumps(out)
-    if enabled and not legacy:
-        assert out["extraction"]["result_bytes"] <= 64
-        assert out["provenance"]["derived"] is False
+    assert out["legacy_compaction"]["summary_bytes"] <= module._config.limits.max_extraction_bytes
+    assert out["provenance"]["derived"] is False
 
 
 def test_openclaw_post_tool_release_gate_cannot_certify_a_retired_seam(monkeypatch):
@@ -1113,5 +1215,54 @@ def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch,
     for value in ("small", {"image": "x" * 30_000}):
         assert module.transform_tool_result(tool_name=tool_name, result=value) is None
     out = module.transform_tool_result(tool_name=tool_name, result="x" * 30_000)
-    assert json.loads(out)["code"] == "HOST_UNSAFE"
+    assert json.loads(out)["code"] == "LEGACY_COMPACTED"
+    assert json.loads(out)["failure_detail"] == "INTERNAL_ERROR"
+    assert json.loads(out)["sources"] == []
     assert len(out.encode()) <= module._config.limits.max_envelope_bytes
+
+
+def test_store_bootstrap_failure_keeps_capture_fallback_registered(tmp_path, monkeypatch):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("PRIVATE_STORE_BOOTSTRAP")
+
+    monkeypatch.setattr(module, "SnapshotStore", broken)
+    module.register(FakeCtx(config))
+    monkeypatch.setattr(module, "_session", broken)
+    out = json.loads(module.transform_tool_result(tool_name="read_file", result="x" * 40000))
+    assert out["code"] == "LEGACY_COMPACTED"
+    assert "PRIVATE_STORE_BOOTSTRAP" not in str(out)
+    unsafe = "aws_secret_access_key=" + "x" * 40000
+    out = json.loads(module.transform_tool_result(tool_name="read_file", result=unsafe))
+    assert out["code"] == "UNSAFE_SOURCE"
+    assert "legacy_compaction" not in out
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("context_shunt_read", {"question": "q", "paths": ["/untrusted"], "extra": True}),
+        ("context_shunt_stats", {"page": "1"}),
+        ("context_shunt_stats", {"extra": 1}),
+        ("context_shunt_import", {"manifest_path": "/untrusted", "extra": 1}),
+        (
+            "context_shunt_inspect",
+            {
+                "source_id": "src_abcd",
+                "snapshot_id": "sha256:" + "a" * 64,
+                "selector": {"kind": "lines", "start": 1, "end": 2},
+                "max_result_bytes": 0,
+            },
+        ),
+    ],
+)
+def test_direct_tool_handler_preserves_canonical_caller_errors(tmp_path, tool, args):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path)))
+    env = json.loads(getattr(module, tool)(args, task_id="strict"))
+    assert env["code"] == "INVALID_REQUEST"
+    assert not env["recovery"]["handles_valid"]
+    assert "legacy_compaction" not in env

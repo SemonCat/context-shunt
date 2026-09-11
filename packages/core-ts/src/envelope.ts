@@ -17,7 +17,7 @@
  * to one, because declaring the older revision while carrying newer fields is a version lie
  * rather than a compatible extension.
  */
-import { RETRYABLE_CODES, ShuntError } from "./errors.js";
+import { RETRYABLE_CODES, ShuntError, safeFailureDetail } from "./errors.js";
 import { EMITTED_SCHEMA_VERSION, legalPair } from "./limits.js";
 import {
   type Provenance,
@@ -41,6 +41,7 @@ export const OMISSION_REASONS = new Set([
 export const RECOVERY_ACTIONS = new Set([
   "RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE", "NARROW_SELECTOR",
   "WAIT_AND_RETRY", "RECAPTURE_SOURCE", "CONFIGURE_READER_MODEL", "REVIEW_DISCLOSURE_BUDGET",
+  "REUSE_POINTER_PAIR",
   "NONE",
 ]);
 
@@ -50,10 +51,11 @@ export const RECOVERY_ACTIONS = new Set([
  */
 const HANDLES_SURVIVE = new Set([
   "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "TIMEOUT", "CANCELLED",
-  "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "PROVENANCE_UNAVAILABLE", "INVALID_REQUEST",
+  "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "PROVENANCE_UNAVAILABLE",
 ]);
 
 const RECOVERY_BY_CODE: Record<string, string[]> = {
+  INVALID_REQUEST: ["REUSE_POINTER_PAIR"],
   MODEL_ERROR: ["RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"],
   INVALID_MODEL_OUTPUT: ["RETRY_SAME_QUESTION", "INSPECT_HANDLE"],
   CITATION_INVALID: ["REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"],
@@ -141,13 +143,13 @@ export interface RecoveryShape {
 
 export interface LegacyCompactionShape {
   deterministic: true;
-  source_id: string;
-  snapshot_id: string;
+  source_id?: string;
+  snapshot_id?: string;
   summary: string;
   summary_bytes: number;
   original_bytes: number;
   hard_cap_chars: number;
-  original_failure: "MODEL_ERROR" | "TIMEOUT" | "INVALID_MODEL_OUTPUT" | "CITATION_INVALID";
+  original_failure: "MODEL_ERROR" | "TIMEOUT" | "INVALID_MODEL_OUTPUT" | "CITATION_INVALID" | "STORE_FAILED" | "SPILL_FAILED" | "LIMIT_EXCEEDED" | "HOST_UNSAFE";
 }
 
 export interface Envelope {
@@ -167,6 +169,7 @@ export interface Envelope {
   accounting_id?: string;
   extraction?: ExtractionShape;
   legacy_compaction?: LegacyCompactionShape;
+  failure_detail?: string;
   stats?: StatsShape;
   recovery?: RecoveryShape;
 }
@@ -248,6 +251,7 @@ export interface BuildOptions {
   accountingId?: string;
   extraction?: ExtractionShape;
   legacyCompaction?: LegacyCompactionShape;
+  failureDetail?: string;
   stats?: StatsShape;
   recovery?: RecoveryShape;
   schemaVersion?: string;
@@ -357,6 +361,7 @@ export function buildEnvelope(opts: BuildOptions): Envelope {
   envelope.accounting_id = opts.accountingId ?? PLACEHOLDER_ACCOUNTING_ID;
   if (opts.extraction) envelope.extraction = opts.extraction;
   if (opts.legacyCompaction) envelope.legacy_compaction = opts.legacyCompaction;
+  if (opts.failureDetail !== undefined) envelope.failure_detail = safeFailureDetail(opts.failureDetail);
   if (opts.stats) envelope.stats = opts.stats;
   if (opts.recovery) envelope.recovery = validatedRecovery(opts.recovery);
   return envelope;
@@ -403,8 +408,10 @@ export function errorEnvelope(
     status: BLOCKED_CODES.has(err.code) ? "blocked" : "error",
     code: err.code,
     retryable: err.retryable,
-    recovery: recoveryFor(err.code, opts.handlesValid),
+    recovery: recoveryFor(err.code, err.code === "INVALID_REQUEST" ? false : opts.handlesValid),
+    failureDetail: safeFailureDetail(err.detail),
   };
+  if (err.code === "INVALID_REQUEST") build.guidance = "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema.";
   if (opts.guidance) build.guidance = opts.guidance;
   if (opts.sources) build.sources = opts.sources;
   if (opts.accountingId) build.accountingId = opts.accountingId;

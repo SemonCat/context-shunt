@@ -521,6 +521,21 @@ class FallbackChainProvider:
         first = self._chain[0]
         return getattr(first, "target", ProviderTarget())
 
+    def repair_provider_for(self, identity: ModelIdentity) -> ReaderProvider | None:
+        """Return a unique leaf matching an observed requested provider/model.
+
+        Citation repair is semantic and must not advance the availability chain to a
+        different target. A target is selectable only when exactly one leaf declares the
+        same provider/model pair; ambiguity tells the reader to skip repair. The ordinary
+        read path continues to use :meth:`complete`.
+        """
+        matches = [
+            candidate
+            for candidate in self._chain
+            if ((getattr(candidate, "target", None) or ProviderTarget()).identity() == identity)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def complete(
         self,
         *,

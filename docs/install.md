@@ -2,8 +2,8 @@
 
 > Retirement update (2026-09-10): both live context-shunt plugins remain disabled.
 > Earlier OpenClaw capture/cutover proof below is historical and was contradicted by the
-> live canary. Automatic capture is now unsupported; citation failures preserve an explicit
-> error and source handles. Do not use the historical cutover steps to re-enable capture.
+> live canary. OpenClaw automatic capture is unsupported; Shunt-owned citation failures now use mandatory
+> bounded legacy compaction after at most one citation repair. Do not use the historical cutover steps to re-enable capture.
 > See [current capabilities](capability-matrix.md#openclaw).
 
 
@@ -57,12 +57,7 @@ npm install
 `scripts/verify` exits `0` on pass, `1` on failure, and `2` for `NOT_RUN` — a gate whose
 prerequisite is absent. `NOT_RUN` is never a pass.
 
-Reader availability failures now default to a labelled, bounded exact-text escape hatch
-(2 KiB prefix of the first source), using the existing inspector and disclosure ceilings.
-Set `reader.automatic_extract: false` for error-only recovery, or
-`reader.fallback_max_bytes` (1–4096) to narrow/tune it. `inspect.enabled: false` also disables
-it. No database migration is needed; the 1.1 wire schema is unchanged. See
-[trigger and compatibility details](configuration.md#automatic-exact-extraction-after-reader-unavailability).
+Shunt-owned failures automatically use mandatory bounded deterministic legacy compaction. Deprecated fallback toggles cannot restore error-only recovery. Caller/security/policy failures remain explicit refusals. No database migration is needed; both packages must ship the synchronized first-party 1.1 contract extensions. See [fallback and compatibility details](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover). Deployment, drift checks, draining, and restart approval remain separate operator work.
 
 ## Hermes
 

@@ -15,7 +15,7 @@ OpenClaw prevents the mode.
 
 | Tool | Returns | Model calls |
 | --- | --- | --- |
-| `context_shunt_read` | a cited answer, or labelled bounded legacy compaction after exhausted availability; citation failure preserves a bounded error and handles | at least one per processed chunk; retries/fallback can add more |
+| `context_shunt_read` | a cited answer, or mandatory bounded legacy compaction for Shunt-owned failures | at least one per processed chunk; retries/fallback can add more |
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 
@@ -32,17 +32,9 @@ an explicit provider is pinned. The isolated completion path can prove the host'
 post-policy selection (`resolved`), not a provider-authoritative `actual` model. See the checked
 [`openclaw.json`](../../examples/config/openclaw.json).
 
-OpenClaw selects the shared TypeScript legacy compactor after exhausted availability.
-It returns `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and
-`provenance.derived: false`, with an empty answer/citations and a dedicated bounded summary.
-It is independent of the question and covers only the first requested source, retaining
-all handles and omissions. A citation verification failure remains an explicit bounded
-`CITATION_INVALID` error with its recovery handles; it does not become a semantic answer or
-an availability fallback. If compaction cannot be published safely, the bounded reader
-failure remains; it does not downgrade to an exact prefix. The older `automatic_extract`
-and `fallback_max_bytes` fields remain accepted for configuration compatibility, but do not
-control this OpenClaw availability fallback. Generic TypeScript sessions retain the old
-automatic-extraction default unless the legacy session option is selected.
+Shunt-owned read, capture/store, and eligible inspection failures automatically return bounded deterministic `partial/LEGACY_COMPACTED` output. This invariant cannot be disabled: former legacy-compaction switches are deprecated no-ops. The output preserves the original failure code and bounded `failure_detail`, marks incomplete coverage, and never claims model derivation or verified citations. Safe representative excerpts are expected; full raw passthrough is forbidden.
+
+Caller errors, unsupported operations/versions, unsafe/binary/secret content, immutable binding or session mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. `LIMIT_EXCEEDED` qualifies only for enumerated Shunt implementation/store capacity details, never safety or disclosure caps. Citation failures receive at most one pinned, deadline- and budget-preserving repair; accounting includes both physical calls. An attribution-policy refusal spends no repair call. See [configuration](../../docs/configuration.md) for migration and limits.
 
 ## OpenClaw tool-result capture is retired
 

@@ -315,7 +315,7 @@ def _try_parse_json(text: str) -> Any:
         return None
     try:
         return json.loads(stripped)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -324,7 +324,7 @@ def _cap_text(text: str, max_chars: int) -> str:
         return text
     notice = f"\n\n[Compacted summary truncated to {max_chars} chars. Original source is larger.]"
     keep = max(0, max_chars - len(notice))
-    return text[:keep].rstrip() + notice
+    return (text[:keep].rstrip() + notice)[:max_chars]
 
 
 def compact_tool_result(text: str, *, hard_chars: int = _DEFAULT_HARD_CHARS) -> str:
@@ -338,9 +338,16 @@ def compact_tool_result(text: str, *, hard_chars: int = _DEFAULT_HARD_CHARS) -> 
     """
     redacted = _redact_secret_values(text)
     parsed = _try_parse_json(redacted)
-    compacted = (
-        _compact_json_text(redacted, parsed) if parsed is not None else _compact_log_text(redacted)
-    )
+    try:
+        compacted = (
+            _compact_json_text(redacted, parsed)
+            if parsed is not None
+            else _compact_log_text(redacted)
+        )
+    except RecursionError:
+        # Deep structured-looking strings are still valid text. Indexing capacity must
+        # not prevent the incumbent text path from producing its bounded sample.
+        compacted = _compact_log_text(redacted)
     return _cap_text(compacted, max(1, hard_chars))
 
 

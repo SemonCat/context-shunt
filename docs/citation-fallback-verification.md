@@ -1,3 +1,5 @@
+> Historical verification record. Current mandatory Shunt-owned fallback behavior supersedes the fallback expectations below; see [configuration](configuration.md).
+
 # OpenClaw citation fallback fix — 1.2.1
 
 > Retirement update (2026-09-10): both live context-shunt plugins remain disabled.

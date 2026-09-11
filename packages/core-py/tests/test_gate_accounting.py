@@ -389,7 +389,12 @@ def test_exact_provider_usage_survives_into_the_reader_cost(tmp_path):
     """
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
-    luna = FakeLuna(default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]))
+    luna = FakeLuna(
+        default_reply=answer_json(
+            "mode = fast [c1]",
+            [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "mode = fast"}],
+        )
+    )
     result = Reader(registry, luna).answer("sess", _read_request(entry))
 
     assert result.cost.method is TokenMethod.EXACT
@@ -401,7 +406,10 @@ def test_exact_provider_usage_survives_into_the_reader_cost(tmp_path):
 
     # A bridge that reports nothing still yields the named estimate, not a false `exact`.
     silent = FakeLuna(
-        default_reply=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]),
+        default_reply=answer_json(
+            "mode = fast [c1]",
+            [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "mode = fast"}],
+        ),
         usage_exact=False,
     )
     estimated = Reader(registry, silent).answer("sess", _read_request(entry))

@@ -58,19 +58,19 @@ plugins:
           # working either way; neither touches a model.
           attribution_policy: allow_unverified
 
-          # Secondary availability-only exact prefix if legacy compaction is disabled
-          # or cannot safely deliver; inspect/disclosure limits still apply.
+          # Compatibility exact-prefix settings; mandatory fallback cannot be disabled
+          # Inspect and cumulative disclosure limits still apply.
           automatic_extract: true
           fallback_max_bytes: 2048 # 1..4096; also bounded by inspect/disclosure limits
           # fallback_chain:
           #   - model: gpt-5.6-luna
           #     provider: openrouter
 
-          # First fallback after exhausted MODEL_ERROR/TIMEOUT, and for terminal
-          # CITATION_INVALID. On by default; a ported, deterministic
+          # Mandatory fallback for Shunt-owned failures, including exhausted citation repair.
+          # This deprecated boolean cannot disable the ported, deterministic
           # heuristic summary, never exact bytes and never model output. See
           # docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover.
-          legacy_compaction: true
+          legacy_compaction: false  # deprecated no-op; mandatory fallback still runs
           legacy_compaction_max_chars: 16000 # 1000..60000
 
         # Deterministic exact extraction: zero model calls, 16 KiB per page, and every

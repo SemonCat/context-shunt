@@ -60,8 +60,7 @@ The Hermes hook currently captures oversized **string** results; structured/mult
 blocks pass through. It cannot restore content a producer already truncated. Hook ordering
 was inspected on one Hermes 0.21.1 host, not proven for every installation. New deployments
 must verify their own ordering and set both `tool_result_capture.enabled: true` and
-`tool_result_capture.host_ordering_verified_locally: true`. The adapter returns a bounded
-failure if an eligible oversized capture fails, never the raw result as a fail-open fallback.
+`tool_result_capture.host_ordering_verified_locally: true`. The adapter returns bounded legacy compaction when Shunt owns an eligible oversized capture failure; unsafe sources remain explicit refusals. It never returns the full raw result as fallback.
 See the [capability evidence](docs/capability-matrix.md) and [cutover procedure](docs/acceptance.md#tool_result_capture-cutover-on-hermes).
 
 `suma_post_tool` is only a deprecated configuration migration alias, never the product name.
@@ -112,38 +111,15 @@ cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/too
 
 ## When the reader fails
 
-`CITATION_INVALID` remains an explicit error in both cores, even with legacy compaction
-enabled. A nonempty semantic reply without referenced, verified evidence is a citation failure;
-an unrelated verified quote cannot support it. A valid
-empty `answer` or empty `claims` array with no citations remains `ok/NO_MATCH`.
-No heuristic or byte prefix substitutes for an answer. Retained `source_id` and
-`snapshot_id` handles support `context_shunt_inspect` with lines/bytes or search selectors;
-follow `next_cursor` within TTL and disclosure limits. Evidence still needs verification.
-Normal inspection clamps pages to the available envelope budget and returns continuation.
-Concatenate line-page text directly; internal LF bytes are preserved and the final selected
-line’s terminating LF is excluded. Nonempty byte ranges require UTF-8-aligned endpoints
-(`INVALID_REQUEST` otherwise). If a page cannot fit one code point, it fails without
-advancing or charging disclosure; retry with a larger budget.
+Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
 
-On Python/Hermes, exhausted reader retries/model fallbacks ending in eligible `MODEL_ERROR` or
-`TIMEOUT` trigger the ported bounded legacy compactor **inside
-context-shunt** (`reader.legacy_compaction: true` by default). Model-identity mismatches and
-provenance-policy refusals do not qualify. This is a deterministic heuristic summary of the
-first requested source, using signal lines, head/tail sampling, repetition collapsing, and
-JSON shaping—not a Luna answer or an exact source range.
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response envelope reports `status: partial`, `code: LEGACY_COMPACTED`,
-`result_kind: legacy_compaction`, and `provenance.derived: false`. Its summary lives in
-`legacy_compaction`, with empty `answer` and `citations`; coverage stays partial and failed
-model attempts remain in accounting. This is non-semantic output, never successful semantic summarization.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
 
-If compaction is disabled or cannot safely return output, a wholly unavailable reader may
-use the secondary, guarded exact-prefix extraction tier when enabled. If neither tier can
-safely return output, the response contains only a bounded pointer/failure and recovery
-guidance, never raw oversized content. Reuse a valid handle with a narrower question or
-inspect a bounded range.
-OpenClaw also uses the TypeScript legacy-compactor port after exhausted reader availability; its trigger set remains narrower than Hermes’s additional terminal-failure triggers.
-See [fallback semantics and limits](docs/configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover).
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
 
 ## Quick start
 
@@ -199,7 +175,7 @@ See [capability evidence](docs/capability-matrix.md#openclaw).
 | Local pre-read gate, reader, exact inspect, session stats/lifecycle | Supported (compatibility baseline 0.18.2) | Supported |
 | Tool-result capture | Supported with verified host ordering; live deployment retired | Unsupported; pass-through |
 | External artifact import | Supported; off until configured | Unsupported (`IMPORT_UNIMPLEMENTED`) |
-| Internal legacy compaction | Supported, default reader-failure fallback | Supported after exhausted availability |
+| Internal legacy compaction | Supported, default reader-failure fallback | Mandatory for Shunt-owned failures |
 | Reader attribution ceiling | `unverified` | `resolved` |
 | Writer / `propose_patch` | Not implemented | Not implemented |
 

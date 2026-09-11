@@ -68,6 +68,7 @@ V11_ONLY_ENVELOPE_FIELDS: frozenset[str] = frozenset(
         "accounting_id",
         "extraction",
         "legacy_compaction",
+        "failure_detail",
         "stats",
         "recovery",
         "import_receipt",

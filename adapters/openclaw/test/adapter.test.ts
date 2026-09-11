@@ -869,14 +869,14 @@ describe("empty no-match and citation failure preserve their delivery contracts"
       expect(original.envelope.code).toBe(code);
       expect(original.availabilityFailure).toBeUndefined();
       if (!noMatch) expect(original.envelope.recovery?.handles_valid).toBe(true);
-      expect(out.code).toBe(code);
+      expect(out.code).toBe(noMatch ? code : "LEGACY_COMPACTED");
       validateEnvelope(out);
-      expect(out.status).toBe(noMatch ? "ok" : "error");
-      expect(out.result_kind).toBe(noMatch ? "model_derived" : "failure");
+      expect(out.status).toBe(noMatch ? "ok" : "partial");
+      expect(out.result_kind).toBe(noMatch ? "model_derived" : "legacy_compaction");
       expect(out.sources).toEqual(original.envelope.sources);
       if (!noMatch) {
         expect(out.recovery.handles_valid).toBe(true);
-        expect(out.provenance).toMatchObject({ derived: false, label: "no_model_output" });
+        expect(out.provenance).toMatchObject({ derived: false, label: "legacy_compaction" });
       }
       expect(out.coverage.complete).toBe(noMatch);
       expect(out.provenance).toMatchObject({
@@ -892,7 +892,7 @@ describe("empty no-match and citation failure preserve their delivery contracts"
       expect(record).toHaveLength(1);
       expect(record[0]).toMatchObject({ attempts_started: complete.mock.calls.length,
         reader_input_tokens: complete.mock.calls.length * 12,
-        reader_output_tokens: complete.mock.calls.length * 8, delivery_boundary: "envelope" });
+        reader_output_tokens: complete.mock.calls.length * 8, delivery_boundary: noMatch ? "envelope" : "extraction" });
     });
   });
 });

@@ -202,7 +202,7 @@ export function deterministicProvenance(
     attributionPolicy: "not_applicable",
     attemptsStarted: 0,
     usageComplete: true,
-    citationsMechanicallyVerified: true,
+    citationsMechanicallyVerified: label !== "legacy_compaction",
   };
 }
 

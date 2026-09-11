@@ -597,10 +597,12 @@ it("cannot skip an undisclosed UTF-8 codepoint when the byte budget is too small
   const dir = tmp(); const s = session(dir); const entry = captured(dir, s, "é");
   const req = request(entry, { kind: "bytes", start: 0, end: 2 }, { maxResultBytes: 1 });
   const env = s.inspect(req);
-  expect(env.code).toBe("LIMIT_EXCEEDED");
+  expect(env.code).toBe("LEGACY_COMPACTED");
+  expect(env.coverage.complete).toBe(false);
+  expect(env.legacy_compaction!.summary_bytes).toBeLessThanOrEqual(1);
   expect(env.extraction).toBeUndefined();
   expect(s.store.disclosureAllowance(s.identity, entry.sourceId).perSourceRemaining)
-    .toBe(L.disclosureMaxPerSourceBytes);
+    .toBe(L.disclosureMaxPerSourceBytes - env.legacy_compaction!.summary_bytes);
   const recovered = s.inspect(request(entry, { kind: "bytes", start: 0, end: 2 }, { maxResultBytes: 2 }));
   expect(recovered.extraction!.segments[0]!.text).toBe("é");
   expect(recovered.extraction!.complete).toBe(true);

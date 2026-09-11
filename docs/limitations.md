@@ -135,7 +135,7 @@ the snapshot whose full SHA-256 it names, through a handle valid in this scope. 
 **not** prove the quote supports the claim attached to it. Semantic support is what the
 opt-in `eval luna` gate measures, and that gate needs live model access.
 
-An answer whose citations all fail verification becomes `CITATION_INVALID` with no answer
+An answer whose citations all fail verification becomes `CITATION_INVALID` internally and, after at most one repair, mandatory `LEGACY_COMPACTED` fallback with no model answer
 text, so a wrong claim cannot survive with fabricated evidence — but a true-looking claim
 paired with a real quote that does not actually support it can pass mechanical verification.
 
@@ -247,13 +247,14 @@ truthful provenance, not a silent loosening.
 The store needs `node:sqlite`, so the TypeScript side requires Node ≥22.22.3 (which is also
 OpenClaw's own floor). Python requires ≥3.11.
 
-## Automatic extraction is a prefix, not an answer
+## Mandatory fallback limitations
 
-After wholly exhausted reader availability, the default escape hatch returns at most
-2 KiB of the first source's exact bytes, independently of question/reader selectors.
-It never returns the entire source. Useful evidence may be elsewhere; all other sources
-and remaining bytes are explicitly omitted. This does not rescue malformed/citation-invalid
-or weak valid answers. Disabling `reader.automatic_extract` or inspect restores error-only
-recovery. Existing disclosure, output, scope and secret checks may also prevent extraction.
-The bounded local inspection can add latency after a model timeout; failed attempt costs
-remain accounted even when usage is unknown. See [full semantics](configuration.md#automatic-exact-extraction-after-reader-unavailability).
+Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
+
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
+
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.

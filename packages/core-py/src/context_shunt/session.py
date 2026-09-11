@@ -49,14 +49,15 @@ from .binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from .capability import CapabilityReport
 from .clock import Clock, MonotonicClock
 from .config import Config
-from .errors import ShuntError
+from .errors import ShuntError, fallback_allowed
+from .fallback import compact_failure, fit_compaction
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
 from .guard import OutputGuardError, enforce, enforce_or_fixed, fixed_error
 from .inspect import CURSOR_PREFIX, Inspector, decode_cursor, encode_cursor
 from .legacy_compact import compact_tool_result
 from .limits import EMITTED_SCHEMA_VERSION
 from .metrics import MetricsSink, NullMetrics
-from .paths import authorize
+from .paths import assert_no_secret, authorize
 from .probe import FileProber
 from .provenance import (
     AttributionPolicy,
@@ -75,16 +76,12 @@ from .provider import (
 from .reader import Reader, ReaderResult
 from .registry import RegisteredSource, SourceRegistry
 from .schema import validate_request
-from .snapshot import snapshot_file
-from .spill import SpillEngine
+from .snapshot import Snapshot, record_count, resolve_pointer, snapshot_file
+from .spill import SpillEngine, SpillOutcome
 from .store import ScopeIdentity, SnapshotStore
 
 _INSPECT_OPERATIONS = frozenset({"inspect"})
 _STATS_OPERATIONS = frozenset({"stats"})
-#: Legacy compaction runs first for terminal availability failures.
-#: Malformed output published as NO_MATCH and provenance-policy refusals are excluded.
-#: A reported-model mismatch is excluded separately even when its code is MODEL_ERROR.
-_LEGACY_COMPACTION_TRIGGER_CODES = frozenset({"MODEL_ERROR", "TIMEOUT"})
 #: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
 #: a cursor of exactly this length so a real one can never overshoot the budget it set.
 _MAX_CURSOR_CHARS = 512
@@ -241,6 +238,29 @@ class ShuntSession:
         binary or oversized path rejects the batch, so a partially authorized multi-source
         capture can never leave usable handles behind.
         """
+        snapshots = self._capture_paths(paths, media_type=media_type)
+        return self._registry.register_batch(self.session_id, snapshots)
+
+    def capture_read_paths(self, request_id: str, paths: list[str]):
+        """Adapter capture boundary: retain authorized bytes if store publication fails."""
+        snapshots = self._capture_paths(paths)
+        try:
+            return self._registry.register_batch(self.session_id, snapshots)
+        except Exception as raw_exc:
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, ShuntError)
+                else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
+            )
+            return compact_failure(
+                request_id,
+                snapshots[0].data,
+                exc,
+                limits=self.config.limits,
+                hard_chars=self.config.reader.legacy_compaction_max_chars,
+            )
+
+    def _capture_paths(self, paths: list[str], *, media_type: str | None = None) -> list[Snapshot]:
         if not paths:
             raise ShuntError("INVALID_REQUEST", "NO_SOURCE", retryable=False)
         if len(paths) > self.config.limits.max_sources_per_request:
@@ -255,7 +275,7 @@ class ShuntSession:
             snapshots.append(
                 snapshot_file(authorized, limits=self.config.limits, media_type_hint=hint)
             )
-        return self._registry.register_batch(self.session_id, snapshots)
+        return snapshots
 
     # -- reader ------------------------------------------------------------
     def read(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -265,15 +285,33 @@ class ShuntSession:
             return self._publish_failure(request_id, exc, OperationKind.READ)
 
         operation_id = new_operation_id()
-        result: ReaderResult = self._reader.answer(
-            self.session_id, request, accounting_id=operation_id
-        )
+        try:
+            result: ReaderResult = self._reader.answer(
+                self.session_id, request, accounting_id=operation_id
+            )
+        except Exception as raw_exc:
+            # Validate before recovering an unexpected implementation failure: a broken
+            # reader must never turn malformed arguments into permission to disclose.
+            try:
+                validate_request(request)
+                exc = (
+                    raw_exc
+                    if isinstance(raw_exc, ShuntError)
+                    else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
+                )
+            except ShuntError as invalid:
+                exc = invalid
+            provenance = deterministic(ProvenanceLabel.NO_MODEL_OUTPUT)
+            result = ReaderResult(
+                envelope=E.error_envelope(request_id, exc),
+                provenance=provenance,
+                cost=ReaderCost.none(),
+            )
         candidate = result.envelope
         if (
             candidate.get("status") == "error"
-            and candidate.get("code") in _LEGACY_COMPACTION_TRIGGER_CODES
+            and fallback_allowed(candidate.get("code", ""), candidate.get("failure_detail"))
             and candidate.get("provenance", {}).get("attribution_status") != "mismatch"
-            and self.config.reader.legacy_compaction
         ):
             # Prefer a bounded heuristic summary after exhausted reader attempts. Policy
             # refusals are not availability failures and must never receive a soft landing.
@@ -282,32 +320,17 @@ class ShuntSession:
                     self._legacy_compaction_fallback(request, result, request_id, operation_id),
                     self.config.limits,
                 )
+            except ShuntError as refused:
+                candidate = E.error_envelope(request_id, refused, accounting_id=operation_id)
             except Exception:
-                # An unsafe/unusable summary is no delivery. Availability-only extraction
-                # may still run below; otherwise retain the original bounded failure.
-                candidate = result.envelope
-        if (
-            candidate is result.envelope
-            and result.availability_failure
-            and self.config.reader.automatic_extract
-            and self.config.tools.inspect_enabled
-        ):
-            try:
-                candidate = self._automatic_extract(request, result, request_id, operation_id)
-            except Exception as exc:
-                # Recovery must retain the original bounded failure, never a store or
-                # provider exception body. No extraction is delivered on this path.
-                candidate = result.envelope
-                if isinstance(exc, ShuntError) and exc.code in (
-                    "SOURCE_EXPIRED",
-                    "SOURCE_CHANGED",
-                    "STORE_FAILED",
-                    "UNSAFE_SOURCE",
-                ):
-                    candidate = {
-                        **candidate,
-                        "recovery": E.recovery_for(exc.code, handles_valid=False),
-                    }
+                # Recover through the pure compactor even if the normal wrapper failed.
+                # The independent path repeats authorization and all disclosure guards.
+                try:
+                    candidate = self._emergency_compaction(
+                        request, result, request_id, operation_id
+                    )
+                except ShuntError as refused:
+                    candidate = E.error_envelope(request_id, refused, accounting_id=operation_id)
         if candidate.get("code") == "CITATION_INVALID":
             # A failed citation is not a semantic answer. Keep evidence handles and
             # reader cost intact; let the caller choose an exact bounded selector.
@@ -331,7 +354,7 @@ class ShuntSession:
         refined = bool((request or {}).get("refined"))
         try:
             baseline, credited_bytes = self._baseline_for(result.source_ids)
-        except ShuntError:
+        except Exception:
             baseline, credited_bytes = Baseline.none(), 0
         self._record(
             operation_id=operation_id,
@@ -354,10 +377,14 @@ class ShuntSession:
     ) -> dict[str, Any]:
         # Revalidate every handle after the provider wait; expiry/reset/store failures
         # must not turn a partially resolvable request into a disclosure.
+        validate_request(request)
+        assert_no_secret(request["question"].encode("utf-8"), "QUESTION")
+        entries = []
         for source in request["sources"]:
             entry = self._registry.resolve(self.session_id, source["source_id"])
             if entry.snapshot.snapshot_id != source["snapshot_id"]:
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+            entries.append(entry)
         first = request["sources"][0]
         entry = self._registry.resolve(self.session_id, first["source_id"])
         limits = self.config.limits
@@ -396,6 +423,9 @@ class ShuntSession:
         result: ReaderResult,
         request_id: str,
         operation_id: str,
+        *,
+        max_result_bytes: int | None = None,
+        compactor=None,
     ) -> dict[str, Any]:
         """Deterministic legacy-shaped compaction over the first requested source.
 
@@ -408,28 +438,62 @@ class ShuntSession:
         simplification; any other selected sources are recorded as an omission rather than
         silently dropped.
         """
+        validate_request(request)
+        assert_no_secret(request["question"].encode("utf-8"), "QUESTION")
+        entries = []
         for source in request["sources"]:
             entry = self._registry.resolve(self.session_id, source["source_id"])
             if entry.snapshot.snapshot_id != source["snapshot_id"]:
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+            selector = source["selector"]
+            if selector["kind"] == "lines" and selector["start"] > min(
+                selector["end"], entry.snapshot.line_count
+            ):
+                raise ShuntError("INVALID_REQUEST", "LINE_OUT_OF_RANGE")
+            if selector["kind"] == "records":
+                node = resolve_pointer(entry.snapshot.json_value, selector["pointer"])
+                if selector["end"] < selector["start"] or selector["end"] > record_count(node):
+                    raise ShuntError("INVALID_REQUEST", "RECORD_OUT_OF_RANGE")
+            entries.append(entry)
         first = request["sources"][0]
         entry = self._registry.resolve(self.session_id, first["source_id"])
         original_bytes = entry.snapshot.bytes_len
         text = entry.snapshot.data.decode("utf-8")
 
         hard_chars = self.config.reader.legacy_compaction_max_chars
-        summary = compact_tool_result(text, hard_chars=hard_chars)
-        summary = _utf8_safe_cap(summary, self.config.limits.max_extraction_bytes)
+        allowance = self._store.disclosure_allowance(self._identity, entry.source_id)
+        if allowance.exhausted:
+            raise ShuntError("DISCLOSURE_EXHAUSTED")
+        summary = (compactor or compact_tool_result)(text, hard_chars=hard_chars)
+        summary = _utf8_safe_cap(
+            summary,
+            min(
+                self.config.limits.max_extraction_bytes,
+                allowance.remaining,
+                max_result_bytes
+                if max_result_bytes is not None
+                else self.config.limits.max_extraction_bytes,
+            ),
+        )
         summary_bytes = len(summary.encode("utf-8"))
 
         original_failure = str(result.envelope.get("code") or "")
-        if original_failure not in _LEGACY_COMPACTION_TRIGGER_CODES:
+        if not fallback_allowed(original_failure, result.envelope.get("failure_detail")):
             # Should be unreachable given the caller's own guard, but the block's own
             # runtime policy only accepts availability failures - refuse rather than publish an
             # invented one.
             raise ShuntError("STORE_FAILED", "LEGACY_COMPACTION_FAILURE_UNKNOWN")
 
-        source_handles = list(result.envelope.get("sources") or [])
+        source_handles = [
+            {
+                "source_id": item.source_id,
+                "snapshot_id": item.snapshot.snapshot_id,
+                "media_type": item.snapshot.media_type,
+                "bytes": item.snapshot.bytes_len,
+                "expires_at": E.iso_expiry(item.expires_at_epoch),
+            }
+            for item in entries
+        ]
         coverage = E.Coverage(
             **{
                 **result.envelope["coverage"],
@@ -441,16 +505,20 @@ class ShuntSession:
             coverage.omit_once(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
 
         attempts = result.cost.attempts_started
-        return E.build(
+        env = E.build(
             request_id=request_id,
             status="partial",
             code="LEGACY_COMPACTED",
+            failure_detail=result.envelope.get("failure_detail", "UNSPECIFIED"),
             coverage=coverage,
             sources=source_handles,
             retryable=False,
             result_kind=ResultKind.LEGACY_COMPACTION,
             provenance=replace(
-                deterministic(ProvenanceLabel.LEGACY_COMPACTION),
+                result.provenance,
+                derived=False,
+                label=ProvenanceLabel.LEGACY_COMPACTION,
+                citations_mechanically_verified=False,
                 attempts_started=attempts,
                 usage_complete=(
                     result.cost.attempts_usage_complete == attempts if attempts else True
@@ -476,6 +544,26 @@ class ShuntSession:
                 "hard_cap_chars": hard_chars,
                 "original_failure": original_failure,
             },
+        )
+        fit_compaction(env, self.config.limits)
+        summary_bytes = env["legacy_compaction"]["summary_bytes"]
+        charge = self._store.charge_disclosure(
+            self._identity, entry.source_id, "bytes", summary_bytes
+        )
+        if not charge.granted:
+            raise ShuntError("DISCLOSURE_EXHAUSTED")
+        return env
+
+    def _emergency_compaction(self, request, result, request_id, operation_id):
+        from .fallback import compact_tool_result as incumbent
+
+        return ShuntSession._legacy_compaction_fallback(
+            self,
+            request,
+            result,
+            request_id,
+            operation_id,
+            compactor=incumbent,
         )
 
     def _baseline_for(self, source_ids: tuple[str, ...]) -> tuple[Baseline, int]:
@@ -515,10 +603,100 @@ class ShuntSession:
         operation_id = new_operation_id()
         try:
             return self._inspect(request, request_id, operation_id)
-        except ShuntError as exc:
+        except Exception as raw_exc:
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, ShuntError)
+                else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
+            )
+            if fallback_allowed(exc.code, exc.detail):
+                try:
+                    candidate = self._inspect_legacy_fallback(
+                        request, request_id, operation_id, exc
+                    )
+                    self._record(
+                        operation_id=operation_id,
+                        kind=OperationKind.INSPECT,
+                        envelope=candidate,
+                        baseline=Baseline.none(),
+                        baseline_credited=False,
+                        reader=ReaderCost.none(),
+                        boundary=DeliveryBoundary.EXTRACTION,
+                    )
+                    return candidate
+                except ShuntError as refused:
+                    exc = refused
             return self._publish_failure(
                 request_id, exc, OperationKind.INSPECT, operation_id=operation_id
             )
+
+    def _inspect_legacy_fallback(self, request, request_id, operation_id, exc):
+        validated = validate_request(request, operations=_INSPECT_OPERATIONS)
+        entry = self._registry.resolve(self.session_id, validated["source_id"])
+        if entry.snapshot.snapshot_id != validated["snapshot_id"]:
+            raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
+        state = {}
+        if "cursor" in validated:
+            state = decode_cursor(
+                self._store.cursor_key(),
+                validated["cursor"],
+                entry.source_id,
+                entry.snapshot.snapshot_id,
+                validated["selector"],
+            )
+        selector = validated["selector"]
+        kind = selector["kind"]
+        if kind in ("lines", "bytes") and selector["end"] < selector["start"]:
+            raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR")
+        if kind == "bytes":
+            data = entry.snapshot.data
+            start = max(selector["start"], int(state.get("offset", selector["start"])))
+            end = min(selector["end"], len(data))
+            if start < end and any(
+                0 <= pos < len(data) and data[pos] & 0xC0 == 0x80
+                for pos in (selector["start"], start, end)
+            ):
+                raise ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY")
+        if (
+            kind == "search"
+            and len(selector["needle"].encode("utf-8"))
+            > self.config.limits.inspect_max_needle_bytes
+        ):
+            raise ShuntError("INVALID_REQUEST", "NEEDLE_OVER_CAP")
+        allowance = self._store.disclosure_allowance(self._identity, entry.source_id)
+        if allowance.exhausted:
+            raise ShuntError("DISCLOSURE_EXHAUSTED")
+        read_request = {
+            "schema_version": EMITTED_SCHEMA_VERSION,
+            "request_id": request_id,
+            "operation": "read",
+            "question": "Deterministic fallback",
+            "sources": [
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "selector": {"kind": "all"},
+                }
+            ],
+            "budgets": {
+                "max_chunks": 1,
+                "max_answer_bytes": self.config.limits.max_answer_bytes,
+                "deadline_ms": self.config.limits.request_deadline_ms,
+            },
+        }
+        provenance = deterministic(ProvenanceLabel.NO_MODEL_OUTPUT)
+        result = ReaderResult(
+            envelope=E.error_envelope(request_id, exc),
+            provenance=provenance,
+            cost=ReaderCost.none(),
+        )
+        return self._legacy_compaction_fallback(
+            read_request,
+            result,
+            request_id,
+            operation_id,
+            max_result_bytes=validated["budgets"]["max_result_bytes"],
+        )
 
     def _inspect(
         self,
@@ -676,15 +854,13 @@ class ShuntSession:
         # published envelope is therefore never larger than the probe and never differs from
         # it anywhere the guard looks, so a probe that passes cannot become a failure below.
         limits = self.config.limits
+        probe = compose(
+            limits.disclosure_max_per_source_bytes, limits.disclosure_max_per_session_bytes, False
+        )
+        if E.serialized_bytes(probe) > limits.max_extended_envelope_bytes:
+            raise ShuntError("LIMIT_EXCEEDED", "NO_ENVELOPE_HEADROOM")
         try:
-            enforce(
-                compose(
-                    limits.disclosure_max_per_source_bytes,
-                    limits.disclosure_max_per_session_bytes,
-                    False,
-                ),
-                limits,
-            )
+            enforce(probe, limits)
         except OutputGuardError as exc:
             raise ShuntError("LIMIT_EXCEEDED", "EXTRACTION_REFUSED", retryable=False) from exc
 
@@ -1030,9 +1206,34 @@ class ShuntSession:
         if not self.tool_result_capture_enabled:
             return None
         operation_id = new_operation_id()
-        outcome = self._spill.evaluate(
-            self.session_id, request_id, result, internal_source_id=internal_source_id
-        )
+        try:
+            outcome = self._spill.evaluate(
+                self.session_id, request_id, result, internal_source_id=internal_source_id
+            )
+        except Exception as raw_exc:
+            if (
+                not isinstance(result, str)
+                or len(result.encode("utf-8")) <= self.config.limits.max_tool_result_bytes
+            ):
+                raise
+            exc = (
+                raw_exc
+                if isinstance(raw_exc, ShuntError)
+                else ShuntError("SPILL_FAILED", "INTERNAL_ERROR")
+            )
+            env = compact_failure(
+                request_id,
+                result.encode("utf-8"),
+                exc,
+                limits=self.config.limits,
+                hard_chars=self.config.reader.legacy_compaction_max_chars,
+            )
+            outcome = SpillOutcome(
+                action="error",
+                envelope=env,
+                code=env["code"],
+                bytes_measured=len(result.encode("utf-8")),
+            )
         if outcome.envelope is not None:
             envelope = enforce_or_fixed(outcome.envelope, self.config.limits)
             pointer_delivered = (
@@ -1113,7 +1314,7 @@ class ShuntSession:
         )
         try:
             self._store.record_operation(self._identity, record)
-        except ShuntError:
+        except Exception:
             # Losing a metric must never fail the caller's operation, and it must never
             # be papered over as a zero: the operation simply has no record.
             self._metrics.count("accounting_dropped", {"stage": kind.value})

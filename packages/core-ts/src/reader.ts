@@ -33,7 +33,7 @@ import {
 } from "./accounting.js";
 import { Chunk, estimateTokens, planChunks } from "./chunking.js";
 import {
-  type Claim, CitationVerifier, normalizeClaims, referencedIds, renderClaims,
+  type Claim, type Reason, CitationVerifier, normalizeClaims, referencedIds, renderClaims,
   stripUnsupportedAssertions, unpublishedMarkerIds,
 } from "./citations.js";
 import { Clock, Deadline, monotonicClock } from "./clock.js";
@@ -41,7 +41,7 @@ import {
   Citation, Coverage, Envelope, SourceHandle, buildEnvelope, errorEnvelope, isoExpiry,
   serializedBytes,
 } from "./envelope.js";
-import { ShuntError, isShuntError } from "./errors.js";
+import { ShuntError, isShuntError, fallbackAllowed } from "./errors.js";
 import { DEFAULT_LIMITS, Limits, envelopeByteCap } from "./limits.js";
 import { MetricsSink, nullMetrics } from "./metrics.js";
 import {
@@ -62,9 +62,9 @@ import {
 import {
   type CallIdentity,
   type CallInputBudget,
-  ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider, UNOBSERVED_CALL, buildUserMessage,
-  identityOfThisCall, providerTargetOf, responseAttribution, targetIdentity,
-  transientProviderError,
+  FallbackChainProvider, ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider,
+  UNOBSERVED_CALL, buildUserMessage, identityOfThisCall, providerTargetOf, responseAttribution,
+  targetIdentity, transientProviderError,
 } from "./provider.js";
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
@@ -107,6 +107,13 @@ const FORMAT_RETRY_DETAILS = new Set([
   "NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE",
 ]);
 
+// Citation repair is deliberately narrower than the ordinary format/transient retry
+// budgets: one request gets at most one extra provider invocation, and that invocation
+// receives only fixed verifier reasons plus the already-authorized chunk. The count cap
+// keeps the feedback deterministic and prevents a model-controlled citation list from
+// becoming a prompt-sized side channel.
+const MAX_CITATION_REPAIR_REASONS = 8;
+
 interface ChunkOutcome {
   chunk: Chunk;
   /** The current contract: structurally valid `{text, citation_ids}` objects, chunk-local
@@ -120,6 +127,9 @@ interface ChunkOutcome {
   semanticContent: boolean;
   citations: Array<Record<string, unknown>>;
   failedReason: string | null;
+  /** The precise bounded Shunt failure behind `failedReason`, kept for safe envelopes. */
+  failureCode: string | null;
+  failureDetail: string | null;
   availabilityOnly: boolean;
   calls: number;
   usageCompleteCalls: number;
@@ -241,6 +251,27 @@ class AttemptLedger {
     // Even late or malformed delivered output is conservatively not unavailability.
     this.outcome.availabilityOnly = false;
     if (this.recorded) return;
+    // The provider boundary is intentionally untrusted. A late host response can win
+    // the deadline race before `validateModelResponse` gets a chance to inspect it, so
+    // do not let missing provenance/usage fields turn a truthful TIMEOUT into a generic
+    // provider error while accounting that late call.
+    if (
+      typeof response !== "object"
+      || response === null
+      || typeof response.text !== "string"
+      || typeof response.usage !== "object"
+      || response.usage === null
+      || !hasResponseIdentity(response)
+    ) {
+      this.recorded = true;
+      if (typeof (response as { text?: unknown })?.text === "string") {
+        this.outcome.completionBytes += new TextEncoder().encode(
+          (response as { text: string }).text,
+        ).length;
+      }
+      this.outcome.callIdentities.push(UNOBSERVED_CALL);
+      return;
+    }
     this.recorded = true;
     const outcome = this.outcome;
     // An availability fallback may have taken several attempts inside this one call, and
@@ -349,8 +380,27 @@ function responseIdentities(response: ModelResponse): CallIdentity[] {
   const attempts = Math.max(1, response.attempts ?? 1);
   const carried = response.callIdentities?.length
     ? response.callIdentities
-    : [identityOfThisCall(response)];
+    : (hasResponseIdentity(response) ? [identityOfThisCall(response)] : [UNOBSERVED_CALL]);
   return padIdentities(carried, attempts);
+}
+
+/** Runtime guard for the provenance fields the provider boundary must supply. */
+function hasResponseIdentity(response: unknown): response is ModelResponse {
+  if (typeof response !== "object" || response === null) return false;
+  const candidate = response as Record<string, unknown>;
+  return isIdentityShape(candidate["requested"])
+    && isIdentityShape(candidate["resolved"])
+    && isIdentityShape(candidate["reported"])
+    && typeof candidate["providerConfirmsGeneration"] === "boolean";
+}
+
+function isIdentityShape(value: unknown): value is ModelIdentity {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return ["provider", "model"].every((key) => {
+    const field = candidate[key];
+    return field === undefined || field === null || typeof field === "string";
+  });
 }
 
 /** `carried`, trimmed or extended with unobserved records to cover `calls`. */
@@ -432,8 +482,8 @@ export class Reader {
     const spent: { cost: ReaderCost } = { cost: noReaderCost() };
     try {
       return await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
-    } catch (err) {
-      if (!isShuntError(err)) throw err;
+    } catch (raw) {
+      const err = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
       this.metrics.count("reader_error", { code: err.code });
       const provenance = this.failureProvenance(err, spent.cost.attemptsStarted);
       const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
@@ -568,11 +618,12 @@ export class Reader {
       };
     }
 
+    const inputBudget = new InputTokenBudget(this.limits.maxRequestInputTokens);
     const outcomes = await this.runChunks(
       request.question,
       plan.chunks,
       deadline,
-      new InputTokenBudget(this.limits.maxRequestInputTokens),
+      inputBudget,
     );
 
     const allClaims: Claim[] = [];
@@ -604,7 +655,10 @@ export class Reader {
     // model produced every measured answer; counting per run and weighting by the call
     // count credits failed candidates with the winner's identity.
     const callIdentities: CallIdentity[] = [];
-    for (const outcome of outcomes) {
+    const addOutcome = (outcome: ChunkOutcome, includeContent = true): void => {
+      // Citation repair is a second physical call for an already-planned chunk. Its
+      // spend and provenance join the request totals, while its content is selected only
+      // after a second mechanical verification pass.
       totalCalls += outcome.calls;
       usageCompleteCalls += outcome.usageCompleteCalls;
       usage = mergeUsage(usage, outcome.usage);
@@ -620,13 +674,14 @@ export class Reader {
         reportedSeen.push(outcome.reported);
       }
       const droppedByCeiling = outcome.claimsOverCap + outcome.citationsOverCap;
-      if (droppedByCeiling > 0) {
+      if (includeContent && droppedByCeiling > 0) {
         capDropped += droppedByCeiling;
         coverage.omitOnce(outcome.chunk.sourceId, outcome.chunk.locator, "BUDGET_EXCEEDED");
       }
+      if (!includeContent) return;
       if (outcome.failedReason) {
         coverage.omit(outcome.chunk.sourceId, outcome.chunk.locator, outcome.failedReason);
-        continue;
+        return;
       }
       coverage.processedChunks += 1;
       const namespaced = namespaceOutcome(outcome, nextCitation);
@@ -634,31 +689,38 @@ export class Reader {
       allClaims.push(...namespaced.claims);
       if (namespaced.legacyAnswer) legacyParts.push(namespaced.legacyAnswer);
       rawCitations.push(...namespaced.citations);
-    }
+    };
+    for (const outcome of outcomes) addOutcome(outcome);
     // One answer, one identity - or none. Each side is published only when every answering
     // call agreed on it; a request whose calls disagree cannot be described by any single
     // value, and picking one would certify a model that produced part of the answer as the
     // model that produced all of it. Divergence also drops the attribution to `unknown`,
     // because a status is a claim *about* the requested identity and there is no longer one
     // to make it about.
-    const agreedRequested = agreedIdentity(requestedSeen);
-    const agreedResolved = agreedIdentity(resolvedSeen);
-    const agreedReported = agreedIdentity(reportedSeen);
-    if (agreedRequested === null || agreedResolved === null || agreedReported === null) {
-      attribution = weakestAttribution(attribution, { status: "unknown", confidence: "none" });
-    }
-    // No answering call at all: the strongest truthful statement is what was asked for,
-    // which is what the pre-1.1 envelope always published.
-    const requested =
-      requestedSeen.length === 0
-        ? targetIdentity(providerTargetOf(this.provider))
-        : (agreedRequested ?? UNKNOWN_IDENTITY);
-    const resolved = agreedResolved ?? UNKNOWN_IDENTITY;
-    const reported = agreedReported ?? UNKNOWN_IDENTITY;
+    let requested: ModelIdentity = {};
+    let resolved: ModelIdentity = {};
+    let reported: ModelIdentity = {};
+    const refreshIdentity = (): void => {
+      const agreedRequested = agreedIdentity(requestedSeen);
+      const agreedResolved = agreedIdentity(resolvedSeen);
+      const agreedReported = agreedIdentity(reportedSeen);
+      if (agreedRequested === null || agreedResolved === null || agreedReported === null) {
+        attribution = weakestAttribution(attribution, { status: "unknown", confidence: "none" });
+      }
+      // No answering call at all: the strongest truthful statement is what was asked for,
+      // which is what the pre-1.1 envelope always published.
+      requested =
+        requestedSeen.length === 0
+          ? targetIdentity(providerTargetOf(this.provider))
+          : (agreedRequested ?? UNKNOWN_IDENTITY);
+      resolved = agreedResolved ?? UNKNOWN_IDENTITY;
+      reported = agreedReported ?? UNKNOWN_IDENTITY;
+    };
+    refreshIdentity();
     this.metrics.observe("reader_model_calls", totalCalls);
     this.metrics.observe("reader_attempts_usage_complete", usageCompleteCalls);
 
-    const cost = readerCostOf({
+    let cost = readerCostOf({
       usage,
       unseenUsage,
       attempts: totalCalls,
@@ -688,9 +750,243 @@ export class Reader {
       return { envelope, provenance, cost, sourceIds, availabilityFailure: category };
     }
 
-    const { verified, rejected } = this.verifyAll(sessionId, rawCitations);
+    // Attribution and provenance policy are caller boundaries. Judge them before the
+    // optional semantic repair so a refused answer never spends a second provider call.
+    // A call with no response has no attribution to judge; its explicit reader failure
+    // remains eligible for the ordinary failure path below.
+    if (outcomes.some((outcome) => outcome.responsesSeen > 0)) {
+      const preRepair: Provenance = {
+        derived: true,
+        label: "model_generated_answer",
+        attributionStatus: attribution.status,
+        attributionConfidence: attribution.confidence,
+        attributionPolicy: this.policy,
+        attemptsStarted: totalCalls,
+        usageComplete: totalCalls > 0 && usageCompleteCalls === totalCalls,
+        citationsMechanicallyVerified: true,
+        requested,
+        resolved,
+        reported,
+        ...(totalCalls > 0 ? { fallbackUsed } : {}),
+        callIdentities,
+      };
+      try {
+        enforceAttributionPolicy(preRepair, this.policy);
+      } catch (err) {
+        if (!isShuntError(err)) throw err;
+        this.metrics.count("reader_error", { code: err.code });
+        const refused: Provenance = { ...preRepair, derived: false, label: "no_model_output" };
+        const opts: Parameters<typeof errorEnvelope>[2] = {
+          provenance: refused,
+          sources: handles,
+          handlesValid: true,
+        };
+        if (accountingId !== undefined) opts.accountingId = accountingId;
+        return {
+          envelope: errorEnvelope(requestId, err, opts),
+          provenance: refused,
+          cost,
+          sourceIds,
+        };
+      }
+    }
+
+    if (outcomes.length > 0 && outcomes.every((outcome) => outcome.failedReason !== null)) {
+      // A chunk that never produced publishable content still has a concrete reader
+      // failure. Returning NO_MATCH here erased malformed model output (and its safe
+      // detail), which made the outer session unable to apply the mandatory failure
+      // fallback. Valid empty replies have `failedReason === null` and stay on the
+      // normal NO_MATCH path below.
+      const terminal = outcomes.find((outcome) => outcome.failureCode !== null)
+        ?? (outcomes[0] as ChunkOutcome);
+      const code = terminal.failureCode ?? "MODEL_ERROR";
+      const failure = new ShuntError(code, terminal.failureDetail ?? undefined, false);
+      const failed: Provenance = {
+        ...this.failureProvenance(failure, totalCalls),
+        attributionStatus: attribution.status,
+        attributionConfidence: attribution.confidence,
+        attributionPolicy: this.policy,
+        requested,
+        resolved,
+        reported,
+        ...(totalCalls > 0 ? { fallbackUsed } : {}),
+        callIdentities,
+      };
+      const envelope = errorEnvelope(requestId, failure, {
+        ...(accountingId ? { accountingId } : {}),
+        provenance: failed,
+        sources: handles,
+        handlesValid: true,
+      });
+      envelope.coverage = coverage.toShape();
+      return { envelope, provenance: failed, cost, sourceIds };
+    }
+
+    let { verified, rejected, rejectionReasons } = this.verifyAll(sessionId, rawCitations);
     this.metrics.observe("citations_verified", verified.length, { result: "verified" });
     this.metrics.observe("citations_rejected", rejected, { result: "rejected" });
+
+    // A citation failure is the one reader-owned quality failure that gets a focused
+    // repair opportunity. It is deliberately request-wide (one extra provider
+    // invocation total), has no transient/format retry budget of its own, and targets
+    // the first affected planned chunk in deterministic order. A valid answer already
+    // exists whenever any normalized claim or legacy sentence is backed by a verified
+    // citation, so a partial result never spends this extra call.
+    const verifiedIds = new Set(verified.map((citation) => citation.id));
+    const supportedClaims = allClaims.some(
+      (claim) => claim.citation_ids.length > 0
+        && claim.citation_ids.every((id) => verifiedIds.has(id)),
+    );
+    const supportedLegacy = stripUnsupportedAssertions(legacyParts.join(" "), verifiedIds).length > 0;
+    const repairTarget = outcomes.find(
+      (outcome) => outcome.failedReason === null
+        && outcome.requiresEvidence
+        && outcome.semanticContent,
+    );
+    const repairProvider = repairTarget === undefined
+      ? undefined
+      : this.repairProviderFor(repairTarget.requested);
+    if (
+      repairTarget !== undefined
+      && repairProvider !== undefined
+      && !supportedClaims
+      && !supportedLegacy
+      && capDropped === 0
+    ) {
+      for (const source of request.sources) {
+        const current = this.registry.resolve(sessionId, source.source_id);
+        if (current.snapshot.snapshotId !== source.snapshot_id) throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH");
+      }
+      const repaired = await this.runChunk(
+        citationRepairQuestion(request.question, citationRepairFeedback(
+          repairFeedbackReasons(rejectionReasons, rawCitations.length, verified.length),
+        )),
+        repairTarget.chunk,
+        deadline,
+        inputBudget,
+        false,
+        repairProvider,
+      );
+      // The repair call is part of this request's cost and provenance, even though its
+      // content is selected only after a second mechanical verification pass.
+      addOutcome(repaired, false);
+      if (repaired.claimsOverCap > 0 || repaired.citationsOverCap > 0) {
+        capDropped += repaired.claimsOverCap + repaired.citationsOverCap;
+        coverage.omitOnce(repaired.chunk.sourceId, repaired.chunk.locator, "BUDGET_EXCEEDED");
+      }
+      cost = readerCostOf({
+        usage,
+        unseenUsage,
+        attempts: totalCalls,
+        usageCompleteCalls,
+        promptBytes,
+        completionBytes,
+        limits: this.limits,
+      });
+      spent.cost = cost;
+      if (repaired.failureCode === "MODEL_ERROR" && repaired.failureDetail === "MODEL_SUBSTITUTED") {
+        const failure = new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
+        const failed: Provenance = {
+          ...this.failureProvenance(failure, totalCalls),
+          attributionStatus: attribution.status,
+          attributionConfidence: attribution.confidence,
+          requested,
+          resolved,
+          reported,
+          ...(totalCalls > 0 ? { fallbackUsed } : {}),
+          callIdentities,
+        };
+        const envelope = errorEnvelope(requestId, failure, {
+          ...(accountingId ? { accountingId } : {}),
+          provenance: failed,
+          sources: handles,
+          handlesValid: true,
+        });
+        envelope.coverage = coverage.toShape();
+        return { envelope, provenance: failed, cost, sourceIds };
+      }
+      if (repaired.failureCode === "LIMIT_EXCEEDED"
+          || repaired.failureCode === "TIMEOUT"
+          || (repaired.failureCode !== null && !fallbackAllowed(repaired.failureCode, repaired.failureDetail ?? undefined))) {
+        // Capacity and caller deadline/cancellation boundaries remain explicit. The
+        // original citation failure stays visible in coverage; the outer session can
+        // classify this bounded stage failure without guessing.
+        const code = repaired.failureCode;
+        const failure = new ShuntError(code, repaired.failureDetail ?? undefined, false);
+        const failed: Provenance = {
+          ...this.failureProvenance(failure, totalCalls),
+          attributionStatus: attribution.status,
+          attributionConfidence: attribution.confidence,
+          requested,
+          resolved,
+          reported,
+          ...(totalCalls > 0 ? { fallbackUsed } : {}),
+          callIdentities,
+        };
+        const envelope = errorEnvelope(requestId, failure, {
+          ...(accountingId ? { accountingId } : {}),
+          provenance: failed,
+          sources: handles,
+          handlesValid: true,
+        });
+        envelope.coverage = coverage.toShape();
+        return { envelope, provenance: failed, cost, sourceIds };
+      }
+      if (repaired.failedReason !== null || !repaired.semanticContent) {
+        // The request still has no verified evidence. Preserve that stable reason for
+        // the caller and mandatory deterministic fallback; the repair attempt's own
+        // bounded cost is carried above.
+        const failure = new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
+        const failed: Provenance = {
+          ...this.failureProvenance(failure, totalCalls),
+          attributionStatus: attribution.status,
+          attributionConfidence: attribution.confidence,
+          requested,
+          resolved,
+          reported,
+          ...(totalCalls > 0 ? { fallbackUsed } : {}),
+          callIdentities,
+        };
+        const envelope = errorEnvelope(requestId, failure, {
+          ...(accountingId ? { accountingId } : {}),
+          provenance: failed,
+          sources: handles,
+          handlesValid: true,
+        });
+        envelope.coverage = coverage.toShape();
+        return { envelope, provenance: failed, cost, sourceIds };
+      }
+
+      // Replace only the affected chunk's answer material. Its first response remains
+      // in the aggregates above for truthful spend/identity accounting; only the
+      // evidence selected for publication is rebuilt from this repaired response.
+      repairTarget.claims = repaired.claims;
+      repairTarget.legacyAnswer = repaired.legacyAnswer;
+      repairTarget.requiresEvidence = repaired.requiresEvidence;
+      repairTarget.semanticContent = repaired.semanticContent;
+      repairTarget.citations = repaired.citations;
+      repairTarget.claimsOverCap = repaired.claimsOverCap;
+      repairTarget.citationsOverCap = repaired.citationsOverCap;
+      allClaims.length = 0;
+      legacyParts.length = 0;
+      rawCitations.length = 0;
+      nextCitation = 1;
+      for (const outcome of outcomes) {
+        if (outcome.failedReason) continue;
+        const namespaced = namespaceOutcome(outcome, nextCitation);
+        nextCitation += namespaced.idsAllocated;
+        allClaims.push(...namespaced.claims);
+        if (namespaced.legacyAnswer) legacyParts.push(namespaced.legacyAnswer);
+        rawCitations.push(...namespaced.citations);
+      }
+      const verifiedAgain = this.verifyAll(sessionId, rawCitations);
+      verified = verifiedAgain.verified;
+      rejected = verifiedAgain.rejected;
+      // The destructured values above are mutable only for this repair path; keeping a
+      // fresh reason map is useful if a future diagnostic path reports the second pass.
+      this.metrics.observe("citations_verified", verified.length, { result: "verified" });
+      this.metrics.observe("citations_rejected", rejected, { result: "rejected" });
+    }
 
     // The citation ceiling is applied to a *prioritized* list, not to whatever order the
     // model happened to emit. Truncating arbitrarily lost twice over: the citation went,
@@ -1038,6 +1334,14 @@ export class Reader {
     return { answer: "", citations: [], dropped };
   }
 
+  private repairProviderFor(identity: ModelIdentity): ReaderProvider | undefined {
+    if (!identityKnown(identity)) return undefined;
+    if (this.provider instanceof FallbackChainProvider) {
+      return this.provider.repairProviderFor(identity);
+    }
+    return this.provider;
+  }
+
   private async runChunks(
     question: string,
     chunks: Chunk[],
@@ -1069,6 +1373,8 @@ export class Reader {
     chunk: Chunk,
     deadline: Deadline,
     inputBudget: InputTokenBudget,
+    allowRetries = true,
+    provider?: ReaderProvider,
   ): Promise<ChunkOutcome> {
     const outcome: ChunkOutcome = {
       chunk,
@@ -1078,6 +1384,8 @@ export class Reader {
       semanticContent: false,
       citations: [],
       failedReason: null,
+      failureCode: null,
+      failureDetail: null,
       availabilityOnly: true,
       calls: 0,
       usageCompleteCalls: 0,
@@ -1108,12 +1416,16 @@ export class Reader {
     // (1 + maxTransientRetries + maxFormatRetries), never more.
     let transientUsed = 0;
     let formatUsed = 0;
-    const maxAttempts = 1 + this.limits.maxTransientRetries + this.limits.maxFormatRetries;
+    const maxAttempts = allowRetries
+      ? 1 + this.limits.maxTransientRetries + this.limits.maxFormatRetries
+      : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
         deadline.check("MODEL_CALL");
       } catch (err) {
         outcome.failedReason = isShuntError(err) && err.code === "TIMEOUT" ? "TIMEOUT" : "CANCELLED";
+        outcome.failureCode = isShuntError(err) ? err.code : "CANCELLED";
+        outcome.failureDetail = isShuntError(err) ? err.detail ?? null : null;
         return outcome;
       }
       // Hoisted so the failure path can charge the same per-call prompt for every attempt
@@ -1149,6 +1461,7 @@ export class Reader {
             maxOutputTokens: this.limits.maxOutputTokensPerCall,
             ledger,
             inputBudget: debit,
+            provider,
           }, deadline);
         } finally {
           ledger.recordExtraAttempts(debit.close());
@@ -1252,6 +1565,8 @@ export class Reader {
           safe.code === "TIMEOUT"
           || (safe.code === "MODEL_ERROR" && safe.detail !== "MODEL_SUBSTITUTED")
         );
+        outcome.failureCode = safe.code;
+        outcome.failureDetail = safe.detail ?? null;
         const canRetryTransient =
           safe.code === "MODEL_ERROR"
           && safe.retryable
@@ -1260,7 +1575,7 @@ export class Reader {
           safe.code === "INVALID_MODEL_OUTPUT"
           && FORMAT_RETRY_DETAILS.has(safe.detail ?? "")
           && formatUsed < this.limits.maxFormatRetries;
-        if ((canRetryTransient || canRetryFormat) && !deadline.expired()) {
+        if (allowRetries && (canRetryTransient || canRetryFormat) && !deadline.expired()) {
           if (canRetryTransient) transientUsed += 1;
           else formatUsed += 1;
           continue;
@@ -1276,6 +1591,8 @@ export class Reader {
         return outcome;
       }
     }
+    outcome.failureCode = "MODEL_ERROR";
+    outcome.failureDetail = "CHUNK_FAILED";
     outcome.failedReason = "CHUNK_FAILED";
     return outcome;
   }
@@ -1290,6 +1607,8 @@ export class Reader {
       /** Debits the request's shared input budget for each extra candidate a composite
        * provider starts, so no chain transmits more than the request's ceiling. */
       inputBudget?: CallInputBudget | undefined;
+      /** Provider selected for a pinned semantic repair, when one is available. */
+      provider?: ReaderProvider | undefined;
     },
     deadline: Deadline,
   ): Promise<ModelResponse> {
@@ -1324,7 +1643,8 @@ export class Reader {
     // unread - and with it the attempts, prompts and billing of everything the chain
     // tried. The call was made and was billed either way, so its outcome is kept.
     let settled: { ok: true; value: ModelResponse } | { ok: false; err: unknown } | undefined;
-    const call = this.provider
+    const callProvider = opts.provider ?? this.provider;
+    const call = callProvider
       .complete({
         system: opts.system,
         user: opts.user,
@@ -1387,14 +1707,16 @@ export class Reader {
   private verifyAll(
     sessionId: string,
     citations: Array<Record<string, unknown>>,
-  ): { verified: Citation[]; rejected: number } {
+  ): { verified: Citation[]; rejected: number; rejectionReasons: Record<string, number> } {
     const verified: Citation[] = [];
     const seen = new Set<string>();
+    const rejectionReasons: Record<string, number> = {};
     let rejected = 0;
     for (const citation of citations) {
       const result = this.verifier.verify(sessionId, citation);
       if (!result.verified) {
         rejected += 1;
+        rejectionReasons[result.reason] = (rejectionReasons[result.reason] ?? 0) + 1;
         continue;
       }
       const id = String(citation["id"]);
@@ -1402,8 +1724,57 @@ export class Reader {
       seen.add(id);
       verified.push({ ...(citation as unknown as Citation), verified: true });
     }
-    return { verified, rejected };
+    return { verified, rejected, rejectionReasons };
   }
+}
+
+const CITATION_REPAIR_REASONS: ReadonlySet<string> = new Set([
+  "OK",
+  "LINE_OUT_OF_RANGE",
+  "QUOTE_NOT_FOUND",
+  "POINTER_NOT_FOUND",
+  "RECORD_OUT_OF_RANGE",
+  "SNAPSHOT_MISMATCH",
+  "HANDLE_UNKNOWN",
+  "HANDLE_EXPIRED",
+  "QUOTE_OVER_CAP",
+  "LOCATOR_UNSUPPORTED",
+  "NO_VALID_EVIDENCE",
+  "MARKER_NOT_PUBLISHED",
+]);
+
+function citationRepairFeedback(reasons: Record<string, number>): string {
+  const entries = Object.entries(reasons)
+    .filter(([reason, count]) => CITATION_REPAIR_REASONS.has(reason) && Number.isSafeInteger(count))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, MAX_CITATION_REPAIR_REASONS)
+    .map(([reason, count]) => `${reason} x${Math.min(count as number, 64)}`);
+  return entries.length > 0 ? entries.join("; ") : "NO_VALID_EVIDENCE";
+}
+
+function repairFeedbackReasons(
+  reasons: Record<string, number>,
+  citationCount: number,
+  verifiedCount: number,
+): Record<string, number> {
+  if (Object.keys(reasons).length > 0) return reasons;
+  // A valid citation that did not back any surviving assertion means the marker/evidence
+  // relationship was not published. With no citation at all, the only safe feedback is
+  // the bounded absence-of-evidence reason.
+  return citationCount > 0 && verifiedCount > 0
+    ? { MARKER_NOT_PUBLISHED: 1 }
+    : { NO_VALID_EVIDENCE: 1 };
+}
+
+function citationRepairQuestion(question: string, feedback: string): string {
+  return [
+    question,
+    "",
+    "CITATION REPAIR: The previous evidence did not pass the bounded verifier.",
+    `Fixed verifier feedback: ${feedback}.`,
+    "Answer the original question using only the SOURCE EXCERPT above.",
+    "Return JSON with claims and exact citations; every claim must cite evidence.",
+  ].join("\n");
 }
 
 function readRequestId(request: unknown): string {

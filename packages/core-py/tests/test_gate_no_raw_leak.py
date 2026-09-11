@@ -124,7 +124,7 @@ def test_spill_failures_never_return_raw(tmp_path, inject, caplog):
     identity = make_identity("sess")
     store.open_scope(identity)
     registry = SourceRegistry(store, identity, limits)
-    expected = "LIMIT_EXCEEDED" if inject == "quota" else "STORE_FAILED"
+    expected = "STORE_FAILED" if inject == "content_mismatch" else "LEGACY_COMPACTED"
     if inject != "quota":
         detail = "WRITE_FAILED" if inject == "write_failure" else "BLOB_CONTENT_MISMATCH"
 
@@ -136,9 +136,19 @@ def test_spill_failures_never_return_raw(tmp_path, inject, caplog):
     outcome = engine.evaluate("sess", "req_leak", _payload())
     assert outcome.action == "error" and outcome.code == expected
     # Storage failure never degrades to passthrough, and it publishes no handle.
-    assert outcome.envelope["status"] == "error"
+    assert outcome.envelope["status"] == ("error" if inject == "content_mismatch" else "partial")
     assert "pointer" not in outcome.envelope
-    _assert_clean(json.dumps(outcome.envelope), caplog.text)
+    assert _payload() not in json.dumps(outcome.envelope)
+    assert not outcome.envelope["recovery"]["handles_valid"]
+    _assert_clean(caplog.text)
+    if inject == "content_mismatch":
+        _assert_clean(json.dumps(outcome.envelope))
+    else:
+        from context_shunt.legacy_compact import compact_tool_result
+
+        assert outcome.envelope["legacy_compaction"]["summary"] == compact_tool_result(
+            _payload(), hard_chars=16000
+        )
 
 
 def test_spill_contains_hostile_serialization_and_store_exceptions(tmp_path):
@@ -161,7 +171,7 @@ def test_spill_contains_hostile_serialization_and_store_exceptions(tmp_path):
     store_registry.store.publish = fail_with_payload
     store_engine = SpillEngine(store_registry, enabled=True)
     outcome = store_engine.evaluate("sess", "req_leak", "x" * 40_000)
-    assert outcome.action == "error" and outcome.code == "SPILL_FAILED"
+    assert outcome.action == "error" and outcome.code == "LEGACY_COMPACTED"
     _assert_clean(json.dumps(outcome.envelope))
     assert store_registry.count("sess") == 0
 

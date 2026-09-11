@@ -95,6 +95,7 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "artifact-import": ("gate_artifact_import", []),
     # Both language ports plus the TypeScript availability-only session boundary.
     "legacy-compaction": ("gate_legacy_compact", [
+        (CORE_TS, "test/mandatory-fallback.test.ts"),
         (CORE_TS, "test/legacy-compact.test.ts"),
         (CORE_TS, "test/automatic-extract.test.ts"),
     ]),

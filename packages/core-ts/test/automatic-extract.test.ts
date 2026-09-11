@@ -37,34 +37,29 @@ function stats(session: ShuntSession) {
   return session.stats({ schema_version: "1.1", request_id: "req_stats", operation: "stats" }).stats!.records;
 }
 
-describe("automatic deterministic escape hatch", () => {
-  it("exhausts all providers, labels exact bytes, and accounts once", async () => {
+describe("mandatory deterministic fallback", () => {
+  it("exhausts all providers, labels legacy compaction, and accounts once", async () => {
     const failure = outage();
     failure.billedUsage = { inputTokens: 10, outputTokens: 5, method: "exact" };
     const a = new FakeLuna([], failure);
     const b = new FakeLuna([], failure);
     const { session, entry, request, body } = setup(new FallbackChainProvider(a, [b]));
     const env = await session.read(request);
-    expect(env.code).toBe("EXTRACTED");
+    expect(env.code).toBe("LEGACY_COMPACTED");
     enforce(env);
     expect(a.callCount).toBe(2); expect(b.callCount).toBe(2);
     expect(env.status).toBe("partial"); expect(env.coverage.complete).toBe(false);
-    expect(env.result_kind).toBe("deterministic_extraction");
+    expect(env.result_kind).toBe("legacy_compaction");
     expect(env.provenance!.derived).toBe(false);
-    expect(env.provenance!.attribution_status).toBe("not_applicable");
     expect(env.provenance!.attempts_started).toBe(4);
     expect(env.answer).toBe(""); expect(env.citations).toEqual([]);
-    expect(env.guidance).toContain("Escape hatch: exact deterministic fallback extraction");
+    expect(env.guidance).toContain("Escape hatch: deterministic legacy-shaped compaction");
     expect(env.guidance).toContain("not an LLM summary"); expect(env.guidance).toContain("MODEL_ERROR");
-    const segment = env.extraction!.segments[0]!;
-    expect(segment.kind).toBe("bytes"); expect(segment.start).toBe(0);
-    expect(Buffer.from(segment.text)).toEqual(Buffer.from(body).subarray(0, segment.end));
-    expect(env.extraction!.result_bytes).toBeGreaterThan(0);
-    expect(env.extraction!.result_bytes).toBeLessThanOrEqual(2048);
+    expect(env.legacy_compaction!.summary).toBe(legacyCompact.compactToolResult(body, { hardChars: 16000 }));
+    expect(env.legacy_compaction!.summary_bytes).toBeLessThanOrEqual(16384);
     expect(env.sources[0]!.snapshot_id).toBe(entry.snapshot.snapshotId);
     expect(env.recovery!.handles_valid).toBe(true);
     expect(JSON.stringify(env)).not.toContain("PRIVATE_BODY");
-    expect(JSON.stringify(env)).not.toContain("TAIL_CANARY");
     const rows = stats(session).filter((r) => r.operation_id === env.accounting_id);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.attempts_started).toBe(4);
@@ -74,27 +69,27 @@ describe("automatic deterministic escape hatch", () => {
     expect(rows[0]!.delivery_boundary).toBe("extraction");
   });
   it.each([{ reader: { automatic_extract: false } }, { inspect: { enabled: false } }])(
-    "retains original failure when disabled %j", async (config) => {
+    "compacts even when former extraction controls are disabled %j", async (config) => {
       const { session, request } = setup(undefined, config);
       const env = await session.read(request);
-      expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
+      expect(env.code).toBe("LEGACY_COMPACTED"); expect(env.extraction).toBeUndefined();
       expect(env.recovery!.actions).toContain("INSPECT_HANDLE");
     });
   it("respects cumulative disclosure", async () => {
     const { session, request } = setup(undefined, { limits: { disclosure_max_per_source_bytes: 32 } });
-    expect((await session.read(request)).extraction!.result_bytes).toBeLessThanOrEqual(32);
+    expect((await session.read(request)).legacy_compaction!.summary_bytes).toBeLessThanOrEqual(32);
     const second = await session.read(request);
-    expect(second.code).toBe("MODEL_ERROR"); expect(second.extraction).toBeUndefined();
+    expect(second.code).toBe("DISCLOSURE_EXHAUSTED"); expect(second.extraction).toBeUndefined();
   });
-  it("retains all sources and omissions but extracts only the first", async () => {
+  it("retains all sources and omissions but compacts only the first", async () => {
     const { session, request, dir } = setup();
     const path = join(dir, "ws", "second.txt");
     writeFileSync(path, "SECOND_SOURCE_CANARY\n".repeat(100));
     const entry = session.registerPath(path);
     request.sources.push({ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } });
     const env = await session.read(request);
-    expect(env.code).toBe("EXTRACTED"); expect(env.sources).toHaveLength(2);
-    expect(env.coverage.omitted.map((o) => o.source_id)).toEqual(request.sources.map((s) => s.source_id));
+    expect(env.code).toBe("LEGACY_COMPACTED"); expect(env.sources).toHaveLength(2);
+    expect(env.coverage.omitted.map((o) => o.source_id)).toEqual(expect.arrayContaining(request.sources.map((s) => s.source_id)));
     expect(JSON.stringify(env)).not.toContain("SECOND_SOURCE_CANARY");
   });
   it.each(['not JSON', '{"claims": [], "citations": []}',
@@ -109,16 +104,16 @@ describe("automatic deterministic escape hatch", () => {
     const { session, request } = setup(new FakeLuna(["bad"], outage()));
     expect((await session.read(request)).extraction).toBeUndefined();
   });
-  it("extracts after an actual call timeout", async () => {
+  it("compacts after an actual call timeout", async () => {
     const provider: ReaderProvider = { target: { model: "slow", provider: "test" },
       async complete() { await new Promise((r) => setTimeout(r, 150)); throw outage(); } };
     const { session, request } = setup(provider, { limits: { model_call_deadline_ms: 10 } });
     const env = await session.read(request);
-    expect(env.code).toBe("EXTRACTED"); expect(env.guidance).toContain("TIMEOUT");
+    expect(env.code).toBe("LEGACY_COMPACTED"); expect(env.guidance).toContain("TIMEOUT");
     expect(env.provenance!.attempts_started).toBe(1);
   });
   it.each(["STORE_FAILED", "SOURCE_EXPIRED", "SOURCE_CHANGED"])(
-    "retains the original failure when fallback handle resolution fails: %s", async (code) => {
+    "publishes the binding failure when fallback handle resolution fails: %s", async (code) => {
       const { session, request } = setup();
       const original = session.registry.resolve.bind(session.registry);
       let resolves = 0;
@@ -127,21 +122,21 @@ describe("automatic deterministic escape hatch", () => {
         return original(...args);
       });
       const env = await session.read(request);
-      expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
+      expect(env.code).toBe(code); expect(env.extraction).toBeUndefined();
       expect(JSON.stringify(env)).not.toContain("PRIVATE_STORE_BODY");
       expect(env.recovery!.handles_valid).toBe(false);
     });
   it.each([0, 4097, true, 2.5, "2048", null])("rejects invalid byte caps %s", (value) => {
     expect(() => setup(undefined, { reader: { fallback_max_bytes: value } })).toThrow();
   });
-  it("narrows to config and request caps", async () => {
+  it("uses compaction caps independently of retired prefix caps", async () => {
     const { session, request } = setup(undefined, { reader: { fallback_max_bytes: 100 } });
     request.budgets.max_answer_bytes = 50;
-    expect((await session.read(request)).extraction!.result_bytes).toBeLessThanOrEqual(50);
+    expect((await session.read(request)).legacy_compaction!.summary_bytes).toBeLessThanOrEqual(DEFAULT_LIMITS.maxExtractionBytes);
   });
 });
 
-describe("explicit legacy reader fallback", () => {
+describe("mandatory legacy reader fallback", () => {
   it("publishes a partial, deterministic legacy summary after availability is exhausted", async () => {
     const first = new FakeLuna([], outage());
     const second = new FakeLuna([], outage());
@@ -158,7 +153,6 @@ describe("explicit legacy reader fallback", () => {
     expect(env.provenance).toMatchObject({
       derived: false,
       label: "legacy_compaction",
-      attribution_status: "not_applicable",
       attempts_started: 4,
       usage_complete: false,
     });
@@ -217,9 +211,10 @@ describe("explicit legacy reader fallback", () => {
         : undefined;
       const { session, request, body } = setup(provider, {}, { legacyCompaction: true });
       const env = await session.read(request);
-      expect(env.code).toBe(failure === "citations" ? "CITATION_INVALID" : "MODEL_ERROR");
+      expect(env.code).toBe("LEGACY_COMPACTED");
+      expect(env.legacy_compaction!.original_failure).toBe(failure === "citations" ? "CITATION_INVALID" : "MODEL_ERROR");
       expect(JSON.stringify(env)).not.toContain("UNVERIFIED_MODEL_SENTINEL");
-      expect(env.legacy_compaction).toBeUndefined();
+      expect(env.legacy_compaction!.summary).toBe(legacyCompact.incumbentCompactToolResult(body, { hardChars: 16000 }));
       expect(env.extraction).toBeUndefined();
       expect(JSON.stringify(env)).not.toContain(sentinel);
       expect(JSON.stringify(env)).not.toContain(body);
@@ -237,7 +232,7 @@ describe("explicit legacy reader fallback", () => {
       return original(...args);
     });
     const env = await session.read(request);
-    expect(env.code).toBe("MODEL_ERROR");
+    expect(env.code).toBe("SOURCE_CHANGED");
     expect(env.recovery!.handles_valid).toBe(false);
     expect(JSON.stringify(env)).not.toContain("PRIVATE_STORE_BODY");
   });
@@ -260,19 +255,18 @@ describe("explicit legacy reader fallback", () => {
     expect(JSON.stringify(env)).not.toContain("SECOND_SOURCE_ONLY_CANARY");
   });
 
-  it.each([new ShuntError("CANCELLED"), new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false),
-    "not JSON"])("does not extend legacy fallback to unrelated failure %s", async (reply) => {
+  it.each([new ShuntError("CANCELLED"), new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false)])("does not extend legacy fallback to unrelated failure %s", async (reply) => {
     const { session, request } = setup(new FakeLuna([], reply), {}, { legacyCompaction: true });
     const env = await session.read(request);
     expect(env.code).not.toBe("LEGACY_COMPACTED");
     expect(env.extraction).toBeUndefined();
   });
 
-  it("preserves the old exact-prefix availability fallback when legacy mode is omitted", async () => {
+  it("compacts automatically when the legacy option is omitted", async () => {
     const { session, request } = setup();
     const env = await session.read(request);
-    expect(env.code).toBe("EXTRACTED");
-    expect(env.result_kind).toBe("deterministic_extraction");
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    expect(env.result_kind).toBe("legacy_compaction");
   });
 
   it.each([999, 60_001, 2.5, "16000", null])("rejects invalid legacy hard caps %s", (value) => {
@@ -280,7 +274,7 @@ describe("explicit legacy reader fallback", () => {
   });
 });
 
-describe("shared automatic extraction contract", () => {
+describe("incumbent compaction over historical extraction fixtures", () => {
   const cases = JSON.parse(readFileSync(new URL("../../../contracts/v1/conformance/automatic-extract-cases.json", import.meta.url), "utf8")) as Array<{
     name: string; text: string; cap: number; expected: string | null; end: number | null;
   }>;
@@ -291,14 +285,10 @@ describe("shared automatic extraction contract", () => {
     const entry = session.registerPath(path);
     request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }];
     const env = await session.read(request);
-    if (fixture.expected === null) {
-      expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
-    } else {
-      enforce(env);
-      expect(env.status).toBe("partial"); expect(env.code).toBe("EXTRACTED");
-      expect(env.extraction!.segments).toEqual([{ kind: "bytes", start: 0, end: fixture.end, text: fixture.expected }]);
-      expect(env.extraction!.complete).toBe(false); expect(env.provenance!.derived).toBe(false);
-    }
+    enforce(env);
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    expect(env.legacy_compaction!.summary).toBe(legacyCompact.compactToolResult(fixture.text, { hardChars: 16000 }));
+    expect(env.coverage.complete).toBe(false);
   });
   it("never returns a whole line-oversized source", async () => {
     const { session, request, dir } = setup();
@@ -308,32 +298,34 @@ describe("shared automatic extraction contract", () => {
     const entry = session.registerPath(path);
     request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }];
     const env = await session.read(request);
-    expect(env.extraction!.result_bytes).toBeGreaterThan(0);
-    expect(env.extraction!.result_bytes).toBeLessThan(Buffer.byteLength(body));
-    expect(env.extraction!.complete).toBe(false);
+    expect(env.legacy_compaction!.summary_bytes).toBeGreaterThan(0);
+    expect(env.legacy_compaction!.summary).not.toBe(body);
+    expect(env.coverage.complete).toBe(false);
   });
 });
 
 it("guard refusal consumes no disclosure", async () => {
   const { session, entry, request } = setup(undefined, { limits: { max_extended_envelope_bytes: 2048 } });
+  const spy = vi.spyOn((session as any).inspector, "extract").mockImplementation(() => { throw new ShuntError("LIMIT_EXCEEDED", "EXTRACTION_REFUSED"); });
   const before = session.store.disclosureAllowance(session.identity, entry.sourceId);
-  const env = await session.read(request);
-  expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
+  const env = session.inspect({ schema_version: "1.1", request_id: "req_guard", operation: "inspect", source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: {kind: "lines", start: 1, end: 100}, budgets: {max_result_bytes: 2048, max_scan_lines: 100} });
+  expect(env.code).toBe("LIMIT_EXCEEDED"); expect(env.extraction).toBeUndefined();
   expect(session.store.disclosureAllowance(session.identity, entry.sourceId)).toEqual(before);
+  spy.mockRestore();
 });
-it("request timeout without a response extracts", async () => {
+it("request timeout without a response compacts", async () => {
   const provider: ReaderProvider = { target: { model: "slow", provider: "test" },
     async complete() { await new Promise((r) => setTimeout(r, 150)); throw outage(); } };
   const { session, request } = setup(provider);
   request.budgets.deadline_ms = 20;
   const env = await session.read(request);
-  expect(env.code).toBe("EXTRACTED"); expect(env.guidance).toContain("TIMEOUT");
+  expect(env.code).toBe("LEGACY_COMPACTED"); expect(env.guidance).toContain("TIMEOUT");
 });
 it("respects session disclosure exhaustion", async () => {
   const { session, entry, request } = setup(undefined, { limits: { disclosure_max_per_session_bytes: 32 } });
   expect(session.store.chargeDisclosure(session.identity, entry.sourceId, "bytes", 32).granted).toBe(true);
   const env = await session.read(request);
-  expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
+  expect(env.code).toBe("DISCLOSURE_EXHAUSTED"); expect(env.extraction).toBeUndefined();
 });
 it.each([null, 0, 1, "false", {}])("requires a boolean automatic flag: %s", (value) => {
   expect(() => setup(undefined, { reader: { automatic_extract: value } })).toThrow();
@@ -346,7 +338,7 @@ it("timeout retains already started fallback attempts", async () => {
   const { session, request } = setup(new FallbackChainProvider(first, [second]),
     { limits: { model_call_deadline_ms: 20 } });
   const env = await session.read(request);
-  expect(env.code).toBe("EXTRACTED"); expect(first.callCount).toBe(1); expect(secondCalls).toBe(1);
+  expect(env.code).toBe("LEGACY_COMPACTED"); expect(first.callCount).toBe(1); expect(secondCalls).toBe(1);
   expect(env.provenance!.attempts_started).toBe(2);
   expect(stats(session).find((r) => r.operation_id === env.accounting_id)!.attempts_started).toBe(2);
 });
@@ -361,27 +353,27 @@ it("secret guard refusal neither leaks nor charges", async () => {
       segments: [{ kind: "bytes", start: 0, end: secretMarker.length, text: secretMarker }] };
   });
   try {
-    const env = await session.read(request);
-    expect(env.code).toBe("MODEL_ERROR"); expect(env.extraction).toBeUndefined();
+    const env = session.inspect({ schema_version: "1.1", request_id: "req_guard", operation: "inspect", source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: {kind: "lines", start: 1, end: 100}, budgets: {max_result_bytes: 2048, max_scan_lines: 100} });
+    expect(env.code).toBe("LIMIT_EXCEEDED"); expect(env.extraction).toBeUndefined();
     expect(JSON.stringify(env)).not.toContain(secretMarker);
     expect(session.store.disclosureAllowance(session.identity, entry.sourceId)).toEqual(before);
   } finally { spy.mockRestore(); }
 });
 
-it.each([{ answer: "UNVERIFIED_SENTINEL", citations: [] }, { claims: [{ text: "UNVERIFIED_SENTINEL", citation_ids: [] }], citations: [] }])("retired canary citation failure preserves evidence without a question-independent prefix %j", async (reply) => {
+it.each([{ answer: "UNVERIFIED_SENTINEL", citations: [] }, { claims: [{ text: "UNVERIFIED_SENTINEL", citation_ids: [] }], citations: [] }])("citation failure preserves evidence and returns question-independent legacy compaction %j", async (reply) => {
   const provider = new FakeLuna([], JSON.stringify(reply));
   const { session, entry, request, body } = setup(provider, {}, { legacyCompaction: true });
   const env = await session.read(request);
-  expect(env.code).toBe("CITATION_INVALID");
-  expect(env.status).toBe("error");
+  expect(env.code).toBe("LEGACY_COMPACTED");
+  expect(env.status).toBe("partial");
   expect(env.answer).toBe("");
   expect(env.citations).toEqual([]);
-  expect(env.legacy_compaction).toBeUndefined();
+  expect(env.legacy_compaction!.original_failure).toBe("CITATION_INVALID");
   expect(env.extraction).toBeUndefined();
   expect(env.sources[0]!.source_id).toBe(entry.sourceId);
   expect(env.recovery!.handles_valid).toBe(true);
   expect(env.recovery!.actions).toContain("INSPECT_HANDLE");
-  expect(env.guidance).toContain("needs verification");
+  expect(env.guidance).toContain("not model-derived");
   expect(JSON.stringify(env)).not.toContain(body);
   expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");
   const inspected = session.inspect({ schema_version: "1.1", request_id: "verify_evidence",
@@ -391,8 +383,8 @@ it.each([{ answer: "UNVERIFIED_SENTINEL", citations: [] }, { claims: [{ text: "U
   expect(inspected.code).toBe("EXTRACTED");
   expect(JSON.stringify(inspected.extraction)).toContain("prefix");
   const record = stats(session).find((r) => r.operation_id === env.accounting_id)!;
-  expect(record.code).toBe("CITATION_INVALID");
-  expect(record.delivery_boundary).toBe("envelope");
+  expect(record.code).toBe("LEGACY_COMPACTED");
+  expect(record.delivery_boundary).toBe("extraction");
   expect(record.attempts_started).toBeGreaterThan(0);
 
 });
@@ -408,7 +400,7 @@ it.each([{ answer: "unverified", citations: [] }, { claims: [{ text: "unverified
     return original(...args);
   });
   const env = await session.read(request);
-  expect(env.code).toBe("CITATION_INVALID");
+  expect(env.code).toBe("SOURCE_EXPIRED");
   expect(env.recovery!.handles_valid).toBe(false);
   expect(env.recovery!.actions).toContain("RECAPTURE_SOURCE");
   expect(env.legacy_compaction).toBeUndefined();
@@ -436,7 +428,7 @@ it.each([{ answer: "", citations: [{}] }, { claims: [], citations: [{}] }])(
   "rejects empty reply with malformed citations %j", async (reply) => {
     const { session, request } = setup(new FakeLuna([], JSON.stringify(reply)));
     const env = await session.read(request);
-    expect(env.code).toBe("CITATION_INVALID");
+    expect(env.code).toBe("LEGACY_COMPACTED");
     expect(env.coverage.complete).toBe(false);
   },
 );
@@ -455,19 +447,20 @@ describe.each(["legacy", "claims"])("referenced semantic support %s", (shape) =>
     const entry = session.registerPath(path);
     request.sources = [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }];
     const env = await session.read(request);
-    const expected = ["empty", "verified_empty"].includes(kind) ? "NO_MATCH" : kind === "cited" ? "ANSWERED" : "CITATION_INVALID";
+    const expected = ["empty", "verified_empty"].includes(kind) ? "NO_MATCH" : kind === "cited" ? "ANSWERED" : "LEGACY_COMPACTED";
     expect(env.code).toBe(expected);
-    expect(env.status).toBe(expected === "CITATION_INVALID" ? "error" : "ok");
-    expect(env.coverage.complete).toBe(expected !== "CITATION_INVALID");
+    expect(env.status).toBe(expected === "LEGACY_COMPACTED" ? "partial" : "ok");
+    expect(env.coverage.complete).toBe(expected !== "LEGACY_COMPACTED");
     expect(env.sources[0]!.source_id).toBe(entry.sourceId);
     expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");
-    if (expected === "CITATION_INVALID") {
+    if (expected === "LEGACY_COMPACTED") {
       expect(env.answer).toBe(""); expect(env.citations).toEqual([]);
       expect(env.recovery!.handles_valid).toBe(true);
     }
     const record = stats(session).find((r) => r.operation_id === env.accounting_id)!;
     expect(record.code).toBe(expected);
-    expect(record.reader_input_tokens).toBe(10); expect(record.reader_output_tokens).toBe(5);
+    const calls = ["uncited", "unused"].includes(kind) ? 2 : 1;
+    expect(record.reader_input_tokens).toBe(10 * calls); expect(record.reader_output_tokens).toBe(5 * calls);
   });
   it("revalidates TTL after an unused citation verified", async () => {
     const citation = { id: "c1", line_start: 1, line_end: 1, quote: "alpha" };
@@ -484,7 +477,7 @@ describe.each(["legacy", "claims"])("referenced semantic support %s", (shape) =>
       return original(...args);
     });
     const env = await session.read(request);
-    expect(env.code).toBe("CITATION_INVALID"); expect(calls).toBeGreaterThanOrEqual(3);
+    expect(env.code).toBe("SOURCE_EXPIRED"); expect(calls).toBeGreaterThanOrEqual(3);
     expect(env.recovery!.handles_valid).toBe(false);
     expect(env.recovery!.actions).toContain("RECAPTURE_SOURCE");
     expect(JSON.stringify(env)).not.toContain("UNVERIFIED_SENTINEL");

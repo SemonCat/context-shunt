@@ -368,7 +368,7 @@ describe("provider usage preservation", () => {
   it("keeps exact provider counts instead of falling back to the estimate", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
-    const luna = new FakeLuna([], answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]));
+    const luna = new FakeLuna([], answerJson("mode = fast [c1]", [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }]));
     const result = await new Reader(registry, luna).answerDetailed("sess", readRequest(entry));
 
     expect(result.cost.method).toBe("exact");
@@ -386,7 +386,7 @@ describe("provider usage preservation", () => {
     // declared typecheck was not being run.
     const silent = new FakeLuna(
       [],
-      answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
+      answerJson("mode = fast [c1]", [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }]),
       READER_MODEL,
       { usageExact: false },
     );
@@ -475,7 +475,7 @@ describe("fallback usage completeness", () => {
 
   const answered = () =>
     Promise.resolve({
-      text: answerJson("mode = fast [c1]", [[1, 1, "mode = fast"]]),
+      text: answerJson("mode = fast [c1]", [{ id: "c1", line_start: 1, line_end: 1, quote: "mode = fast" }]),
       input_tokens: 7,
       output_tokens: 4,
       usage_exact: true,

@@ -1,3 +1,4 @@
+import type { ReaderProvider } from "../src/provider.js";
 /**
  * unit reader / bounded-output / cancellation / no-raw-leak / no-writes (TypeScript core).
  *
@@ -279,6 +280,123 @@ describe("reader gate", () => {
     expect(env.code).toBe("ANSWERED");
   });
 
+  it("uses one bounded citation repair and preserves exact usage", async () => {
+    const { registry, entry } = fixture();
+    const rejected = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "not-present" },
+    ]);
+    const repaired = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "import os" },
+    ]);
+    const luna = new FakeLuna([rejected, repaired]);
+    const result = await new Reader(registry, luna).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.citations[0]!.verified).toBe(true);
+    expect(luna.callCount).toBe(2);
+    expect(luna.calls[1]!.user).toContain("CITATION REPAIR");
+    expect(luna.calls[1]!.user).toContain("QUOTE_NOT_FOUND");
+    expect(luna.calls[1]!.user).not.toContain("not-present");
+    expect(luna.calls[1]!.user).toContain("import os");
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(20);
+    expect(result.cost.outputTokens).toBe(10);
+    expect(result.cost.attemptsStarted).toBe(2);
+    expect(result.cost.attemptsUsageComplete).toBe(2);
+    expect(result.provenance.attemptsStarted).toBe(2);
+    expect(result.provenance.callIdentities).toHaveLength(2);
+  });
+
+  it.each([["TIMEOUT", "CALL_DEADLINE"], ["LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP"], ["PROVENANCE_UNAVAILABLE", "ATTRIBUTION_UNPROVEN"]])("preserves repair boundary %s and both physical calls", async (code, detail) => {
+    const {registry, entry} = fixture();
+    const failure = new ShuntError(code!, detail);
+    failure.billedUsage = {inputTokens: 7, outputTokens: 3, method: "exact"};
+    const luna = new FakeLuna([answerJson("Unverified", []), failure]);
+    const result = await new Reader(registry, luna).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe(code);
+    expect(luna.callCount).toBe(2);
+    expect(result.cost).toMatchObject({attemptsStarted: 2, inputTokens: 17, outputTokens: 8, method: "exact"});
+  });
+
+  it("fails closed after one citation repair and reports both calls", async () => {
+    const { registry, entry } = fixture();
+    const rejected = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "wrong" },
+    ]);
+    const luna = new FakeLuna([rejected, rejected, answerJson("unused [c1].", [])]);
+    const result = await new Reader(registry, luna).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe("CITATION_INVALID");
+    expect(result.envelope.answer).toBe("");
+    expect(result.envelope.citations).toEqual([]);
+    expect(luna.callCount).toBe(2);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.attemptsStarted).toBe(2);
+    expect(result.cost.attemptsUsageComplete).toBe(2);
+    expect(result.provenance.attemptsStarted).toBe(2);
+  });
+
+  it.each([
+    ["no evidence", answerJson("The first line is alpha.", []), "NO_VALID_EVIDENCE"],
+    [
+      "unpublished marker",
+      answerJson("The first line is alpha.", [
+        { id: "c1", line_start: 1, line_end: 1, quote: "import os" },
+      ]),
+      "MARKER_NOT_PUBLISHED",
+    ],
+  ])("repairs %s with fixed safe feedback", async (_label, first, feedback) => {
+    const { registry, entry } = fixture();
+    const repaired = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "import os" },
+    ]);
+    const luna = new FakeLuna([first, repaired]);
+    const result = await new Reader(registry, luna).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(luna.callCount).toBe(2);
+    expect(luna.calls[1]!.user).toContain(feedback);
+    expect(luna.calls[1]!.user).toContain("import os");
+  });
+
+  it("does not spend citation repair after an attribution policy refusal", async () => {
+    const { registry, entry } = fixture();
+    const rejected = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "wrong" },
+    ]);
+    const luna = new FakeLuna([rejected], undefined, READER_MODEL, {
+      confirmsGeneration: false, reportModel: false,
+    });
+    const original = luna.complete.bind(luna);
+    const provider: ReaderProvider = { target: luna.target, async complete(opts) {
+      return { ...await original(opts), resolved: {}, reported: {}, providerConfirmsGeneration: false };
+    } };
+    const result = await new Reader(
+      registry,
+      provider,
+      undefined,
+      undefined,
+      undefined,
+      "require_match",
+    ).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe("PROVENANCE_UNAVAILABLE");
+    expect(luna.callCount).toBe(1);
+  });
+
+  it("pins citation repair to the unique chain leaf that produced the first answer", async () => {
+    const { registry, entry } = fixture();
+    const rejected = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "wrong" },
+    ]);
+    const repaired = answerJson("The first line is alpha [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "import os" },
+    ]);
+    const primary = new FakeLuna([rejected, repaired], undefined, "primary-model");
+    const alternative = new FakeLuna([repaired], undefined, "alternative-model");
+    const chain = new FallbackChainProvider(primary, [alternative]);
+    const result = await new Reader(registry, chain).answerDetailed("sess", request(entry));
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(primary.callCount).toBe(2);
+    expect(alternative.callCount).toBe(0);
+  });
+
   it("draws from independent transient and format retry budgets, and both may fire", async () => {
     // "Independent" means neither budget can steal the other's slot, not that only one
     // of them may ever fire: one call, one transient retry, one format retry - three
@@ -469,7 +587,7 @@ describe("tool-result-capture spill conformance", () => {
     };
     const storeOutcome = new SpillEngine(storeRegistry, undefined, true)
       .evaluate("sess", "req_s", "x".repeat(40_000));
-    expect(storeOutcome).toMatchObject({ action: "error", code: "SPILL_FAILED" });
+    expect(storeOutcome).toMatchObject({ action: "error", code: "LEGACY_COMPACTED" });
     expect(JSON.stringify(storeOutcome)).not.toContain(secret);
     expect(storeRegistry.count("sess")).toBe(0);
   });

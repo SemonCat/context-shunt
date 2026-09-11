@@ -23,10 +23,10 @@ adding fake keys to either plugin `config` block.
 | `reader.provider` | `""` | Optional provider to pin. Empty lets the host route. |
 | `reader.attribution_policy` | `allow_unverified` | What to do when the host cannot prove which model answered. See below. |
 | `reader.fallback_chain` | `[]` | Availability-only fallback targets, at most four. |
-| `reader.automatic_extract` | `true` | Exact extraction escape hatch after exhausted availability; also requires inspect. |
-| `reader.fallback_max_bytes` | `2048` | 1–4096 source bytes, narrowed by all existing limits. |
-| `reader.legacy_compaction` | `true` | Broader deterministic fallback for a reader failure `automatic_extract` does not cover. **Python core only** — not yet in `openclaw.json`'s shape; OpenClaw selects its port via an adapter session option after exhausted availability. |
-| `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core only, same caveat as above. |
+| `reader.automatic_extract` | `true` | Deprecated compatibility flag; does not control mandatory legacy compaction. |
+| `reader.fallback_max_bytes` | `2048` | 1–4096; retained compatibility cap for the retired automatic-prefix helper. |
+| `reader.legacy_compaction` | deprecated | Accepted boolean no-op. Mandatory fallback cannot be disabled, including with `false`. |
+| `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core option; TypeScript exposes the equivalent session hard cap. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
 | `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw automatic capture is unsupported, even when requested. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
