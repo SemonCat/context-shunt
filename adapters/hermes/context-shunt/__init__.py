@@ -770,17 +770,18 @@ def context_shunt_read(args: dict[str, Any] | None = None, **kwargs) -> str:
     refined question over snapshots the caller already holds. A refined question reuses
     the named immutable snapshot and never recaptures the source.
     """
-    params = {**(args or {}), **kwargs}
-    request_id = _request_id(params)
+    public_args, host_kwargs = _tool_invocation_args(args, kwargs, "context_shunt_read")
+    request_id = _request_id(host_kwargs)
 
     try:
-        tool_args = _validate_tool_args(_read_args(params))
+        tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
         return _error(request_id, exc)
 
     try:
         session = _session(
-            str(params.get("task_id") or ""), str(params.get("session_id") or "")
+            str(host_kwargs.get("task_id") or ""),
+            str(host_kwargs.get("session_id") or ""),
         )
     except Exception as raw_exc:
         failure = (
@@ -845,17 +846,29 @@ def context_shunt_read(args: dict[str, Any] | None = None, **kwargs) -> str:
         return _block_message(fixed_error(request_id, "HOST_UNSAFE"))
 
 
-def _public_tool_args(params: dict[str, Any], tool: str) -> dict[str, Any]:
-    # Host routing metadata is outside the model-visible arguments contract.
-    metadata = {"task_id", "session_id", "tool_call_id", "turn_id"}
-    return {
-        "tool": tool,
-        **{key: value for key, value in params.items() if key not in metadata},
-    }
+_TRUSTED_HOST_TOOL_KWARGS = frozenset(
+    {"task_id", "session_id", "tool_call_id", "turn_id", "user_task"}
+)
 
 
-def _read_args(params: dict[str, Any]) -> dict[str, Any]:
-    return _public_tool_args(params, "context_shunt_read")
+def _tool_invocation_args(
+    args: dict[str, Any] | None, kwargs: dict[str, Any], tool: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keep Hermes runtime metadata separate from strict caller arguments.
+
+    Hermes passes the model-produced argument dictionary positionally and adds its own
+    routing context as keyword arguments. Reserved names inside the positional dictionary
+    remain caller input and therefore fail the public schema instead of impersonating host
+    metadata.
+    """
+    public = dict(args or {})
+    host = {}
+    for key, value in kwargs.items():
+        if key in _TRUSTED_HOST_TOOL_KWARGS:
+            host[key] = value
+        else:
+            public[key] = value
+    return {"tool": tool, **public}, host
 
 
 def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -864,15 +877,16 @@ def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
 
 def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
     """Exact lines, bytes or literal-search hits from a handle. Zero model calls."""
-    params = {**(args or {}), **kwargs}
-    session = _session(
-        str(params.get("task_id") or ""), str(params.get("session_id") or "")
+    public_args, host_kwargs = _tool_invocation_args(
+        args, kwargs, "context_shunt_inspect"
     )
-    request_id = _request_id(params)
+    session = _session(
+        str(host_kwargs.get("task_id") or ""),
+        str(host_kwargs.get("session_id") or ""),
+    )
+    request_id = _request_id(host_kwargs)
     try:
-        tool_args = _validate_tool_args(
-            _public_tool_args(params, "context_shunt_inspect")
-        )
+        tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
         return _error(request_id, exc)
 
@@ -886,14 +900,14 @@ def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
         "budgets": {
             "max_result_bytes": min(
                 int(
-                    params.get("max_result_bytes")
+                    tool_args.get("max_result_bytes")
                     or _config.limits.inspect_max_result_bytes
                 ),
                 _config.limits.inspect_max_result_bytes,
             ),
             "max_scan_lines": min(
                 int(
-                    params.get("max_scan_lines")
+                    tool_args.get("max_scan_lines")
                     or _config.limits.inspect_max_scan_lines
                 ),
                 _config.limits.inspect_max_scan_lines,
@@ -910,20 +924,21 @@ def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
 
 def context_shunt_stats(args: dict[str, Any] | None = None, **kwargs) -> str:
     """This session's own bounded accounting. Read-only; resets nothing."""
-    params = {**(args or {}), **kwargs}
-    session = _session(
-        str(params.get("task_id") or ""), str(params.get("session_id") or "")
+    public_args, host_kwargs = _tool_invocation_args(
+        args, kwargs, "context_shunt_stats"
     )
-    request_id = _request_id(params)
+    session = _session(
+        str(host_kwargs.get("task_id") or ""),
+        str(host_kwargs.get("session_id") or ""),
+    )
+    request_id = _request_id(host_kwargs)
     request: dict[str, Any] = {
         "schema_version": EMITTED_SCHEMA_VERSION,
         "request_id": request_id,
         "operation": "stats",
     }
     try:
-        tool_args = _validate_tool_args(
-            _public_tool_args(params, "context_shunt_stats")
-        )
+        tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
         return _error(request_id, exc)
     for key in ("page", "page_size"):
@@ -942,15 +957,16 @@ def context_shunt_import(args: dict[str, Any] | None = None, **kwargs) -> str:
     the core re-proves every claim the manifest makes before a handle exists. Returns a
     pointer envelope - never the artifact's bytes.
     """
-    params = {**(args or {}), **kwargs}
-    session = _session(
-        str(params.get("task_id") or ""), str(params.get("session_id") or "")
+    public_args, host_kwargs = _tool_invocation_args(
+        args, kwargs, "context_shunt_import"
     )
-    request_id = _request_id(params)
+    session = _session(
+        str(host_kwargs.get("task_id") or ""),
+        str(host_kwargs.get("session_id") or ""),
+    )
+    request_id = _request_id(host_kwargs)
     try:
-        tool_args = _validate_tool_args(
-            _public_tool_args(params, "context_shunt_import")
-        )
+        tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
         return _error(request_id, exc)
     try:

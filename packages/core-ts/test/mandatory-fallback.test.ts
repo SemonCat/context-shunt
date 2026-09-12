@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { ShuntError } from "../src/errors.js";
+import { errorEnvelope } from "../src/envelope.js";
 import { DEFAULT_LIMITS as L, narrowLimits } from "../src/limits.js";
 import { compactToolResult } from "../src/legacy-compact.js";
 import { ShuntSession } from "../src/session.js";
@@ -227,6 +228,23 @@ describe("mandatory legacy fallback", () => {
     expect(envelope.provenance?.attempts_started).toBeGreaterThan(0);
     expect(envelope.provenance?.requested_model).toBeDefined();
     expect(envelope.provenance?.attribution_status).not.toBe("not_applicable");
+  });
+});
+
+describe("invalid request recovery", () => {
+  it.each([
+    ["TOOL_ARGS_VIOLATION", { handles_valid: true, actions: ["NONE"] }],
+    ["INVALID_SNAPSHOT_ID", { handles_valid: false, actions: ["REUSE_POINTER_PAIR"] }],
+  ] as const)("distinguishes %s from other schema failures", (detail, expected) => {
+    const env = errorEnvelope("req_invalid", new ShuntError("INVALID_REQUEST", detail, false));
+    expect(env.failure_detail).toBe(detail);
+    expect(env.recovery).toEqual(expected);
+    if (detail === "INVALID_SNAPSHOT_ID") {
+      expect(env.guidance).toContain("exact source_id/snapshot_id pair");
+    } else {
+      expect(env.guidance).not.toContain("exact source_id/snapshot_id pair");
+      expect(env.guidance).toContain("tool argument schema");
+    }
   });
 });
 

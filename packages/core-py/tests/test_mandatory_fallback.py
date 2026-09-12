@@ -51,6 +51,29 @@ def test_arbitrary_enum_shaped_detail_is_not_published():
 
 
 @pytest.mark.parametrize(
+    "detail,expected",
+    [
+        ("TOOL_ARGS_VIOLATION", {"handles_valid": True, "actions": ["NONE"]}),
+        (
+            "INVALID_SNAPSHOT_ID",
+            {"handles_valid": False, "actions": ["REUSE_POINTER_PAIR"]},
+        ),
+    ],
+)
+def test_invalid_request_recovery_distinguishes_schema_from_snapshot(detail, expected):
+    from context_shunt.envelope import error_envelope
+
+    env = error_envelope("req_invalid", ShuntError("INVALID_REQUEST", detail))
+    assert env["failure_detail"] == detail
+    assert env["recovery"] == expected
+    if detail == "INVALID_SNAPSHOT_ID":
+        assert "exact source_id/snapshot_id pair" in env["guidance"]
+    else:
+        assert "exact source_id/snapshot_id pair" not in env["guidance"]
+        assert "tool argument schema" in env["guidance"]
+
+
+@pytest.mark.parametrize(
     "failure",
     [
         ShuntError("STORE_FAILED", "WRITE_FAILED"),

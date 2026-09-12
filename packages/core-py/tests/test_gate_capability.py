@@ -94,6 +94,7 @@ class FakeCtx:
         self.auxiliary_tasks: list[tuple[str, dict]] = []
         self.registered_tools: list[str] = []
         self.registered_toolsets: list[str] = []
+        self.registered_handlers: dict[str, object] = {}
         self.messages: list[str] = []
         self._with_tools = with_tools
         self.logger = self
@@ -124,6 +125,7 @@ class FakeCtx:
         assert toolset and "override" not in kwargs
         self.registered_tools.append(name)
         self.registered_toolsets.append(toolset)
+        self.registered_handlers[name] = handler
 
     def info(self, msg, *args):
         self.messages.append(msg % args if args else msg)
@@ -1264,5 +1266,130 @@ def test_direct_tool_handler_preserves_canonical_caller_errors(tmp_path, tool, a
     module.register(FakeCtx(_config(tmp_path)))
     env = json.loads(getattr(module, tool)(args, task_id="strict"))
     assert env["code"] == "INVALID_REQUEST"
-    assert not env["recovery"]["handles_valid"]
+    assert env["failure_detail"] == "TOOL_ARGS_VIOLATION"
+    assert env["recovery"] == {"handles_valid": True, "actions": ["NONE"]}
     assert "legacy_compaction" not in env
+
+
+@pytest.mark.parametrize("user_task", [None, "HOST_USER_TASK_MUST_NOT_LEAK"])
+def test_hermes_registry_metadata_stays_outside_all_public_tool_args(
+    tmp_path, monkeypatch, user_task
+):
+    """Hermes 0.21.2 passes these kwargs beside the model's argument dictionary."""
+    module = _load_adapter()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    source.write_text("max_retries = 3\n", encoding="utf-8")
+
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    artifact = import_root / "artifact.log"
+    body = b"imported adapter artifact\n"
+    artifact.write_bytes(body)
+    manifest = import_root / "artifact.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "import_contract": "context_shunt.artifact_import.v1",
+                "producer": {
+                    "id": "synthetic-adapter",
+                    "manifest_schema": "context_shunt.artifact_import.v1",
+                },
+                "artifact": {
+                    "path": str(artifact),
+                    "bytes": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                    "media_type": "text/plain",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path)
+    config["artifact_import"] = {
+        "enabled": True,
+        "roots": [str(import_root)],
+        "accepted_manifest_schemas": ["context_shunt.artifact_import.v1"],
+    }
+    llm = FakeLlm()
+    ctx = FakeCtx(config, llm=llm)
+
+    read_requests = []
+    real_read = module.ShuntSession.read
+
+    def capture_read_request(session, request):
+        read_requests.append(request)
+        return real_read(session, request)
+
+    monkeypatch.setattr(module.ShuntSession, "read", capture_read_request)
+    module.register(ctx)
+
+    def invoke(tool, args):
+        # Faithful Hermes registry shape: the model arguments remain positional while
+        # _execute_tool supplies trusted runtime metadata as keyword arguments.
+        return json.loads(
+            ctx.registered_handlers[tool](
+                args,
+                task_id="registry-task",
+                session_id="registry-session",
+                user_task=user_task,
+            )
+        )
+
+    first = invoke(
+        "context_shunt_read",
+        {"question": "What is the retry ceiling?", "paths": [str(source)]},
+    )
+    assert first["code"] == "ANSWERED"
+    handle = {key: first["sources"][0][key] for key in ("source_id", "snapshot_id")}
+
+    refined = invoke(
+        "context_shunt_read",
+        {"question": "Is this the same snapshot?", "handles": [handle]},
+    )
+    assert refined["code"] in ("ANSWERED", "NO_MATCH")
+    assert {key: refined["sources"][0][key] for key in handle} == handle
+
+    inspected = invoke(
+        "context_shunt_inspect",
+        {
+            **handle,
+            "selector": {"kind": "lines", "start": 1, "end": 1},
+        },
+    )
+    assert inspected["code"] == "EXTRACTED"
+    assert inspected["extraction"]["source_id"] == handle["source_id"]
+    assert inspected["extraction"]["snapshot_id"] == handle["snapshot_id"]
+
+    stats = invoke("context_shunt_stats", {})
+    assert stats["code"] == "STATS"
+    imported = invoke("context_shunt_import", {"manifest_path": str(manifest)})
+    assert imported["code"] == "IMPORTED"
+
+    assert [request["question"] for request in read_requests] == [
+        "What is the retry ceiling?",
+        "Is this the same snapshot?",
+    ]
+    private_metadata = "HOST_USER_TASK_MUST_NOT_LEAK"
+    assert private_metadata not in json.dumps(read_requests)
+    assert private_metadata not in json.dumps(llm.calls)
+    assert private_metadata not in json.dumps(ctx.messages)
+
+
+@pytest.mark.parametrize(
+    "metadata", ["task_id", "session_id", "tool_call_id", "turn_id", "user_task"]
+)
+def test_caller_cannot_impersonate_trusted_hermes_metadata(tmp_path, metadata):
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path)))
+    env = json.loads(
+        module.context_shunt_stats(
+            {metadata: "caller-controlled"},
+            task_id="trusted-task",
+            session_id="trusted-session",
+            user_task=None,
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "TOOL_ARGS_VIOLATION"

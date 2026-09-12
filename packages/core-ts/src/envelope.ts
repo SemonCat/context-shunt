@@ -52,10 +52,11 @@ export const RECOVERY_ACTIONS = new Set([
 const HANDLES_SURVIVE = new Set([
   "MODEL_ERROR", "INVALID_MODEL_OUTPUT", "CITATION_INVALID", "TIMEOUT", "CANCELLED",
   "LIMIT_EXCEEDED", "DISCLOSURE_EXHAUSTED", "PROVENANCE_UNAVAILABLE",
+  "INVALID_REQUEST",
 ]);
 
 const RECOVERY_BY_CODE: Record<string, string[]> = {
-  INVALID_REQUEST: ["REUSE_POINTER_PAIR"],
+  INVALID_REQUEST: ["NONE"],
   MODEL_ERROR: ["RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"],
   INVALID_MODEL_OUTPUT: ["RETRY_SAME_QUESTION", "INSPECT_HANDLE"],
   CITATION_INVALID: ["REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"],
@@ -403,15 +404,22 @@ export function errorEnvelope(
 ): Envelope {
   // The 1.0 signature took a bare guidance string; keep it working.
   const opts: ErrorEnvelopeOptions = typeof options === "string" ? { guidance: options } : options;
+  const invalidSnapshot = err.code === "INVALID_REQUEST" && err.detail === "INVALID_SNAPSHOT_ID";
   const build: BuildOptions = {
     requestId,
     status: BLOCKED_CODES.has(err.code) ? "blocked" : "error",
     code: err.code,
     retryable: err.retryable,
-    recovery: recoveryFor(err.code, err.code === "INVALID_REQUEST" ? false : opts.handlesValid),
+    recovery: invalidSnapshot
+      ? { handles_valid: false, actions: ["REUSE_POINTER_PAIR"] }
+      : recoveryFor(err.code, opts.handlesValid),
     failureDetail: safeFailureDetail(err.detail),
   };
-  if (err.code === "INVALID_REQUEST") build.guidance = "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema.";
+  if (invalidSnapshot) {
+    build.guidance = "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema.";
+  } else if (err.code === "INVALID_REQUEST") {
+    build.guidance = "Check the tool argument schema and retry with corrected arguments.";
+  }
   if (opts.guidance) build.guidance = opts.guidance;
   if (opts.sources) build.sources = opts.sources;
   if (opts.accountingId) build.accountingId = opts.accountingId;

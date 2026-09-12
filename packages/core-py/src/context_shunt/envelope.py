@@ -78,11 +78,12 @@ _HANDLES_SURVIVE = frozenset(
         "LIMIT_EXCEEDED",
         "DISCLOSURE_EXHAUSTED",
         "PROVENANCE_UNAVAILABLE",
+        "INVALID_REQUEST",
     }
 )
 
 _RECOVERY_BY_CODE: dict[str, tuple[str, ...]] = {
-    "INVALID_REQUEST": ("REUSE_POINTER_PAIR",),
+    "INVALID_REQUEST": ("NONE",),
     "MODEL_ERROR": ("RETRY_SAME_QUESTION", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"),
     "INVALID_MODEL_OUTPUT": ("RETRY_SAME_QUESTION", "INSPECT_HANDLE"),
     "CITATION_INVALID": ("REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE"),
@@ -317,6 +318,12 @@ def error_envelope(
 ) -> dict[str, Any]:
     """Map a bounded failure to an envelope. The exception message never rides along."""
     status = "blocked" if exc.code in _BLOCKED_CODES else "error"
+    invalid_snapshot = exc.code == "INVALID_REQUEST" and exc.detail == "INVALID_SNAPSHOT_ID"
+    recovery = (
+        {"handles_valid": False, "actions": ["REUSE_POINTER_PAIR"]}
+        if invalid_snapshot
+        else recovery_for(exc.code, handles_valid=handles_valid)
+    )
     return build(
         request_id=request_id,
         status=status,
@@ -326,15 +333,15 @@ def error_envelope(
         guidance=guidance
         or (
             "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema."
+            if invalid_snapshot
+            else "Check the tool argument schema and retry with corrected arguments."
             if exc.code == "INVALID_REQUEST"
             else None
         ),
         sources=sources,
         accounting_id=accounting_id,
         provenance=provenance,
-        recovery=recovery_for(
-            exc.code, handles_valid=False if exc.code == "INVALID_REQUEST" else handles_valid
-        ),
+        recovery=recovery,
         schema_version=schema_version,
     )
 
