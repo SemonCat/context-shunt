@@ -291,7 +291,7 @@ expose this"** rather than a default that would overstate what is known:
 | `resolved_provider` / `resolved_model` | what the host says it selected. Omit if the host does not expose its selection. |
 | `reported_provider` / `reported_model` | what the **provider** says generated the tokens. Omit if it does not report one. |
 | `provider_confirms_generation` | `true` only if you can show the reported value came from the provider, not from the host echoing your request. When `false`, attribution is reported `unverified` — never `actual`. |
-| `input_tokens` / `output_tokens` / `cache_tokens` | omit when not reported. **Do not send `0` to mean unknown.** |
+| `input_tokens` / `output_tokens` / `cache_tokens` | Nonnegative integer counts reported by the host, even when they exceed configured request/generation caps. Omit when not reported. Malformed values become unknown and do not reject valid text. **Do not send `0` to mean unknown.** |
 | `usage_exact` | `true` only when those counts came from the provider. |
 | `fallback_used` | `true` if an availability fallback produced this result. |
 

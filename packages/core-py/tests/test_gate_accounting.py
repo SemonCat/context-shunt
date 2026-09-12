@@ -9,6 +9,7 @@ reset switch, a cross-session read or a content channel.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -574,13 +575,8 @@ def test_the_estimate_includes_billed_output_from_attempts_never_seen(tmp_path):
     assert result.cost.output_tokens == 6
 
 
-def test_a_billed_failure_claim_no_single_call_could_have_produced_is_refused(tmp_path):
-    """Bounding the sum cannot prove each constituent respected the per-call cap.
-
-    A `ShuntError` the host raises itself never passes the bridge's usage validation, so a
-    failure reporting one token over the cap plus a winner reporting one stayed under the
-    two-attempt ceiling and was published as exact.
-    """
+def test_an_over_cap_billed_failure_remains_exact_accounting_evidence(tmp_path):
+    """Generation limits do not cap what a provider may truthfully report it billed."""
     over_cap = _billed_unavailable(1, L.max_output_tokens_per_call + 1)
 
     def tiny_winner(**_kwargs):
@@ -591,10 +587,9 @@ def test_a_billed_failure_claim_no_single_call_could_have_produced_is_refused(tm
     assert seen["calls"] == 2
     # The call still failed the way it failed, so the chain still advanced and answered.
     assert result.envelope["code"] == "ANSWERED"
-    # But the impossible claim is not evidence, so the total is not exact and never
-    # carries the over-cap number.
-    assert result.cost.method is not TokenMethod.EXACT
-    assert result.cost.output_tokens < L.max_output_tokens_per_call
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.attempts_usage_complete == 2
+    assert result.cost.output_tokens == L.max_output_tokens_per_call + 2
 
 
 def test_a_billed_failure_claim_that_respects_the_per_call_cap_is_still_accepted(tmp_path):
@@ -640,7 +635,7 @@ def test_a_billed_loser_and_an_exact_winner_are_each_counted_exactly_once(tmp_pa
 # The ordinary success and failure paths were the first half of this rule. These are the
 # paths that bypassed them: a stable provider error re-read across the reader's outer
 # retry, a response that arrived after the deadline, a cancellation that raced the
-# provider, and a plain `ReaderProvider` whose usage no bridge ever bounded.
+# provider, and a plain `ReaderProvider` whose usage still needs safe normalization.
 
 _PLAIN = ProviderTarget(model=L.reader_model, provider="plain")
 
@@ -792,12 +787,8 @@ def test_a_billed_attempt_that_cancellation_raced_is_kept(tmp_path):
     assert result.cost.output_tokens == 3
 
 
-def test_a_plain_providers_billed_failure_is_capped_before_the_merge(tmp_path):
-    """The chain accepts any ``ReaderProvider``, so a claim may never have been bounded.
-
-    A plain provider's failed attempt claiming one token over the per-call cap, plus a
-    winner claiming one, stayed under the two-attempt aggregate ceiling.
-    """
+def test_a_plain_providers_over_cap_billed_failure_is_merged_honestly(tmp_path):
+    """The fallback chain retains well-formed usage from any provider implementation."""
     from context_shunt.provider import FallbackChainProvider
 
     class Failing:
@@ -817,19 +808,13 @@ def test_a_plain_providers_billed_failure_is_capped_before_the_merge(tmp_path):
 
     # The call still failed the way it failed, so the chain still advanced and answered.
     assert result.envelope["code"] == "ANSWERED"
-    assert result.cost.method is not TokenMethod.EXACT
-    assert result.cost.output_tokens < L.max_output_tokens_per_call
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.attempts_usage_complete == 2
+    assert result.cost.output_tokens == L.max_output_tokens_per_call + 2
 
 
-def test_a_plain_provider_that_wins_the_fallback_is_capped(tmp_path):
-    """A winner is a constituent too, and an aggregate bound cannot vouch for it.
-
-    Refusing it must not refuse what the chain already knew. The rejection used to raise a
-    bare ``BAD_USAGE`` that carried none of the chain's state, so a two-call schedule whose
-    first attempt was billed 5/3 was published as one attempt, zero usage-complete attempts
-    and zero output tokens - the invalid claim was thrown out and the *earlier* attempt's
-    real spend went with it. Only the unusable claim may be excluded.
-    """
+def test_an_over_cap_plain_fallback_winner_keeps_answer_and_all_usage(tmp_path):
+    """An anomalous usage report cannot erase the valid answer or earlier billing."""
     from context_shunt.provider import FallbackChainProvider
 
     seen = {"calls": 0}
@@ -851,25 +836,18 @@ def test_a_plain_provider_that_wins_the_fallback_is_capped(tmp_path):
     reader, request = _fixture(tmp_path, FallbackChainProvider(BilledFailure(), [OverCap()]))
     result = reader.answer("sess", request)
 
-    assert result.envelope["code"] != "ANSWERED"
-    assert result.envelope["answer"] == ""
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["answer"]
     # Both calls were made and both were billed, whatever became of the second's claim.
     assert seen["calls"] == 2
     assert result.cost.attempts_started == 2
-    # Exactly one of the two reported usage that could be believed.
-    assert result.cost.attempts_usage_complete == 1
-    # The first attempt's three billed output tokens survive the second's refusal.
-    assert result.cost.output_tokens == 3
+    assert result.cost.attempts_usage_complete == 2
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.output_tokens == L.max_output_tokens_per_call + 4
 
 
-def test_a_host_bridge_that_wins_the_fallback_is_capped_the_same_way(tmp_path):
-    """The parity case: the same schedule where the winner is a real bridge.
-
-    A bridge rejects its own over-cap reply inside ``complete``, so the refusal reaches the
-    chain as a caught failure rather than a returned response. Both routes have to publish
-    the same accounting, or the boundary a claim happens to cross would decide what the
-    session was charged.
-    """
+def test_an_over_cap_host_bridge_fallback_winner_keeps_answer_and_all_usage(tmp_path):
+    """Host-bridge and plain-provider winners have identical observational accounting."""
     from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
 
     seen = {"calls": 0}
@@ -894,12 +872,41 @@ def test_a_host_bridge_that_wins_the_fallback_is_capped_the_same_way(tmp_path):
     reader, request = _fixture(tmp_path, chain)
     result = reader.answer("sess", request)
 
-    assert result.envelope["code"] != "ANSWERED"
-    assert result.envelope["answer"] == ""
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["answer"]
     assert seen["calls"] == 2
     assert result.cost.attempts_started == 2
+    assert result.cost.attempts_usage_complete == 2
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.output_tokens == L.max_output_tokens_per_call + 4
+
+
+def test_malformed_fallback_usage_is_unknown_without_losing_the_winner(tmp_path):
+    """Malformed loser metadata cannot poison the winner or masquerade as exact."""
+    from context_shunt.provider import FallbackChainProvider
+
+    class MalformedFailure:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            exc = ShuntError("MODEL_ERROR", "UNAVAILABLE", retryable=True)
+            exc.billed_usage = Usage(input_tokens=1, output_tokens="bad", method=TokenMethod.EXACT)
+            raise exc
+
+    class Winner:
+        target = _PLAIN
+
+        def complete(self, **_kwargs):
+            return _plain_response(7)
+
+    reader, request = _fixture(tmp_path, FallbackChainProvider(MalformedFailure(), [Winner()]))
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.cost.attempts_started == 2
     assert result.cost.attempts_usage_complete == 1
-    assert result.cost.output_tokens == 3
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.output_tokens > 0
 
 
 def test_a_legal_sum_above_the_single_call_ceiling_is_accepted(tmp_path):
@@ -937,11 +944,11 @@ def test_a_legal_sum_above_the_single_call_ceiling_is_accepted(tmp_path):
     assert result.cost.output_tokens > L.max_output_tokens_per_call
 
 
-# -- a refused usage claim does not erase measured bytes --------------------------------
+# -- usage anomalies never erase otherwise valid answers --------------------------------
 
 
-class _BadUsageProvider:
-    """Returns a real completion alongside a usage claim no call could have made."""
+class _OverCapUsageProvider:
+    """Returns a real completion alongside an anomalous but well-formed usage claim."""
 
     def __init__(self, text: str):
         self.text = text
@@ -957,27 +964,19 @@ class _BadUsageProvider:
             text=self.text,
             requested=ModelIdentity(model="gpt-5.6-luna"),
             resolved=ModelIdentity(model="gpt-5.6-luna"),
-            # Above every ceiling, so `_validate_model_response` refuses the claim.
             usage=Usage(input_tokens=10, output_tokens=10**9, method=TokenMethod.EXACT),
         )
 
 
-def test_invalid_usage_metadata_does_not_erase_the_bytes_we_measured(tmp_path):
-    """The release blocker: a refused usage claim took real completion bytes with it.
-
-    The response reached the provider, transmitted the prompt and came back carrying
-    completion bytes this core can measure itself. Rejecting the whole response for a
-    malformed usage claim reported ``output_tokens: 0`` for a call that had produced
-    hundreds of bytes - understating spend, which is the one direction this accounting
-    must never err in. The claim is still refused; the measurement is kept.
-    """
+def test_over_cap_reader_usage_preserves_the_valid_answer_and_exact_count(tmp_path):
+    """The final reader layer treats usage as accounting, never answer validity."""
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"alpha = 1\nbeta = 2\n"))
     text = answer_json(
         "Alpha is one [c1].",
         [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
     )
-    provider = _BadUsageProvider(text)
+    provider = _OverCapUsageProvider(text)
     result = Reader(registry, provider).answer(
         "sess",
         {
@@ -998,17 +997,45 @@ def test_invalid_usage_metadata_does_not_erase_the_bytes_we_measured(tmp_path):
     assert provider.calls == 1
     cost = result.cost
     assert cost.attempts_started == 1
-    # The provider's own numbers are refused, so no attempt counts as usage-complete and
-    # the method says the totals are this core's estimate.
-    assert cost.attempts_usage_complete == 0
-    assert cost.method is TokenMethod.BYTES_DIV_4
-    # And the completion bytes survive: the estimate is the text we actually received.
-    assert cost.output_tokens == estimate_tokens(len(text.encode("utf-8")))
-    assert cost.output_tokens > 0
-    assert cost.input_tokens > 0
-    # The refused reply is still refused - nothing from it is published.
-    assert result.envelope["code"] in ("NO_MATCH", "INVALID_MODEL_OUTPUT")
-    assert result.envelope.get("answer", "") == ""
+    assert cost.attempts_usage_complete == 1
+    assert cost.method is TokenMethod.EXACT
+    assert cost.input_tokens == 10
+    assert cost.output_tokens == 10**9
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["answer"]
+
+
+def test_malformed_reader_usage_becomes_unknown_without_losing_text(tmp_path):
+    """A bad count cannot crash aggregation or reject a cited answer."""
+
+    class MalformedUsageProvider(_OverCapUsageProvider):
+        def complete(self, *, system, user, max_output_tokens, timeout_ms):
+            response = super().complete(
+                system=system,
+                user=user,
+                max_output_tokens=max_output_tokens,
+                timeout_ms=timeout_ms,
+            )
+            return replace(
+                response,
+                usage=Usage(input_tokens=10, output_tokens="bad", method=TokenMethod.EXACT),
+            )
+
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha = 1\n"))
+    text = answer_json(
+        "Alpha is one [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
+    )
+    result = Reader(registry, MalformedUsageProvider(text)).answer(
+        "sess", _read_request(entry, "What is alpha?")
+    )
+
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["answer"]
+    assert result.cost.attempts_usage_complete == 0
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.output_tokens == estimate_tokens(len(text.encode("utf-8")))
 
 
 def test_a_valid_usage_claim_is_still_reported_exactly(tmp_path):
@@ -1165,20 +1192,32 @@ class _BadBridgeUsage:
 
     def __call__(self, **_kwargs):
         self.calls += 1
-        # Negative is not a count. `_usage_value` refuses it before any response exists,
-        # which is the path that used to lose the reply's measured bytes entirely.
+        # Negative is not a count. The whole usage claim becomes unknown.
         return {"text": self.text, "usage_exact": True, "input_tokens": 5, "output_tokens": -1}
 
 
-def test_a_bridge_usage_claim_this_core_refuses_still_keeps_the_reply_bytes(tmp_path):
-    """The release blocker: `_unpack` raised before the reply could be measured.
+@pytest.mark.parametrize(
+    "usage_fields",
+    [
+        {},
+        {"usage_exact": True, "input_tokens": 5, "output_tokens": "bad"},
+    ],
+)
+def test_bridge_missing_or_malformed_usage_is_unknown_not_zero(usage_fields):
+    from context_shunt.provider import HostBridgeProvider
 
-    `_usage_value` rejects a malformed count *while the usage object is being built*, so
-    the `ModelResponse` was never constructed and the error carried nothing. The call had
-    reached the provider, transmitted the prompt and returned hundreds of bytes of text -
-    all of which was published as `output_tokens: 0`. The claim is still refused whole; the
-    measurement this core made itself survives it.
-    """
+    response = HostBridgeProvider(
+        lambda **_kwargs: {"text": _ANSWER_TEXT, **usage_fields}
+    ).complete(system="s", user="u", max_output_tokens=10, timeout_ms=100)
+
+    assert response.text == _ANSWER_TEXT
+    assert response.usage.method is TokenMethod.UNKNOWN
+    assert response.usage.input_tokens is None
+    assert response.usage.output_tokens is None
+
+
+def test_malformed_bridge_usage_is_unknown_without_losing_the_answer(tmp_path):
+    """The host boundary downgrades accounting metadata, not valid response text."""
     from context_shunt.provider import HostBridgeProvider
 
     registry = make_registry(tmp_path, session_id="sess")
@@ -1191,14 +1230,15 @@ def test_a_bridge_usage_claim_this_core_refuses_still_keeps_the_reply_bytes(tmp_
     result = Reader(registry, HostBridgeProvider(bridge, L, provider="openai")).answer(
         "sess", _read_request(entry, "What is alpha?")
     )
-    assert bridge.calls >= 1
+    assert bridge.calls == 1
+    assert result.envelope["code"] == "ANSWERED"
+    assert result.envelope["answer"]
     cost = result.cost
-    assert cost.attempts_started >= 1
+    assert cost.attempts_started == 1
     # None of the host's numbers are believed.
     assert cost.attempts_usage_complete == 0
     assert cost.method is TokenMethod.BYTES_DIV_4
-    # The bytes are: one refused claim must not read as a call that produced nothing.
-    assert cost.output_tokens >= estimate_tokens(len(text.encode("utf-8")))
+    assert cost.output_tokens == estimate_tokens(len(text.encode("utf-8")))
     assert cost.output_tokens > 0
 
 

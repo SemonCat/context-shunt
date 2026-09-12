@@ -1245,8 +1245,7 @@ export function buildProvider(
       ref.model,
       ref.provider,
     ));
-  // The chain checks each constituent's usage against the *configured* ceilings, so it
-  // is given the same limits every candidate was built with.
+  // The chain shares the same scheduling and generation budgets as its candidates.
   return new FallbackChainProvider(primary, alternatives, config.limits);
 }
 

@@ -1459,8 +1459,7 @@ def build_provider(
         )
         for ref in config.reader.fallback_chain
     ]
-    # The chain checks each constituent's usage against the *configured* ceilings, so it
-    # is given the same limits every candidate was built with.
+    # The chain shares the same scheduling and generation budgets as its candidates.
     return FallbackChainProvider(primary, alternatives, config.limits)
 
 

@@ -287,22 +287,10 @@ export class HostBridgeProvider implements ReaderProvider {
       });
     } catch (err) {
       if (err instanceof ShuntError) {
-        // This is the boundary a single physical call's report crosses, and the only
-        // place that knows the per-call caps apply to *it* rather than to a sum. A failed
-        // attempt may report what it was billed, and that claim was previously merged
-        // into the aggregate unchecked: a failure reporting 2,049 output tokens against
-        // the fixed 2,048 cap, plus a winner reporting 1, totalled 2,050 - under the
-        // two-attempt aggregate ceiling - and was published as `exact`. Bounding only the
-        // sum cannot prove every constituent respected the cap.
-        //
-        // An out-of-range claim is refused as evidence, not escalated into a hard error:
-        // the call still failed the way it failed, so availability and the chain's
-        // advance are unchanged, and the attempt simply counts as one that reported
-        // nothing usable.
-        // Dropping it means *replacing* the error, never editing it. The host owns that
-        // object and may throw one stable instance for every call it fails; editing it
-        // would make this bridge's verdict permanent and visible to the next caller.
-        throw withoutUnusableBilledUsage(err, this.limits, capped);
+        // Usage attached to a failure is observational. Preserve every well-formed
+        // nonnegative count even above generation caps; downgrade malformed metadata on a
+        // fresh error so downstream accounting cannot crash or mistake it for zero.
+        throw withoutMalformedBilledUsage(err);
       }
       // A cancelled call is not a provider that failed. Sanitizing an abort into a
       // *retryable* provider error handed the chain the one signal that means "advance",
@@ -312,10 +300,10 @@ export class HostBridgeProvider implements ReaderProvider {
       }
       throw transientProviderError();
     }
-    return this.unpack(result, capped);
+    return this.unpack(result);
   }
 
-  private unpack(result: HostBridgeResult, outputCap: number): ModelResponse {
+  private unpack(result: HostBridgeResult): ModelResponse {
     if (typeof result !== "object" || result === null) {
       throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", false);
     }
@@ -323,41 +311,19 @@ export class HostBridgeProvider implements ReaderProvider {
     if (typeof text !== "string") {
       throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", false);
     }
-    // Usage is unpacked *before* the text is judged. The call reached the provider and
-    // was billed whatever the reply turned out to be, so rejecting an over-cap reply must
-    // not take its token counts with it - that reported one attempt with no exact usage
-    // and silently fell back to a byte estimate for tokens the host had counted exactly.
-    const exact = result.usage_exact === true;
-    const usage: { -readonly [K in keyof Usage]: Usage[K] } = {
-      method: exact ? "exact" : "unknown",
-    };
-    let input: number | undefined;
-    let output: number | undefined;
-    let cache: number | undefined;
-    try {
-      input = readUsage(result.input_tokens, this.limits.maxRequestInputTokens);
-      output = readUsage(result.output_tokens, outputCap);
-      cache = readUsage(result.cache_tokens, this.limits.maxRequestInputTokens);
-    } catch (err) {
-      // The usage *claim* is unusable, and none of its numbers may be trusted. What the
-      // host said it cost is refused wholesale - no clamping, no partial read of the
-      // fields that happened to parse - because a report this malformed says nothing
-      // reliable about any of them.
-      //
-      // But the call still reached the provider, still transmitted the prompt, and still
-      // came back carrying completion bytes this core can measure for itself. Throwing
-      // with nothing attached threw that away: a call that produced 1,200 bytes of text
-      // was published as `outputTokens: 0`, the one direction this accounting must never
-      // err in. The measurement travels on the error instead, bounded by the reply
-      // ceiling so an unbounded body cannot inflate it.
-      throw withResponseBytes(err, text, this.limits);
-    }
-    if (input !== undefined) usage.inputTokens = input;
-    if (output !== undefined) usage.outputTokens = output;
-    if (cache !== undefined) usage.cacheTokens = cache;
+    // Usage is observational, so it is never compared with request or generation caps.
+    // A provider can truthfully report an anomaly above those caps without invalidating
+    // the answer. Any malformed supplied count makes the whole claim unknown; nothing is
+    // clamped or replaced with zero.
+    const { usage } = normalizeUsage({
+      inputTokens: result.input_tokens as number | undefined,
+      outputTokens: result.output_tokens as number | undefined,
+      cacheTokens: result.cache_tokens as number | undefined,
+      method: result.usage_exact === true ? "exact" : "unknown",
+    });
     if (new TextEncoder().encode(text).length > this.limits.maxToolResultBytes) {
       const rejected = new ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", false);
-      rejected.billedUsage = usage as Usage;
+      rejected.billedUsage = usage;
       throw rejected;
     }
     const response: ModelResponse = {
@@ -366,7 +332,7 @@ export class HostBridgeProvider implements ReaderProvider {
       resolved: identityOf(result.resolved_provider, result.resolved_model),
       reported: identityOf(result.reported_provider, result.reported_model),
       providerConfirmsGeneration: result.provider_confirms_generation === true,
-      usage: usage as Usage,
+      usage,
       fallbackUsed: result.fallback_used === true,
     };
     // This bridge makes exactly one physical call, so it is the one place that can state
@@ -382,57 +348,67 @@ function identityOf(provider: unknown, model: unknown): ModelIdentity {
   return identity;
 }
 
-/** `undefined` in, `undefined` out. Absence is never converted to zero. */
-function readUsage(value: unknown, maximum: number): number | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) {
-    throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
+export function normalizeUsage(raw: unknown): { usage: Usage; wellFormed: boolean } {
+  if (typeof raw !== "object" || raw === null) return { usage: NO_USAGE, wellFormed: false };
+  const candidate = raw as Partial<Usage>;
+  const values = [candidate.inputTokens, candidate.outputTokens, candidate.cacheTokens];
+  if (values.some((value) =>
+    value !== undefined
+    && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0))) {
+    return { usage: NO_USAGE, wellFormed: false };
   }
-  return value;
+  const usage: { -readonly [K in keyof Usage]: Usage[K] } = { method: "unknown" };
+  if (candidate.inputTokens !== undefined) usage.inputTokens = candidate.inputTokens;
+  if (candidate.outputTokens !== undefined) usage.outputTokens = candidate.outputTokens;
+  if (candidate.cacheTokens !== undefined) usage.cacheTokens = candidate.cacheTokens;
+  if (
+    candidate.method === "exact"
+    && candidate.inputTokens !== undefined
+    && candidate.outputTokens !== undefined
+  ) {
+    usage.method = "exact";
+  } else if (candidate.method === "bytes_div_4") {
+    usage.method = "bytes_div_4";
+  }
+  return { usage, wellFormed: true };
+}
+
+/** Downgrade malformed response usage without changing text or provenance. */
+export function normalizeResponseUsage(response: ModelResponse): ModelResponse {
+  const { usage, wellFormed } = normalizeUsage((response as { usage?: unknown }).usage);
+  return {
+    ...response,
+    usage,
+    ...(!wellFormed ? { usageCompleteAttempts: 0 } : {}),
+  };
 }
 
 /**
- * Used when the host cannot serve the reader. Fails closed on every call - and is the
- * cheapest possible proof that deterministic extraction makes no model call: inject this
- * and inspect still succeeds.
- */
-/**
- * Could one physical call legally have reported this?
- *
- * The fixed per-call ceilings, applied to one attempt's claim. A *sum* is a different
- * question and is bounded separately; this is the only check that can establish that a
- * constituent was legal, so it runs before anything is merged.
- */
-export function usageWithinPerCallLimits(
-  usage: Usage | undefined,
-  limits: Limits,
-  outputCap: number,
-): boolean {
-  if (!usage || typeof usage !== "object") return false;
-  const within = (value: number | undefined, maximum: number): boolean =>
-    value === undefined
-    || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum);
-  return (
-    within(usage.inputTokens, limits.maxRequestInputTokens)
-    && within(usage.outputTokens, outputCap)
-    && within(usage.cacheTokens, limits.maxRequestInputTokens)
-  );
-}
-
-/**
- * `err` itself when its billed claim is legal, otherwise a copy without the claim.
+ * `err` itself when billed usage is merge-safe, otherwise a sanitized copy.
  *
  * Never edits the argument. A provider may throw one stable error instance for every call
  * it fails, so anything written onto it outlives the call it described.
  */
-function withoutUnusableBilledUsage(err: ShuntError, limits: Limits, outputCap: number): ShuntError {
-  const billed = (err as { billedUsage?: unknown }).billedUsage as Usage | undefined;
-  if (billed === undefined || usageWithinPerCallLimits(billed, limits, outputCap)) return err;
+function withoutMalformedBilledUsage(err: ShuntError): ShuntError {
+  const billed = (err as { billedUsage?: unknown }).billedUsage;
+  if (billed === undefined) return err;
+  const { usage, wellFormed } = normalizeUsage(billed);
+  const candidate = billed as Partial<Usage>;
+  if (
+    wellFormed
+    && usage.inputTokens === candidate.inputTokens
+    && usage.outputTokens === candidate.outputTokens
+    && usage.cacheTokens === candidate.cacheTokens
+    && usage.method === candidate.method
+  ) return err;
   const stripped = new ShuntError(err.code, err.detail, err.retryable);
   if (err.internalAttempts !== undefined) stripped.internalAttempts = err.internalAttempts;
-  if (err.usageCompleteAttempts !== undefined) {
+  if (wellFormed && err.usageCompleteAttempts !== undefined) {
     stripped.usageCompleteAttempts = err.usageCompleteAttempts;
+  } else if (!wellFormed) {
+    stripped.usageCompleteAttempts = 0;
   }
+  if (wellFormed) stripped.billedUsage = usage;
   // A measured byte count is this core's own observation, not the host's claim, so it
   // survives the claim being dropped. So do the per-call identity records: they describe
   // which calls happened, not what any of them cost.
@@ -463,10 +439,7 @@ export class UnavailableProvider implements ReaderProvider {
 export class FallbackChainProvider implements ReaderProvider {
   private readonly chain: ReaderProvider[];
 
-  /**
-   * `limits` is needed because the chain accepts *any* `ReaderProvider`, not only
-   * `HostBridgeProvider`, so it cannot assume a constituent's usage was ever bounded.
-   */
+  /** Limits identify the scheduling and generation budget shared by nested candidates. */
   constructor(
     primary: ReaderProvider,
     alternatives: readonly ReaderProvider[],
@@ -484,9 +457,6 @@ export class FallbackChainProvider implements ReaderProvider {
    * - `attempts` counted one per entry, so a nested chain's extra physical calls were
    *   invisible to the ledger: calls that were started and billed were reported as never
    *   having happened.
-   * - `usageWithinPerCallLimits` is applied to each constituent's reply. A nested chain's
-   *   reply is already an aggregate over several calls, so the single-call ceiling would
-   *   reject work that was legal.
    * - The shared input-token debit is taken here, before each candidate past the first.
    *   `opts` carries `inputBudget` down, so a nested chain does debit its own extra
    *   candidates - but only because of that spread, and nothing states the requirement.
@@ -572,17 +542,10 @@ export class FallbackChainProvider implements ReaderProvider {
      * Called exactly once per call the chain actually made, from the catch clause and
      * nowhere else. Every other exit reports the aggregate rather than re-reading it.
      */
-    const outputCap = Math.min(opts.maxOutputTokens, this.limits.maxOutputTokensPerCall);
     const carry = (usage: unknown): void => {
       if (!usage || typeof usage !== "object") return;
-      const reported = usage as Usage;
-      // A claim no single call could legally have produced is refused entry. The chain
-      // accepts any `ReaderProvider`, so a plain one's claim may never have been bounded
-      // anywhere: a failure reporting 2,049 output tokens against the fixed 2,048 cap,
-      // plus a winner reporting 1, totalled 2,050 - under the two-attempt aggregate
-      // ceiling - and was published as `exact`. Dropping the claim rather than the call
-      // keeps availability exactly as it was.
-      if (!usageWithinPerCallLimits(reported, this.limits, outputCap)) return;
+      const { usage: reported, wellFormed } = normalizeUsage(usage);
+      if (!wellFormed) return;
       billed = billed === undefined ? reported : mergeUsage(billed, reported);
       if (usageComplete(reported)) billedComplete += 1;
     };
@@ -664,31 +627,13 @@ export class FallbackChainProvider implements ReaderProvider {
         }
         continue;
       }
+      response = normalizeResponseUsage(response);
       attempts += physicalAttempts(response.attempts) - 1;
       identities.push(...carriedIdentities(response, attempts - identities.length));
-      // A winner is a constituent too. Its own claim has to be one a single call could
-      // have made before it is merged with anyone else's, or an aggregate bound - which
-      // must scale with the attempts it covers - can no longer establish that every part
-      // of it was legal.
-      //
-      // Refusing it goes through the same builder every other chain failure uses. A bare
-      // error carried none of what the chain had already established, so a two-call
-      // schedule whose first attempt was billed 5/3 was published as one attempt, zero
-      // usage-complete attempts and zero output tokens: the winner's claim was rejected
-      // and the *earlier* attempt's real spend went with it. Only the unusable claim is
-      // excluded - `billed` is the aggregate of attempts that reported legally, and the
-      // winner was never carried into it.
-      if (!usageWithinPerCallLimits(response.usage, this.limits, outputCap)) {
-        throw chainFailure(null, () => new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false));
-      }
       // A composite winner reports its own usage-complete count; reading only
       // `usage.complete` collapsed several attempts into one.
       const winnerComplete =
-        response.usageCompleteAttempts !== undefined
-          ? response.usageCompleteAttempts
-          : usageComplete(response.usage)
-            ? 1
-            : 0;
+        completeUsageCount(response.usageCompleteAttempts, physicalAttempts(response.attempts), response.usage);
       if (index === 0 && billed === undefined) {
         // Untouched, records included: one candidate, one call, its own report.
         if (response.callIdentities?.length) return response;
@@ -724,27 +669,6 @@ export class FallbackChainProvider implements ReaderProvider {
 function sameIdentity(target: ProviderTarget, identity: ModelIdentity): boolean {
   return target.provider === (identity.provider ?? "")
     && target.model === (identity.model ?? "");
-}
-
-/**
- * A fresh error carrying the bounded size of a reply whose usage cannot be trusted.
- *
- * Fresh, not edited: the thrown object may be one the host owns and reuses, and this core
- * never writes to something it did not create. `responseBytes` is what the ledger turns
- * into a conservative output-token estimate.
- */
-function withResponseBytes(err: unknown, text: string, limits: Limits): ShuntError {
-  const source = err instanceof ShuntError ? err : undefined;
-  const out = new ShuntError(
-    source?.code ?? "INVALID_MODEL_OUTPUT",
-    source?.detail ?? "BAD_USAGE",
-    source?.retryable ?? false,
-  );
-  out.responseBytes = Math.min(
-    new TextEncoder().encode(text).length,
-    limits.maxToolResultBytes,
-  );
-  return out;
 }
 
 /**
@@ -785,9 +709,21 @@ function physicalAttempts(count: unknown): number {
   return typeof count === "number" && Number.isInteger(count) && count >= 1 ? count : 1;
 }
 
+function completeUsageCount(value: unknown, attempts: number, usage: Usage): number {
+  if (
+    typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= attempts
+    && (usageComplete(usage) || value < attempts)
+  ) return value;
+  return usageComplete(usage) ? 1 : 0;
+}
+
 function unseenFrom(left: Usage | undefined, right: unknown): Usage | undefined {
-  if (right === undefined || right === null || typeof right !== "object") return left;
-  const usage = right as Usage;
+  if (right === undefined || right === null) return left;
+  const { usage, wellFormed } = normalizeUsage(right);
+  if (!wellFormed) return left;
   return left === undefined ? usage : mergeUsage(left, usage);
 }
 

@@ -291,62 +291,40 @@ class HostBridgeProvider:
                 timeout_ms=timeout_ms,
             )
         except ShuntError as exc:
-            # A `ShuntError` the host raised itself travels straight through, so any
-            # `billed_usage` riding on it never passed `_unpack`'s caps - the only place
-            # usage is checked. A host could therefore claim an output count above the
-            # per-call cap on a billed failure and have the chain merge it into the
-            # aggregate untouched. The claim is dropped rather than the failure escalated:
-            # availability behaviour stays exactly as it was, and the fixed cap holds.
-            # Dropping it means *replacing* the error, never editing it. The host owns
-            # that object and may raise one stable instance for every call it fails;
-            # editing it would make this bridge's verdict permanent and visible to the
-            # next caller.
-            raise without_unusable_billed_usage(exc, self._limits, capped) from None
+            # A host may attach usage to a failure. Keep every well-formed nonnegative
+            # count, regardless of the generation cap: usage is an observation, not a
+            # reason to rewrite the failure. A malformed claim is removed from a fresh
+            # error so downstream accounting cannot crash or mistake it for zero.
+            raise without_malformed_billed_usage(exc) from None
         except TimeoutError:
             raise ShuntError("TIMEOUT", "MODEL_CALL") from None
         except Exception:
             # The provider's exception text may contain the prompt or a payload echo.
             # It is dropped here and never reaches a log, metric or envelope.
             raise TransientProviderError("PROVIDER_CALL_FAILED") from None
-        return self._unpack(result, capped)
+        return self._unpack(result)
 
-    def _unpack(self, result: Any, output_cap: int) -> ModelResponse:
+    def _unpack(self, result: Any) -> ModelResponse:
         if not isinstance(result, dict):
             raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
         text = result.get("text")
         if not isinstance(text, str):
             raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
 
-        # Usage is unpacked *before* the text is judged. The call reached the provider and
-        # was billed whatever the reply turned out to be, so rejecting an over-cap reply
-        # must not take its token counts with it - that reported one attempt with no exact
-        # usage and silently fell back to a byte estimate for tokens the host had already
-        # counted exactly.
-        exact = result.get("usage_exact") is True
-        try:
-            usage = Usage(
-                input_tokens=_usage_value(
-                    result.get("input_tokens"), self._limits.max_request_input_tokens
+        # Usage is observational. Counts are not compared with request or generation caps:
+        # a provider can truthfully report more than it was asked to generate, and that
+        # anomaly must not erase an otherwise valid answer. Malformed claims become unknown
+        # as a whole; no field is clamped or replaced with zero.
+        usage, _ = normalize_usage(
+            Usage(
+                input_tokens=result.get("input_tokens"),
+                output_tokens=result.get("output_tokens"),
+                cache_tokens=result.get("cache_tokens"),
+                method=(
+                    TokenMethod.EXACT if result.get("usage_exact") is True else TokenMethod.UNKNOWN
                 ),
-                output_tokens=_usage_value(result.get("output_tokens"), output_cap),
-                cache_tokens=_usage_value(
-                    result.get("cache_tokens"), self._limits.max_request_input_tokens
-                ),
-                method=TokenMethod.EXACT if exact else TokenMethod.UNKNOWN,
             )
-        except ShuntError as exc:
-            # The usage *claim* is unusable, and none of its numbers may be trusted. What
-            # the host said it cost is refused wholesale - no clamping, no partial read of
-            # the fields that happened to parse - because a report this malformed says
-            # nothing reliable about any of them.
-            #
-            # But the call still reached the provider, still transmitted the prompt, and
-            # still came back carrying completion bytes this core can measure for itself.
-            # Raising with nothing attached threw that away: a call that produced 1,200
-            # bytes of text was published as `output_tokens: 0`, the one direction this
-            # accounting must never err in. The measurement travels on the error instead,
-            # bounded by the reply ceiling so an unbounded body cannot inflate it.
-            raise _with_response_bytes(exc, text, self._limits) from None
+        )
         if (
             self._enforce_output_caps
             and len(text.encode("utf-8")) > self._limits.max_tool_result_bytes
@@ -377,67 +355,63 @@ def _identity(result: dict[str, Any], prefix: str) -> ModelIdentity:
     )
 
 
-def usage_within_per_call_limits(usage: Any, limits: Limits, output_cap: int) -> bool:
-    """Could one physical call legally have reported this?
+def normalize_usage(usage: Any) -> tuple[Usage, bool]:
+    """Return a merge-safe usage claim and whether its counts were well formed.
 
-    The fixed per-call ceilings, applied to one attempt's claim. A *sum* is a different
-    question and is bounded separately; this is the only check that can establish that a
-    constituent was legal, so it runs before anything is merged.
+    Configured request and generation limits deliberately do not appear here. Usage says
+    what a provider reports happened; it does not decide whether response text is valid.
+    Missing fields remain ``None``. If any supplied count is not a nonnegative integer, the
+    whole claim becomes unknown so partial parsing cannot manufacture a trustworthy total.
     """
     if not isinstance(usage, Usage):
-        return False
+        return Usage(), False
+    values = (usage.input_tokens, usage.output_tokens, usage.cache_tokens)
+    if any(
+        value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+        for value in values
+    ):
+        return Usage(), False
+    method = usage.method if isinstance(usage.method, TokenMethod) else TokenMethod.UNKNOWN
+    if method is TokenMethod.NOT_APPLICABLE:
+        method = TokenMethod.UNKNOWN
+    if method is TokenMethod.EXACT and (usage.input_tokens is None or usage.output_tokens is None):
+        method = TokenMethod.UNKNOWN
+    return replace(usage, method=method), True
 
-    def within(value: Any, maximum: int) -> bool:
-        if value is None:
-            return True
-        return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
 
-    return (
-        within(usage.input_tokens, limits.max_request_input_tokens)
-        and within(usage.output_tokens, output_cap)
-        and within(usage.cache_tokens, limits.max_request_input_tokens)
-    )
+def normalize_response_usage(response: ModelResponse) -> ModelResponse:
+    """Downgrade malformed response usage without changing response text or provenance."""
+    usage, well_formed = normalize_usage(response.usage)
+    complete = response.usage_complete_attempts
+    if not well_formed:
+        complete = 0
+    if usage == response.usage and complete == response.usage_complete_attempts:
+        return response
+    return replace(response, usage=usage, usage_complete_attempts=complete)
 
 
-def without_unusable_billed_usage(exc: ShuntError, limits: Limits, output_cap: int) -> ShuntError:
-    """``exc`` itself when its billed claim is legal, otherwise a copy without the claim.
+def without_malformed_billed_usage(exc: ShuntError) -> ShuntError:
+    """``exc`` itself when billed usage is merge-safe, otherwise a sanitized copy.
 
     Never edits the argument. A provider may raise one stable error instance for every
     call it fails, so anything written onto it outlives the call it described.
     """
     billed = getattr(exc, "billed_usage", None)
-    if billed is None or usage_within_per_call_limits(billed, limits, output_cap):
+    if billed is None:
+        return exc
+    normalized, well_formed = normalize_usage(billed)
+    if well_formed and normalized == billed:
         return exc
     stripped = ShuntError(exc.code, exc.detail, exc.retryable)
     stripped.internal_attempts = exc.internal_attempts
-    stripped.usage_complete_attempts = exc.usage_complete_attempts
+    stripped.billed_usage = normalized if well_formed else None
+    stripped.usage_complete_attempts = exc.usage_complete_attempts if well_formed else 0
     # A measured byte count is this core's own observation, not the host's claim, so it
     # survives the claim being dropped. So do the per-call identity records: they describe
     # which calls happened, not what any of them cost.
     stripped.response_bytes = exc.response_bytes
     stripped.call_identities = exc.call_identities
     return stripped
-
-
-def _with_response_bytes(exc: ShuntError, text: str, limits: Limits) -> ShuntError:
-    """A fresh error carrying the bounded size of a reply whose usage cannot be trusted.
-
-    Fresh, not edited: the raised object may be one the host owns and reuses, and this
-    core never writes to something it did not create. ``response_bytes`` is what the
-    ledger turns into a conservative output-token estimate.
-    """
-    out = ShuntError(exc.code, exc.detail, exc.retryable)
-    out.response_bytes = min(len(text.encode("utf-8")), limits.max_tool_result_bytes)
-    return out
-
-
-def _usage_value(value: Any, maximum: int) -> int | None:
-    """``None`` in, ``None`` out. Absence is never converted to zero."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
-        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
-    return value
 
 
 class UnavailableProvider:
@@ -475,9 +449,8 @@ class FallbackChainProvider:
         alternatives: list[ReaderProvider],
         limits: Limits = DEFAULT_LIMITS,
     ):
-        # The chain accepts *any* `ReaderProvider`, not only `HostBridgeProvider`, so it
-        # cannot assume a constituent's usage was ever bounded. It needs the limits to
-        # check that itself.
+        # Limits remain part of the chain identity because nested candidates must share
+        # scheduling and generation budgets. They never bound observed usage counts.
         self._limits = limits
         self._chain = self._flatten([primary, *alternatives])
 
@@ -485,7 +458,7 @@ class FallbackChainProvider:
         """Splice a nested chain's candidates into this one, in order.
 
         Every invariant this class enforces is written per *constituent*: one entry, one
-        physical call. A nested chain breaks all three of them at once.
+        physical call. A nested chain breaks both of them at once.
 
         * The shared input-token debit is taken here, before each candidate past the
           first. A nested chain's own candidates are not this chain's candidates, so they
@@ -494,14 +467,10 @@ class FallbackChainProvider:
         * ``attempts`` counted one per entry, so a nested chain's extra physical calls
           were invisible to the ledger: calls that were started and billed were reported
           as never having happened.
-        * ``usage_within_per_call_limits`` is applied to each constituent's reply. A
-          nested chain's reply is already an aggregate over several calls, so the
-          single-call ceiling would reject work that was legal.
-
-        Flattening fixes all three without changing what the caller asked for: the
-        candidates are tried in exactly the same order, and each one is again a single
-        physical call. It is done at construction so there is no arrangement of providers
-        for which the invariants hold only sometimes.
+        Flattening fixes both without changing what the caller asked for: the candidates
+        are tried in exactly the same order, and each one is again a single physical call.
+        It is done at construction so there is no arrangement of providers for which the
+        invariants hold only sometimes.
 
         The outer limits then govern every candidate. That is refused rather than assumed
         when a nested chain was built with different ones - silently widening a ceiling
@@ -571,7 +540,6 @@ class FallbackChainProvider:
         last: ShuntError | None = None
         started = time.monotonic()
         attempts = 0
-        output_cap = min(max_output_tokens, self._limits.max_output_tokens_per_call)
         # Usage billed by candidates that did not win, and how many of them reported it.
         # A failed candidate still reached a provider and was still charged, so its counts
         # belong in the total whether the chain eventually succeeds or gives up.
@@ -587,18 +555,15 @@ class FallbackChainProvider:
 
             Called exactly once per call the chain actually made, from the except clause
             and nowhere else. Every other exit reports the aggregate rather than re-reading
-            it. A claim no single call could legally have produced is refused entry: the
-            chain accepts any ``ReaderProvider``, so a plain one's claim may never have
-            been bounded anywhere. Dropping the claim rather than the call keeps
-            availability exactly as it was.
+            it. Counts are normalized for safe aggregation, but never compared with the
+            generation cap: an anomalous report is still accounting evidence.
             """
             nonlocal billed_usage, billed_complete
-            if not isinstance(usage, Usage):
+            reported, well_formed = normalize_usage(usage)
+            if not well_formed:
                 return
-            if not usage_within_per_call_limits(usage, self._limits, output_cap):
-                return
-            billed_usage = billed_usage.merge(usage) if billed_usage else usage
-            if usage.complete:
+            billed_usage = billed_usage.merge(reported) if billed_usage else reported
+            if reported.complete:
                 billed_complete += 1
 
         def chain_failure(source: ShuntError | None, fallback: ShuntError) -> ShuntError:
@@ -682,28 +647,13 @@ class FallbackChainProvider:
                         exc, ShuntError("MODEL_ERROR", "NO_PROVIDER", retryable=False)
                     ) from None
                 continue
+            response = normalize_response_usage(response)
             attempts += _physical_attempts(response.attempts) - 1
             identities.extend(_carried_identities(response, attempts - len(identities)))
-            # A winner is a constituent too. Its own claim has to be one a single call
-            # could have made before it is merged with anyone else's, or an aggregate
-            # bound - which must scale with the attempts it covers - can no longer
-            # establish that every part of it was legal.
-            #
-            # Refusing it goes through the same builder every other chain failure uses.
-            # A bare error carried none of what the chain had already established, so a
-            # two-call schedule whose first attempt was billed 5/3 was published as one
-            # attempt, zero usage-complete attempts and zero output tokens: the winner's
-            # claim was rejected and the *earlier* attempt's real spend went with it.
-            # Only the unusable claim is excluded - `billed_usage` is the aggregate of
-            # attempts that reported legally, and the winner was never carried into it.
-            if not usage_within_per_call_limits(response.usage, self._limits, output_cap):
-                raise chain_failure(
-                    None, ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
-                )
-            winner_complete = (
-                response.usage_complete_attempts
-                if response.usage_complete_attempts is not None
-                else (1 if response.usage.complete else 0)
+            winner_complete = _usage_complete_count(
+                response.usage_complete_attempts,
+                _physical_attempts(response.attempts),
+                response.usage,
             )
             if index == 0 and billed_usage is None:
                 # Untouched, records included: one candidate, one call, its own report.
@@ -771,10 +721,22 @@ def _physical_attempts(count: Any) -> int:
     return count
 
 
+def _usage_complete_count(value: Any, attempts: int, usage: Usage) -> int:
+    if (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 <= value <= attempts
+        and (usage.complete or value < attempts)
+    ):
+        return value
+    return 1 if usage.complete else 0
+
+
 def _merge_optional(left: Usage | None, right: Any) -> Usage | None:
-    if not isinstance(right, Usage):
+    normalized, well_formed = normalize_usage(right)
+    if not well_formed:
         return left
-    return right if left is None else left.merge(right)
+    return normalized if left is None else left.merge(normalized)
 
 
 def _is_availability_failure(exc: ShuntError) -> bool:

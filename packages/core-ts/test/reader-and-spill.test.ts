@@ -1401,8 +1401,8 @@ describe("structured claims contract", () => {
     expect(JSON.stringify(env)).not.toContain("sk-ant-");
   });
 
-  it("never retries a content judgement (BAD_USAGE) as a format failure", async () => {
-    class BadUsageProvider {
+  it("does not reject or retry a valid empty answer with over-cap usage", async () => {
+    class OverCapUsageProvider {
       calls = 0;
       readonly target = { model: READER_MODEL, provider: "openai" };
       async complete() {
@@ -1419,9 +1419,13 @@ describe("structured claims contract", () => {
       }
     }
     const { registry, entries } = claimsFixture(SOURCE);
-    const provider = new BadUsageProvider();
-    const env = await new Reader(registry, provider).answer("sess", multiRequest(entries));
-    expect(env.coverage.omitted[0]!.reason).toBe("INVALID_MODEL_OUTPUT");
+    const provider = new OverCapUsageProvider();
+    const result = await new Reader(registry, provider)
+      .answerDetailed("sess", multiRequest(entries));
+    expect(result.envelope.code).toBe("NO_MATCH");
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(10 ** 9);
+    expect(result.cost.outputTokens).toBe(5);
     expect(provider.calls).toBe(1);
   });
 
@@ -1825,16 +1829,14 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     expect(env.provenance?.requested_model).toBe(READER_MODEL);
   });
 
-  // A refused usage claim used to take real completion bytes with it, reporting
-  // `output_tokens: 0` for a call that had produced hundreds of bytes.
-  it("keeps the bytes it measured when a usage claim is refused", async () => {
+  it("keeps an answer and exact count when reader usage is over cap", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\nbeta = 2\n")));
     const text = answerJson("Alpha is one [c1].", [
       { id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" },
     ]);
     let calls = 0;
-    const badUsage = {
+    const overCapUsage = {
       target: { model: READER_MODEL, provider: "openai" },
       async complete() {
         calls += 1;
@@ -1844,14 +1846,13 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
           resolved: { provider: "openai", model: READER_MODEL },
           reported: { provider: null, model: null },
           providerConfirmsGeneration: false,
-          // Above every ceiling, so `validateModelResponse` refuses the claim.
           usage: { inputTokens: 10, outputTokens: 1_000_000_000, method: "exact" as const },
           fallbackUsed: false,
           attempts: 1,
         };
       },
     };
-    const result = await new Reader(registry, badUsage as never).answerDetailed("sess", {
+    const result = await new Reader(registry, overCapUsage as never).answerDetailed("sess", {
       schema_version: "1.0",
       request_id: "req_usage",
       operation: "read",
@@ -1867,11 +1868,42 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     });
     expect(calls).toBe(1);
     expect(result.cost.attemptsStarted).toBe(1);
+    expect(result.cost.attemptsUsageComplete).toBe(1);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(10);
+    expect(result.cost.outputTokens).toBe(1_000_000_000);
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.answer.length).toBeGreaterThan(0);
+  });
+
+  it("keeps an answer while malformed reader usage becomes unknown", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
+    const text = answerJson("Alpha is one [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "alpha = 1" },
+    ]);
+    const malformedUsage = {
+      target: { model: READER_MODEL, provider: "openai" },
+      async complete() {
+        return {
+          text,
+          requested: { provider: "openai", model: READER_MODEL },
+          resolved: { provider: "openai", model: READER_MODEL },
+          reported: { provider: null, model: null },
+          providerConfirmsGeneration: false,
+          usage: { inputTokens: 10, outputTokens: "bad", method: "exact" },
+          fallbackUsed: false,
+        };
+      },
+    };
+    const result = await new Reader(registry, malformedUsage as never)
+      .answerDetailed("sess", request(entry));
+
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.answer.length).toBeGreaterThan(0);
     expect(result.cost.attemptsUsageComplete).toBe(0);
     expect(result.cost.method).toBe("bytes_div_4");
     expect(result.cost.outputTokens).toBe(accountingTokens(new TextEncoder().encode(text).length));
-    expect(result.cost.outputTokens as number).toBeGreaterThan(0);
-    expect(result.envelope.answer ?? "").toBe("");
   });
 });
 
@@ -2012,10 +2044,30 @@ describe("release blockers: raw-citation bound, nested chains, bridge usage, per
     ).toThrow(/NESTED_CHAIN_LIMITS_DIFFER/);
   });
 
-  // A malformed usage count is refused *while the usage object is built*, so no response
-  // existed and the error carried nothing: a call that returned hundreds of bytes was
-  // published as `outputTokens: 0`.
-  it("keeps the reply bytes when a bridge usage claim is refused", async () => {
+  for (const [name, fields] of [
+    ["missing", {}],
+    ["malformed", { usage_exact: true, input_tokens: 5, output_tokens: "bad" }],
+  ] as const) {
+    it(`normalizes ${name} bridge usage to unknown without inventing zero`, async () => {
+      const provider = new HostBridgeProvider(
+        async () => ({ text: claimsJson([], []), ...fields }),
+        L,
+      );
+      const response = await provider.complete({
+        system: "s",
+        user: "u",
+        maxOutputTokens: 10,
+        timeoutMs: 100,
+      });
+
+      expect(response.usage.method).toBe("unknown");
+      expect(response.usage.inputTokens).toBeUndefined();
+      expect(response.usage.outputTokens).toBeUndefined();
+      expect(response.text).toBe(claimsJson([], []));
+    });
+  }
+
+  it("keeps a valid answer while malformed bridge usage becomes unknown", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("alpha = 1\n")));
     const text = claimsJson(
@@ -2045,10 +2097,12 @@ describe("release blockers: raw-citation bound, nested chains, bridge usage, per
       ],
       budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
     });
-    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls).toBe(1);
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.answer.length).toBeGreaterThan(0);
     expect(result.cost.attemptsUsageComplete).toBe(0);
     expect(result.cost.method).toBe("bytes_div_4");
-    expect(result.cost.outputTokens as number).toBeGreaterThanOrEqual(
+    expect(result.cost.outputTokens).toBe(
       accountingTokens(new TextEncoder().encode(text).length),
     );
   });

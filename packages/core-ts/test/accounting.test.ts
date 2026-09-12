@@ -756,7 +756,7 @@ describe("each physical attempt is aggregated exactly once", () => {
     expect(result.cost.outputTokens).toBe(each * 2);
   });
 
-  it("still refuses a single call that exceeds the per-call ceiling", async () => {
+  it("keeps an answer and exact usage when one call reports above the generation cap", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
     const overCap = new HostBridgeProvider(
@@ -771,7 +771,10 @@ describe("each physical attempt is aggregated exactly once", () => {
       "openai",
     );
     const result = await new Reader(registry, overCap).answerDetailed("sess", readRequest(entry));
-    expect(result.envelope.answer).toBe("");
+    expect(result.envelope.code).toBe("ANSWERED");
+    expect(result.envelope.answer.length).toBeGreaterThan(0);
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.outputTokens).toBe(L.maxOutputTokensPerCall + 1);
   });
 });
 
@@ -850,12 +853,7 @@ describe("estimates cover every physical attempt", () => {
     expect(cost.outputTokens).toBe(6);
   });
 
-  /**
-   * Bounding only the sum cannot prove every constituent respected the per-call cap: a
-   * failure reporting one token over it, plus a winner reporting one, stayed under the
-   * two-attempt ceiling and was published as `exact`.
-   */
-  it("refuses a billed-failure claim no single call could have produced", async () => {
+  it("retains an over-cap billed failure as exact accounting evidence", async () => {
     const overCap = billedUnavailable(1, L.maxOutputTokensPerCall + 1);
     const tinyWinner = async (): Promise<Record<string, unknown>> => ({
       text: answerText,
@@ -868,10 +866,9 @@ describe("estimates cover every physical attempt", () => {
     expect(calls).toBe(2);
     // The call still failed the way it failed, so the chain still advanced and answered.
     expect(envelope.code).toBe("ANSWERED");
-    // But the impossible claim is not evidence, so the total is not exact and never
-    // carries the over-cap number.
-    expect(cost.method).not.toBe("exact");
-    expect(cost.outputTokens).toBeLessThan(L.maxOutputTokensPerCall);
+    expect(cost.method).toBe("exact");
+    expect(cost.attemptsUsageComplete).toBe(2);
+    expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall + 2);
   });
 
   /**
@@ -900,7 +897,7 @@ describe("estimates cover every physical attempt", () => {
     expect(cost.outputTokens).toBe(18);
   });
 
-  it("still accepts a billed-failure claim that respects the per-call cap", async () => {
+  it("still aggregates an at-cap billed failure exactly", async () => {
     const atCap = billedUnavailable(1, L.maxOutputTokensPerCall);
     const { cost } = await measured(atCap, plainUnavailable);
     // Exactly at the ceiling is legal, and two attempts reported it.
@@ -1029,13 +1026,7 @@ describe("every physical attempt is accounted for once, on every path", () => {
     expect(cost.outputTokens).toBe(3);
   });
 
-  /**
-   * The chain accepts any `ReaderProvider`, so a constituent's claim may never have been
-   * bounded anywhere. A plain provider's failed attempt claiming one token over the
-   * per-call cap, plus a winner claiming one, stayed under the two-attempt aggregate
-   * ceiling and was published as `exact`.
-   */
-  it("caps a plain provider's billed failure before the merge", async () => {
+  it("merges a plain provider's over-cap billed failure honestly", async () => {
     const failing = {
       target: identity,
       async complete(): Promise<ModelResponse> {
@@ -1061,20 +1052,12 @@ describe("every physical attempt is accounted for once, on every path", () => {
 
     // The call still failed the way it failed, so the chain still advanced and answered.
     expect(envelope.code).toBe("ANSWERED");
-    expect(cost.method).not.toBe("exact");
-    expect(cost.outputTokens).toBeLessThan(L.maxOutputTokensPerCall);
+    expect(cost.method).toBe("exact");
+    expect(cost.attemptsUsageComplete).toBe(2);
+    expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall + 2);
   });
 
-  /**
-   * A winner is a constituent too, and an aggregate bound cannot vouch for it.
-   *
-   * Refusing it must not refuse what the chain already knew. The rejection used to throw a
-   * bare `BAD_USAGE` carrying none of the chain's state, so a two-call schedule whose
-   * first attempt was billed 5/3 was published as one attempt, zero usage-complete
-   * attempts and zero output tokens - the invalid claim was thrown out and the *earlier*
-   * attempt's real spend went with it. Only the unusable claim may be excluded.
-   */
-  it("caps a plain provider that wins the fallback and keeps the earlier attempt", async () => {
+  it("keeps an over-cap plain fallback winner and all reported usage", async () => {
     let calls = 0;
     const billedFailure = {
       target: identity,
@@ -1105,26 +1088,17 @@ describe("every physical attempt is accounted for once, on every path", () => {
     const { reader, request } = fixture(new FallbackChainProvider(billedFailure, [overCap]));
     const { envelope, cost } = await reader.answerDetailed("sess", request);
 
-    expect(envelope.code).not.toBe("ANSWERED");
-    expect(envelope.answer).toBe("");
+    expect(envelope.code).toBe("ANSWERED");
+    expect(envelope.answer.length).toBeGreaterThan(0);
     // Both calls were made and both were billed, whatever became of the second's claim.
     expect(calls).toBe(2);
     expect(cost.attemptsStarted).toBe(2);
-    // Exactly one of the two reported usage that could be believed.
-    expect(cost.attemptsUsageComplete).toBe(1);
-    // The first attempt's three billed output tokens survive the second's refusal.
-    expect(cost.outputTokens).toBe(3);
+    expect(cost.attemptsUsageComplete).toBe(2);
+    expect(cost.method).toBe("exact");
+    expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall + 4);
   });
 
-  /**
-   * The parity case: the same schedule where the winner is a real bridge.
-   *
-   * A bridge rejects its own over-cap reply inside `complete`, so the refusal reaches the
-   * chain as a caught failure rather than a returned response. Both routes have to publish
-   * the same accounting, or the boundary a claim happens to cross would decide what the
-   * session was charged.
-   */
-  it("caps a host bridge that wins the fallback the same way", async () => {
+  it("keeps an over-cap host-bridge fallback winner and all reported usage", async () => {
     let calls = 0;
     const failing: HostBridgeCall = async () => {
       calls += 1;
@@ -1146,12 +1120,52 @@ describe("every physical attempt is accounted for once, on every path", () => {
     const { reader, request } = fixture(chain);
     const { envelope, cost } = await reader.answerDetailed("sess", request);
 
-    expect(envelope.code).not.toBe("ANSWERED");
-    expect(envelope.answer).toBe("");
+    expect(envelope.code).toBe("ANSWERED");
+    expect(envelope.answer.length).toBeGreaterThan(0);
     expect(calls).toBe(2);
     expect(cost.attemptsStarted).toBe(2);
+    expect(cost.attemptsUsageComplete).toBe(2);
+    expect(cost.method).toBe("exact");
+    expect(cost.outputTokens).toBe(L.maxOutputTokensPerCall + 4);
+  });
+
+  it("keeps a fallback winner while malformed loser usage stays unknown", async () => {
+    const malformedFailure = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        const err = new ShuntError("MODEL_ERROR", "UNAVAILABLE", true);
+        (err as { billedUsage?: unknown }).billedUsage = {
+          inputTokens: 1,
+          outputTokens: "bad",
+          method: "exact",
+        };
+        throw err;
+      },
+    };
+    const winner = {
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        return {
+          text: answerText,
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          usage: { inputTokens: 1, outputTokens: 7, method: "exact" },
+          fallbackUsed: false,
+        };
+      },
+    };
+    const { reader, request } = fixture(
+      new FallbackChainProvider(malformedFailure, [winner]),
+    );
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).toBe("ANSWERED");
+    expect(cost.attemptsStarted).toBe(2);
     expect(cost.attemptsUsageComplete).toBe(1);
-    expect(cost.outputTokens).toBe(3);
+    expect(cost.method).toBe("bytes_div_4");
+    expect(cost.outputTokens as number).toBeGreaterThan(0);
   });
 
   /**

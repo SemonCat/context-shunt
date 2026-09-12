@@ -64,7 +64,7 @@ import {
   type CallInputBudget,
   FallbackChainProvider, ModelResponse, READER_SYSTEM_PROMPT, type ReaderProvider,
   UNOBSERVED_CALL, buildUserMessage, identityOfThisCall, providerTargetOf, responseAttribution,
-  targetIdentity, transientProviderError,
+  normalizeResponseUsage, normalizeUsage, targetIdentity, transientProviderError,
 } from "./provider.js";
 import { SourceRegistry } from "./registry.js";
 import { Snapshot, assertNoSecret } from "./snapshot.js";
@@ -101,8 +101,7 @@ function agreedIdentity(values: ModelIdentity[]): ModelIdentity | null {
 
 /** `INVALID_MODEL_OUTPUT` details eligible for the one-shot format retry: a shape or
  * claims/citations *relationship* failure, never a content judgement. Retrying
- * `BAD_USAGE` would not fix a provider accounting bug, and retrying
- * `MODEL_OUTPUT_OVER_CAP` would not make the model write less - neither belongs here. */
+ * `MODEL_OUTPUT_OVER_CAP` would not make the model write less, so it does not belong here. */
 const FORMAT_RETRY_DETAILS = new Set([
   "NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE",
 ]);
@@ -259,8 +258,6 @@ class AttemptLedger {
       typeof response !== "object"
       || response === null
       || typeof response.text !== "string"
-      || typeof response.usage !== "object"
-      || response.usage === null
       || !hasResponseIdentity(response)
     ) {
       this.recorded = true;
@@ -272,58 +269,32 @@ class AttemptLedger {
       this.outcome.callIdentities.push(UNOBSERVED_CALL);
       return;
     }
+    response = normalizeResponseUsage(response);
     this.recorded = true;
     const outcome = this.outcome;
     // An availability fallback may have taken several attempts inside this one call, and
     // every one of them reached a provider and was billed. `calls` was already incremented
     // once by the caller for the attempt it started.
-    const extraAttempts = Math.max(0, (response.attempts ?? 1) - 1);
+    const attempts = physicalAttemptCount(response.attempts);
+    const extraAttempts = attempts - 1;
     this.recordExtraAttempts(extraAttempts);
     outcome.completionBytes += new TextEncoder().encode(response.text).length;
     outcome.callIdentities.push(...responseIdentities(response));
     // Output the reader never saw: a failed candidate returned no text to measure, so its
     // reported tokens are the only evidence of what it produced. Held apart from the
     // winner's bytes precisely so the two are never added twice.
-    const unseen = response.billedFromFailedAttempts;
-    if (unseen) outcome.unseenUsage = mergeUsage(outcome.unseenUsage, unseen);
+    const unseen = normalizeUsage(response.billedFromFailedAttempts);
+    if (response.billedFromFailedAttempts !== undefined && unseen.wellFormed) {
+      outcome.unseenUsage = mergeUsage(outcome.unseenUsage, unseen.usage);
+    }
     outcome.usage = mergeUsage(outcome.usage, response.usage);
     // A composite provider reports how many of its attempts supplied complete usage; a
     // plain one supplies one attempt, so the winner alone decides.
-    outcome.usageCompleteCalls +=
-      response.usageCompleteAttempts ?? (usageComplete(response.usage) ? 1 : 0);
-  }
-
-  /**
-   * What a returned response cost when its *usage claim* cannot be trusted.
-   *
-   * A response whose usage metadata is malformed still reached the provider, still
-   * transmitted the prompt and still came back carrying completion bytes we can measure
-   * ourselves. Rejecting it through `recordFailure` threw all of that away: the error
-   * carries no `billedUsage`, so a call that produced 1,200 bytes of text was published as
-   * `output_tokens: 0` - the one direction this accounting must never err in.
-   *
-   * The response's own numbers are still refused; only what this core measured is kept,
-   * and the completion measurement is clamped to the reply ceiling so a provider cannot
-   * inflate the estimate by returning an unbounded body.
-   */
-  recordUntrustedUsage(response: unknown, limits: Limits): void {
-    if (this.recorded) return;
-    const candidate = response as ModelResponse | undefined;
-    if (!candidate || typeof candidate.text !== "string") return;
-    this.recorded = true;
-    const outcome = this.outcome;
-    const extraAttempts = Math.max(0, (candidate.attempts ?? 1) - 1);
-    this.recordExtraAttempts(extraAttempts);
-    outcome.completionBytes += Math.min(
-      new TextEncoder().encode(candidate.text).length,
-      limits.maxToolResultBytes,
+    outcome.usageCompleteCalls += completeUsageAttempts(
+      response.usageCompleteAttempts,
+      attempts,
+      response.usage,
     );
-    // A refused usage *claim* says nothing about which model ran, so the identity records
-    // stand exactly as reported.
-    outcome.callIdentities.push(...responseIdentities(candidate));
-    // No usage is merged and no attempt is counted as usage-complete: the claim was
-    // refused, so every attempt behind this response has unknown usage. That is what
-    // `attempts_started` > `attempts_usage_complete` is for.
   }
 
   /** What a failed call cost. A rejected reply is still a paid call. */
@@ -331,18 +302,22 @@ class AttemptLedger {
     if (this.recorded) return;
     this.recorded = true;
     const outcome = this.outcome;
-    const billed = (err as { billedUsage?: unknown })?.billedUsage;
-    if (billed && typeof billed === "object") {
-      outcome.usage = mergeUsage(outcome.usage, billed as Usage);
+    const attempts = physicalAttemptCount(
+      (err as { internalAttempts?: unknown })?.internalAttempts,
+    );
+    const billedRaw = (err as { billedUsage?: unknown })?.billedUsage;
+    const billed = normalizeUsage(billedRaw);
+    if (billedRaw !== undefined && billed.wellFormed) {
+      outcome.usage = mergeUsage(outcome.usage, billed.usage);
       // Nothing came back, so every attempt here is one whose output was never seen.
-      outcome.unseenUsage = mergeUsage(outcome.unseenUsage, billed as Usage);
+      outcome.unseenUsage = mergeUsage(outcome.unseenUsage, billed.usage);
+      const reportedAttempts = (err as { usageCompleteAttempts?: unknown })?.usageCompleteAttempts;
+      outcome.usageCompleteCalls += completeUsageAttempts(
+        reportedAttempts,
+        attempts,
+        billed.usage,
+      );
     }
-    // The same aggregate as the success path: a chain that gave up still reports how many
-    // of its candidates were billed and how many of those said what they cost.
-    const reportedAttempts = (err as { usageCompleteAttempts?: number })?.usageCompleteAttempts;
-    outcome.usageCompleteCalls +=
-      reportedAttempts
-      ?? (billed && typeof billed === "object" && usageComplete(billed as Usage) ? 1 : 0);
     // Bytes a reply carried that this core measured itself. Present when the reply
     // arrived intact but its usage claim did not: the claim is refused, the measurement
     // is kept, and the estimate built from it is the conservative one. Without this a
@@ -354,10 +329,7 @@ class AttemptLedger {
     // A composite provider may have made several calls inside this one invocation before
     // giving up. `calls` was incremented once by the caller for the invocation; the rest
     // are the ones the chain made and was billed for.
-    const extraAttempts = Math.max(
-      0,
-      ((err as { internalAttempts?: number })?.internalAttempts ?? 1) - 1,
-    );
+    const extraAttempts = attempts - 1;
     this.recordExtraAttempts(extraAttempts);
     // Every physical call behind this failure still happened. Whatever the provider
     // observed is taken; the rest are unobserved, which is the truthful record for a call
@@ -377,11 +349,26 @@ class AttemptLedger {
  * false certification these records exist to prevent.
  */
 function responseIdentities(response: ModelResponse): CallIdentity[] {
-  const attempts = Math.max(1, response.attempts ?? 1);
+  const attempts = physicalAttemptCount(response.attempts);
   const carried = response.callIdentities?.length
     ? response.callIdentities
     : (hasResponseIdentity(response) ? [identityOfThisCall(response)] : [UNOBSERVED_CALL]);
   return padIdentities(carried, attempts);
+}
+
+function completeUsageAttempts(value: unknown, attempts: number, usage: Usage): number {
+  if (
+    typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= attempts
+    && (usageComplete(usage) || value < attempts)
+  ) return value;
+  return usageComplete(usage) ? 1 : 0;
+}
+
+function physicalAttemptCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : 1;
 }
 
 /** Runtime guard for the provenance fields the provider boundary must supply. */
@@ -1466,14 +1453,7 @@ export class Reader {
         } finally {
           ledger.recordExtraAttempts(debit.close());
         }
-        try {
-          validateModelResponse(response, this.limits);
-        } catch (err) {
-          // The reply is refused, but it was delivered and billed. Its own numbers are
-          // untrustworthy; the bytes this core measured are not.
-          ledger.recordUntrustedUsage(response, this.limits);
-          throw err;
-        }
+        response = validateModelResponse(response);
         ledger.recordSuccess(response);
         outcome.responsesSeen += 1;
         outcome.attribution = responseAttribution(response);
@@ -1927,40 +1907,17 @@ function locatorFor(item: Record<string, unknown>, chunk: Chunk): Record<string,
 }
 
 /**
- * Shape and bounds only. *Which* model answered is a provenance question, not a validation
- * one: it is classified truthfully and then judged by the configured policy, rather than
- * being asserted here from what we happened to request.
+ * Validate response text shape and normalize observational usage metadata. *Which* model
+ * answered is a provenance question, not a validation one: it is classified truthfully
+ * and then judged by the configured policy. Usage anomalies do not decide whether an
+ * answer is valid: malformed counts become unknown, while valid nonnegative integers
+ * remain reported even above a configured call cap.
  */
-function validateModelResponse(response: ModelResponse, limits: Limits): void {
+function validateModelResponse(response: ModelResponse): ModelResponse {
   if (typeof response !== "object" || response === null || typeof response.text !== "string") {
     throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", false);
   }
-  const usage = response.usage;
-  if (typeof usage !== "object" || usage === null) {
-    throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
-  }
-  // Ceilings are per *call*, and this usage may be the sum of several. Each physical call
-  // is already bounded where it is unpacked - `HostBridgeProvider` rejects an out-of-range
-  // count against the same limits before it ever reaches an aggregate - so applying the
-  // single-call ceiling again to the sum rejected valid work: two attempts of 1,500 output
-  // tokens each are individually legal and totalled 3,000 against a 2,048 ceiling, and the
-  // fallback winner was refused as `BAD_USAGE` with no answer returned. Aggregate
-  // bookkeeping must not change availability.
-  //
-  // The bound scales with the attempts the total covers, so it still catches a count no
-  // sequence of legal calls could have produced. Per-call validation is untouched.
-  const attempts = Math.max(1, response.attempts ?? 1);
-  const bounds: Array<[number | undefined, number]> = [
-    [usage.inputTokens, limits.maxRequestInputTokens * attempts],
-    [usage.outputTokens, limits.maxOutputTokensPerCall * attempts],
-    [usage.cacheTokens, limits.maxRequestInputTokens * attempts],
-  ];
-  for (const [value, maximum] of bounds) {
-    if (value === undefined) continue;
-    if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
-      throw new ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", false);
-    }
-  }
+  return normalizeResponseUsage(response);
 }
 
 /** Only a failure of the handle itself invalidates it. */

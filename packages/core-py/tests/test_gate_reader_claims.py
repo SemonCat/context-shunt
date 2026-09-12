@@ -337,10 +337,8 @@ def test_format_retry_and_transient_retry_are_independently_budgeted(tmp_path):
     assert env["code"] == "ANSWERED"
 
 
-def test_a_content_judgement_is_never_retried_as_a_format_failure(tmp_path):
-    """BAD_USAGE is not in the format-retry allowlist: it is a provider accounting
-    problem, not a claims/citations shape problem, so it must not spend the same call
-    budget the format retry protects."""
+def test_over_cap_usage_does_not_reject_or_retry_a_valid_empty_answer(tmp_path):
+    """Usage anomalies are accounting observations, not response-format failures."""
     from context_shunt.provenance import TokenMethod, Usage
     from context_shunt.provider import ModelResponse, ProviderTarget
 
@@ -358,10 +356,11 @@ def test_a_content_judgement_is_never_retried_as_a_format_failure(tmp_path):
 
     registry, (entry,) = _fixture(tmp_path, SOURCE)
     provider = _BadUsageProvider()
-    env = Reader(registry, provider).answer("sess", _request([entry])).envelope
-    assert env["coverage"]["omitted"][0]["reason"] == "INVALID_MODEL_OUTPUT"
-    # Not retryable at all: BAD_USAGE is neither a transient-provider failure nor an
-    # allowlisted format failure, so it costs exactly the one call it made.
+    result = Reader(registry, provider).answer("sess", _request([entry]))
+    assert result.envelope["code"] == "NO_MATCH"
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 10**9
+    assert result.cost.output_tokens == 5
     assert provider.calls == 1
 
 

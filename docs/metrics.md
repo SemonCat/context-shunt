@@ -51,6 +51,10 @@ applicable `not_applicable`.
 - Reader usage is `exact` only when every physical attempt returned complete provider
   counts. One incomplete attempt switches the request-wide reader totals to
   `bytes_div_4`; partial exact counts are not presented as an exact aggregate.
+- Usage is observational rather than a response-validity gate. Every reported
+  nonnegative integer is retained even when it exceeds a configured request or generation
+  cap. A missing or malformed count remains unknown and cannot reject otherwise valid
+  response text, fabricate a zero, or make the aggregate exact.
 - Under request-wide estimation, `reader_input_tokens` estimates all accumulated prompt
   bytes and `reader_output_tokens` estimates all completion bytes received by the core,
   then adds any reported output-token counts from failed attempts whose completion text
@@ -64,7 +68,7 @@ applicable `not_applicable`.
 ## Retries and fallback attempts
 
 Every physical provider call contributes once to `attempts_started`, including transient
-retries, failed fallback candidates, invalid or over-cap responses, and a late response
+retries, failed fallback candidates, invalid or over-size responses, and a late response
 whose result cannot be published. `attempts_usage_complete` counts the attempts that
 returned complete usable token counts. Exact reader totals aggregate every attempt only
 when all attempts are complete; otherwise the request-wide estimate above accounts for

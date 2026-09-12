@@ -84,14 +84,16 @@ from .provider import (
     build_user_message,
     deadline_kwarg,
     input_budget_kwarg,
+    normalize_response_usage,
+    normalize_usage,
 )
 from .registry import SourceRegistry
 from .schema import validate_request
 
 #: ``INVALID_MODEL_OUTPUT`` details eligible for the one-shot format retry: a shape or
 #: claims/citations *relationship* failure, never a content judgement. Retrying
-#: ``BAD_USAGE`` would not fix a provider accounting bug, and retrying
-#: ``MODEL_OUTPUT_OVER_CAP`` would not make the model write less - neither belongs here.
+#: ``MODEL_OUTPUT_OVER_CAP`` would not make the model write less, so it does not belong
+#: here.
 _FORMAT_RETRY_DETAILS = frozenset(
     {"NOT_JSON", "NOT_OBJECT", "BAD_RESPONSE_SHAPE", "AMBIGUOUS_RESPONSE_SHAPE"}
 )
@@ -206,62 +208,29 @@ class _AttemptLedger:
         self._outcome.availability_only = False
         if self._recorded or not isinstance(response, ModelResponse):
             return
+        response = normalize_response_usage(response)
         self._recorded = True
         outcome = self._outcome
         # An availability fallback may have taken several attempts inside this one call,
         # and every one of them reached a provider and was billed. `calls` was already
         # incremented once by the caller for the attempt it started.
-        extra_attempts = max(0, response.attempts - 1)
+        attempts = _physical_attempts(response.attempts)
+        extra_attempts = attempts - 1
         self.record_extra_attempts(extra_attempts)
         # Output the reader never saw: a failed candidate returned no text to measure, so
         # its reported tokens are the only evidence of what it produced. Disjoint from
         # `completion_bytes` by construction.
-        unseen = response.billed_from_failed_attempts
-        if isinstance(unseen, Usage):
+        unseen, unseen_well_formed = normalize_usage(response.billed_from_failed_attempts)
+        if response.billed_from_failed_attempts is not None and unseen_well_formed:
             outcome.unseen_usage = outcome.unseen_usage.merge(unseen)
         outcome.completion_bytes += len(response.text.encode("utf-8"))
         outcome.call_identities.extend(_response_identities(response))
         outcome.usage = outcome.usage.merge(response.usage)
         # A composite provider reports how many of its attempts supplied complete usage; a
         # plain one supplies one attempt, so the winner alone decides.
-        outcome.usage_complete_calls += (
-            response.usage_complete_attempts
-            if response.usage_complete_attempts is not None
-            else (1 if response.usage.complete else 0)
+        outcome.usage_complete_calls += _usage_complete_attempts(
+            response.usage_complete_attempts, attempts, response.usage
         )
-
-    def record_untrusted_usage(self, response: Any, limits: Limits) -> None:
-        """Record what a returned response cost when its *usage claim* cannot be trusted.
-
-        A response whose usage metadata is malformed still reached the provider, still
-        transmitted the prompt and still came back carrying completion bytes we can
-        measure ourselves. Rejecting it through ``record_failure`` threw all of that away:
-        the error carries no ``billed_usage``, so a call that produced 1,200 bytes of text
-        was published as ``output_tokens: 0`` - the one direction this accounting must
-        never err in.
-
-        The response's own numbers are still refused; only what this core measured is
-        kept, and the completion measurement is clamped to the reply ceiling so a provider
-        cannot inflate the estimate by returning an unbounded body.
-        """
-        if self._recorded or not isinstance(response, ModelResponse):
-            return
-        if not isinstance(response.text, str):
-            return
-        self._recorded = True
-        outcome = self._outcome
-        attempts = response.attempts if isinstance(response.attempts, int) else 1
-        extra_attempts = max(0, attempts - 1)
-        self.record_extra_attempts(extra_attempts)
-        outcome.completion_bytes += min(
-            len(response.text.encode("utf-8")), limits.max_tool_result_bytes
-        )
-        # A refused usage *claim* says nothing about which model ran, so the identity
-        # records stand exactly as reported.
-        outcome.call_identities.extend(_response_identities(response))
-        # No usage is merged and no attempt is counted as usage-complete: the claim was
-        # refused, so every attempt behind this response has unknown usage. That is what
-        # `attempts_started` > `attempts_usage_complete` is for.
 
     def record_failure(self, exc: BaseException) -> None:
         """What a failed call cost. A rejected reply is still a paid call."""
@@ -269,18 +238,18 @@ class _AttemptLedger:
             return
         self._recorded = True
         outcome = self._outcome
-        billed = getattr(exc, "billed_usage", None)
+        attempts = _physical_attempts(getattr(exc, "internal_attempts", 1))
+        raw_billed = getattr(exc, "billed_usage", None)
+        billed, billed_well_formed = normalize_usage(raw_billed)
         reported_complete = getattr(exc, "usage_complete_attempts", None)
-        if isinstance(billed, Usage):
+        if raw_billed is not None and billed_well_formed:
             outcome.usage = outcome.usage.merge(billed)
             # The same aggregate as the success path: a chain that gave up still reports
             # how many of its candidates were billed and how many of those said what they
             # cost. Counting one aggregate error as one report made two billed candidates
             # look like one usage-complete attempt out of two started.
-            outcome.usage_complete_calls += (
-                reported_complete
-                if reported_complete is not None
-                else (1 if billed.complete else 0)
+            outcome.usage_complete_calls += _usage_complete_attempts(
+                reported_complete, attempts, billed
             )
             # Nothing came back, so every attempt here is one whose output was never seen.
             outcome.unseen_usage = outcome.unseen_usage.merge(billed)
@@ -294,7 +263,7 @@ class _AttemptLedger:
         # A composite provider may have made several calls inside this one invocation
         # before giving up. `calls` was incremented once by the caller for the invocation;
         # the rest are the ones the chain made and was billed for.
-        extra_attempts = max(0, int(getattr(exc, "internal_attempts", 1)) - 1)
+        extra_attempts = attempts - 1
         self.record_extra_attempts(extra_attempts)
         # Every physical call behind this failure still happened. Whatever the provider
         # observed is taken; the rest are unobserved, which is the truthful record for a
@@ -312,7 +281,7 @@ def _response_identities(response: Any) -> list[CallIdentity]:
     made stays unobserved - the alternative, repeating this identity for each of them, is
     the false certification these records exist to prevent.
     """
-    attempts = response.attempts if isinstance(response.attempts, int) else 1
+    attempts = _physical_attempts(response.attempts)
     carried = getattr(response, "call_identities", ())
     if not carried:
         carried = (response.identity_of_this_call(),)
@@ -325,6 +294,25 @@ def _pad_identities(carried: Any, calls: int) -> list[CallIdentity]:
     if len(records) >= calls:
         return records[:calls]
     return [*records, *(CallIdentity() for _ in range(calls - len(records)))]
+
+
+def _physical_attempts(count: Any) -> int:
+    """A response's physical-call count, defaulting malformed values to one."""
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return 1
+    return count
+
+
+def _usage_complete_attempts(value: Any, attempts: int, usage: Usage) -> int:
+    """A bounded completeness count that cannot make accounting contradictory."""
+    if (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 <= value <= attempts
+        and (usage.complete or value < attempts)
+    ):
+        return value
+    return 1 if usage.complete else 0
 
 
 @dataclass
@@ -1560,13 +1548,7 @@ class Reader:
                     )
                 finally:
                     ledger.record_extra_attempts(debit.close())
-                try:
-                    _validate_model_response(response, self._limits)
-                except ShuntError:
-                    # The reply is refused, but it was delivered and billed. Its own
-                    # numbers are untrustworthy; the bytes this core measured are not.
-                    ledger.record_untrusted_usage(response, self._limits)
-                    raise
+                response = _validate_model_response(response)
                 ledger.record_success(response)
                 outcome.responses_seen += 1
                 outcome.attribution, outcome.confidence = response.attribution()
@@ -2204,36 +2186,18 @@ def _locator_for(item: dict[str, Any], chunk: Chunk) -> dict[str, Any] | None:
     }
 
 
-def _validate_model_response(response: Any, limits: Limits) -> None:
-    """Shape and bounds only. *Which* model answered is a provenance question, not a
+def _validate_model_response(response: Any) -> ModelResponse:
+    """Validate response text shape and normalize observational usage metadata.
+
+    *Which* model answered is a provenance question, not a
     validation one: it is classified truthfully and then judged by the configured policy,
-    rather than being asserted here from what we happened to request."""
+    rather than being asserted here from what we happened to request. Usage anomalies do
+    not decide whether the answer is valid: malformed counts become unknown and valid
+    nonnegative integers remain reported even when they exceed a configured call cap.
+    """
     if not isinstance(response, ModelResponse) or not isinstance(response.text, str):
         raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
-    usage = response.usage
-    if not isinstance(usage, Usage):
-        raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
-    # Ceilings are per *call*, and this usage may be the sum of several. Every physical
-    # call is already bounded where it enters an aggregate - `FallbackChainProvider`
-    # refuses a constituent claim no single call could have made, and `HostBridgeProvider`
-    # bounds what it unpacks - so applying the single-call ceiling again to the sum would
-    # reject valid work: two attempts of 1,500 output tokens each are individually legal
-    # and total 3,000 against a 2,048 ceiling. Aggregate bookkeeping must not change
-    # availability.
-    #
-    # The bound scales with the attempts the total covers, so it still catches a count no
-    # sequence of legal calls could have produced. It is a backstop; the per-constituent
-    # check is what establishes legality.
-    attempts = max(1, response.attempts)
-    for value, maximum in (
-        (usage.input_tokens, limits.max_request_input_tokens * attempts),
-        (usage.output_tokens, limits.max_output_tokens_per_call * attempts),
-        (usage.cache_tokens, limits.max_request_input_tokens * attempts),
-    ):
-        if value is None:
-            continue
-        if type(value) is not int or value < 0 or value > maximum:
-            raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_USAGE", retryable=False)
+    return normalize_response_usage(response)
 
 
 #: Stands in for a legacy marker that names an id its own chunk never declared. Inside
