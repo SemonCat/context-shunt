@@ -43,6 +43,14 @@ Tool registration follows host capability. `reader.enabled: false` controls exec
 returns a bounded refusal without calling a model; it does not require the adapter to hide
 an otherwise registerable tool.
 
+Reader answer-output caps remain on by default. A trusted Hermes deployment can set
+`plugins.entries.context-shunt.config.reader.enforce_output_caps: false` to remove only the
+historical answer/claim/quote/count and reader-result/final-`ANSWERED` byte ceilings. This is
+not exposed in tool arguments, and it does not relax source/input, spill, disclosure,
+citation verification/locators, secret, generation-token, timeout, concurrency, or fallback
+controls. The shared public envelope schema and TypeScript/OpenClaw behavior stay bounded;
+see [configuration](../../docs/configuration.md#hermes-reader-answer-output-compatibility-switch).
+
 The effective reader target uses `auxiliary.context_shunt_reader` over the plugin's
 `reader` defaults; Hermes' `auto` means inherit. The plugin `llm` policy must authorize the
 chosen overrides. This host can report only `attribution_status: unverified`, never

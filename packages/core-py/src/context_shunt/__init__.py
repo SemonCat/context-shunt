@@ -3,7 +3,9 @@
 It keeps large sources out of the main agent's context. It blocks oversized full reads
 before they run, captures only what it withholds, answers questions about that immutable
 snapshot through a configurable reader model, verifies every citation, and returns a
-bounded envelope. It never writes to a source.
+bounded envelope by default. A trusted Python/Hermes deployment may disable only the
+reader answer-output ceilings; every other boundary remains enforced. It never writes to
+a source.
 
 Revision 1.1 adds three things and takes nothing away:
 

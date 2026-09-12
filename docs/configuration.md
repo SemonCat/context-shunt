@@ -1,9 +1,10 @@
 # Configuration reference
 
-This document names the configuration accepted by both cores and the current defaults
-loaded from [`contracts/v1/limits.json`](../contracts/v1/limits.json). The JSON file is the
-normative source. Every numeric `limits` override may only lower its corresponding default;
-a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
+This document names shared configuration plus explicitly identified host/runtime-only
+settings. Current numeric defaults are loaded from
+[`contracts/v1/limits.json`](../contracts/v1/limits.json); that JSON file is their normative
+source. Every numeric `limits` override may only lower its corresponding default; a higher
+value fails load with `LIMIT_MAY_ONLY_NARROW`.
 
 ## Shared plugin keys
 
@@ -19,6 +20,7 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.provider` | string, at most 128 UTF-8 bytes | `""` | Provider request; empty delegates routing to the host. |
 | `reader.attribution_policy` | enum | `allow_unverified` | `allow_unverified` publishes the host's truthful attribution status; `require_match` refuses below actual/resolved agreement. |
 | `reader.fallback_chain` | array of `{model, provider?}` | `[]` | At most four availability targets. It does not rescue a semantically weak answer. |
+| `reader.enforce_output_caps` | boolean | `true` | **Python/Hermes only, trusted deployment configuration.** When `false`, removes only reader answer/claim/quote/count limits and the raw-result/final `ANSWERED` envelope byte limits. It is not a request or tool argument. Input/source/spill/disclosure, citation structure and mechanical verification, secret detection, generation-token, deadline, concurrency, and fallback controls remain enforced. TypeScript/OpenClaw and the shared public envelope schema remain bounded. |
 | `reader.automatic_extract` | boolean | `true` | Compatibility setting for exact extraction; does not disable or replace mandatory legacy fallback. |
 | `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
 | `reader.legacy_compaction` | boolean | `true` | Deprecated no-op; false cannot disable mandatory fallback. |
@@ -35,7 +37,25 @@ a higher value fails load with `LIMIT_MAY_ONLY_NARROW`.
 Compatibility inputs `writer.enabled: true` and an `operations` array containing
 `propose_patch` are explicitly refused with `WRITER_UNSUPPORTED_CONFIGURATION`. There is no
 writer tool. Both public core loaders reject unknown top-level keys, nested keys, limit
-names, and invalid types. The OpenClaw manifest adds a separate host validation boundary.
+names, and invalid types, except for the explicitly Python/Hermes-only key above. The
+OpenClaw loader and manifest reject `reader.enforce_output_caps` rather than ignoring it.
+
+### Hermes reader answer-output compatibility switch
+
+Set the switch only under
+`plugins.entries.context-shunt.config.reader.enforce_output_caps`. Its default is `true`,
+which preserves the existing bounded behavior. Setting it to `false` allows a mechanically
+verified `ANSWERED` result to exceed the historical answer, claim text, quote, claim count,
+citations-per-claim, citation count, model-result byte, and final answer-envelope byte
+ceilings. It does not make model generation unbounded: `max_output_tokens_per_call` still
+applies, as do every source/input and disclosure control listed above.
+
+The checked-in shared envelope schema remains compatibility-bounded for portable/public
+validation. The Python final guard derives an internal schema view with only `answer`,
+`citations`, and citation `quote` schema ceilings removed, and uses it only for `ANSWERED`
+delivery when this trusted switch is false. Error, pointer, extraction, stats, and mandatory
+legacy-compaction envelopes remain bounded. This is why no TypeScript or OpenClaw change is
+required: neither runtime consumes the Python-only setting or its internal validator.
 
 ## Artifact import
 

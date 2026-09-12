@@ -129,6 +129,34 @@ def test_config_rejects_unknown_limit_and_top_level_sections(tmp_path):
             )
 
 
+def test_reader_output_caps_are_a_strict_trusted_config_boolean_defaulting_on(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    base = {"workspace_roots": [str(workspace)]}
+
+    assert load_config(
+        base, default_spill_dir=tmp_path / "cache-default"
+    ).reader.enforce_output_caps
+    disabled = load_config(
+        {**base, "reader": {"enforce_output_caps": False}},
+        default_spill_dir=tmp_path / "cache-disabled",
+    )
+    assert disabled.reader.enforce_output_caps is False
+    enabled = load_config(
+        {**base, "reader": {"enforce_output_caps": True}},
+        default_spill_dir=tmp_path / "cache-enabled",
+    )
+    assert enabled.reader.enforce_output_caps is True
+
+    for invalid in (0, 1, "false", None):
+        with pytest.raises(ShuntError) as exc:
+            load_config(
+                {**base, "reader": {"enforce_output_caps": invalid}},
+                default_spill_dir=tmp_path / f"cache-{invalid!r}",
+            )
+        assert exc.value.detail == "BAD_CONFIGURATION"
+
+
 # -- tool_result_capture / suma_post_tool config migration ------------------------------
 
 

@@ -1,14 +1,18 @@
 """The final output boundary.
 
-Nothing reaches a host without passing through here. The guard measures the *serialized*
-envelope - every field, every citation, every metadata value - against the cap that
-applies to its ``result_kind``, re-checks the per-field caps, refuses unknown fields, and
-refuses any citation not marked verified. If the guard itself fails it emits a fixed small
-error envelope rather than falling back to whatever it was given.
+Nothing reaches a host without passing through here. By default, the guard measures the
+*serialized* envelope - every field, every citation, every metadata value - against the cap
+that applies to its ``result_kind``, re-checks the per-field caps, refuses unknown fields,
+and refuses any citation not marked verified. A trusted Python/Hermes configuration may
+skip only reader answer-output caps for ``ANSWERED``; structural, citation, secret, and all
+non-reader checks still run. If the guard itself fails it emits a fixed small error envelope
+rather than falling back to whatever it was given.
 
 Two caps, both normative
 ------------------------
-Most envelopes are capped at 16 KiB. A deterministic extraction or a stats page carries a
+Most envelopes are capped at 16 KiB. An ``ANSWERED`` envelope is the sole exception when
+its trusted deployment explicitly disables reader answer-output caps. A deterministic
+extraction or a stats page carries a
 bounded payload of its own - up to 16 KiB of exact snapshot bytes, or one page of records
 - so those are measured against ``max_extended_envelope_bytes`` (20 KiB), leaving 4 KiB
 for the envelope around a full-size extraction. The extraction payload itself is measured
@@ -92,7 +96,12 @@ def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]
     )
 
 
-def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[str, Any]:
+def enforce(
+    envelope: dict[str, Any],
+    limits: Limits = DEFAULT_LIMITS,
+    *,
+    enforce_reader_output_caps: bool = True,
+) -> dict[str, Any]:
     """Validate and return the envelope, or raise :class:`OutputGuardError`."""
     if not isinstance(envelope, dict):
         raise OutputGuardError("not an object")
@@ -107,23 +116,28 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
         raise OutputGuardError("illegal status/code pairing")
 
     _check_version_fields(envelope, version)
+    cap_answer_output = enforce_reader_output_caps or code != "ANSWERED"
 
     answer = envelope.get("answer")
     if not isinstance(answer, str):
         raise OutputGuardError("answer must be a string")
-    if len(answer.encode("utf-8")) > limits.max_answer_bytes:
+    if cap_answer_output and len(answer.encode("utf-8")) > limits.max_answer_bytes:
         raise OutputGuardError("answer over cap")
     if contains_secret_marker(answer.encode("utf-8")):
         raise OutputGuardError("secret marker in answer")
 
     citations = envelope.get("citations")
-    if not isinstance(citations, list) or len(citations) > limits.max_citations:
+    if not isinstance(citations, list) or (
+        cap_answer_output and len(citations) > limits.max_citations
+    ):
         raise OutputGuardError("citations over cap")
     for citation in citations:
         if not isinstance(citation, dict) or citation.get("verified") is not True:
             raise OutputGuardError("unverified citation")
         quote = citation.get("quote", "")
-        if not isinstance(quote, str) or len(quote.encode("utf-8")) > limits.max_quote_bytes:
+        if not isinstance(quote, str) or (
+            cap_answer_output and len(quote.encode("utf-8")) > limits.max_quote_bytes
+        ):
             raise OutputGuardError("quote over cap")
         if contains_secret_marker(quote.encode("utf-8")):
             raise OutputGuardError("secret marker in quote")
@@ -156,9 +170,11 @@ def enforce(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[s
     _check_extraction(envelope, limits)
     _check_legacy_compaction(envelope, limits)
 
-    if serialized_bytes(envelope) > envelope_byte_cap(envelope.get("result_kind"), limits):
+    if cap_answer_output and serialized_bytes(envelope) > envelope_byte_cap(
+        envelope.get("result_kind"), limits
+    ):
         raise OutputGuardError("envelope over byte cap")
-    if not validate_envelope(envelope):
+    if not validate_envelope(envelope, enforce_reader_output_caps=cap_answer_output):
         raise OutputGuardError("envelope schema violation")
     return envelope
 
@@ -251,14 +267,23 @@ def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
         raise OutputGuardError("legacy_compaction must not accompany a derived=true provenance")
 
 
-def enforce_or_fixed(envelope: dict[str, Any], limits: Limits = DEFAULT_LIMITS) -> dict[str, Any]:
+def enforce_or_fixed(
+    envelope: dict[str, Any],
+    limits: Limits = DEFAULT_LIMITS,
+    *,
+    enforce_reader_output_caps: bool = True,
+) -> dict[str, Any]:
     """Never raises. A guard failure yields the fixed error envelope, never the input."""
     request_id = "req_unknown"
     try:
         candidate = envelope.get("request_id") if isinstance(envelope, dict) else None
         if isinstance(candidate, str):
             request_id = candidate
-        return enforce(envelope, limits)
+        return enforce(
+            envelope,
+            limits,
+            enforce_reader_output_caps=enforce_reader_output_caps,
+        )
     except Exception:
         return fixed_error(request_id)
 

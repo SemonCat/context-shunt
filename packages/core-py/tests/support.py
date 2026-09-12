@@ -105,6 +105,29 @@ def claims_json(claims: list[dict[str, Any]], citations: list[dict[str, Any]]) -
     return json.dumps({"claims": claims, "citations": citations})
 
 
+def over_old_reader_caps_fixture(count: int = 25) -> tuple[bytes, str]:
+    """One valid cited reply that crosses every historical reader-output ceiling."""
+    lines = [f"fact{i:02d}=" + (chr(96 + ((i - 1) % 26) + 1) * 600) for i in range(1, count + 1)]
+    citations = [
+        {"id": f"c{i}", "line_start": i, "line_end": i, "quote": line}
+        for i, line in enumerate(lines, 1)
+    ]
+    claims = [
+        {
+            "text": "Fact 1 is documented " + ("a" * 2_100) + ".",
+            "citation_ids": [f"c{i}" for i in range(1, 6)],
+        },
+        *[
+            {
+                "text": f"Fact {i} is documented " + ("b" * 280) + ".",
+                "citation_ids": [f"c{i}"],
+            }
+            for i in range(2, count + 1)
+        ],
+    ]
+    return ("\n".join(lines) + "\n").encode(), claims_json(claims, citations)
+
+
 def derived_provenance(**overrides: Any) -> Provenance:
     """Provenance for a hand-built model-derived envelope in a test.
 

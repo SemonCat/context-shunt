@@ -12,6 +12,7 @@ from context_shunt.provenance import ResultKind
 from context_shunt.provider import FallbackChainProvider
 from context_shunt.reader import MAX_RAW_CITATIONS, Reader
 from context_shunt.registry import SourceRegistry
+from context_shunt.schema import validate_envelope
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.spill import SpillEngine
 from context_shunt.store import SnapshotStore
@@ -21,6 +22,7 @@ from tests.support import (
     derived_provenance,
     make_identity,
     make_registry,
+    over_old_reader_caps_fixture,
     transient,
 )
 
@@ -185,6 +187,98 @@ def test_unverified_citation_never_leaves_the_guard():
         accounting_id="acc_" + "0" * 15 + "2",
     )
     assert enforce_or_fixed(env)["code"] == "LIMIT_EXCEEDED"
+
+
+def test_disabled_reader_output_caps_preserve_large_verified_answer_end_to_end(tmp_path):
+    source, reply = over_old_reader_caps_fixture()
+    assert len(reply.encode("utf-8")) > L.max_tool_result_bytes
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(source))
+
+    env = (
+        Reader(
+            registry,
+            FakeLuna(replies=[reply]),
+            enforce_output_caps=False,
+        )
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+
+    assert env["status"] == "ok" and env["code"] == "ANSWERED"
+    assert env["coverage"]["complete"] is True
+    assert len(env["answer"].encode("utf-8")) > L.max_answer_bytes
+    assert len(env["citations"]) == 25 > L.max_citations
+    assert max(len(c["quote"].encode("utf-8")) for c in env["citations"]) > L.max_quote_bytes
+    assert env["answer"].count("Fact ") == 25 > L.max_claims_per_answer
+    assert "[c1][c2][c3][c4][c5]" in env["answer"]
+    assert len(E.serialized(env).encode("utf-8")) > L.max_envelope_bytes
+    assert validate_envelope(env) is False
+    assert validate_envelope(env, enforce_reader_output_caps=False) is True
+    assert enforce(env, enforce_reader_output_caps=False) is env
+
+
+def test_disabled_reader_output_caps_still_reject_malformed_and_unverified_citations(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(b"alpha is present\n"))
+    malformed = _claims_reply(
+        [{"text": "Alpha is present.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "not in source"}],
+    )
+    env = (
+        Reader(
+            registry,
+            FakeLuna(replies=[malformed, malformed]),
+            enforce_output_caps=False,
+        )
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "error" and env["code"] == "CITATION_INVALID"
+
+    unverified = E.build(
+        request_id="req_unverified",
+        status="ok",
+        code="ANSWERED",
+        answer="alpha [c1]",
+        citations=[{**_citation(), "verified": False}],
+        coverage=E.Coverage(
+            complete=True, processed_chunks=1, planned_chunks=1, upstream_truncated=False
+        ),
+        provenance=derived_provenance(),
+        accounting_id="acc_0000000000000003",
+    )
+    with pytest.raises(OutputGuardError, match="unverified citation"):
+        enforce(unverified, enforce_reader_output_caps=False)
+
+
+def test_reenabling_reader_output_caps_restores_the_old_result_and_guard_failures(tmp_path):
+    source, reply = over_old_reader_caps_fixture()
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(source))
+    env = (
+        Reader(
+            registry,
+            FakeLuna(replies=[reply]),
+            enforce_output_caps=True,
+        )
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    assert env["status"] == "error" and env["code"] == "INVALID_MODEL_OUTPUT"
+    assert env["failure_detail"] == "MODEL_OUTPUT_OVER_CAP"
+
+    uncapped = (
+        Reader(
+            registry,
+            FakeLuna(replies=[reply]),
+            enforce_output_caps=False,
+        )
+        .answer("sess", _cap_request(entry))
+        .envelope
+    )
+    with pytest.raises(OutputGuardError):
+        enforce(uncapped, enforce_reader_output_caps=True)
 
 
 def test_reader_answer_is_capped_to_the_requested_budget(tmp_path):

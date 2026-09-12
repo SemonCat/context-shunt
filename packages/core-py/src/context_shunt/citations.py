@@ -65,15 +65,22 @@ _CITATION_REF = re.compile(r"\[(c[0-9]{1,3})\]")
 
 
 class CitationVerifier:
-    def __init__(self, registry: SourceRegistry, limits: Limits = DEFAULT_LIMITS):
+    def __init__(
+        self,
+        registry: SourceRegistry,
+        limits: Limits = DEFAULT_LIMITS,
+        *,
+        enforce_output_caps: bool = True,
+    ):
         self._registry = registry
         self._limits = limits
+        self._enforce_output_caps = enforce_output_caps
 
     def verify(self, session_id: str, citation: dict[str, Any]) -> VerificationResult:
         quote = citation.get("quote")
         if not isinstance(quote, str) or not quote:
             return VerificationResult(False, Reason.QUOTE_NOT_FOUND)
-        if len(quote.encode("utf-8")) > self._limits.max_quote_bytes:
+        if self._enforce_output_caps and len(quote.encode("utf-8")) > self._limits.max_quote_bytes:
             return VerificationResult(False, Reason.QUOTE_OVER_CAP)
 
         try:
@@ -184,18 +191,22 @@ _MARKER_IN_TEXT = re.compile(r"\[c[0-9]{1,3}\]")
 
 
 def normalize_claims(
-    raw: Any, valid_local_ids: set[str], limits: Limits = DEFAULT_LIMITS
+    raw: Any,
+    valid_local_ids: set[str],
+    limits: Limits = DEFAULT_LIMITS,
+    *,
+    enforce_output_caps: bool = True,
 ) -> list[dict[str, Any]]:
     """Structurally validate a model's ``claims`` array against its own ``citations``.
 
-    A claim survives only if ``text`` is a non-empty string within
-    ``limits.max_claim_text_bytes`` that contains no ``[cN]`` marker syntax of its own,
-    and ``citation_ids`` is a non-empty, duplicate-free list of well-formed ids that all
-    appear in ``valid_local_ids`` - the ids the same response actually declared in its
-    ``citations`` array (before namespacing). Unknown, duplicate or missing ids drop *that
-    claim*, never the whole answer, and never guessed at: a dropped claim is exactly as
-    much evidence-free as a legacy sentence with no marker, so it is held to the same
-    fail-closed rule.
+    A claim survives only if ``text`` is a non-empty string that contains no ``[cN]``
+    marker syntax of its own, and ``citation_ids`` is a non-empty, duplicate-free list of
+    well-formed ids that all appear in ``valid_local_ids`` - the ids the same response
+    actually declared in its ``citations`` array (before namespacing). With output caps
+    enabled, the claim text, claim count, and ids-per-claim limits also apply. Unknown,
+    duplicate or missing ids drop *that claim*, never the whole answer, and never guessed
+    at: a dropped claim is exactly as much evidence-free as a legacy sentence with no
+    marker, so it is held to the same fail-closed rule.
 
     Marker syntax in ``text`` is held to that same rule. The renderer copies ``text``
     verbatim, so a model-authored ``[c999]`` would be published as though the program had
@@ -211,18 +222,23 @@ def normalize_claims(
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
-    for item in raw[: limits.max_claims_per_answer]:
+    items = raw[: limits.max_claims_per_answer] if enforce_output_caps else raw
+    for item in items:
         if not isinstance(item, dict):
             continue
         text = item.get("text")
         ids = item.get("citation_ids")
         if not isinstance(text, str) or not text.strip():
             continue
-        if len(text.encode("utf-8")) > limits.max_claim_text_bytes:
+        if enforce_output_caps and len(text.encode("utf-8")) > limits.max_claim_text_bytes:
             continue
         if _MARKER_IN_TEXT.search(text):
             continue
-        if not isinstance(ids, list) or not ids or len(ids) > limits.max_citation_ids_per_claim:
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or (enforce_output_caps and len(ids) > limits.max_citation_ids_per_claim)
+        ):
             continue
         seen: set[str] = set()
         malformed = False

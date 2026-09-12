@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from functools import cache
 from typing import Any
 
@@ -46,6 +47,22 @@ def request_validator() -> Draft202012Validator:
 
 def envelope_validator() -> Draft202012Validator:
     return _validator("envelope.schema.json")
+
+
+@cache
+def uncapped_reader_envelope_validator() -> Draft202012Validator:
+    """The v1 structure with only reader answer-output ceilings removed.
+
+    The shared public schema remains compatibility-bounded. A trusted deployment may opt
+    out at runtime, so its final guard uses this derived validator for ``ANSWERED`` only;
+    every structural, citation, locator, provenance, secret and non-reader constraint is
+    unchanged.
+    """
+    schema = deepcopy(envelope_validator().schema)
+    schema["properties"]["answer"].pop("maxLength")
+    schema["properties"]["citations"].pop("maxItems")
+    schema["$defs"]["citation"]["properties"]["quote"].pop("maxLength")
+    return Draft202012Validator(schema)
 
 
 def tool_args_validator() -> Draft202012Validator:
@@ -118,12 +135,18 @@ def _assert_question(question: str) -> None:
         raise ShuntError("INVALID_REQUEST", "EMPTY_QUESTION", retryable=False)
 
 
-def validate_envelope(envelope: Any) -> bool:
-    return envelope_validator().is_valid(envelope)
+def validate_envelope(envelope: Any, *, enforce_reader_output_caps: bool = True) -> bool:
+    validator = (
+        envelope_validator() if enforce_reader_output_caps else uncapped_reader_envelope_validator()
+    )
+    return validator.is_valid(envelope)
 
 
-def envelope_errors(envelope: Any) -> list[str]:
-    return [e.message for e in envelope_validator().iter_errors(envelope)]
+def envelope_errors(envelope: Any, *, enforce_reader_output_caps: bool = True) -> list[str]:
+    validator = (
+        envelope_validator() if enforce_reader_output_caps else uncapped_reader_envelope_validator()
+    )
+    return [e.message for e in validator.iter_errors(envelope)]
 
 
 def invalid_snapshot_id(value: dict[str, Any]) -> bool:

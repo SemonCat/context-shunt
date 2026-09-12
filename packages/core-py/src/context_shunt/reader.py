@@ -151,14 +151,15 @@ class ChunkOutcome:
     #: can be started, billed and still return nothing.
     responses_seen: int = 0
     fallback_used: bool = False
-    #: Claims the model wrote beyond ``max_claims_per_answer``. They are never read, so
-    #: they are material this request dropped, and the caller has to be told.
+    #: With output caps enabled, claims the model wrote beyond
+    #: ``max_claims_per_answer``. They are never read in that mode, so they are material
+    #: this request dropped, and the caller has to be told.
     claims_over_cap: int = 0
-    #: Claims whose evidence was cut by the raw-citation bound before anything could
-    #: verify it. ``_normalize_citations`` stops at ``MAX_RAW_CITATIONS``, so a claim
-    #: citing ``c65`` lost its citation to a ceiling, not to a failed verification - and
-    #: reporting that as "the model cited something that does not exist" blamed the model
-    #: for the program's own bound.
+    #: With output caps enabled, claims whose evidence was cut by the raw-citation bound
+    #: before anything could verify it. ``_normalize_citations`` then stops at
+    #: ``MAX_RAW_CITATIONS``, so a claim citing ``c65`` lost its citation to a ceiling, not
+    #: to failed verification - and reporting that as "the model cited something that does
+    #: not exist" blamed the model for the program's own bound.
     citations_over_cap: int = 0
     #: One record per physical call this chunk made. Exactly as many as ``calls``, which
     #: is what makes a count over them a count over calls.
@@ -439,13 +440,15 @@ class Reader:
         clock: Clock | None = None,
         metrics: MetricsSink | None = None,
         attribution_policy: AttributionPolicy = AttributionPolicy.ALLOW_UNVERIFIED,
+        enforce_output_caps: bool = True,
     ):
         self._registry = registry
         self._provider = provider
         self._limits = limits
         self._clock = clock or MonotonicClock()
         self._metrics = metrics or NullMetrics()
-        self._verifier = CitationVerifier(registry, limits)
+        self._enforce_output_caps = enforce_output_caps
+        self._verifier = CitationVerifier(registry, limits, enforce_output_caps=enforce_output_caps)
         self._policy = attribution_policy
 
     # -- public ------------------------------------------------------------
@@ -1081,8 +1084,11 @@ class Reader:
         wanted = {cid for c in all_claims for cid in c["citation_ids"]}
         wanted |= set(referenced_ids(legacy_all))
         prioritized = sorted(verified, key=lambda c: c["id"] not in wanted)
-        allowed = prioritized[: self._limits.max_citations]
-        for citation in prioritized[self._limits.max_citations :]:
+        allowed = (
+            prioritized[: self._limits.max_citations] if self._enforce_output_caps else prioritized
+        )
+        overflow = prioritized[self._limits.max_citations :] if self._enforce_output_caps else []
+        for citation in overflow:
             # Only a *referenced* citation losing its place costs the answer anything. An
             # unreferenced one is already discarded further down - the envelope publishes
             # `used_ids` and nothing else - so reporting its overflow as material dropped
@@ -1113,7 +1119,11 @@ class Reader:
         # and then reporting `complete: true` told the caller the whole selection had been
         # read when part of the reading had just been deleted.
         max_answer = min(budgets["max_answer_bytes"], self._limits.max_answer_bytes)
-        while len(answer.encode("utf-8")) > max_answer and (kept_claims or legacy_answer):
+        while (
+            self._enforce_output_caps
+            and len(answer.encode("utf-8")) > max_answer
+            and (kept_claims or legacy_answer)
+        ):
             if kept_claims:
                 orphaned = set(kept_claims[-1]["citation_ids"])
                 kept_claims = kept_claims[:-1]
@@ -1313,9 +1323,12 @@ class Reader:
                 accounting_id=accounting_id,
             )
 
-        answer, verified, dropped = self._fit_to_envelope(
-            kept_claims, legacy_answer, verified, coverage, answered
-        )
+        if self._enforce_output_caps:
+            answer, verified, dropped = self._fit_to_envelope(
+                kept_claims, legacy_answer, verified, coverage, answered
+            )
+        else:
+            dropped = 0
         # The fit loop rewrites both halves, so the invariant is re-established on what is
         # actually published rather than on what was measured before trimming. A violation
         # here is a program bug and is reported as the citation failure it is - calling it
@@ -1563,7 +1576,10 @@ class Reader:
                 outcome.fallback_used = outcome.fallback_used or response.fallback_used
                 if outcome.attribution is Attribution.MISMATCH:
                     raise ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
-                parsed = _parse_model_json(response.text, self._limits.max_tool_result_bytes)
+                parsed = _parse_model_json(
+                    response.text,
+                    self._limits.max_tool_result_bytes if self._enforce_output_caps else None,
+                )
                 has_claims = "claims" in parsed
                 has_legacy_answer = "answer" in parsed
                 if has_claims and has_legacy_answer:
@@ -1575,8 +1591,14 @@ class Reader:
                     )
                 if not isinstance(parsed.get("citations"), list):
                     raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_RESPONSE_SHAPE", retryable=False)
-                citations_local = _normalize_citations(parsed["citations"], chunk)
-                over_cap_ids = _citation_ids_over_cap(parsed["citations"])
+                citations_local = _normalize_citations(
+                    parsed["citations"],
+                    chunk,
+                    enforce_output_caps=self._enforce_output_caps,
+                )
+                over_cap_ids = _citation_ids_over_cap(
+                    parsed["citations"], enforce_output_caps=self._enforce_output_caps
+                )
                 if has_claims:
                     raw_claims = parsed["claims"]
                     if not isinstance(raw_claims, list):
@@ -1589,7 +1611,12 @@ class Reader:
                     # still have been scanned before it is discarded.
                     outcome.requires_evidence = bool(parsed["citations"])
                     outcome.semantic_content = False
-                    for item in raw_claims[: self._limits.max_claims_per_answer]:
+                    bounded_claims = (
+                        raw_claims[: self._limits.max_claims_per_answer]
+                        if self._enforce_output_caps
+                        else raw_claims
+                    )
+                    for item in bounded_claims:
                         if isinstance(item, dict) and isinstance(item.get("text"), str):
                             assert_no_secret(item["text"].encode("utf-8"), "ANSWER")
                             outcome.semantic_content |= bool(item["text"].strip())
@@ -1597,9 +1624,10 @@ class Reader:
                     # Claims past the ceiling are never read. That is dropped material,
                     # so it is carried out and reported as an omission rather than
                     # silently disappearing behind a `complete: true`.
-                    outcome.claims_over_cap = max(
-                        0, len(raw_claims) - self._limits.max_claims_per_answer
-                    )
+                    if self._enforce_output_caps:
+                        outcome.claims_over_cap = max(
+                            0, len(raw_claims) - self._limits.max_claims_per_answer
+                        )
                     valid_local_ids = {c["id"] for c in citations_local}
                     # A claim whose only evidence sat past the raw-citation bound is about
                     # to be dropped by `normalize_claims` for citing an unknown id. It is
@@ -1609,10 +1637,15 @@ class Reader:
                     if over_cap_ids:
                         outcome.citations_over_cap = sum(
                             1
-                            for item in raw_claims[: self._limits.max_claims_per_answer]
+                            for item in bounded_claims
                             if _claim_cites_over_cap(item, over_cap_ids)
                         )
-                    outcome.claims = normalize_claims(raw_claims, valid_local_ids, self._limits)
+                    outcome.claims = normalize_claims(
+                        raw_claims,
+                        valid_local_ids,
+                        self._limits,
+                        enforce_output_caps=self._enforce_output_caps,
+                    )
                     outcome.citations = citations_local
                     return outcome
                 if not has_legacy_answer or not isinstance(parsed["answer"], str):
@@ -2040,8 +2073,8 @@ def _read_requested_deadline(request: Any, maximum: int) -> int:
     return min(value, maximum)
 
 
-def _parse_model_json(text: str, max_bytes: int) -> dict[str, Any]:
-    if len(text.encode("utf-8")) > max_bytes:
+def _parse_model_json(text: str, max_bytes: int | None) -> dict[str, Any]:
+    if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
         raise ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -2057,20 +2090,21 @@ def _parse_model_json(text: str, max_bytes: int) -> dict[str, Any]:
     return value
 
 
-#: How many raw citation entries one chunk's reply may declare. A bound is needed - the
-#: array is model-controlled - but it is the program's bound, so what it cuts is the
-#: program's omission to report. See :func:`_citation_ids_over_cap`.
+#: How many raw citation entries one chunk's reply may declare while output caps are
+#: enabled. It is the program's bound, so what it cuts is the program's omission to report.
+#: The trusted uncapped mode still applies all structural and mechanical verification to
+#: every entry. See :func:`_citation_ids_over_cap`.
 MAX_RAW_CITATIONS = 64
 
 
-def _citation_ids_over_cap(raw: Any) -> set[str]:
+def _citation_ids_over_cap(raw: Any, *, enforce_output_caps: bool = True) -> set[str]:
     """The well-formed citation ids ``_normalize_citations`` will not reach.
 
     Read from the entries past :data:`MAX_RAW_CITATIONS` so a claim referencing one can be
     told apart from a claim referencing an id that was never declared at all. Only the id
     is read, and only to recognise it later - nothing here is trusted as evidence.
     """
-    if not isinstance(raw, list) or len(raw) <= MAX_RAW_CITATIONS:
+    if not enforce_output_caps or not isinstance(raw, list) or len(raw) <= MAX_RAW_CITATIONS:
         return set()
     out: set[str] = set()
     for item in raw[MAX_RAW_CITATIONS:]:
@@ -2099,7 +2133,9 @@ def _claim_cites_over_cap(item: Any, over_cap_ids: set[str]) -> bool:
     return any(isinstance(cid, str) and cid in over_cap_ids for cid in ids)
 
 
-def _normalize_citations(raw: Any, chunk: Chunk) -> list[dict[str, Any]]:
+def _normalize_citations(
+    raw: Any, chunk: Chunk, *, enforce_output_caps: bool = True
+) -> list[dict[str, Any]]:
     """Rebuild each citation from trusted chunk metadata.
 
     Only the id, the addressed range and the quote come from the model; the source and
@@ -2108,7 +2144,8 @@ def _normalize_citations(raw: Any, chunk: Chunk) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
-    for item in raw[:MAX_RAW_CITATIONS]:
+    items = raw[:MAX_RAW_CITATIONS] if enforce_output_caps else raw
+    for item in items:
         if not isinstance(item, dict):
             continue
         cid = item.get("id")

@@ -251,10 +251,12 @@ class HostBridgeProvider:
         model: str = READER_MODEL,
         *,
         provider: str = "",
+        enforce_output_caps: bool = True,
     ):
         self._call = call
         self._limits = limits
         self._target = ProviderTarget(model=model, provider=provider)
+        self._enforce_output_caps = enforce_output_caps
 
     @property
     def model(self) -> str:
@@ -345,7 +347,10 @@ class HostBridgeProvider:
             # accounting must never err in. The measurement travels on the error instead,
             # bounded by the reply ceiling so an unbounded body cannot inflate it.
             raise _with_response_bytes(exc, text, self._limits) from None
-        if len(text.encode("utf-8")) > self._limits.max_tool_result_bytes:
+        if (
+            self._enforce_output_caps
+            and len(text.encode("utf-8")) > self._limits.max_tool_result_bytes
+        ):
             rejected = ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
             rejected.billed_usage = usage
             raise rejected

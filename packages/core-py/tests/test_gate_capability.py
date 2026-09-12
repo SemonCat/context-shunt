@@ -28,7 +28,7 @@ from context_shunt.capability import (
 from context_shunt.errors import ShuntError
 from context_shunt.limits import READER_MODEL
 from context_shunt.session import ShuntSession
-from tests.support import make_capability, make_config
+from tests.support import make_capability, make_config, over_old_reader_caps_fixture
 
 pytestmark = pytest.mark.gate_capability
 
@@ -1036,6 +1036,42 @@ def test_hermes_automatic_extract_config_reaches_delivery(tmp_path, enabled, leg
     assert "PRIVATE_PROVIDER_BODY" not in json.dumps(out)
     assert out["legacy_compaction"]["summary_bytes"] <= module._config.limits.max_extraction_bytes
     assert out["provenance"]["derived"] is False
+
+
+def test_hermes_adapter_delivers_over_old_caps_only_from_trusted_plugin_config(tmp_path):
+    source, reply = over_old_reader_caps_fixture()
+    path = tmp_path / "ws" / "uncapped.txt"
+    config = _config(tmp_path)
+    config["reader"] = {"enforce_output_caps": False}
+    path.write_bytes(source)
+    module = _load_adapter()
+    module.register(FakeCtx(config, llm=FakeLlm(reply=reply)))
+
+    delivered = module.context_shunt_read(
+        {"question": "List every documented fact.", "paths": [str(path)]},
+        task_id="trusted-output-config",
+        session_id="trusted-output-config",
+    )
+    env = json.loads(delivered)
+
+    assert len(delivered.encode("utf-8")) > module._config.limits.max_envelope_bytes
+    assert env["status"] == "ok" and env["code"] == "ANSWERED"
+    assert len(env["citations"]) == 25
+    assert env["answer"].count("Fact ") == 25
+
+    attempted_toggle = json.loads(
+        module.context_shunt_read(
+            {
+                "question": "List every documented fact.",
+                "paths": [str(path)],
+                "enforce_output_caps": True,
+            },
+            task_id="caller-toggle",
+            session_id="caller-toggle",
+        )
+    )
+    assert attempted_toggle["status"] == "error"
+    assert attempted_toggle["failure_detail"] == "TOOL_ARGS_VIOLATION"
 
 
 def test_openclaw_post_tool_release_gate_cannot_certify_a_retired_seam(monkeypatch):

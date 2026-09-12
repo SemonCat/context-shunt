@@ -42,6 +42,13 @@ plugins:
         reader:
           enabled: true
 
+          # Hermes/Python trusted deployment switch. Defaults true for compatibility.
+          # false removes only reader answer/claim/quote/count and ANSWERED result/envelope
+          # byte ceilings. Citation verification and all source/input, disclosure, secret,
+          # model-token, timeout, concurrency, and fallback controls remain enforced.
+          # This is not accepted as a model/tool argument and does not affect OpenClaw.
+          enforce_output_caps: true
+
           # Configurable since contract revision 1.1; this is the default. What keeps a
           # substitution from going unnoticed is the envelope's provenance block, not a
           # hardcoded value here.

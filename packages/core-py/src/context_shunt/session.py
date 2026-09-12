@@ -125,6 +125,7 @@ class ShuntSession:
             clock=self._clock,
             metrics=self._metrics,
             attribution_policy=config.reader.attribution_policy,
+            enforce_output_caps=config.reader.enforce_output_caps,
         )
         self._inspector = Inspector(config.limits)
         tool_result_capture_enabled = config.tool_result_capture.enabled and capability.enabled(
@@ -319,6 +320,7 @@ class ShuntSession:
                 candidate = enforce(
                     self._legacy_compaction_fallback(request, result, request_id, operation_id),
                     self.config.limits,
+                    enforce_reader_output_caps=self.config.reader.enforce_output_caps,
                 )
             except ShuntError as refused:
                 candidate = E.error_envelope(request_id, refused, accounting_id=operation_id)
@@ -350,7 +352,11 @@ class ShuntSession:
                     "follow next_cursor for more evidence. No heuristic summary was substituted."
                 ),
             }
-        published = enforce_or_fixed(candidate, self.config.limits)
+        published = enforce_or_fixed(
+            candidate,
+            self.config.limits,
+            enforce_reader_output_caps=self.config.reader.enforce_output_caps,
+        )
         refined = bool((request or {}).get("refined"))
         try:
             baseline, credited_bytes = self._baseline_for(result.source_ids)
@@ -1439,6 +1445,7 @@ def build_provider(
         config.limits,
         config.reader.model if model is None else model,
         provider=config.reader.provider if provider is None else provider,
+        enforce_output_caps=config.reader.enforce_output_caps,
     )
     if not config.reader.fallback_chain:
         return primary
@@ -1448,6 +1455,7 @@ def build_provider(
             config.limits,
             ref.model,
             provider=ref.provider,
+            enforce_output_caps=config.reader.enforce_output_caps,
         )
         for ref in config.reader.fallback_chain
     ]

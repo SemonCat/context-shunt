@@ -16,6 +16,9 @@ Rules that matter more than the rest:
   private cache, and are a separate allowlist from ``workspace_roots`` - a deployment can
   broker external artifacts without widening what the pre-read gate may capture.
 * A cap may be narrowed, never widened.
+* ``reader.enforce_output_caps`` is a trusted deployment switch, not a request/tool
+  argument. It defaults to ``true``; only an operator-owned plugin configuration can
+  disable the reader answer/claim/quote/count/envelope output ceilings.
 
 Changed in 1.1: reader model and provider are configurable
 ----------------------------------------------------------
@@ -84,6 +87,7 @@ _READER_KEYS = {
     "provider",
     "attribution_policy",
     "fallback_chain",
+    "enforce_output_caps",
     "automatic_extract",
     "fallback_max_bytes",
     "legacy_compaction",
@@ -158,6 +162,9 @@ class ReaderConfig:
     provider: str = ""
     attribution_policy: AttributionPolicy = AttributionPolicy.ALLOW_UNVERIFIED
     fallback_chain: tuple[ProviderRef, ...] = ()
+    #: Trusted deployment-only compatibility switch. This never enters a public request or
+    #: model/tool argument; adapters read it from their operator-owned plugin config.
+    enforce_output_caps: bool = True
     automatic_extract: bool = True
     fallback_max_bytes: int = 2048
     #: Deprecated compatibility key; never controls mandatory fallback.
@@ -246,6 +253,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
     for value in (
         raw.get("gate_enabled"),
         reader_raw.get("enabled"),
+        reader_raw.get("enforce_output_caps"),
         reader_raw.get("automatic_extract"),
         (raw.get("inspect") or {}).get("enabled"),
         (raw.get("stats") or {}).get("enabled"),
@@ -324,6 +332,8 @@ def _merge_tool_result_capture_raw(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
+    if "enforce_output_caps" in reader_raw and type(reader_raw["enforce_output_caps"]) is not bool:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False)
     model = reader_raw.get("model", DEFAULT_LIMITS.reader_model)
     provider = reader_raw.get("provider", "")
     for value in (model, provider):
@@ -381,6 +391,7 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
         provider=provider.strip(),
         attribution_policy=AttributionPolicy(policy_raw),
         fallback_chain=tuple(chain),
+        enforce_output_caps=reader_raw.get("enforce_output_caps", True),
     )
 
 
