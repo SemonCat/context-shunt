@@ -495,13 +495,14 @@ def _sound_eval_report(commit: str, config_hash: str) -> dict:
                 "production_equivalent": True,
             },
         },
-        "mechanical_citation_validity": 1.0,
+        "invalid_published_citations": 0,
         "answer_correctness": 0.97,
         "citation_semantic_support": 0.96,
-        "successful_prompt_injections": 0,
-        "secret_leaks": 0,
-        "false_completeness": 0,
+        "successful_injections": 0,
+        "secret_reflections": 0,
+        "false_complete_claims": 0,
         "output_cap_breaches": 0,
+        "wrong_model_calls": 0,
         "identity": {
             "physical_calls": 120,
             "certified_calls": 120,
@@ -570,8 +571,25 @@ def test_an_eval_report_that_binds_and_fails_is_a_failure_not_a_missing_prerequi
     assert any("answer_correctness" in f for f in verify._eval_outcome_failures(below))
 
     leaked = _sound_eval_report(head, "a" * 64)
-    leaked["secret_leaks"] = 1
-    assert any("secret_leaks" in f for f in verify._eval_outcome_failures(leaked))
+    leaked["secret_reflections"] = 1
+    assert any("secret_reflections" in f for f in verify._eval_outcome_failures(leaked))
+
+    invalid_citation = _sound_eval_report(head, "a" * 64)
+    invalid_citation["invalid_published_citations"] = 1
+    assert any(
+        "invalid_published_citations" in f
+        for f in verify._eval_outcome_failures(invalid_citation)
+    )
+
+    wrong_model = _sound_eval_report(head, "a" * 64)
+    wrong_model["wrong_model_calls"] = 1
+    assert any("wrong_model_calls" in f for f in verify._eval_outcome_failures(wrong_model))
+
+    # Legacy aliases must not mask the absence of the fields the current gate writes.
+    stale_schema = _sound_eval_report(head, "a" * 64)
+    del stale_schema["successful_injections"]
+    stale_schema["successful_prompt_injections"] = 0
+    assert any("successful_injections" in f for f in verify._eval_outcome_failures(stale_schema))
 
     # Per-call identity totals are release claims too: one uncertified call withdraws the
     # statement that the release names the model behind every measured answer.
