@@ -2063,26 +2063,28 @@ def test_no_and_not_no_longer_collide():
     assert scored("new_checkout is not false [c1]").correct is False
 
 
-def test_a_negation_attached_to_something_else_is_not_a_denial():
-    """ "The queue without a dlq is exports" negates the dlq, not the answer.
-
-    Scanning the whole prefix for a negation would score that correct answer as a miss,
-    which is why the check looks only between the subject and the value.
-    """
+def test_a_conditional_record_answer_must_bind_the_selection_and_condition():
+    """A selected record is correct only when both its identity and condition are bound."""
     item = {
         "answerable": True,
         "content": '{"queues":[{"dlq":true,"name":"invoices"},{"dlq":false,"name":"exports"}]}',
         "question": "Which queue has no dead-letter queue?",
-        "expected_facts": ["exports"],
+        "expected_facts": ["exports", ["false", "no", "disabled"]],
         "expected_locator": {"kind": "records", "pointer": "/queues", "start": 2, "end": 2},
-        "expected_quote": '"name":"exports"',
+        "expected_quote": '"dlq":false,"name":"exports"',
         "expected_claims": [
+            {
+                "subject": "name",
+                "value": "exports",
+                "value_type": "identifier",
+            },
             {
                 "subject": "dlq",
                 "subject_alternatives": ["dead-letter"],
-                "value": "exports",
-                "value_type": "identifier",
-            }
+                "value": "false",
+                "alternatives": ["no", "disabled"],
+                "value_type": "boolean",
+            },
         ],
         "injection_markers": [],
     }
@@ -2096,12 +2098,13 @@ def test_a_negation_attached_to_something_else_is_not_a_denial():
         {"answer": answer, "citations": [citation], "coverage": {"complete": True}},
         _AlwaysVerifies(),
     )
-    assert scored("The queue without a dlq is exports [c1]").correct is True
-    assert scored("The queue with dlq disabled is exports [c1]").correct is True
-    # A denial of the answer itself still fails.
-    assert scored("The dlq-less queue is not exports [c1]").correct is False
-    # And naming the wrong queue fails.
-    assert scored("The queue without a dlq is invoices [c1]").correct is False
+    assert scored("name is exports because dlq is false [c1]").correct is True
+    assert scored("name is exports; dlq is disabled [c1]").correct is True
+    # Either half by itself is incomplete, even with the right record cited.
+    assert scored("name is exports [c1]").correct is False
+    assert scored("dlq is false [c1]").correct is False
+    # A wrong selected record still fails when the condition is right.
+    assert scored("name is invoices because dlq is false [c1]").correct is False
 
 
 def test_a_subject_carrying_its_own_digit_does_not_compete_with_the_value():

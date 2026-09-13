@@ -2,8 +2,8 @@
   "schema_version": "1.0",
   "purpose": "Bounded holdout evidence that source-key claim binding generalizes to renamed keys and paraphrased questions that do not contain those keys.",
   "runs_per_item": 3,
-  "provider_call_budget": 24,
-  "call_budget_basis": "4 items * 3 runs * (1 initial call + at most 1 citation-repair call); transient and format retries are disabled by the diagnostic runner.",
+  "provider_call_budget": 30,
+  "call_budget_basis": "5 items * 3 runs * (1 initial call + at most 1 citation-repair call); transient and format retries are disabled by the diagnostic runner.",
   "items": [
     {
       "id": "holdout_retention_horizon",
@@ -63,6 +63,27 @@
       "expect_complete": true,
       "expected_claims": [
         {"subject": "failover_region_code", "value": "nimbus-7", "value_type": "identifier"}
+      ]
+    },
+    {
+      "id": "holdout_conditional_lane",
+      "category": "claim_binding_holdout",
+      "media_type": "application/json",
+      "content": "{\"lanes\":[{\"active\":true,\"lane_code\":\"opal-1\"},{\"active\":false,\"lane_code\":\"sable-9\"}]}",
+      "question": "Which lane should be withheld from new work?",
+      "expected_facts": ["sable-9", ["false", "inactive"]],
+      "expected_locator": {"kind": "records", "pointer": "/lanes", "start": 2, "end": 2},
+      "expected_quote": "\"active\":false,\"lane_code\":\"sable-9\"",
+      "answerable": true,
+      "expect_complete": true,
+      "expected_claims": [
+        {"subject": "lane_code", "value": "sable-9", "value_type": "identifier"},
+        {
+          "subject": "active",
+          "value": "false",
+          "alternatives": ["inactive"],
+          "value_type": "boolean"
+        }
       ]
     }
   ]

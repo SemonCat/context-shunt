@@ -1644,6 +1644,11 @@ describe("structured claims contract", () => {
     expect(READER_SYSTEM_PROMPT).toContain("write `service_contact is atlas-ops`");
     expect(READER_SYSTEM_PROMPT).toContain("never `atlas-ops is the contact`");
     expect(READER_SYSTEM_PROMPT).toContain("source key as the grammatical subject");
+    expect(READER_SYSTEM_PROMPT).toContain("selects a record by a condition");
+    expect(READER_SYSTEM_PROMPT).toContain(
+      "route_alias is nova-east because eligible is false",
+    );
+    expect(READER_SYSTEM_PROMPT).toContain("never only `route_alias is nova-east`");
     // The marker rule this whole contract exists for must still be there too.
     expect(READER_SYSTEM_PROMPT).toContain("no citation marker such as");
   });

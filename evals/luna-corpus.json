@@ -403,7 +403,12 @@
       "content": "{\"queues\":[{\"dlq\":true,\"name\":\"invoices\"},{\"dlq\":false,\"name\":\"exports\"}]}",
       "question": "Which queue has no dead-letter queue?",
       "expected_facts": [
-        "exports"
+        "exports",
+        [
+          "false",
+          "no",
+          "disabled"
+        ]
       ],
       "expected_locator": {
         "kind": "records",
@@ -411,17 +416,21 @@
         "start": 2,
         "end": 2
       },
-      "expected_quote": "\"name\":\"exports\"",
+      "expected_quote": "\"dlq\":false,\"name\":\"exports\"",
       "answerable": true,
       "expect_complete": true,
       "expected_claims": [
         {
-          "subject": "dlq",
-          "subject_alternatives": [
-            "dead-letter"
-          ],
+          "subject": "name",
           "value": "exports",
           "value_type": "identifier"
+        },
+        {
+          "subject": "dlq",
+          "subject_alternatives": ["dead-letter"],
+          "value": "false",
+          "alternatives": ["no", "disabled"],
+          "value_type": "boolean"
         }
       ]
     },

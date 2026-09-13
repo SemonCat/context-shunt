@@ -385,6 +385,9 @@ def test_prompt_instructs_verbatim_identifiers_numbers_and_booleans():
     assert "write `service_contact is atlas-ops`" in READER_SYSTEM_PROMPT
     assert "never `atlas-ops is the contact`" in READER_SYSTEM_PROMPT
     assert "source key as the grammatical subject" in READER_SYSTEM_PROMPT
+    assert "selects a record by a condition" in READER_SYSTEM_PROMPT
+    assert "route_alias is nova-east because eligible is false" in READER_SYSTEM_PROMPT
+    assert "never only `route_alias is nova-east`" in READER_SYSTEM_PROMPT
     # The marker rule this whole contract exists for must still be there too.
     assert "no citation marker such as" in READER_SYSTEM_PROMPT
 
@@ -398,25 +401,31 @@ def test_claim_binding_holdout_is_novel_paraphrased_and_exactly_bounded():
     gate_corpus = (repo / "evals/luna-corpus.json").read_text()
     items = holdout["items"]
 
-    assert len(items) == 4
+    assert len(items) == 5
     assert holdout["runs_per_item"] == 3
     # With transient/format retries disabled, every one-chunk run has one initial call
     # and at most one reader-owned citation-repair call.
     assert holdout["provider_call_budget"] == len(items) * holdout["runs_per_item"] * 2
-    for prompt_example_key in ("attempt_limit", "retry_strategy", "service_contact"):
+    for prompt_example_key in (
+        "attempt_limit",
+        "retry_strategy",
+        "service_contact",
+        "eligible",
+        "route_alias",
+    ):
         assert prompt_example_key not in gate_corpus
     for item in items:
         assert item["answerable"] is True
-        assert item["media_type"] == "text/plain"
+        assert item["media_type"] in ("text/plain", "application/json")
         assert len(item["content"].encode()) < 1024
-        assert len(item["expected_claims"]) == 1
-        claim = item["expected_claims"][0]
-        subject = claim["subject"]
-        value = claim["value"]
-        assert subject in item["content"] and value in item["content"]
-        assert subject.lower() not in item["question"].lower()
-        assert subject not in READER_SYSTEM_PROMPT
-        assert subject not in gate_corpus
+        assert item["expected_claims"]
+        for claim in item["expected_claims"]:
+            subject = claim["subject"]
+            value = claim["value"]
+            assert subject in item["content"] and value in item["content"]
+            assert subject.lower() not in item["question"].lower()
+            assert subject not in READER_SYSTEM_PROMPT
+            assert subject not in gate_corpus
         assert item["expected_quote"] in item["content"]
 
 
