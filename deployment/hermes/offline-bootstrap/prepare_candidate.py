@@ -108,7 +108,11 @@ def prepare(hook: Path, wheel: Path, output: Path) -> None:
                 before.decode().splitlines(keepends=True),
                 after.decode().splitlines(keepends=True),
                 fromfile=str(manifest["hook"]["host_path"]),  # type: ignore[index]
-                tofile=str(manifest["hook"]["host_path"]) + ".ffa218c",  # type: ignore[index]
+                tofile=(
+                    str(manifest["hook"]["host_path"])
+                    + "."
+                    + str(manifest["source_commit"])[:7]
+                ),
             )
         ).encode()
         write_new(output / "hook.diff", diff, 0o600)

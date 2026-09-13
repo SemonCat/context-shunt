@@ -84,7 +84,7 @@ def test_prepare_emits_complete_checksummed_candidate(tmp_path: Path, monkeypatc
     for name, data in source_files.items():
         (source / name).write_bytes(data)
     manifest = {
-        "source_commit": "ffa218c",
+        "source_commit": "5492046",
         "hook": {
             "host_path": "/host/hook",
             "expected_before_sha256": MODULE.sha256(hook),
@@ -174,7 +174,7 @@ def test_committed_bundle_matches_trust_root_and_deployment_source() -> None:
                 before.decode().splitlines(keepends=True),
                 after.decode().splitlines(keepends=True),
                 fromfile=manifest["hook"]["host_path"],
-                tofile=manifest["hook"]["host_path"] + ".ffa218c",
+                tofile=manifest["hook"]["host_path"] + ".5492046",
             )
         ).encode()
         assert archived("hook.diff") == expected_diff

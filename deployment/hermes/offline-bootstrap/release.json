@@ -1,6 +1,6 @@
 {
-  "commit": "ffa218cb27a33d99659b36b1214c49c166cffa73",
-  "installed_core_tree_sha256": "4f010071087ef8b3957b5bd0fb35b50ee94cdbe412473216a5b8bd281bb3e013",
+  "commit": "5492046470eb9c1d6e1e39135508635baafc4908",
+  "installed_core_tree_sha256": "6ed9364477b5e82d8abecadb50490dea918cf50543f9007613559ede83cae5df",
   "wheel": "context_shunt_core-1.1.0-py3-none-any.whl",
-  "wheel_sha256": "b8f0bfa3d60831da5e5c2baf3e7acb71163e39b87cb04abed63a888b17a045fc"
+  "wheel_sha256": "be5da4818b8cca70a4f663cd9708658b6f971dde452aded395f2e928d1a51855"
 }

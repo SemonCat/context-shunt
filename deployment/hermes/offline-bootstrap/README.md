@@ -4,7 +4,7 @@ This directory owns the release-specific correction for Hermes startup. `ensure_
 keeps the host's supported offline-only, no-dependency installer flow and adds unconditional
 fail-closed checks so `PYTHONOPTIMIZE` cannot remove an integrity gate. The release manifest
 and the path inside the marked shunt hook block advance to
-`ffa218cb27a33d99659b36b1214c49c166cffa73`.
+`5492046470eb9c1d6e1e39135508635baafc4908`.
 
 `prepare_candidate.py` is non-mutating with respect to Hermes. It requires the exact
 inspected hook preimage and the exact verified release wheel, refuses hook drift, preserves
