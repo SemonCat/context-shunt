@@ -51,7 +51,15 @@ jobs:
         run: ./scripts/sync-contracts --check
 
       - name: Lint (ruff)
-        run: ./.venv/bin/ruff check packages/core-py adapters/hermes scripts/sync-contracts scripts/verify
+        run: >-
+          ./.venv/bin/ruff check packages/core-py adapters/hermes scripts/sync-contracts scripts/verify
+          deployment/hermes/offline-bootstrap/activate_bootstrap.py
+          deployment/hermes/offline-bootstrap/ensure_core.py
+          deployment/hermes/offline-bootstrap/prepare_candidate.py
+          deployment/hermes/offline-bootstrap/verify_install.py
+          deployment/hermes/offline-bootstrap/test_activate_bootstrap.py
+          deployment/hermes/offline-bootstrap/test_prepare_candidate.py
+          deployment/hermes/offline-bootstrap/test_runtime.py
 
       - name: Format check (ruff)
         run: ./.venv/bin/ruff format --check packages/core-py adapters/hermes
@@ -67,6 +75,13 @@ jobs:
 
       - name: Unit gates
         run: ./scripts/verify unit all
+
+      - name: Hermes offline bootstrap contract
+        run: ./.venv/bin/pytest -q deployment/hermes/offline-bootstrap
+
+      - name: Hermes offline bootstrap published bundle
+        working-directory: deployment/hermes/offline-bootstrap
+        run: sha256sum --check bundle.sha256
 
       - name: Fail-closed integration gates
         run: |

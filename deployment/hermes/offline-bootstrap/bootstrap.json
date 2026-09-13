@@ -1,0 +1,33 @@
+{
+  "schema": "context-shunt.hermes-offline-bootstrap.v1",
+  "source_commit": "ffa218cb27a33d99659b36b1214c49c166cffa73",
+  "hook": {
+    "host_path": "/opt/hermes-data/scripts/99-hermes-local-patches",
+    "container_path": "/etc/cont-init.d/99-hermes-local-patches",
+    "expected_before_sha256": "bb3fb0efe675727fa637b3392be9a291416899a0af668197a23e478951cddcd4",
+    "expected_after_sha256": "daaefc09c1b9470fd7e385fa18563c3bb65d461d58bd70ea8add86ccb7869cea",
+    "before_mode": "0755",
+    "before_uid": 10000,
+    "before_gid": 10000,
+    "target_mode": "0755",
+    "target_uid": 0,
+    "target_gid": 0
+  },
+  "release": {
+    "host_directory": "/opt/hermes-data/context-shunt/ffa218cb27a33d99659b36b1214c49c166cffa73",
+    "container_directory": "/opt/data/context-shunt/ffa218cb27a33d99659b36b1214c49c166cffa73",
+    "directory_mode": "0755",
+    "file_mode": "0444",
+    "uid": 0,
+    "gid": 0,
+    "files": {
+      "context_shunt_core-1.1.0-py3-none-any.whl": "b8f0bfa3d60831da5e5c2baf3e7acb71163e39b87cb04abed63a888b17a045fc",
+      "ensure_core.py": "1c0da6013612481122b21ec52b729b5975e8ce8e88521257caa48cb3f695fae6",
+      "release.json": "93b37fb2434c5443de632734f5b4a461507a9ee3cf55d851c0b48d06509c7f5c",
+      "verify_install.py": "ed7b353b1046d19d0d8970fd7c7941e619ebb1ef7b066c40727323ad5a34ffd6"
+    }
+  },
+  "candidate_files": {
+    "activate_bootstrap.py": "abc56260ebe0c457e30a41298db213e1404f501849414675cc01a6cb0774e357"
+  }
+}
