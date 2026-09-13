@@ -420,6 +420,14 @@ def test_only_the_isolated_in_host_route_is_release_quality():
     )
 
 
+def test_the_verifier_propagates_its_builtin_bridge_path_to_pytest():
+    """A descriptor import that passes in the parent must also import in the gate worker."""
+    verify = (REPO / "scripts" / "verify").read_text()
+    assert 'pythonpath = [str(ROOT / "evals")]' in verify
+    assert 'env["PYTHONPATH"] = os.pathsep.join(pythonpath)' in verify
+    assert "env=env" in verify
+
+
 def test_the_bridge_env_names_are_documented_where_an_operator_looks():
     """Every environment name the in-host route reads is named in its own docstring."""
     module = _bridges_module("openclaw_inhost")

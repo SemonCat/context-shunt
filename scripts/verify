@@ -153,7 +153,22 @@ def _pytest(marker: str) -> tuple[str, int, str]:
     interpreter = _python()
     if interpreter is None:
         return "not_run", 0, "python3 not found"
-    proc = _run([interpreter, "-m", "pytest", "-m", marker, "-q", "--no-header"], ROOT)
+    # Built-in live bridges live under evals/ rather than a shipped package. The verifier
+    # already imports their descriptor from there in its own process; give the pytest
+    # worker the same path so a validated built-in route cannot fail only at invocation.
+    env = dict(os.environ)
+    pythonpath = [str(ROOT / "evals")]
+    if env.get("PYTHONPATH"):
+        pythonpath.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    proc = subprocess.run(
+        [interpreter, "-m", "pytest", "-m", marker, "-q", "--no-header"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
     cases = _pytest_count(proc.stdout)
     if proc.returncode == 5 or cases == 0:
         # pytest exit 5 is "no tests collected". An empty gate is a failure, not a pass.

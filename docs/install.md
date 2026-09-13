@@ -277,7 +277,6 @@ prints or writes a credential:
 CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
 CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
-PYTHONPATH=evals \
   ./scripts/verify eval luna
 ```
 
