@@ -38,7 +38,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -86,6 +86,23 @@ class RunDiagnostic:
     call_count: int
 
 
+class _BudgetedBridge:
+    """Count invocations and refuse locally before an external call exceeds budget."""
+
+    def __init__(self, call, budget: int):
+        self._call = call
+        self.budget = budget
+        self.calls = 0
+        self.blocked = False
+
+    def __call__(self, **kwargs):
+        if self.calls >= self.budget:
+            self.blocked = True
+            raise RuntimeError("diagnostic provider-call budget exhausted")
+        self.calls += 1
+        return self._call(**kwargs)
+
+
 def _reason(item: dict, answer: str, score) -> str:
     if not item["answerable"]:
         return "OK" if not answer.strip() else "FALSE_COMPLETE"
@@ -115,12 +132,19 @@ def _load_bridge():
     return getattr(importlib.import_module(module_name), attr)
 
 
-def _run_one(item: dict, run_index: int, tmp_root: Path, bridge_call) -> RunDiagnostic:
+def _run_one(
+    item: dict,
+    run_index: int,
+    tmp_root: Path,
+    bridge_call,
+    *,
+    limits=DEFAULT_LIMITS,
+) -> RunDiagnostic:
     media = (
         JSON_MEDIA_TYPE if item["media_type"] == "application/json" else TEXT_MEDIA_TYPE
     )
     recorder = tel._ClaimsRecorder(bridge_call)
-    provider = HostBridgeProvider(recorder, DEFAULT_LIMITS, READER_MODEL)
+    provider = HostBridgeProvider(recorder, limits, READER_MODEL)
     registry = tel._eval_registry(tmp_root)
     try:
         entry = registry.register(
@@ -153,7 +177,7 @@ def _run_one(item: dict, run_index: int, tmp_root: Path, bridge_call) -> RunDiag
         records = record_count(resolve_pointer(entry.snapshot.json_value, pointer))
         selector = {"kind": "records", "pointer": pointer, "start": 1, "end": records}
 
-    result = Reader(registry, provider).answer(
+    result = Reader(registry, provider, limits=limits).answer(
         "eval",
         {
             "schema_version": "1.0",
@@ -214,6 +238,19 @@ def main() -> None:
         help="runs per selected item (default: 1 - one pass)",
     )
     parser.add_argument(
+        "--corpus",
+        default=str(REPO / "evals" / "luna-corpus.json"),
+        help="corpus JSON to run (default: the fixed Luna gate corpus)",
+    )
+    parser.add_argument(
+        "--no-retries",
+        action="store_true",
+        help=(
+            "disable transient and format retries; one request may still spend the "
+            "reader's single citation-repair call"
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=str(REPO / "reports" / "eval-luna-diagnostics.jsonl"),
         help="path to append JSON-line records to (gitignored 'reports/' by default)",
@@ -221,7 +258,9 @@ def main() -> None:
     args = parser.parse_args()
 
     bridge_call = _load_bridge()
-    corpus = tel._corpus()
+    corpus_path = Path(args.corpus).resolve()
+    with corpus_path.open("rb") as fh:
+        corpus = json.load(fh)
     all_items = {it["id"]: it for it in corpus["items"]}
     if args.items == "all":
         selected = list(all_items.values())
@@ -235,12 +274,41 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    limits = (
+        replace(DEFAULT_LIMITS, max_transient_retries=0, max_format_retries=0)
+        if args.no_retries
+        else DEFAULT_LIMITS
+    )
+    declared_budget = corpus.get("provider_call_budget")
+    if declared_budget is not None:
+        if not isinstance(declared_budget, int) or declared_budget < 1:
+            raise SystemExit("corpus provider_call_budget must be a positive integer")
+        if not args.no_retries:
+            raise SystemExit("a corpus with provider_call_budget requires --no-retries")
+        if args.items != "all" or args.runs != corpus.get("runs_per_item"):
+            raise SystemExit(
+                "provider_call_budget is valid only for all corpus items at its declared "
+                "runs_per_item"
+            )
+    budgeted_bridge = (
+        _BudgetedBridge(bridge_call, declared_budget)
+        if declared_budget is not None
+        else None
+    )
+    active_bridge = budgeted_bridge or bridge_call
+
     rows: list[RunDiagnostic] = []
     tmp_base = Path(f"/tmp/shunt-diag-{os.getpid()}")
     with out_path.open("a", encoding="utf-8") as fh:
         for item in selected:
             for run in range(args.runs):
-                row = _run_one(item, run, tmp_base / f"{item['id']}-{run}", bridge_call)
+                row = _run_one(
+                    item,
+                    run,
+                    tmp_base / f"{item['id']}-{run}",
+                    active_bridge,
+                    limits=limits,
+                )
                 rows.append(row)
                 line = json.dumps(asdict(row), separators=(",", ":"))
                 print(line)
@@ -252,7 +320,25 @@ def main() -> None:
     shutil.rmtree(tmp_base, ignore_errors=True)
 
     print(f"--- {len(rows)} runs, written to {out_path} ---")
+    provider_calls = (
+        budgeted_bridge.calls
+        if budgeted_bridge is not None
+        else sum(row.call_count for row in rows)
+    )
+    if declared_budget is not None:
+        assert budgeted_bridge is not None
+        if budgeted_bridge.blocked:
+            raise SystemExit(
+                f"provider-call budget exhausted: actual={provider_calls} budget={declared_budget}"
+            )
+        print(
+            f"provider calls: actual={provider_calls} budget={declared_budget} "
+            f"remaining={declared_budget - provider_calls}"
+        )
     misses = [r for r in rows if r.reason != "OK" and r.status != "refused"]
+    safe_refusals = [r for r in rows if r.status == "refused"]
+    print(f"safe core refusals: {len(safe_refusals)}")
+    print(f"wrong/no-answer outcomes: {len(misses)}")
     print(f"non-OK reasons (excluding expected core refusals): {len(misses)}")
     for row in rows:
         if row.reason != "OK":

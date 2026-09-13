@@ -1636,6 +1636,14 @@ describe("structured claims contract", () => {
     expect(READER_SYSTEM_PROMPT).toContain("exactly as they appear in the excerpt");
     expect(READER_SYSTEM_PROMPT).toContain("hyphenated or compound names");
     expect(READER_SYSTEM_PROMPT).toContain("boolean or yes/no values");
+    expect(READER_SYSTEM_PROMPT).toContain(
+      "Every claim must name the exact source key or identifier",
+    );
+    expect(READER_SYSTEM_PROMPT).toContain('"text": "attempt_limit is 7."');
+    expect(READER_SYSTEM_PROMPT).toContain("never `the attempt limit is 7`");
+    expect(READER_SYSTEM_PROMPT).toContain("write `service_contact is atlas-ops`");
+    expect(READER_SYSTEM_PROMPT).toContain("never `atlas-ops is the contact`");
+    expect(READER_SYSTEM_PROMPT).toContain("source key as the grammatical subject");
     // The marker rule this whole contract exists for must still be there too.
     expect(READER_SYSTEM_PROMPT).toContain("no citation marker such as");
   });

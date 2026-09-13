@@ -59,12 +59,12 @@ from .provenance import (
 #: claims/citation_ids shape, not just an abstract schema line). Two claims, one citing two
 #: locations, so the model sees both a single- and a multi-citation claim before it answers.
 _CLAIMS_EXAMPLE = (
-    '{"claims": [{"text": "Retries stop after three attempts.", "citation_ids": ["c1"]}, '
-    '{"text": "The timeout backs off exponentially before that ceiling.", '
+    '{"claims": [{"text": "attempt_limit is 7.", "citation_ids": ["c1"]}, '
+    '{"text": "retry_strategy is exponential before attempt_limit reaches 7.", '
     '"citation_ids": ["c1", "c2"]}], '
     '"citations": [{"id": "c1", "line_start": 41, "line_end": 41, '
-    '"quote": "max_retries = 3"}, {"id": "c2", "line_start": 12, "line_end": 12, '
-    '"quote": "backoff = \\"exponential\\""}]}'
+    '"quote": "attempt_limit = 7"}, {"id": "c2", "line_start": 12, "line_end": 12, '
+    '"quote": "retry_strategy = \\"exponential\\""}]}'
 )
 
 READER_SYSTEM_PROMPT = (
@@ -76,9 +76,15 @@ READER_SYSTEM_PROMPT = (
     "3. State every factual claim as a separate object in `claims`: `text` is the "
     'assertion in your own words, with no citation marker such as "[c1]" written into it - '
     "the caller renders markers from `citation_ids` mechanically, so a marker you place by "
-    "hand is never trusted. Copy identifiers (including hyphenated or compound names), "
-    "numbers, and boolean or yes/no values exactly as they appear in the excerpt rather "
-    "than paraphrasing them; paraphrase everything else freely. `citation_ids` lists every "
+    "hand is never trusted. Every claim must name the exact source key or identifier that "
+    "carries the answer, even when the question paraphrases it. Copy identifiers "
+    "(including hyphenated or compound names), numbers, and boolean or yes/no values "
+    "exactly as they appear in the excerpt rather than paraphrasing them: if the source "
+    "says `attempt_limit = 7`, write `attempt_limit is 7`, never `the attempt limit is "
+    "7`; if it says `service_contact: atlas-ops`, write `service_contact is atlas-ops`, "
+    "never `atlas-ops is the contact`. Keep the source key as the grammatical "
+    "subject even when that sounds less natural. Paraphrase everything else freely. "
+    "`citation_ids` lists every "
     "entry in your `citations` array that supports that claim; a claim with no "
     "citation_ids is dropped, so never state a fact without one.\n"
     "4. A quote must be copied byte-for-byte from the excerpt line or record it cites, and "

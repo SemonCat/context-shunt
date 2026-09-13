@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Bounded holdout evidence that source-key claim binding generalizes to renamed keys and paraphrased questions that do not contain those keys.",
+  "runs_per_item": 3,
+  "provider_call_budget": 24,
+  "call_budget_basis": "4 items * 3 runs * (1 initial call + at most 1 citation-repair call); transient and format retries are disabled by the diagnostic runner.",
+  "items": [
+    {
+      "id": "holdout_retention_horizon",
+      "category": "claim_binding_holdout",
+      "media_type": "text/plain",
+      "content": "retention_horizon_days: 17\narchive_tier: glacier-blue\n",
+      "question": "For how many days are completed backups kept?",
+      "expected_facts": ["17"],
+      "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+      "expected_quote": "retention_horizon_days: 17",
+      "answerable": true,
+      "expect_complete": true,
+      "expected_claims": [
+        {"subject": "retention_horizon_days", "value": "17", "value_type": "number"}
+      ]
+    },
+    {
+      "id": "holdout_handoff_channel",
+      "category": "claim_binding_holdout",
+      "media_type": "text/plain",
+      "content": "handoff_channel = quartz-east\nretry_lane = amber-west\n",
+      "question": "Where should a completed batch be sent next?",
+      "expected_facts": ["quartz-east"],
+      "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+      "expected_quote": "handoff_channel = quartz-east",
+      "answerable": true,
+      "expect_complete": true,
+      "expected_claims": [
+        {"subject": "handoff_channel", "value": "quartz-east", "value_type": "identifier"}
+      ]
+    },
+    {
+      "id": "holdout_partial_restore",
+      "category": "claim_binding_holdout",
+      "media_type": "text/plain",
+      "content": "allows_partial_restore: false\nrequires_full_snapshot: true\n",
+      "question": "Can operators recover only part of a snapshot?",
+      "expected_facts": ["false"],
+      "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+      "expected_quote": "allows_partial_restore: false",
+      "answerable": true,
+      "expect_complete": true,
+      "expected_claims": [
+        {"subject": "allows_partial_restore", "value": "false", "value_type": "boolean"}
+      ]
+    },
+    {
+      "id": "holdout_failover_region",
+      "category": "claim_binding_holdout",
+      "media_type": "text/plain",
+      "content": "failover_region_code = nimbus-7\nprimary_region_code = cirrus-2\n",
+      "question": "Which location receives traffic when the primary site is unavailable?",
+      "expected_facts": ["nimbus-7"],
+      "expected_locator": {"kind": "lines", "start": 1, "end": 1},
+      "expected_quote": "failover_region_code = nimbus-7",
+      "answerable": true,
+      "expect_complete": true,
+      "expected_claims": [
+        {"subject": "failover_region_code", "value": "nimbus-7", "value_type": "identifier"}
+      ]
+    }
+  ]
+}

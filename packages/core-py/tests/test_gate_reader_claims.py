@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -378,8 +379,45 @@ def test_prompt_instructs_verbatim_identifiers_numbers_and_booleans():
     assert "exactly as they appear in the excerpt" in READER_SYSTEM_PROMPT
     assert "hyphenated or compound names" in READER_SYSTEM_PROMPT
     assert "boolean or yes/no values" in READER_SYSTEM_PROMPT
+    assert "Every claim must name the exact source key or identifier" in READER_SYSTEM_PROMPT
+    assert '"text": "attempt_limit is 7."' in READER_SYSTEM_PROMPT
+    assert "never `the attempt limit is 7`" in READER_SYSTEM_PROMPT
+    assert "write `service_contact is atlas-ops`" in READER_SYSTEM_PROMPT
+    assert "never `atlas-ops is the contact`" in READER_SYSTEM_PROMPT
+    assert "source key as the grammatical subject" in READER_SYSTEM_PROMPT
     # The marker rule this whole contract exists for must still be there too.
     assert "no citation marker such as" in READER_SYSTEM_PROMPT
+
+
+def test_claim_binding_holdout_is_novel_paraphrased_and_exactly_bounded():
+    """The live holdout must test the rule, not repeat prompt or gate-corpus fixtures."""
+    from context_shunt.provider import READER_SYSTEM_PROMPT
+
+    repo = Path(__file__).resolve().parents[3]
+    holdout = json.loads((repo / "evals/claim-binding-generalization.json").read_text())
+    gate_corpus = (repo / "evals/luna-corpus.json").read_text()
+    items = holdout["items"]
+
+    assert len(items) == 4
+    assert holdout["runs_per_item"] == 3
+    # With transient/format retries disabled, every one-chunk run has one initial call
+    # and at most one reader-owned citation-repair call.
+    assert holdout["provider_call_budget"] == len(items) * holdout["runs_per_item"] * 2
+    for prompt_example_key in ("attempt_limit", "retry_strategy", "service_contact"):
+        assert prompt_example_key not in gate_corpus
+    for item in items:
+        assert item["answerable"] is True
+        assert item["media_type"] == "text/plain"
+        assert len(item["content"].encode()) < 1024
+        assert len(item["expected_claims"]) == 1
+        claim = item["expected_claims"][0]
+        subject = claim["subject"]
+        value = claim["value"]
+        assert subject in item["content"] and value in item["content"]
+        assert subject.lower() not in item["question"].lower()
+        assert subject not in READER_SYSTEM_PROMPT
+        assert subject not in gate_corpus
+        assert item["expected_quote"] in item["content"]
 
 
 # -- forged markers ---------------------------------------------------------------------
