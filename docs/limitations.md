@@ -23,12 +23,12 @@ otherwise.
 
 The shared internal tool-argument contract supports an optional selector for
 `context_shunt_read` and per-call `max_result_bytes` / `max_scan_lines` on
-`context_shunt_inspect`. The current adapter registration schemas omit those optional
-fields. In particular, OpenClaw declares `additionalProperties: false`, so an agent cannot
-portably send them even though the handler/core understands them internally. The documented
-host-facing examples therefore use full-source reader selection and configured inspect
-limits. Aligning the registered schemas with the shared contract remains an adapter release
-task, not a capability this documentation assumes.
+`context_shunt_inspect`. Hermes derives its registered schemas from that contract and
+exposes those fields. OpenClaw's registration still omits the optional reader selector and
+per-call inspect limits while declaring `additionalProperties: false`, so those controls are
+not portable across both hosts even though its handler/core understands them internally.
+Portable recovery uses the required inspect selector and returned cursor; per-call limit
+overrides remain a Hermes-only registered surface until the OpenClaw schema is aligned.
 
 ## The artifact broker depends on a producer, and only imports one shape of thing
 
@@ -255,6 +255,6 @@ Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CIT
 
 The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
 
-Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
 Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.

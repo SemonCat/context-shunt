@@ -130,6 +130,24 @@ function checkLegacyCompaction(env: Record<string, unknown>, limits: Limits): vo
   if (typeof block !== "object" || block === null) {
     throw new OutputGuardError("legacy_compaction must be an object");
   }
+  if (
+    env["code"] !== "LEGACY_COMPACTED"
+    || env["status"] !== "partial"
+    || env["result_kind"] !== "legacy_compaction"
+    || env["answer"] !== ""
+    || !Array.isArray(env["citations"])
+    || env["citations"].length !== 0
+  ) {
+    throw new OutputGuardError("legacy_compaction cannot masquerade as an answer");
+  }
+  const coverage = env["coverage"];
+  if (
+    typeof coverage !== "object"
+    || coverage === null
+    || (coverage as Record<string, unknown>)["complete"] !== false
+  ) {
+    throw new OutputGuardError("legacy_compaction must declare incomplete coverage");
+  }
   const value = block as Record<string, unknown>;
   if (value["deterministic"] !== true) {
     throw new OutputGuardError("legacy_compaction must declare itself deterministic");
@@ -149,9 +167,14 @@ function checkLegacyCompaction(env: Record<string, unknown>, limits: Limits): vo
     throw new OutputGuardError("legacy_compaction summary_bytes disagrees with summary");
   }
   const provenance = env["provenance"];
-  if (typeof provenance === "object" && provenance !== null
-      && (provenance as Record<string, unknown>)["derived"] === true) {
-    throw new OutputGuardError("legacy_compaction must not accompany a derived=true provenance");
+  if (
+    typeof provenance !== "object"
+    || provenance === null
+    || (provenance as Record<string, unknown>)["derived"] !== false
+    || (provenance as Record<string, unknown>)["label"] !== "legacy_compaction"
+    || (provenance as Record<string, unknown>)["citations_mechanically_verified"] !== false
+  ) {
+    throw new OutputGuardError("legacy_compaction provenance is authoritative");
   }
 }
 

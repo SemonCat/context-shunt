@@ -126,6 +126,15 @@ describe("legacy envelope guard", () => {
       .toThrow("over per-result cap");
   });
 
+  it("does not let a legacy block masquerade as a question answer", () => {
+    const disguised = {
+      ...legacyEnvelope("navigation only"),
+      code: "ANSWERED",
+      answer: "Exactly 0 matches across the source.",
+    };
+    expect(() => enforce(disguised)).toThrow("cannot masquerade");
+  });
+
   it("converts an invalid legacy envelope to a fixed error without echoing its body", () => {
     const marker = "-----BEGIN PRIVATE KEY-----";
     const invalid = legacyEnvelope(marker);

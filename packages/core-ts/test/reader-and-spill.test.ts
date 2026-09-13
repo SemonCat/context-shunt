@@ -25,7 +25,14 @@ import { Deadline, FakeClock } from "../src/clock.js";
 import { estimateTokens as accountingTokens } from "../src/accounting.js";
 import { estimateTokens, planChunks } from "../src/chunking.js";
 import { referencedIds } from "../src/citations.js";
-import { MAX_RAW_CITATIONS, Reader } from "../src/reader.js";
+import {
+  INCOMPLETE_ANSWER_GUIDANCE,
+  INCOMPLETE_ANSWER_PREFIX,
+  INCOMPLETE_NO_MATCH_GUIDANCE,
+  MAX_RAW_CITATIONS,
+  Reader,
+  scopePublishedAnswer,
+} from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
 import { SpillEngine } from "../src/spill.js";
@@ -238,6 +245,10 @@ describe("reader gate", () => {
     expect(luna.callCount).toBe(0);
     expect(env.code).toBe("NO_MATCH");
     expect(env.status).toBe("ok");
+    // A genuinely fully-covered no-match carries no incomplete-coverage caveat: the
+    // absence really is confirmed across the whole (single-chunk) source.
+    expect(env.coverage.complete).toBe(true);
+    expect(env.guidance).toBeUndefined();
   });
 
   it("is partial when a chunk is omitted by budget", async () => {
@@ -254,6 +265,85 @@ describe("reader gate", () => {
     expect(env.status).toBe("partial");
     expect(env.coverage.complete).toBe(false);
     expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+    // Positive evidence remains visible, but the main answer itself carries the scope
+    // boundary even if a consumer ignores every sibling metadata field.
+    expect(env.code).toBe("ANSWERED");
+    expect(env.answer.startsWith(INCOMPLETE_ANSWER_PREFIX)).toBe(true);
+    expect(env.answer).toContain("The first value is documented");
+    expect(env.guidance).toContain("Coverage is incomplete");
+  });
+
+  it("scopes a partial exact-zero claim inside the published answer", async () => {
+    const body = "2026-08-01 observed event\n" + Array.from(
+      { length: 4998 }, (_, i) => `line ${i + 2} unrelated value\n`,
+    ).join("");
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(body)));
+    const rawClaim = "There are exactly 0 matching events in the complete source [c1].";
+    const luna = new FakeLuna([], answerJson(rawClaim, [
+      { id: "c1", line_start: 1, line_end: 1, quote: "2026-08-01 observed event" },
+    ]));
+    const env = await new Reader(registry, luna).answer(
+      "sess",
+      request(entry, { budgets: { max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000 } }),
+    );
+
+    expect(env.status).toBe("partial");
+    expect(env.code).toBe("ANSWERED");
+    expect(env.coverage.complete).toBe(false);
+    expect(env.answer.startsWith(INCOMPLETE_ANSWER_PREFIX)).toBe(true);
+    expect(env.answer.toLowerCase()).toContain("reviewed subset only");
+    expect(env.answer.toLowerCase()).toContain("citations verify bytes, not claims");
+    expect(env.answer).toContain(rawClaim);
+    expect(env.provenance?.citations_mechanically_verified).toBe(true);
+  });
+
+  it("is partial and not a confirmed absence when a no-match chunk is omitted by budget", async () => {
+    const body = Array.from({ length: 5000 }, (_, i) => `line ${i} value`).join("\n") + "\n";
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const entry = registry.register("sess", snapshotBytes(enc(body)));
+    const luna = new FakeLuna([], answerJson("", []));
+    const env = await new Reader(registry, luna).answer(
+      "sess",
+      request(entry, { budgets: { max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000 } }),
+    );
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("partial");
+    expect(env.coverage.complete).toBe(false);
+    expect(env.coverage.omitted.some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
+    expect(env.guidance).toContain("Coverage is incomplete");
+    expect(env.guidance).toContain("not a confirmed absence");
+  });
+
+  it("keys incomplete publication on completeness, not on the omission reason", () => {
+    // The live reader always hard-sets `upstream_truncated: false` on its own coverage
+    // (see docs/limitations.md); only the session capture/import path ever observes real
+    // upstream truncation, and that fact isn't persisted for a later read to consult. This
+    // builds the envelope directly with an upstream-truncated, incomplete coverage - the
+    // same shape `guidance` is attached from in reader.ts - to prove the caveat generalizes
+    // to that shape and is keyed purely on `coverage.complete`, not on which reason produced
+    // it.
+    const coverage = new Coverage();
+    coverage.complete = false;
+    coverage.processedChunks = 1;
+    coverage.plannedChunks = 1;
+    coverage.upstreamTruncated = true;
+    const env = buildEnvelope({
+      requestId: "req_upstream_truncated",
+      status: "partial",
+      code: "ANSWERED",
+      answer: scopePublishedAnswer("Exactly 0 matches.", coverage.complete),
+      coverage,
+      resultKind: "model_derived",
+      provenance: derivedProvenance(),
+      guidance: INCOMPLETE_ANSWER_GUIDANCE,
+    });
+    expect(env.coverage.upstream_truncated).toBe(true);
+    expect(env.coverage.complete).toBe(false);
+    expect(env.answer.startsWith(INCOMPLETE_ANSWER_PREFIX)).toBe(true);
+    expect(env.answer.endsWith("Exactly 0 matches.")).toBe(true);
+    expect(env.guidance).toBe(INCOMPLETE_ANSWER_GUIDANCE);
+    expect(INCOMPLETE_ANSWER_GUIDANCE).not.toBe(INCOMPLETE_NO_MATCH_GUIDANCE);
   });
 
   it("gets one format retry on invalid model output, then fails closed leaking nothing", async () => {
@@ -1624,11 +1714,12 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
     }));
     const env = await new Reader(registry, new FakeLuna([claimsJson(claims, citations)])).answer(
       "sess",
-      capRequest(entry, 40),
+      capRequest(entry, 88),
     );
     expect(env.code).toBe("ANSWERED");
-    expect(new TextEncoder().encode(env.answer ?? "").length).toBeLessThanOrEqual(40);
+    expect(new TextEncoder().encode(env.answer ?? "").length).toBeLessThanOrEqual(88);
     expect(env.status).toBe("partial");
+    expect(env.answer.startsWith(INCOMPLETE_ANSWER_PREFIX)).toBe(true);
     expect((env.coverage?.omitted ?? []).some((o) => o.reason === "BUDGET_EXCEEDED")).toBe(true);
     expect(enforce(env)).toBe(env);
   });

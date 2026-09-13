@@ -90,7 +90,16 @@ import { ScopeIdentity, SnapshotStore } from "./store.js";
  * cursor of exactly this length so a real one can never overshoot the budget it set.
  */
 const MAX_CURSOR_CHARS = 512;
-const SEARCH_WINDOW_GUIDANCE = 'Oversized search hit: exact byte window only; surrounding context is omitted. Use context_shunt_inspect with a bytes selector and the retained source_id/snapshot_id to read a specific range.';
+const INSPECT_RECOVERY_GUIDANCE =
+  "Use context_shunt_inspect with the exact retained source_id/snapshot_id pair. For a "
+  + 'minified one-line source, first use selector={"kind":"search","needle":"<literal>",'
+  + '"max_matches":5,"context_lines":0}. Then request only needed surrounding bytes with a '
+  + 'bytes selector={"kind":"bytes","start":<0-based UTF-8 boundary>,"end":<exclusive UTF-8 '
+  + "boundary>}. To continue a page, resend the identical "
+  + "selector plus extraction.next_cursor; do not restart lines 1..1 without its cursor.";
+const SEARCH_WINDOW_GUIDANCE =
+  "Oversized search hit: exact byte window only; surrounding context is omitted. "
+  + INSPECT_RECOVERY_GUIDANCE;
 export class ShuntSession {
   private readonly gate: PreReadGate;
   private readonly reader: Reader;
@@ -325,9 +334,8 @@ export class ShuntSession {
       }
       candidate = { ...candidate, guidance:
         "Semantic answer unavailable; evidence needs verification. "
-        + "Use context_shunt_inspect with a retained source_id and snapshot_id: "
-        + "select lines/bytes for a bounded read range, or search with a literal needle; "
-        + "follow next_cursor for more evidence. No heuristic summary was substituted." };
+        + INSPECT_RECOVERY_GUIDANCE
+        + " No heuristic summary was substituted." };
     }
     const published = enforceOrFixed(candidate, this.config.limits);
     const refined = Boolean(
@@ -446,7 +454,10 @@ export class ShuntSession {
         + "the incumbent tool-result compactor; not model-derived and not an LLM summary. "
         + "Original reader failure: " + originalFailure
         + ". Covers only the first requested source, independent of the question; other "
-        + "sources and structure the heuristic dropped are omitted.",
+        + "sources and structure the heuristic dropped are omitted. Treat the summary only "
+        + "as navigation: never as the question's answer, exhaustive coverage, an exact "
+        + "count, or citation evidence. Use the retained handles with context_shunt_inspect "
+        + "for exact bounded evidence.",
       recovery: recoveryFor(originalFailure, true),
       accountingId: operationId,
       ...(result.envelope.failure_detail !== undefined

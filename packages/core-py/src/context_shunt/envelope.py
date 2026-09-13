@@ -319,9 +319,12 @@ def error_envelope(
     """Map a bounded failure to an envelope. The exception message never rides along."""
     status = "blocked" if exc.code in _BLOCKED_CODES else "error"
     invalid_snapshot = exc.code == "INVALID_REQUEST" and exc.detail == "INVALID_SNAPSHOT_ID"
+    snapshot_mismatch = exc.code == "SOURCE_CHANGED" and exc.detail == "SNAPSHOT_MISMATCH"
     recovery = (
         {"handles_valid": False, "actions": ["REUSE_POINTER_PAIR"]}
         if invalid_snapshot
+        else {"handles_valid": True, "actions": ["REUSE_POINTER_PAIR"]}
+        if snapshot_mismatch
         else recovery_for(exc.code, handles_valid=handles_valid)
     )
     return build(
@@ -332,8 +335,10 @@ def error_envelope(
         failure_detail=safe_failure_detail(exc.detail),
         guidance=guidance
         or (
-            "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema."
+            "The snapshot_id is malformed. Reuse the exact source_id/snapshot_id pair from the original pointer; do not shorten, repair, or guess the hash. Check the tool argument schema."
             if invalid_snapshot
+            else "The source_id exists, but the snapshot_id does not match its immutable snapshot. Reuse the exact source_id/snapshot_id pair from the original pointer; do not repair or guess the hash. Recapture only if that exact original pair is expired or the source was intentionally refreshed."
+            if snapshot_mismatch
             else "Check the tool argument schema and retry with corrected arguments."
             if exc.code == "INVALID_REQUEST"
             else None

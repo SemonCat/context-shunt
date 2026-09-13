@@ -85,7 +85,18 @@ _STATS_OPERATIONS = frozenset({"stats"})
 #: Envelope schema cap on ``extraction.next_cursor``. The scaffolding measurement assumes
 #: a cursor of exactly this length so a real one can never overshoot the budget it set.
 _MAX_CURSOR_CHARS = 512
-_SEARCH_WINDOW_GUIDANCE = "Oversized search hit: exact byte window only; surrounding context is omitted. Use context_shunt_inspect with a bytes selector and the retained source_id/snapshot_id to read a specific range."
+_INSPECT_RECOVERY_GUIDANCE = (
+    "Use context_shunt_inspect with the exact retained source_id/snapshot_id pair. For a "
+    'minified one-line source, first use selector={"kind":"search","needle":"<literal>",'
+    '"max_matches":5,"context_lines":0}. Then request only needed surrounding bytes with a '
+    'bytes selector={"kind":"bytes","start":<0-based UTF-8 boundary>,"end":<exclusive UTF-8 '
+    "boundary>}. To continue a page, resend the identical "
+    "selector plus extraction.next_cursor; do not restart lines 1..1 without its cursor."
+)
+_SEARCH_WINDOW_GUIDANCE = (
+    "Oversized search hit: exact byte window only; surrounding context is omitted. "
+    + _INSPECT_RECOVERY_GUIDANCE
+)
 
 
 class ShuntSession:
@@ -347,9 +358,8 @@ class ShuntSession:
                 **candidate,
                 "guidance": (
                     "Semantic answer unavailable; evidence needs verification. "
-                    "Use context_shunt_inspect with a retained source_id and snapshot_id: "
-                    "select lines/bytes for a bounded read range, or search with a literal needle; "
-                    "follow next_cursor for more evidence. No heuristic summary was substituted."
+                    + _INSPECT_RECOVERY_GUIDANCE
+                    + " No heuristic summary was substituted."
                 ),
             }
         published = enforce_or_fixed(
@@ -536,7 +546,10 @@ class ShuntSession:
                 "summary. Original reader failure: "
                 + original_failure
                 + ". Covers only the first requested source, independent of the question; "
-                "other sources and structure the heuristic dropped are omitted."
+                "other sources and structure the heuristic dropped are omitted. Treat the "
+                "summary only as navigation: never as the question's answer, exhaustive "
+                "coverage, an exact count, or citation evidence. Use the retained handles "
+                "with context_shunt_inspect for exact bounded evidence."
             ),
             recovery=E.recovery_for(original_failure, handles_valid=True),
             accounting_id=operation_id,
@@ -1287,6 +1300,27 @@ class ShuntSession:
         return outcome
 
     # -- accounting --------------------------------------------------------
+    def reject_tool_call(
+        self, request_id: str, exc: ShuntError, tool: str
+    ) -> dict[str, Any]:
+        """Publish and account one plugin-owned public-argument rejection.
+
+        Host schema validation happens before a handler and is outside this plugin's
+        accounting boundary. Once Hermes invokes one of our handlers, however, its strict
+        contract rejection is Shunt-owned and can be recorded without touching a source,
+        provider, or protected tool result.
+        """
+        kinds = {
+            "context_shunt_read": OperationKind.READ,
+            "context_shunt_inspect": OperationKind.INSPECT,
+            "context_shunt_stats": OperationKind.STATS,
+            "context_shunt_import": OperationKind.CAPTURE,
+        }
+        kind = kinds.get(tool)
+        if kind is None:
+            raise ValueError("unknown context-shunt tool")
+        return self._publish_failure(request_id, exc, kind)
+
     def _record(
         self,
         *,

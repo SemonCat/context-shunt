@@ -801,6 +801,117 @@ def test_malformed_snapshot_id_has_actionable_safe_failure(tmp_path):
     assert invalid_snapshot not in json.dumps(inspected)
 
 
+def test_inspect_recovers_an_oversized_single_line_tool_result_through_the_real_tool_call(
+    tmp_path,
+):
+    """Reproduces the reported symptom end-to-end at the real ``context_shunt_inspect``
+    tool-call boundary, not just the ``Inspector``/``ShuntSession`` unit seam.
+
+    A roughly 252 KiB double-encoded JSON value has only one physical line. The ordinary
+    line selector must make bounded cursor progress, while search and byte selectors let a
+    caller recover only the relevant window without copying the entire raw payload.
+    """
+    module = _load_adapter()
+    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    marker = "NEEDLE_日本"
+    inner = json.dumps(
+        {"records": [{"id": 1, "marker": marker, "blob": "x" * 252_300}]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    body = json.dumps(inner, ensure_ascii=False, separators=(",", ":"))
+    assert 252_000 < len(body.encode("utf-8")) < 253_000
+    path = tmp_path / "ws" / "result.json"
+    path.write_text(body, encoding="utf-8")
+
+    read_out = json.loads(
+        module.context_shunt_read(
+            question="What does it contain?", paths=[str(path)], task_id="t-oversized-line"
+        )
+    )
+    handle = read_out["sources"][0]
+
+    selector = {"kind": "lines", "start": 1, "end": 1}
+    request: dict = {
+        "source_id": handle["source_id"],
+        "snapshot_id": handle["snapshot_id"],
+        "selector": selector,
+        "max_result_bytes": 4096,
+        "task_id": "t-oversized-line",
+    }
+    first = json.loads(module.context_shunt_inspect(**request))
+    assert first["code"] == "EXTRACTED"
+    assert first["status"] == "partial"
+    assert 0 < first["extraction"]["result_bytes"] <= 4096
+    assert first["extraction"]["segments"][0]["kind"] == "bytes"
+    assert first["extraction"]["next_cursor"]
+    assert body not in json.dumps(first, ensure_ascii=False)
+
+    request["cursor"] = first["extraction"]["next_cursor"]
+    second = json.loads(module.context_shunt_inspect(**request))
+    assert second["code"] == "EXTRACTED"
+    assert second["extraction"]["result_bytes"] > 0
+    assert (
+        second["extraction"]["segments"][0]["start"]
+        == first["extraction"]["segments"][0]["end"]
+    )
+
+    searched = json.loads(
+        module.context_shunt_inspect(
+            source_id=handle["source_id"],
+            snapshot_id=handle["snapshot_id"],
+            selector={
+                "kind": "search",
+                "needle": marker,
+                "max_matches": 1,
+                "context_lines": 0,
+            },
+            max_result_bytes=1024,
+            max_scan_lines=10,
+            task_id="t-oversized-line",
+        )
+    )
+    assert searched["code"] == "EXTRACTED"
+    assert searched["status"] == "partial"
+    assert searched["extraction"]["matches_found"] == 1
+    assert marker in searched["extraction"]["segments"][0]["text"]
+    assert searched["extraction"]["segments"][0]["kind"] == "bytes"
+    assert "0-based" in searched["guidance"]
+    assert "identical selector" in searched["guidance"]
+
+    marker_start = body.encode("utf-8").index(marker.encode("utf-8"))
+    bad_cut = json.loads(
+        module.context_shunt_inspect(
+            source_id=handle["source_id"],
+            snapshot_id=handle["snapshot_id"],
+            selector={"kind": "bytes", "start": marker_start + 8, "end": marker_start + 12},
+            task_id="t-oversized-line",
+        )
+    )
+    assert bad_cut["code"] == "INVALID_REQUEST"
+    assert bad_cut["failure_detail"] == "UTF8_RANGE_BOUNDARY"
+
+    marker_end = marker_start + len(marker.encode("utf-8"))
+    exact = json.loads(
+        module.context_shunt_inspect(
+            source_id=handle["source_id"],
+            snapshot_id=handle["snapshot_id"],
+            selector={"kind": "bytes", "start": marker_start, "end": marker_end},
+            task_id="t-oversized-line",
+        )
+    )
+    assert exact["code"] == "EXTRACTED"
+    assert exact["extraction"]["segments"][0]["text"] == marker
+    # The strict handle check still holds throughout recovery: a wrong snapshot on any page
+    # is refused, not silently repaired or searched for.
+    tampered = dict(request)
+    tampered["snapshot_id"] = "sha256:" + "f" * 64
+    tampered.pop("cursor", None)
+    refused = json.loads(module.context_shunt_inspect(**tampered))
+    assert refused["code"] == "SOURCE_CHANGED"
+    assert refused["failure_detail"] == "SNAPSHOT_MISMATCH"
+
+
 def test_capture_mode_stays_off_even_when_configuration_asks_for_it(tmp_path):
     """Regression: the deprecated `suma_post_tool` config key still works as an alias."""
     config = make_config(tmp_path, suma_post_tool={"enabled": True})
@@ -1307,6 +1418,44 @@ def test_direct_tool_handler_preserves_canonical_caller_errors(tmp_path, tool, a
     assert "legacy_compaction" not in env
 
 
+def test_handler_owned_invalid_arguments_are_accounted_exactly_once(tmp_path):
+    """A host may invoke the handler directly even though its outer schema is strict."""
+    module = _load_adapter()
+    ctx = FakeCtx(_config(tmp_path))
+    module.register(ctx)
+
+    rejected = json.loads(
+        ctx.registered_handlers["context_shunt_stats"](
+            {"page": "1"}, task_id="accounted-task", session_id="accounted-session"
+        )
+    )
+    assert rejected["code"] == "INVALID_REQUEST"
+    assert rejected["failure_detail"] == "TOOL_ARGS_VIOLATION"
+    assert rejected["accounting_id"] != "acc_" + "0" * 16
+
+    stats = json.loads(
+        ctx.registered_handlers["context_shunt_stats"](
+            {}, task_id="accounted-task", session_id="accounted-session"
+        )
+    )
+    # The stats operation records itself only after composing this response, so the one
+    # visible record is exactly the one rejected handler invocation above.
+    assert stats["stats"]["total_records"] == 1
+    records = stats["stats"]["records"]
+    assert [record["operation_id"] for record in records] == [rejected["accounting_id"]]
+    assert records[0]["code"] == "INVALID_REQUEST"
+    assert records[0]["kind"] == "stats"
+
+    # Hermes' outer JSON-schema validator can reject before invoking this function. That
+    # host-owned event cannot appear in plugin accounting; the strict schema makes the
+    # ownership boundary testable instead of claiming otherwise.
+    stats_schema = next(
+        schema["parameters"] for schema, _handler, _mode in module.TOOLS
+        if schema["name"] == "context_shunt_stats"
+    )
+    assert not Draft202012Validator(stats_schema).is_valid({"page": "1"})
+
+
 @pytest.mark.parametrize("user_task", [None, "HOST_USER_TASK_MUST_NOT_LEAK"])
 def test_hermes_registry_metadata_stays_outside_all_public_tool_args(
     tmp_path, monkeypatch, user_task
@@ -1382,7 +1531,11 @@ def test_hermes_registry_metadata_stays_outside_all_public_tool_args(
 
     refined = invoke(
         "context_shunt_read",
-        {"question": "Is this the same snapshot?", "handles": [handle]},
+        {
+            "question": "Is this the same snapshot?",
+            "handles": [handle],
+            "selector": {"kind": "lines", "start": 1, "end": 1},
+        },
     )
     assert refined["code"] in ("ANSWERED", "NO_MATCH")
     assert {key: refined["sources"][0][key] for key in handle} == handle
@@ -1397,6 +1550,23 @@ def test_hermes_registry_metadata_stays_outside_all_public_tool_args(
     assert inspected["code"] == "EXTRACTED"
     assert inspected["extraction"]["source_id"] == handle["source_id"]
     assert inspected["extraction"]["snapshot_id"] == handle["snapshot_id"]
+
+    searched = invoke(
+        "context_shunt_inspect",
+        {
+            **handle,
+            "selector": {
+                "kind": "search",
+                "needle": "max_retries",
+                "max_matches": 1,
+                "context_lines": 0,
+            },
+            "max_result_bytes": 1024,
+            "max_scan_lines": 50,
+        },
+    )
+    assert searched["code"] == "EXTRACTED"
+    assert searched["extraction"]["matches_found"] == 1
 
     stats = invoke("context_shunt_stats", {})
     assert stats["code"] == "STATS"

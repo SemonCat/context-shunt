@@ -113,6 +113,35 @@ const FORMAT_RETRY_DETAILS = new Set([
 // becoming a prompt-sized side channel.
 const MAX_CITATION_REPAIR_REASONS = 8;
 
+// Coverage-aware publication is keyed only on coverage, never on guessed prose intent.
+// `status: partial` and a sibling guidance field were not enough: a consumer that surfaced
+// only `answer` could still publish the model's "exactly zero" as a source-wide conclusion.
+// Prefixing the main answer creates a boundary that survives such consumers and languages.
+export const INCOMPLETE_ANSWER_PREFIX =
+  "[Reviewed subset only; citations verify bytes, not claims] ";
+export const INCOMPLETE_NO_MATCH_GUIDANCE =
+  "Coverage is incomplete: not every planned chunk was reviewed, and/or source content " +
+  "was omitted or reported as upstream-truncated (see coverage.omitted and " +
+  "coverage.upstream_truncated). No matching evidence was found in what was reviewed, but " +
+  "this is not a confirmed absence in the whole source - only in the part covered.";
+export const INCOMPLETE_ANSWER_GUIDANCE =
+  "Coverage is incomplete: not every planned chunk was reviewed, and/or source content " +
+  "was omitted or reported as upstream-truncated (see coverage.omitted and " +
+  "coverage.upstream_truncated). The answer is explicitly scoped to the reviewed subset. " +
+  "Mechanical citation checks do not establish that the cited bytes support its prose.";
+
+export function scopePublishedAnswer(answer: string, complete: boolean): string {
+  if (answer.length === 0 || complete) return answer;
+  return INCOMPLETE_ANSWER_PREFIX + answer;
+}
+
+function coverageIsComplete(coverage: Coverage): boolean {
+  return coverage.omitted.length === 0
+    && coverage.processedChunks === coverage.plannedChunks
+    && coverage.plannedChunks > 0
+    && coverage.upstreamTruncated !== true;
+}
+
 interface ChunkOutcome {
   chunk: Chunk;
   /** The current contract: structurally valid `{text, citation_ids}` objects, chunk-local
@@ -1019,7 +1048,10 @@ export class Reader {
     // then reporting `complete: true` told the caller the whole selection had been read
     // when part of the reading had just been deleted.
     const maxAnswer = Math.min(request.budgets.max_answer_bytes, this.limits.maxAnswerBytes);
-    while (utf8Length(answer) > maxAnswer && (keptClaims.length > 0 || legacyAnswer.length > 0)) {
+    while (
+      utf8Length(scopePublishedAnswer(answer, coverageIsComplete(coverage))) > maxAnswer
+      && (keptClaims.length > 0 || legacyAnswer.length > 0)
+    ) {
       let orphaned: string[];
       if (keptClaims.length > 0) {
         orphaned = [...(keptClaims[keptClaims.length - 1] as Claim).citation_ids];
@@ -1085,10 +1117,7 @@ export class Reader {
     }
 
     deadline.check("PUBLISH");
-    const complete =
-      coverage.omitted.length === 0 &&
-      coverage.processedChunks === coverage.plannedChunks &&
-      coverage.plannedChunks > 0;
+    const complete = coverageIsComplete(coverage);
     coverage.upstreamTruncated = false;
 
     // Publication invariant: every marker in the answer names a citation this envelope
@@ -1187,6 +1216,7 @@ export class Reader {
           sources: handles,
           resultKind: "model_derived",
           provenance,
+          ...(complete ? {} : { guidance: INCOMPLETE_NO_MATCH_GUIDANCE }),
           ...(accountingId !== undefined ? { accountingId } : {}),
         }),
         provenance,
@@ -1201,12 +1231,13 @@ export class Reader {
         requestId,
         status: ok ? "ok" : "partial",
         code: "ANSWERED",
-        answer: text,
+        answer: scopePublishedAnswer(text, ok),
         citations: cited,
         coverage,
         sources: handles,
         resultKind: "model_derived",
         provenance,
+        ...(ok ? {} : { guidance: INCOMPLETE_ANSWER_GUIDANCE }),
         ...(accountingId !== undefined ? { accountingId } : {}),
       });
     };
@@ -1292,7 +1323,9 @@ export class Reader {
     // One drop per pass, so this cannot run longer than there are citations.
     for (let pass = 0; pass <= citations.length; pass += 1) {
       const text = renderAnswer(keptClaims, legacy);
-      const candidate = build(text, kept, false);
+      // A still-complete candidate needs no scope prefix. Once a drop records an omission,
+      // the next candidate becomes partial and pays for that prefix.
+      const candidate = build(text, kept, coverageIsComplete(coverage) && dropped === 0);
       // The same function the guard uses, not a constant: if a later revision moves
       // model_derived to a different cap, trimming must move with it rather than quietly
       // dropping evidence that would have fit.

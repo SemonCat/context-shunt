@@ -118,7 +118,30 @@ def test_a_snapshot_mismatch_is_refused_rather_than_answered_from_a_newer_snapsh
     request["snapshot_id"] = "sha256:" + "0" * 64
     env = session.inspect(request)
     assert env["code"] == "SOURCE_CHANGED"
+    assert env["failure_detail"] == "SNAPSHOT_MISMATCH"
+    assert env["recovery"] == {"handles_valid": True, "actions": ["REUSE_POINTER_PAIR"]}
+    assert "does not match its immutable snapshot" in env["guidance"]
+    assert "Reuse the exact source_id/snapshot_id pair" in env["guidance"]
+    assert "Recapture only if that exact original pair" in env["guidance"]
     assert CANARY_HEAD not in json.dumps(env)
+
+    shortened = _request(entry, {"kind": "lines", "start": 1, "end": 2})
+    shortened["snapshot_id"] = entry.snapshot.snapshot_id[:-1]
+    malformed = session.inspect(shortened)
+    assert malformed["code"] == "INVALID_REQUEST"
+    assert malformed["failure_detail"] == "INVALID_SNAPSHOT_ID"
+    assert malformed["recovery"] == {
+        "handles_valid": False,
+        "actions": ["REUSE_POINTER_PAIR"],
+    }
+    assert "malformed" in malformed["guidance"]
+    assert "do not shorten" in malformed["guidance"]
+
+    original = session.inspect(
+        _request(entry, {"kind": "lines", "start": 1, "end": 2})
+    )
+    assert original["code"] == "EXTRACTED"
+    assert CANARY_HEAD in original["extraction"]["segments"][0]["text"]
 
 
 def test_a_foreign_or_expired_handle_yields_nothing(tmp_path):

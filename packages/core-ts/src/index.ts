@@ -1,10 +1,11 @@
 /**
- * context-shunt core: read-only, question-driven, citation-verified.
+ * context-shunt core: read-only, question-driven, with mechanically matched citation quotes.
  *
  * It keeps large sources out of the main agent's context. It blocks oversized full reads
  * before they run, captures only what it withholds, answers questions about that immutable
- * snapshot through a configurable reader model, verifies every citation, and returns a
- * bounded envelope. It never writes to a source.
+ * snapshot through a configurable reader model, mechanically matches every citation quote
+ * to source bytes, and returns a bounded envelope. That match does not prove the model's
+ * prose. It never writes to a source.
  *
  * Revision 1.1 adds three things and takes nothing away: a hybrid local store (SQLite owns
  * authorization, TTL, quotas, refcounts and accounting; immutable payloads live in

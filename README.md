@@ -94,7 +94,10 @@ For an initial local capture, use `"paths": ["/workspace/service/retry.py"]` ins
 the host conversation or tools. The returned answer includes quotes, coverage, omissions,
 and locators. Code verifies quotes against the immutable snapshot byte-for-byte; it does
 **not** prove that a quote supports the reader's reasoning. Check partial coverage and
-upstream truncation before relying on an answer.
+upstream truncation before relying on an answer. When coverage is incomplete, the main
+`answer` is deterministically prefixed as reviewed-subset-only; exact totals, exhaustive
+negatives, and source-wide conclusions in the model prose remain scoped by that prefix even
+if a consumer ignores the envelope's separate coverage and guidance fields.
 
 | Tool | Purpose | Model calls |
 | --- | --- | --- |
@@ -108,6 +111,10 @@ to configuration, per-call and cumulative disclosure budgets, and handle validit
 are immutable and session-scoped; TTL and session cleanup limit their lifetime. Workspace
 and import roots are separate allowlists. Unsafe, secret, or binary sources are refused;
 cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/tool-args.schema.json).
+For minified one-line payloads, use a literal `search` selector to locate a stable term,
+then request only the needed 0-based, half-open UTF-8 `bytes` range. Continue a partial page
+by resending the identical selector with `extraction.next_cursor`; restarting `lines: 1..1`
+without the cursor restarts the same bounded first page.
 
 ## When the reader fails
 
@@ -115,11 +122,11 @@ Context Shunt is an availability-preserving optimization layer. When Shunt owns 
 
 Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Its summary is navigation only: never a question answer, exhaustive coverage, exact count, or citation evidence. The output guard enforces those non-authoritative fields. Inspection fallback also obeys cumulative disclosure limits.
 
-Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
-Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed or mismatched snapshot IDs are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the original pointer; hashes are never guessed or repaired. A well-formed mismatch is distinguished from an actual source recapture condition: retry the original pair first, and recapture only when that pair is expired or the source was intentionally refreshed.
 
 ## Quick start
 

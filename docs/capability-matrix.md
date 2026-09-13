@@ -20,7 +20,7 @@ integration result. An upgrade is unverified until the gate is rerun and reviewe
 | Mode | Hermes (`hermes-agent` 0.18.2) | OpenClaw (`openclaw` 2026.9.3) | Default |
 | --- | --- | --- | --- |
 | `local_gate` — block proven large unbounded reads on allowed sources | **supported** | **supported** | on |
-| `reader` — question-driven answers with verified citations | **supported**, attribution ceiling `unverified` | **supported**, attribution ceiling `resolved` | on |
+| `reader` — question-driven answers with mechanically matched citation quotes | **supported**, attribution ceiling `unverified` | **supported**, attribution ceiling `resolved` | on |
 | `deterministic_inspect` — exact snapshot bytes, zero model calls | **supported** | **supported** | on |
 | `session_stats` — this session's own token accounting | **supported** | **supported** | on |
 | `session_lifecycle` — handles survive a per-turn boundary, revoked on a real one | **supported** | **supported** | on |

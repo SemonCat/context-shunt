@@ -107,7 +107,7 @@ Context Shunt 是保護可用性的最佳化層。只要故障屬於 Shunt，且
 
 `MODEL_ERROR`、`TIMEOUT`、`INVALID_MODEL_OUTPUT`、`CITATION_INVALID`、擷取／儲存故障及安全的內部例外都適用。`LIMIT_EXCEEDED` 依固定 detail 分類：儲存容量與實作輸出容量故障適用，來源安全與揭露政策上限不適用。無效參數、不支援的版本／操作、不安全／二進位／含機密來源、跨 session 或快照不符、過期或變更來源、provenance 政策拒絕、模型身分不符、取消與揭露額度耗盡仍明確拒絕。
 
-輸出一律標示 `partial/LEGACY_COMPACTED`、`result_kind: legacy_compaction`、`provenance.derived: false`；`answer` 與 `citations` 留空。`original_failure` 保留原始錯誤代碼，固定列舉的 `failure_detail` 區分引文、參數與容量問題，不含提示、供應商回應、原文、路徑或任意例外文字。涵蓋範圍不完整，只摘要第一個來源，且不依賴問題。擷取失敗而尚未發布 handle 時，`sources` 為空且 `handles_valid: false`。inspect 備援仍受累計揭露上限約束。
+輸出一律標示 `partial/LEGACY_COMPACTED`、`result_kind: legacy_compaction`、`provenance.derived: false`；`answer` 與 `citations` 留空。`original_failure` 保留原始錯誤代碼，固定列舉的 `failure_detail` 區分引文、參數與容量問題，不含提示、供應商回應、原文、路徑或任意例外文字。涵蓋範圍不完整，只摘要第一個來源，且不依賴問題。此摘要只供定位，不得視為問題答案、完整涵蓋、精確計數或引文證據；輸出 guard 會強制執行這些非權威欄位。擷取失敗而尚未發布 handle 時，`sources` 為空且 `handles_valid: false`。inspect 備援仍受累計揭露上限約束。
 
 每個請求最多進行一次有界引文修復，只使用安全的驗證回饋與已授權區塊，保留原本期限、額度、provenance 與精確用量記帳。修復失敗會使用強制 legacy 備援，不會把未驗證的模型答案標為已驗證。合法空答案仍為 `NO_MATCH`。Hermes 工具 schema 由共用契約產生；錯誤的 snapshot ID 會明確拒絕，並指引重用 pointer 中原封不動的 ID 配對，不猜測或修補雜湊。
 

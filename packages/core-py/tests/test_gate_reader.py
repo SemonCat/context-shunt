@@ -24,7 +24,7 @@ from context_shunt.provider import (
     ProviderTarget,
     UnavailableProvider,
 )
-from context_shunt.reader import Reader
+from context_shunt.reader import _INCOMPLETE_ANSWER_PREFIX, Reader
 from context_shunt.snapshot import snapshot_bytes
 from tests.support import FakeLuna, answer_json, make_registry
 
@@ -231,15 +231,21 @@ def test_delivered_empty_model_reply_is_no_match(tmp_path):
 
 
 def test_search_with_no_hits_is_no_match_without_a_model_call(tmp_path):
+    # A genuinely fully-covered no-match: nothing was omitted and every planned chunk was
+    # searched, so the absence claim is honest and carries no incompleteness caveat.
     registry, entry, luna, reader = _fixture(tmp_path)
     env = reader.answer(
         "sess", _request(entry, {"kind": "search", "pattern": "nonexistent", "max_matches": 5})
     ).envelope
     assert luna.call_count == 0
     assert env["code"] == "NO_MATCH" and env["status"] == "ok"
+    assert env["coverage"]["complete"] is True
+    assert "guidance" not in env
 
 
 def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
+    # Positive-partial-evidence: the model did answer from what it saw, but a chunk was
+    # dropped by budget, so the answer is real evidence that is not the whole picture.
     body = "".join(f"line {i} value\n" for i in range(1, 5000))
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(body.encode()))
@@ -260,8 +266,116 @@ def test_partial_when_a_chunk_is_omitted_by_budget(tmp_path):
         .envelope
     )
     assert env["status"] == "partial"
+    assert env["code"] == "ANSWERED"
+    assert env["answer"]
     assert env["coverage"]["complete"] is False
     assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
+    # Positive evidence remains visible, but the main answer itself carries the scope
+    # boundary even if a consumer ignores every sibling metadata field.
+    assert env["answer"].startswith(_INCOMPLETE_ANSWER_PREFIX)
+    assert "The first value is documented" in env["answer"]
+    assert "Coverage is incomplete" in env["guidance"]
+
+
+def test_partial_exact_zero_claim_is_scoped_inside_the_published_answer(tmp_path):
+    """Mechanical quote matching cannot turn a partial exact-zero claim into fact."""
+    body = "2026-08-01 observed event\n" + "".join(
+        f"line {i} unrelated value\n" for i in range(2, 5000)
+    )
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(body.encode()))
+    raw_claim = "There are exactly 0 matching events in the complete source [c1]."
+    luna = FakeLuna(
+        default_reply=answer_json(
+            raw_claim,
+            [
+                {
+                    "id": "c1",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "quote": "2026-08-01 observed event",
+                }
+            ],
+        )
+    )
+    env = Reader(registry, luna).answer(
+        "sess",
+        _request(
+            entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+        ),
+    ).envelope
+
+    assert env["status"] == "partial" and env["code"] == "ANSWERED"
+    assert env["coverage"]["complete"] is False
+    assert env["answer"].startswith(_INCOMPLETE_ANSWER_PREFIX)
+    assert "reviewed subset only" in env["answer"].lower()
+    assert "citations verify bytes, not claims" in env["answer"].lower()
+    assert raw_claim in env["answer"]
+    assert env["provenance"]["citations_mechanically_verified"] is True
+
+
+def test_no_match_with_omitted_chunk_is_partial_and_not_a_confirmed_absence(tmp_path):
+    # This is the audit-item-1 shape: a `partial`/`NO_MATCH` result is already honest at
+    # the status/code level, but nothing previously flagged that the free-text absence
+    # claim ("no matching evidence") only covers the part of the source that was reviewed.
+    body = "".join(f"line {i} value\n" for i in range(1, 5000))
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register("sess", snapshot_bytes(body.encode()))
+    luna = FakeLuna(default_reply=answer_json("", []))
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess",
+            _request(
+                entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+            ),
+        )
+        .envelope
+    )
+    assert env["code"] == "NO_MATCH"
+    assert env["status"] == "partial"
+    assert env["coverage"]["complete"] is False
+    assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
+    assert "Coverage is incomplete" in env["guidance"]
+    assert "not a confirmed absence" in env["guidance"]
+
+
+def test_incomplete_publication_is_keyed_on_completeness_not_on_the_reason():
+    # The guidance must generalize across every way coverage can end up incomplete -
+    # including a reason (upstream truncation) the live reader itself never sets on its own
+    # per-answer coverage today (it always reports `upstream_truncated: false`; only the
+    # capture/import path can observe that fact - see docs/limitations.md). Building the
+    # envelope directly with an upstream-truncated, incomplete coverage - the same shape
+    # `guidance=` is attached from in reader.py - proves the caveat is keyed purely on
+    # `coverage.complete`, not on which omission reason produced it, and that it survives
+    # alongside a real `upstream_truncated` flag rather than being specific to omissions.
+    from context_shunt import envelope as E
+    from context_shunt.provenance import Provenance, ProvenanceLabel
+    from context_shunt.reader import (
+        _INCOMPLETE_ANSWER_GUIDANCE,
+        _INCOMPLETE_NO_MATCH_GUIDANCE,
+        _scope_published_answer,
+    )
+
+    coverage = E.Coverage(
+        complete=False, processed_chunks=1, planned_chunks=1, upstream_truncated=True
+    )
+    env = E.build(
+        request_id="req_upstream_truncated",
+        status="partial",
+        code="ANSWERED",
+        answer=_scope_published_answer("Exactly 0 matches.", complete=coverage.complete),
+        coverage=coverage,
+        result_kind=E.ResultKind.MODEL_DERIVED,
+        provenance=Provenance(derived=True, label=ProvenanceLabel.MODEL_GENERATED_ANSWER),
+        guidance=_INCOMPLETE_ANSWER_GUIDANCE,
+    )
+    assert env["coverage"]["upstream_truncated"] is True
+    assert env["coverage"]["complete"] is False
+    assert env["answer"].startswith(_INCOMPLETE_ANSWER_PREFIX)
+    assert env["answer"].endswith("Exactly 0 matches.")
+    assert env["guidance"] == _INCOMPLETE_ANSWER_GUIDANCE
+    assert _INCOMPLETE_ANSWER_GUIDANCE != _INCOMPLETE_NO_MATCH_GUIDANCE
 
 
 def test_invalid_model_output_gets_one_format_retry_then_fails_closed_and_leaks_nothing(

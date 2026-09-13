@@ -59,6 +59,12 @@ provider-authoritative `actual`. See the checked
 
 Shunt-owned read, capture/store, and eligible inspection failures automatically return bounded deterministic `partial/LEGACY_COMPACTED` output. This invariant cannot be disabled: former legacy-compaction switches are deprecated no-ops. The output preserves the original failure code and bounded `failure_detail`, marks incomplete coverage, and never claims model derivation or verified citations. Safe representative excerpts are expected; full raw passthrough is forbidden.
 
+The legacy summary is navigation only, never the question's answer, exhaustive coverage, an
+exact count, or citation evidence; `answer` and `citations` remain empty and the output guard
+enforces the non-authoritative provenance. Reader answers with incomplete coverage carry a
+reviewed-subset-only prefix in the main `answer`, so ignoring sibling metadata cannot turn a
+partial exact-zero claim into a source-wide conclusion.
+
 Caller errors, unsupported operations/versions, unsafe/binary/secret content, immutable binding or session mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. `LIMIT_EXCEEDED` qualifies only for enumerated Shunt implementation/store capacity details, never safety or disclosure caps. Citation failures receive at most one pinned, deadline- and budget-preserving repair; accounting includes both physical calls. An attribution-policy refusal spends no repair call. See [configuration](../../docs/configuration.md) for migration and limits.
 
 
@@ -76,6 +82,12 @@ operator allowlist entry can opt an additional tool into capture, but cannot ove
 protected identities. Similar names such as `context_shunt_read_fake` have neither
 protected status nor default capture eligibility. Paths, `SKILL.md`, payload text,
 and arbitrary name substrings never determine classification.
+
+Once Hermes invokes a `context_shunt_*` handler, a plugin-owned argument rejection is
+recorded exactly once with no source or reader baseline. An outer Hermes JSON-schema
+rejection occurs before the handler and is therefore not visible to plugin accounting; no
+accounting claim is made for that host-owned event. Protected tool-result classification
+still returns before session, store, provider, or accounting work.
 
 MCP `read_resource` requires an explicit exact allowlist entry, for example
 `capture_tool_allowlist: [mcp__docs__read_resource]`. Hermes can register a server-native

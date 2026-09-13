@@ -181,6 +181,12 @@ describe("mandatory legacy fallback", () => {
     expect(envelope.provenance?.derived).toBe(false);
     expect(envelope.provenance?.label).toBe("legacy_compaction");
     expect(envelope.provenance?.citations_mechanically_verified).toBe(false);
+    expect(envelope.coverage.complete).toBe(false);
+    expect(envelope.answer).toBe("");
+    expect(envelope.citations).toEqual([]);
+    expect(envelope.guidance).toContain("never as the question's answer");
+    expect(envelope.guidance).toContain("exact count");
+    expect(envelope.guidance).toContain("citation evidence");
     expect(envelope.sources[0]?.source_id).toBe(entry.sourceId);
   });
 

@@ -247,6 +247,17 @@ def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
         return
     if not isinstance(block, dict):
         raise OutputGuardError("legacy_compaction must be an object")
+    if (
+        envelope.get("code") != "LEGACY_COMPACTED"
+        or envelope.get("status") != "partial"
+        or envelope.get("result_kind") != "legacy_compaction"
+        or envelope.get("answer")
+        or envelope.get("citations")
+    ):
+        raise OutputGuardError("legacy_compaction cannot masquerade as an answer")
+    coverage = envelope.get("coverage")
+    if not isinstance(coverage, dict) or coverage.get("complete") is not False:
+        raise OutputGuardError("legacy_compaction must declare incomplete coverage")
     if block.get("deterministic") is not True:
         raise OutputGuardError("legacy_compaction must declare itself deterministic")
     summary = block.get("summary")
@@ -263,8 +274,12 @@ def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
     # `_check_version_fields` via result_kind agreement); this is the belt to that
     # braces - a compaction block can never accompany a claim of model derivation.
     provenance = envelope.get("provenance")
-    if isinstance(provenance, dict) and provenance.get("derived") is True:
-        raise OutputGuardError("legacy_compaction must not accompany a derived=true provenance")
+    if not isinstance(provenance, dict) or (
+        provenance.get("derived") is not False
+        or provenance.get("label") != "legacy_compaction"
+        or provenance.get("citations_mechanically_verified") is not False
+    ):
+        raise OutputGuardError("legacy_compaction provenance is authoritative")
 
 
 def enforce_or_fixed(

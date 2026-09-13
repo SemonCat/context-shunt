@@ -139,7 +139,28 @@ describe("deterministic extraction", () => {
     req["snapshot_id"] = "sha256:" + "0".repeat(64);
     const env = s.inspect(req);
     expect(env.code).toBe("SOURCE_CHANGED");
+    expect(env.failure_detail).toBe("SNAPSHOT_MISMATCH");
+    expect(env.recovery).toEqual({ handles_valid: true, actions: ["REUSE_POINTER_PAIR"] });
+    expect(env.guidance).toContain("does not match its immutable snapshot");
+    expect(env.guidance).toContain("Reuse the exact source_id/snapshot_id pair");
+    expect(env.guidance).toContain("Recapture only if that exact original pair");
     expect(JSON.stringify(env)).not.toContain(CANARY_HEAD);
+
+    const shortened = request(entry, { kind: "lines", start: 1, end: 2 });
+    shortened["snapshot_id"] = entry.snapshot.snapshotId.slice(0, -1);
+    const malformed = s.inspect(shortened);
+    expect(malformed.code).toBe("INVALID_REQUEST");
+    expect(malformed.failure_detail).toBe("INVALID_SNAPSHOT_ID");
+    expect(malformed.recovery).toEqual({
+      handles_valid: false,
+      actions: ["REUSE_POINTER_PAIR"],
+    });
+    expect(malformed.guidance).toContain("malformed");
+    expect(malformed.guidance).toContain("do not shorten");
+
+    const original = s.inspect(request(entry, { kind: "lines", start: 1, end: 2 }));
+    expect(original.code).toBe("EXTRACTED");
+    expect(original.extraction?.segments[0]?.text).toContain(CANARY_HEAD);
   });
 
   it("yields nothing for a foreign or expired handle", () => {

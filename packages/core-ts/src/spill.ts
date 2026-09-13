@@ -398,7 +398,9 @@ export class SpillEngine {
           + "the incumbent tool-result compactor; not model-derived and not an LLM summary. "
           + "Original capture failure: " + failure.code
           + ". Covers only the retained middleware-visible result; omitted structure and "
-          + "bytes are not complete source coverage.",
+          + "bytes are not complete source coverage. Treat the summary only as navigation: "
+          + "never as a question answer, exhaustive coverage, an exact count, or citation "
+          + "evidence.",
         recovery: recoveryFor(failure.code, entry !== undefined),
         legacyCompaction: {
           ...legacy,

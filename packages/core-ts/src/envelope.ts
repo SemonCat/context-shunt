@@ -405,6 +405,7 @@ export function errorEnvelope(
   // The 1.0 signature took a bare guidance string; keep it working.
   const opts: ErrorEnvelopeOptions = typeof options === "string" ? { guidance: options } : options;
   const invalidSnapshot = err.code === "INVALID_REQUEST" && err.detail === "INVALID_SNAPSHOT_ID";
+  const snapshotMismatch = err.code === "SOURCE_CHANGED" && err.detail === "SNAPSHOT_MISMATCH";
   const build: BuildOptions = {
     requestId,
     status: BLOCKED_CODES.has(err.code) ? "blocked" : "error",
@@ -412,11 +413,15 @@ export function errorEnvelope(
     retryable: err.retryable,
     recovery: invalidSnapshot
       ? { handles_valid: false, actions: ["REUSE_POINTER_PAIR"] }
+      : snapshotMismatch
+        ? { handles_valid: true, actions: ["REUSE_POINTER_PAIR"] }
       : recoveryFor(err.code, opts.handlesValid),
     failureDetail: safeFailureDetail(err.detail),
   };
   if (invalidSnapshot) {
-    build.guidance = "Reuse the exact source_id/snapshot_id pair from the pointer; do not repair or guess the hash. Check the tool argument schema.";
+    build.guidance = "The snapshot_id is malformed. Reuse the exact source_id/snapshot_id pair from the original pointer; do not shorten, repair, or guess the hash. Check the tool argument schema.";
+  } else if (snapshotMismatch) {
+    build.guidance = "The source_id exists, but the snapshot_id does not match its immutable snapshot. Reuse the exact source_id/snapshot_id pair from the original pointer; do not repair or guess the hash. Recapture only if that exact original pair is expired or the source was intentionally refreshed.";
   } else if (err.code === "INVALID_REQUEST") {
     build.guidance = "Check the tool argument schema and retry with corrected arguments.";
   }

@@ -2,7 +2,7 @@
   "name": "context-shunt",
   "version": "1.2.1",
   "private": true,
-  "description": "Read-only context shunt: keep large sources out of the main agent's context and answer questions about them with verified citations.",
+  "description": "Read-only context shunt: keep large sources out of the main agent's context and answer questions with citation quotes mechanically matched to source bytes.",
   "license": "Apache-2.0",
   "type": "module",
   "workspaces": ["packages/core-ts", "adapters/openclaw"],

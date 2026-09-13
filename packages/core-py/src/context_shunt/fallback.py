@@ -46,7 +46,12 @@ def compact_failure(
         sources=[],
         retryable=False,
         recovery=E.recovery_for(failure.code, handles_valid=False),
-        guidance="Deterministic incumbent compaction, independent of any question; not model-derived and incomplete. Capture failed before a reusable handle was published.",
+        guidance=(
+            "Deterministic incumbent compaction, independent of any question; not "
+            "model-derived and incomplete. Treat the summary only as navigation: never as "
+            "the question's answer, exhaustive coverage, an exact count, or citation "
+            "evidence. Capture failed before a reusable handle was published."
+        ),
         legacy_compaction={
             "deterministic": True,
             "summary": summary,

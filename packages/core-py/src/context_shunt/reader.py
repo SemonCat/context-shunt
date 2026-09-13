@@ -105,6 +105,42 @@ _FORMAT_RETRY_DETAILS = frozenset(
 # becoming a prompt-sized side channel.
 _MAX_CITATION_REPAIR_REASONS = 8
 
+# Coverage-aware publication is keyed only on coverage, never on guessed prose intent.
+# `status: partial` and a sibling guidance field were not enough: a consumer that surfaced
+# only `answer` could still publish the model's "exactly zero" as a source-wide conclusion.
+# Prefixing the main answer creates a boundary that survives such consumers and languages.
+_INCOMPLETE_ANSWER_PREFIX = (
+    "[Reviewed subset only; citations verify bytes, not claims] "
+)
+_INCOMPLETE_NO_MATCH_GUIDANCE = (
+    "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
+    "was omitted or reported as upstream-truncated (see coverage.omitted and "
+    "coverage.upstream_truncated). No matching evidence was found in what was reviewed, but "
+    "this is not a confirmed absence in the whole source - only in the part covered."
+)
+_INCOMPLETE_ANSWER_GUIDANCE = (
+    "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
+    "was omitted or reported as upstream-truncated (see coverage.omitted and "
+    "coverage.upstream_truncated). The answer is explicitly scoped to the reviewed subset. "
+    "Mechanical citation checks do not establish that the cited bytes support its prose."
+)
+
+
+def _scope_published_answer(answer: str, *, complete: bool) -> str:
+    """Make incomplete scope part of the consumer-visible answer itself."""
+    if not answer or complete:
+        return answer
+    return _INCOMPLETE_ANSWER_PREFIX + answer
+
+
+def _coverage_is_complete(coverage: E.Coverage) -> bool:
+    return (
+        not coverage.omitted
+        and coverage.processed_chunks == coverage.planned_chunks
+        and coverage.planned_chunks > 0
+        and coverage.upstream_truncated is not True
+    )
+
 
 @dataclass
 class ChunkOutcome:
@@ -1109,7 +1145,12 @@ class Reader:
         max_answer = min(budgets["max_answer_bytes"], self._limits.max_answer_bytes)
         while (
             self._enforce_output_caps
-            and len(answer.encode("utf-8")) > max_answer
+            and len(
+                _scope_published_answer(
+                    answer, complete=_coverage_is_complete(coverage)
+                ).encode("utf-8")
+            )
+            > max_answer
             and (kept_claims or legacy_answer)
         ):
             if kept_claims:
@@ -1176,11 +1217,7 @@ class Reader:
             )
 
         deadline.check("PUBLISH")
-        complete = (
-            not coverage.omitted
-            and coverage.processed_chunks == coverage.planned_chunks
-            and coverage.planned_chunks > 0
-        )
+        complete = _coverage_is_complete(coverage)
         coverage.upstream_truncated = False
 
         # Publication invariant: every marker in the answer names a citation this
@@ -1290,6 +1327,7 @@ class Reader:
                     result_kind=ResultKind.MODEL_DERIVED,
                     provenance=provenance,
                     accounting_id=accounting_id,
+                    guidance=None if complete else _INCOMPLETE_NO_MATCH_GUIDANCE,
                 ),
                 provenance=provenance,
                 cost=cost,
@@ -1302,13 +1340,14 @@ class Reader:
                 request_id=request_id,
                 status="ok" if ok else "partial",
                 code="ANSWERED",
-                answer=answer_text,
+                answer=_scope_published_answer(answer_text, complete=ok),
                 citations=citations,
                 coverage=coverage,
                 sources=handles,
                 result_kind=ResultKind.MODEL_DERIVED,
                 provenance=provenance,
                 accounting_id=accounting_id,
+                guidance=None if ok else _INCOMPLETE_ANSWER_GUIDANCE,
             )
 
         if self._enforce_output_caps:
@@ -1394,7 +1433,13 @@ class Reader:
         # One drop per pass, so this cannot run longer than there are citations.
         for _ in range(len(verified) + 1):
             answer = _render_answer(kept_claims, legacy_answer)
-            candidate = build(answer, verified, False)
+            # A still-complete candidate needs no scope prefix. Once a drop records an
+            # omission, the next candidate becomes partial and pays for that prefix.
+            candidate = build(
+                answer,
+                verified,
+                _coverage_is_complete(coverage) and dropped == 0,
+            )
             # The same function the guard uses, not a constant: if a later revision moves
             # model_derived to a different cap, trimming must move with it rather than
             # quietly dropping evidence that would have fit.

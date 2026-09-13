@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
 
 from context_shunt.errors import ShuntError
-from context_shunt.guard import enforce
+from context_shunt.guard import OutputGuardError, enforce
 from context_shunt.legacy_compact import compact_tool_result
 from context_shunt.session import ShuntSession
 from tests.support import FakeLuna, claims_json, make_capability, make_config
@@ -185,6 +186,10 @@ def test_availability_fallback_precedence(tmp_path, monkeypatch, failure_code, l
     assert env["legacy_compaction"]["original_failure"] == failure_code
     assert env["result_kind"] == "legacy_compaction"
     assert "not model-derived" in env["guidance"] and "not an LLM summary" in env["guidance"]
+    assert "never as the question's answer" in env["guidance"]
+    assert "exact count" in env["guidance"] and "citation evidence" in env["guidance"]
+    assert env["coverage"]["complete"] is False
+    assert env["provenance"]["citations_mechanically_verified"] is False
     for omission in observed[0].envelope["coverage"]["omitted"]:
         assert omission in env["coverage"]["omitted"]
     for key in ("processed_chunks", "planned_chunks", "upstream_truncated"):
@@ -243,6 +248,18 @@ def test_citation_failure_uses_legacy_compaction_and_preserves_evidence(tmp_path
     assert record["code"] == "LEGACY_COMPACTED"
     assert record["delivery_boundary"] == "extraction"
     assert record["attempts_started"] > 0
+
+
+def test_legacy_compaction_block_cannot_masquerade_as_a_question_answer(tmp_path):
+    session, _entry, request, _body = setup(tmp_path, _no_evidence_luna())
+    env = session.read(request)
+    assert env["code"] == "LEGACY_COMPACTED"
+
+    disguised = deepcopy(env)
+    disguised["code"] = "ANSWERED"
+    disguised["answer"] = "Exactly 0 matches across the source."
+    with pytest.raises(OutputGuardError, match="cannot masquerade"):
+        enforce(disguised)
 
 
 @pytest.mark.parametrize("shape", ["legacy", "claims"])

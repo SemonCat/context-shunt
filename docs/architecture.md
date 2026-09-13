@@ -77,7 +77,7 @@ There are three ways content becomes a snapshot, and they answer different probl
             +---------------------------+---------------------------+
             |                           |                           |
    deterministic inspect        question-aware reader        session accounting
-   (zero model calls)           (citation-verified)          (signed, bounded)
+   (zero model calls)           (quotes byte-matched)        (signed, bounded)
 ```
 
 Both tool-result sub-paths exist because the oversized context that actually costs a
@@ -230,9 +230,9 @@ Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CIT
 
 The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
 
-Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails verification uses mandatory legacy compaction; no unverified model answer is published as verified. Genuine valid empty answers remain `NO_MATCH`.
+Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
-Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the pointer; hashes are never guessed or repaired.
+Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles and well-formed snapshot mismatches are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the original pointer; hashes are never guessed or repaired. `SNAPSHOT_MISMATCH` does not itself ask for recapture: the handle remains available for the original pair. Other source-change details retain `RECAPTURE_SOURCE`.
 
 The algorithm itself (`context_shunt.legacy_compact`) is a function-for-function port of
 the text/JSON-shaping half of the incumbent tool-result compactor plugin this project
@@ -247,6 +247,13 @@ algorithm). See the module's own docstring for exactly what was and was not port
 inclusive coordinates, `bytes` uses 0-based half-open coordinates adjusted to safe UTF-8
 boundaries, and `search` takes a literal needle. A page is limited by both source bytes and
 serialized envelope headroom. Search also has line/byte scan budgets.
+
+For a minified one-line payload, first use
+`{"kind":"search","needle":"<literal>","max_matches":5,"context_lines":0}`.
+An oversized hit returns a bounded byte segment. Use its 0-based half-open offsets to form a
+`bytes` selector for only the surrounding evidence needed. If a page includes
+`next_cursor`, the next request must repeat the exact selector and add that cursor; cursors
+are selector-bound and are not offsets to edit.
 
 Every returned source byte is charged transactionally before publication against cumulative
 per-content and per-session disclosure ceilings (currently 256 KiB and 1 MiB). The

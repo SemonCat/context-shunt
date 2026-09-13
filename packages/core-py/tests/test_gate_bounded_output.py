@@ -10,7 +10,7 @@ from context_shunt.guard import OutputGuardError, enforce, enforce_or_fixed
 from context_shunt.limits import DEFAULT_LIMITS
 from context_shunt.provenance import ResultKind
 from context_shunt.provider import FallbackChainProvider
-from context_shunt.reader import MAX_RAW_CITATIONS, Reader
+from context_shunt.reader import _INCOMPLETE_ANSWER_PREFIX, MAX_RAW_CITATIONS, Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.schema import validate_envelope
 from context_shunt.snapshot import snapshot_bytes
@@ -634,11 +634,12 @@ def test_the_answer_byte_cap_records_what_it_dropped(tmp_path):
     ]
     env = (
         Reader(registry, FakeLuna(replies=[_claims_reply(claims, citations)]))
-        .answer("sess", _cap_request(entry, max_answer_bytes=40))
+        .answer("sess", _cap_request(entry, max_answer_bytes=88))
         .envelope
     )
     assert env["code"] == "ANSWERED"
-    assert len(env["answer"].encode("utf-8")) <= 40
+    assert len(env["answer"].encode("utf-8")) <= 88
+    assert env["answer"].startswith(_INCOMPLETE_ANSWER_PREFIX)
     assert env["status"] == "partial" and env["coverage"]["complete"] is False
     assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
     assert enforce(env) is env
