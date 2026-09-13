@@ -23,7 +23,8 @@ Usage::
     ./.venv/bin/python evals/diagnostics/run.py --runs 1
 
 Recorded per run: item id, run index, category, answerable, status, code, a short
-fail-closed ``reason`` token, expected-fact-present, locator-match, semantic-support,
+fail-closed ``reason`` token, the typed citation-bound correctness verdict,
+expected-fact-present, locator-match, semantic-support,
 the raw reply shape(s) this run's calls used, whether any claim referenced an id it never
 declared, the observed model identity (or none), the leaked-region count, and the call
 count. Output is printed as JSON lines and, if ``--out`` is given, appended there -
@@ -74,6 +75,7 @@ class RunDiagnostic:
     status: str
     code: str | None
     reason: str
+    correct: bool | None
     facts_present: bool | None
     located: bool | None
     supported: bool | None
@@ -90,6 +92,8 @@ def _reason(item: dict, answer: str, score) -> str:
     if not answer.strip():
         return "NO_ANSWER"
     parts = []
+    if not score.correct:
+        parts.append("CLAIM_BINDING_MISMATCH")
     if not score.facts_present:
         parts.append("FACTS_MISSING")
     if not score.located:
@@ -132,6 +136,7 @@ def _run_one(item: dict, run_index: int, tmp_root: Path, bridge_call) -> RunDiag
             status="refused",
             code=f"{exc.code}/{exc.detail}",
             reason=f"REFUSED_BY_CORE:{exc.code}/{exc.detail}",
+            correct=None,
             facts_present=None,
             located=None,
             supported=None,
@@ -183,6 +188,7 @@ def _run_one(item: dict, run_index: int, tmp_root: Path, bridge_call) -> RunDiag
         status=envelope["status"],
         code=envelope["code"],
         reason=_reason(item, answer, score),
+        correct=score.correct,
         facts_present=score.facts_present,
         located=score.located,
         supported=score.supported,
