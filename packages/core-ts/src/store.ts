@@ -204,6 +204,7 @@ export interface Capture {
   readonly lineCount: number;
   readonly kind?: string;
   readonly internal?: boolean;
+  readonly upstreamTruncated?: boolean | null;
 }
 
 export function captureHash(capture: Capture): string {
@@ -219,6 +220,7 @@ export interface PublishedHandle {
   readonly lineCount: number;
   readonly kind: string;
   readonly internal: boolean;
+  readonly upstreamTruncated: boolean | null;
   readonly createdAtMs: number;
   readonly expiresAtMs: number;
 }
@@ -354,8 +356,8 @@ export class SnapshotStore {
         db.exec(`PRAGMA busy_timeout = ${Math.trunc(this.limits.storeBusyTimeoutMs)}`);
         db.exec("PRAGMA foreign_keys = ON");
         db.exec("PRAGMA synchronous = FULL");
-        // Before the DDL, not after: revision 2 indexes a column revision 1 does not
-        // have, so executing the script first fails on a store still needing the column.
+        // Before the DDL, not after: newer revisions may reference columns an old store
+        // does not have, so the additive columns must exist first.
         this.migrateSchema(db);
         db.exec(storeDdl());
         try {
@@ -387,37 +389,42 @@ export class SnapshotStore {
    * Add what a newer revision needs, before the DDL script runs. Never destructive.
    *
    * Only additive steps, and only between revisions this core knows how to bridge.
-   * Revision 1 to 2 adds the durable disclosure identity: `disclosure_events` gains a
-   * nullable `blob_hash`. The contract DDL creates that column for a *new* store and also
-   * indexes it, which is why this has to run first - the index cannot be built on a table
-   * that still lacks the column.
+   * Revision 1 to 2 added durable disclosure identity. Revision 3 adds nullable trusted
+   * origin completeness to each handle. The contract DDL creates both columns for a new
+   * store and may reference them, which is why this runs first.
    *
-   * A revision-1 row keeps a null `blob_hash`. That is honest rather than convenient: the
-   * content it disclosed is genuinely unattributable now, so it still counts toward the
-   * session ceiling - where it was always counted - and is never credited to a specific
-   * source's ceiling, which would mean inventing the identity it lacks.
+   * Old rows keep null for metadata they never recorded. That is honest rather than
+   * convenient: a migrated handle's upstream completeness remains unknown, so a later
+   * reader cannot publish source-wide completeness from it.
    */
   private migrateSchema(db: DatabaseSyncType): void {
     try {
       const hasMetadata = db.prepare(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata'",
       ).get();
-      if (hasMetadata === undefined) return; // Brand-new store; the DDL builds revision 2.
-      if (this.metadata(db, "ddl_version") !== "1") return;
-      if (String(this.limits.storeDdlVersion) !== "2") return;
-      const columns = (db.prepare("PRAGMA table_info(disclosure_events)").all() as Row[])
+      if (hasMetadata === undefined) return; // Brand-new store; the DDL builds revision 3.
+      const found = this.metadata(db, "ddl_version");
+      if (!new Set(["1", "2"]).has(found ?? "")) return;
+      if (String(this.limits.storeDdlVersion) !== "3") return;
+      const additions: string[] = [];
+      const disclosureColumns = (db.prepare("PRAGMA table_info(disclosure_events)").all() as Row[])
         .map((row) => String(row["name"]));
-      if (columns.length === 0 || columns.includes("blob_hash")) return;
-      try {
-        // Every process opening this store observes the same missing column and races to
-        // add it. `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so the losers used to
-        // fail with `duplicate column name: blob_hash` - which the connection retry did
-        // not recognise, because it only matched lock/busy text. Eight simultaneous opens
-        // on a revision-1 store produced one success and seven `OPEN_FAILED`. Losing that
-        // race is a successful outcome: the column the loser wanted now exists.
-        db.exec("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT");
-      } catch (err) {
-        if (!/duplicate column name/i.test(String((err as Error)?.message ?? ""))) throw err;
+      if (found === "1" && disclosureColumns.length > 0 && !disclosureColumns.includes("blob_hash")) {
+        additions.push("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT");
+      }
+      const handleColumns = (db.prepare("PRAGMA table_info(handles)").all() as Row[])
+        .map((row) => String(row["name"]));
+      if (handleColumns.length > 0 && !handleColumns.includes("upstream_truncated")) {
+        additions.push("ALTER TABLE handles ADD COLUMN upstream_truncated INTEGER");
+      }
+      for (const statement of additions) {
+        try {
+          db.exec(statement);
+        } catch (err) {
+          // Simultaneous openers can race to add the same column. Losing that race is
+          // success because the desired column now exists.
+          if (!/duplicate column name/i.test(String((err as Error)?.message ?? ""))) throw err;
+        }
       }
     } catch {
       throw new ShuntError("STORE_FAILED", "MIGRATION_FAILED", false);
@@ -442,7 +449,7 @@ export class SnapshotStore {
     }
     const found = this.metadata(db, "ddl_version");
     if (found !== String(this.limits.storeDdlVersion)) {
-      if (found !== "1" || String(this.limits.storeDdlVersion) !== "2") {
+      if (!new Set(["1", "2"]).has(found ?? "") || String(this.limits.storeDdlVersion) !== "3") {
         // A store from an unknown revision is refused rather than migrated in place by
         // guesswork; docs/install.md documents the supported path.
         throw new ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", false);
@@ -640,6 +647,13 @@ export class SnapshotStore {
       if (capture.kind !== undefined && !HANDLE_KINDS.has(capture.kind)) {
         throw new ShuntError("STORE_FAILED", "BAD_HANDLE_KIND", false);
       }
+      if (
+        capture.upstreamTruncated !== undefined
+        && capture.upstreamTruncated !== null
+        && typeof capture.upstreamTruncated !== "boolean"
+      ) {
+        throw new ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", false);
+      }
     }
 
     const scopeId = this.openScope(identity);
@@ -684,8 +698,8 @@ export class SnapshotStore {
         );
         const insertHandle = db.prepare(
           "INSERT INTO handles (handle_id, scope_id, blob_hash, kind, internal, generation, "
-            + "created_at_ms, expires_at_ms, revoked, baseline_credited, disclosed_bytes) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)",
+            + "created_at_ms, expires_at_ms, revoked, baseline_credited, disclosed_bytes, "
+            + "upstream_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)",
         );
         for (const { capture, hash } of staged) {
           insertBlob.run(
@@ -707,6 +721,9 @@ export class SnapshotStore {
             identity.generation,
             now,
             expires,
+            capture.upstreamTruncated === null
+              ? null
+              : capture.upstreamTruncated === true ? 1 : 0,
           );
           published.push({
             handleId,
@@ -717,6 +734,9 @@ export class SnapshotStore {
             lineCount: capture.lineCount,
             kind,
             internal: Boolean(capture.internal),
+            upstreamTruncated: capture.upstreamTruncated === undefined
+              ? false
+              : capture.upstreamTruncated,
             createdAtMs: now,
             expiresAtMs: expires,
           });
@@ -967,7 +987,7 @@ export class SnapshotStore {
     const db = this.connect();
     const row = db.prepare(
       "SELECT h.handle_id, h.scope_id, h.blob_hash, h.kind, h.internal, h.created_at_ms, "
-        + "       h.expires_at_ms, b.bytes, b.media_type, b.line_count "
+        + "       h.expires_at_ms, h.upstream_truncated, b.bytes, b.media_type, b.line_count "
         + "  FROM handles h "
         + "  JOIN scopes s ON s.scope_id = h.scope_id "
         + "  JOIN blobs  b ON b.hash     = h.blob_hash "
@@ -976,6 +996,10 @@ export class SnapshotStore {
     ).get(handleId, identity.scopeId, now, identity.generation) as Row | undefined;
     if (row === undefined) {
       throw new ShuntError("SOURCE_EXPIRED", this.refusalDetail(identity, handleId, now));
+    }
+    const storedOrigin = row["upstream_truncated"];
+    if (storedOrigin !== null && Number(storedOrigin) !== 0 && Number(storedOrigin) !== 1) {
+      throw new ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", false);
     }
     const handle: PublishedHandle = {
       handleId: String(row["handle_id"]),
@@ -986,6 +1010,9 @@ export class SnapshotStore {
       lineCount: Number(row["line_count"]),
       kind: String(row["kind"]),
       internal: Boolean(Number(row["internal"])),
+      upstreamTruncated: storedOrigin === null
+        ? null
+        : Boolean(Number(storedOrigin)),
       createdAtMs: Number(row["created_at_ms"]),
       expiresAtMs: Number(row["expires_at_ms"]),
     };

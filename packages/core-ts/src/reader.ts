@@ -139,7 +139,13 @@ function coverageIsComplete(coverage: Coverage): boolean {
   return coverage.omitted.length === 0
     && coverage.processedChunks === coverage.plannedChunks
     && coverage.plannedChunks > 0
-    && coverage.upstreamTruncated !== true;
+    && coverage.upstreamTruncated === false;
+}
+
+function aggregateUpstreamTruncation(values: readonly (boolean | null)[]): boolean | null {
+  if (values.some((value) => value === true)) return true;
+  if (values.some((value) => value === null)) return null;
+  return false;
 }
 
 interface ChunkOutcome {
@@ -570,6 +576,7 @@ export class Reader {
     const selections: Array<{ sourceId: string; snapshot: Snapshot; selector: Record<string, unknown> }> = [];
     const handles: SourceHandle[] = [];
     const sourceIds: string[] = [];
+    const upstreamTruncation: Array<boolean | null> = [];
     for (const source of request.sources) {
       const entry = this.registry.resolve(sessionId, source.source_id);
       if (entry.snapshot.snapshotId !== source.snapshot_id) {
@@ -578,6 +585,7 @@ export class Reader {
         throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
       }
       sourceIds.push(entry.sourceId);
+      upstreamTruncation.push(entry.upstreamTruncated);
       const selector =
         source.selector["kind"] === "search"
           ? searchSelectorToLines(entry.snapshot, source.selector)
@@ -606,6 +614,7 @@ export class Reader {
 
     const coverage = new Coverage();
     coverage.plannedChunks = plan.chunks.length;
+    coverage.upstreamTruncated = aggregateUpstreamTruncation(upstreamTruncation);
     for (const omission of plan.omitted) {
       coverage.omit(omission.source_id, omission.selector, omission.reason);
     }
@@ -614,18 +623,19 @@ export class Reader {
       // Nothing to read means nothing was generated: the answer is empty and the
       // provenance says no model output rather than claiming a derived answer.
       const complete = new Coverage();
-      complete.complete = true;
-      complete.upstreamTruncated = false;
+      complete.complete = coverage.upstreamTruncated === false;
+      complete.upstreamTruncated = coverage.upstreamTruncated;
       const provenance = this.noOutputProvenance();
       return {
         envelope: buildEnvelope({
           requestId,
-          status: "ok",
+          status: complete.complete ? "ok" : "partial",
           code: "NO_MATCH",
           coverage: complete,
           sources: handles,
           resultKind: "model_derived",
           provenance,
+          ...(complete.complete ? {} : { guidance: INCOMPLETE_NO_MATCH_GUIDANCE }),
           ...(accountingId !== undefined ? { accountingId } : {}),
         }),
         provenance,
@@ -1118,7 +1128,6 @@ export class Reader {
 
     deadline.check("PUBLISH");
     const complete = coverageIsComplete(coverage);
-    coverage.upstreamTruncated = false;
 
     // Publication invariant: every marker in the answer names a citation this envelope
     // publishes. `renderClaims` only ever writes ids the model supplied *and* the verifier

@@ -118,6 +118,7 @@ ALLOWED_COLUMNS = {
     "session",
     "status",
     "temp_id",
+    "upstream_truncated",
     "value",
 }
 
@@ -239,6 +240,22 @@ def test_a_multi_source_batch_publishes_all_or_none(tmp_path):
         store.publish(identity, [_capture(b"four\n"), oversized])
     # Neither handle from the refused batch exists.
     assert store.stats().handles == 3
+
+
+def test_origin_completeness_is_handle_specific_even_when_bytes_dedupe(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    truncated, complete = store.publish(
+        identity,
+        [
+            _capture(upstream_truncated=True),
+            _capture(upstream_truncated=False),
+        ],
+    )
+    assert truncated.blob_hash == complete.blob_hash
+    assert store.stats().blobs == 1
+    assert store.resolve(identity, truncated.handle_id).upstream_truncated is True
+    assert store.resolve(identity, complete.handle_id).upstream_truncated is False
 
 
 def test_a_crash_between_rename_and_commit_leaves_no_usable_handle(tmp_path):
@@ -1178,7 +1195,7 @@ except Exception as exc:
 
 
 def _revision_one_store(root: Path) -> None:
-    """Synthesize a revision-1 store: the current DDL without the revision-2 additions."""
+    """Synthesize revision 1 by removing the additions from revisions 2 and 3."""
     root.mkdir(parents=True, exist_ok=True)
     ddl = (Path(__file__).resolve().parents[3] / "contracts" / "store" / "v1.sql").read_text()
     ddl = ddl.split("CREATE TABLE IF NOT EXISTS source_credits")[0]
@@ -1190,6 +1207,11 @@ def _revision_one_store(root: Path) -> None:
     ddl = ddl.replace(
         "CREATE INDEX IF NOT EXISTS disclosure_by_source"
         " ON disclosure_events (scope_id, blob_hash);\n",
+        "",
+    )
+    ddl = ddl.replace("    upstream_truncated INTEGER,\n", "")
+    ddl = ddl.replace(
+        "    CHECK (upstream_truncated IS NULL OR upstream_truncated IN (0, 1)),\n",
         "",
     )
     conn = sqlite3.connect(root / "store.sqlite3")
@@ -1208,7 +1230,7 @@ def _revision_one_store(root: Path) -> None:
 
 
 def test_simultaneous_opens_all_migrate_a_revision_one_store(tmp_path):
-    """The revision-1 to 2 step is a check followed by an `ALTER TABLE`.
+    """The revision-1 to 3 steps are checks followed by additive `ALTER TABLE`s.
 
     Every process opening the store sees the same missing column and races to add it.
     `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so a loser failed with "duplicate
@@ -1241,5 +1263,64 @@ def test_simultaneous_opens_all_migrate_a_revision_one_store(tmp_path):
         assert results == ["ok"] * 12, (
             f"round {attempt}: simultaneous opens did not all migrate: {results}"
         )
-        # And the store really is at revision 2 afterwards.
-        assert SnapshotStore(root).ddl_version() == 2
+        # And the store really is at revision 3 afterwards.
+        assert SnapshotStore(root).ddl_version() == 3
+
+
+def _revision_two_store_with_handle(root: Path) -> tuple[ScopeIdentity, str]:
+    """Create one pre-origin-metadata handle whose completeness is unknowable."""
+    root.mkdir(parents=True, exist_ok=True)
+    ddl = (Path(__file__).resolve().parents[3] / "contracts" / "store" / "v1.sql").read_text()
+    ddl = ddl.replace("    upstream_truncated INTEGER,\n", "")
+    ddl = ddl.replace(
+        "    CHECK (upstream_truncated IS NULL OR upstream_truncated IN (0, 1)),\n",
+        "",
+    )
+    identity = _identity()
+    handle_id = "src_" + "1" * 16
+    blob_hash = "a" * 64
+    conn = sqlite3.connect(root / "store.sqlite3")
+    try:
+        conn.executescript(ddl)
+        for key, value in (
+            ("ddl_version", "2"),
+            ("store_id", "ab" * 16),
+            ("clock_high_water_ms", "0"),
+            ("cursor_key", "cd" * 32),
+        ):
+            conn.execute("INSERT INTO store_metadata (key, value) VALUES (?, ?)", (key, value))
+        conn.execute(
+            "INSERT INTO scopes "
+            "(scope_id, host, profile, principal, session, generation, created_at_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (identity.scope_id, *identity.columns(), 1),
+        )
+        conn.execute(
+            "INSERT INTO blobs "
+            "(hash, bytes, media_type, line_count, refcount, pending_delete, created_at_ms) "
+            "VALUES (?, 0, 'text/plain', 0, 1, 0, 1)",
+            (blob_hash,),
+        )
+        conn.execute(
+            "INSERT INTO handles "
+            "(handle_id, scope_id, blob_hash, kind, internal, generation, created_at_ms, "
+            "expires_at_ms, revoked, baseline_credited, disclosed_bytes) "
+            "VALUES (?, ?, ?, 'spilled_tool', 1, 1, 1, 4000000000000, 0, 0, 0)",
+            (handle_id, identity.scope_id, blob_hash),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return identity, handle_id
+
+
+def test_revision_two_handles_migrate_as_unknown_not_complete(tmp_path):
+    root = tmp_path / "cache-v2"
+    identity, handle_id = _revision_two_store_with_handle(root)
+    store = SnapshotStore(root)
+    migrated = store.resolve(identity, handle_id)
+    assert store.ddl_version() == 3
+    assert migrated.upstream_truncated is None
+
+    current = store.publish(identity, [_capture(b"new complete bytes\n")])[0]
+    assert current.upstream_truncated is False

@@ -32,6 +32,7 @@ export interface RegisteredSource {
   readonly expiresAtEpoch: number;
   readonly internal: boolean;
   readonly kind: string;
+  readonly upstreamTruncated: boolean | null;
 }
 
 export class SourceRegistry {
@@ -61,8 +62,15 @@ export class SourceRegistry {
     snapshot: Snapshot,
     internal = false,
     kind = "shunted_read",
+    upstreamTruncated: boolean | null = false,
   ): RegisteredSource {
-    return this.registerBatch(sessionId, [snapshot], internal, kind)[0] as RegisteredSource;
+    return this.registerBatch(
+      sessionId,
+      [snapshot],
+      internal,
+      kind,
+      upstreamTruncated,
+    )[0] as RegisteredSource;
   }
 
   /**
@@ -75,6 +83,7 @@ export class SourceRegistry {
     snapshots: readonly Snapshot[],
     internal = false,
     kind = "shunted_read",
+    upstreamTruncated: boolean | null = false,
   ): RegisteredSource[] {
     this.assertSession(sessionId);
     const captures: Capture[] = snapshots.map((snapshot) => ({
@@ -83,6 +92,7 @@ export class SourceRegistry {
       lineCount: snapshot.lineCount,
       kind,
       internal,
+      upstreamTruncated,
     }));
     const published = this.store.publish(this.identity, captures);
     return published.map((handle, index) => {
@@ -159,6 +169,7 @@ export class SourceRegistry {
       expiresAtEpoch: expiresAtEpochOf(handle),
       internal: handle.internal,
       kind: handle.kind,
+      upstreamTruncated: handle.upstreamTruncated,
     };
   }
 

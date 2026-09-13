@@ -165,7 +165,7 @@ describe("capture engine (synthetic capability only)", () => {
     const env = envelope(result);
     expect(env.code).toBe("SPILLED");
     expect(env.pointer.snapshot_id).toMatch(/^sha256:/);
-    expect(env.coverage.upstream_truncated).toBeNull();
+    expect(env.coverage.upstream_truncated).toBe(true);
     expect(env.coverage.complete).toBe(false);
     expect(JSON.stringify(result)).not.toContain(SENTINEL);
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(4096);

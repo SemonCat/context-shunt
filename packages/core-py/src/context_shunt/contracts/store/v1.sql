@@ -1,4 +1,4 @@
--- context-shunt snapshot store, DDL revision 2.
+-- context-shunt snapshot store, DDL revision 3.
 --
 -- This file is normative. Both language cores execute it verbatim to create or verify
 -- their store; neither core may embed an equivalent CREATE TABLE of its own. A
@@ -95,6 +95,10 @@ CREATE TABLE IF NOT EXISTS blobs (
 -- `baseline_credited` makes the withheld-source baseline a one-time credit: the first
 -- withholding operation credits it, every later operation over the same snapshot records
 -- a zero credit and still records its own overhead.
+-- `upstream_truncated` is trusted capture-origin completeness, bound to the authorized
+-- handle rather than the deduplicated blob: identical observed bytes may be a complete
+-- local source under one handle and an upstream-truncated artifact under another. NULL is
+-- reserved for handles migrated from an older DDL, whose origin completeness is unknown.
 CREATE TABLE IF NOT EXISTS handles (
     handle_id         TEXT PRIMARY KEY NOT NULL,
     scope_id          TEXT    NOT NULL REFERENCES scopes (scope_id),
@@ -107,10 +111,12 @@ CREATE TABLE IF NOT EXISTS handles (
     revoked           INTEGER NOT NULL DEFAULT 0,
     baseline_credited INTEGER NOT NULL DEFAULT 0,
     disclosed_bytes   INTEGER NOT NULL DEFAULT 0,
+    upstream_truncated INTEGER,
     CHECK (kind IN ('shunted_read', 'spilled_tool')),
     CHECK (internal IN (0, 1)),
     CHECK (revoked IN (0, 1)),
     CHECK (baseline_credited IN (0, 1)),
+    CHECK (upstream_truncated IS NULL OR upstream_truncated IN (0, 1)),
     CHECK (disclosed_bytes >= 0)
 ) STRICT;
 

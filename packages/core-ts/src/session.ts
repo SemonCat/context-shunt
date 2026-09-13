@@ -996,6 +996,7 @@ export class ShuntSession {
         result,
         opts.internalSourceId,
         operationId,
+        opts.upstreamTruncated ?? false,
       );
     } catch (err) {
       if (isShuntError(err)) {

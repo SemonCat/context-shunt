@@ -221,6 +221,12 @@ export function enforce(envelope: unknown, limits: Limits = DEFAULT_LIMITS): Env
   if (status !== "ok" && (coverage as Record<string, unknown>)["complete"] === true) {
     throw new OutputGuardError("non-ok result claims complete coverage");
   }
+  if (
+    (coverage as Record<string, unknown>)["complete"] === true
+    && (coverage as Record<string, unknown>)["upstream_truncated"] !== false
+  ) {
+    throw new OutputGuardError("complete coverage requires known-complete origin");
+  }
 
   const sources = env["sources"];
   if (!Array.isArray(sources)) throw new OutputGuardError("sources missing");

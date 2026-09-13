@@ -78,6 +78,7 @@ class SpillEngine:
         result: Any,
         *,
         internal_source_id: str | None = None,
+        upstream_truncated: bool = False,
     ) -> SpillOutcome:
         """Decide what a host should do with one complete tool result."""
         if not self._enabled:
@@ -119,7 +120,11 @@ class SpillEngine:
             # an orphaned artifact after the operation is rejected.
             snapshot = snapshot_bytes(serialized, media_type_hint="text/plain", limits=self._limits)
             entry = self._registry.register(
-                session_id, snapshot, internal=True, kind="spilled_tool"
+                session_id,
+                snapshot,
+                internal=True,
+                kind="spilled_tool",
+                upstream_truncated=upstream_truncated,
             )
         except ShuntError as exc:
             if fallback_allowed(exc.code, exc.detail):
@@ -155,7 +160,7 @@ class SpillEngine:
             request_id=request_id,
             status="ok",
             code="SPILLED",
-            coverage=E.Coverage(upstream_truncated=None),
+            coverage=E.Coverage(upstream_truncated=upstream_truncated),
             sources=[
                 {
                     "source_id": entry.source_id,

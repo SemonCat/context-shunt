@@ -147,6 +147,8 @@ def enforce(
         raise OutputGuardError("coverage missing")
     if status != "ok" and coverage.get("complete") is True:
         raise OutputGuardError("non-ok result claims complete coverage")
+    if coverage.get("complete") is True and coverage.get("upstream_truncated") is not False:
+        raise OutputGuardError("complete coverage requires known-complete origin")
 
     sources = envelope.get("sources")
     if not isinstance(sources, list):

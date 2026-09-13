@@ -80,7 +80,7 @@
   },
   "store": {
     "ddl": "contracts/store/v1.sql",
-    "ddl_version": 2,
+    "ddl_version": 3,
     "busy_timeout_ms": 5000,
     "max_entries": 512,
     "max_bytes": 268435456,

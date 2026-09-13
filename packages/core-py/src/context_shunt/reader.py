@@ -138,8 +138,17 @@ def _coverage_is_complete(coverage: E.Coverage) -> bool:
         not coverage.omitted
         and coverage.processed_chunks == coverage.planned_chunks
         and coverage.planned_chunks > 0
-        and coverage.upstream_truncated is not True
+        and coverage.upstream_truncated is False
     )
+
+
+def _aggregate_upstream_truncation(values: list[bool | None]) -> bool | None:
+    """Aggregate trusted per-handle origin completeness without turning unknown into false."""
+    if any(value is True for value in values):
+        return True
+    if any(value is None for value in values):
+        return None
+    return False
 
 
 @dataclass
@@ -553,6 +562,7 @@ class Reader:
         selections: list[tuple[str, Any, dict[str, Any]]] = []
         handles: list[dict[str, Any]] = []
         source_ids: list[str] = []
+        upstream_truncation: list[bool | None] = []
         for source in request["sources"]:
             entry = self._registry.resolve(session_id, source["source_id"])
             if entry.snapshot.snapshot_id != source["snapshot_id"]:
@@ -562,6 +572,7 @@ class Reader:
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
             selections.append((entry.source_id, entry.snapshot, source["selector"]))
             source_ids.append(entry.source_id)
+            upstream_truncation.append(entry.upstream_truncated)
             handles.append(
                 {
                     "source_id": entry.source_id,
@@ -594,7 +605,11 @@ class Reader:
             limits=self._limits,
             question=question,
         )
-        coverage = E.Coverage(planned_chunks=len(the_plan.chunks))
+        trusted_upstream = _aggregate_upstream_truncation(upstream_truncation)
+        coverage = E.Coverage(
+            planned_chunks=len(the_plan.chunks),
+            upstream_truncated=trusted_upstream,
+        )
         for omission in the_plan.omitted:
             coverage.omit(omission["source_id"], omission["selector"], omission["reason"])
 
@@ -602,21 +617,23 @@ class Reader:
             # Nothing to read means nothing was generated: the answer is empty and the
             # provenance says no model output rather than claiming a derived answer.
             provenance = self._no_output_provenance()
+            complete = trusted_upstream is False
             return ReaderResult(
                 envelope=E.build(
                     request_id=request_id,
-                    status="ok",
+                    status="ok" if complete else "partial",
                     code="NO_MATCH",
                     coverage=E.Coverage(
-                        complete=True,
+                        complete=complete,
                         processed_chunks=0,
                         planned_chunks=0,
-                        upstream_truncated=False,
+                        upstream_truncated=trusted_upstream,
                     ),
                     sources=handles,
                     result_kind=ResultKind.MODEL_DERIVED,
                     provenance=provenance,
                     accounting_id=accounting_id,
+                    guidance=None if complete else _INCOMPLETE_NO_MATCH_GUIDANCE,
                 ),
                 provenance=provenance,
                 cost=ReaderCost.none(),
@@ -1218,7 +1235,6 @@ class Reader:
 
         deadline.check("PUBLISH")
         complete = _coverage_is_complete(coverage)
-        coverage.upstream_truncated = False
 
         # Publication invariant: every marker in the answer names a citation this
         # envelope publishes. `render_claims` only ever writes ids the model supplied

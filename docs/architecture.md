@@ -20,11 +20,12 @@ block for the external-artifact boundary. Both are additive: a 1.0 envelope stil
 unchanged, and a 1.0 envelope carrying `import_receipt` is refused rather than accepted with
 the block ignored. `IMPORTED` is deliberately not `SPILLED`. `SPILLED` belongs to the
 capability-gated post-tool mode that no supported host enables, so reusing it for an import
-would read as a claim of post-tool interception. The **store** schema is unchanged: DDL
-revision 2, no migration. `handles.kind` records the capture category and is shared with
-the local spill path because [`contracts/store/v1.sql`](../contracts/store/v1.sql)
-deliberately stores no producer identity; the producer distinction lives in the envelope
-receipt and in the `capture` accounting kind, which was already legal in the DDL and unused.
+would read as a claim of post-tool interception. Store DDL revision 3 adds nullable
+`handles.upstream_truncated`, bound to the authorized handle because identical observed
+bytes may be complete under one origin and truncated under another. Trusted capture/import
+boundaries write the flag; migrated older handles remain `NULL` rather than being invented
+complete. `handles.kind` still records only the capture category, not producer identity;
+that distinction remains in the envelope receipt and `capture` accounting kind.
 
 ## Components and trust boundaries
 
@@ -134,7 +135,8 @@ a shape, and `artifact_import.accepted_manifest_schemas` decides whether it may.
 An imported handle is published `internal`, the same store-verified recursion guard the
 spill engine uses, and its baseline is `host_truncated_observed` when the manifest declares
 upstream truncation - a payload a producer already shortened can only be credited at its
-observed size.
+observed size. That trusted flag is persisted on the immutable handle and participates in
+all later reader coverage aggregation; it cannot be supplied or overridden by reader args.
 
 There is no free-text field anywhere in the manifest contract, so nothing an untrusted
 producer writes can ride into an envelope, a log line or a metric label. The receipt carries

@@ -76,6 +76,7 @@ export class SpillEngine {
     result: unknown,
     internalSourceId?: string,
     accountingId?: string,
+    upstreamTruncated = false,
   ): SpillOutcome {
     if (!this.enabled) return { action: "passthrough", bytesMeasured: 0 };
     if (internalSourceId && this.registry.isInternal(sessionId, internalSourceId)) {
@@ -126,7 +127,13 @@ export class SpillEngine {
       // Validate before persistence so a binary/secret/invalid payload cannot leave an
       // orphaned artifact after the operation is rejected.
       const snapshot = snapshotBytes(serialized, undefined, this.limits);
-      entry = this.registry.register(sessionId, snapshot, true, "spilled_tool");
+      entry = this.registry.register(
+        sessionId,
+        snapshot,
+        true,
+        "spilled_tool",
+        upstreamTruncated,
+      );
     } catch (err) {
       const safe = isShuntError(err)
         ? err
@@ -143,7 +150,7 @@ export class SpillEngine {
 
     const expiresAt = isoExpiry(entry.expiresAtEpoch);
     const coverage = new Coverage();
-    coverage.upstreamTruncated = null;
+    coverage.upstreamTruncated = upstreamTruncated;
     let envelope: Envelope;
     try {
       envelope = buildEnvelope({

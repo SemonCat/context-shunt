@@ -26,9 +26,9 @@ from context_shunt.capability import (
     unsupported,
 )
 from context_shunt.errors import ShuntError
-from context_shunt.limits import READER_MODEL
+from context_shunt.limits import EMITTED_SCHEMA_VERSION, READER_MODEL
 from context_shunt.session import ShuntSession
-from tests.support import make_capability, make_config, over_old_reader_caps_fixture
+from tests.support import FakeLuna, answer_json, make_capability, make_config, over_old_reader_caps_fixture
 
 pytestmark = pytest.mark.gate_capability
 
@@ -933,6 +933,45 @@ def test_engine_spills_once_a_host_is_proven_safe(tmp_path):
     assert outcome.action == "spill"
     assert outcome.envelope["code"] == "SPILLED"
     assert outcome.envelope["answer"] == ""
+
+
+def test_truncated_capture_stays_partial_on_a_later_real_read(tmp_path):
+    config = make_config(
+        tmp_path,
+        tool_result_capture={"enabled": True, "host_ordering_verified_locally": True},
+    )
+    provider = FakeLuna(replies=[answer_json("", [])])
+    session = ShuntSession(
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
+        provider=provider,
+    )
+    body = "observed marker value\n" + "padding line\n" * 4000
+    outcome = session.post_tool_result("req_capture", body, upstream_truncated=True)
+    assert outcome.action == "spill"
+    pointer = outcome.envelope["pointer"]
+    answered = session.read(
+        {
+            "schema_version": EMITTED_SCHEMA_VERSION,
+            "request_id": "req_later_read",
+            "operation": "read",
+            "question": "Is the marker absent?",
+            "sources": [
+                {
+                    "source_id": pointer["source_id"],
+                    "snapshot_id": pointer["snapshot_id"],
+                    "selector": {"kind": "lines", "start": 1, "end": 1},
+                }
+            ],
+            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+        }
+    )
+    assert answered["code"] == "NO_MATCH"
+    assert answered["status"] == "partial"
+    assert answered["coverage"]["complete"] is False
+    assert answered["coverage"]["upstream_truncated"] is True
+    assert "not a confirmed absence" in answered["guidance"]
 
 
 def _config(tmp_path) -> dict:

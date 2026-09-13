@@ -234,6 +234,19 @@ describe("publication is all-or-none", () => {
 // -- dedupe, refcounts and corruption ---------------------------------------
 
 describe("content addressing", () => {
+  it("keeps origin completeness on each handle even when bytes dedupe", () => {
+    const s = store();
+    const scope = identity();
+    const [truncated, complete] = s.publish(scope, [
+      capture(BODY, { upstreamTruncated: true }),
+      capture(BODY, { upstreamTruncated: false }),
+    ]);
+    expect(truncated!.blobHash).toBe(complete!.blobHash);
+    expect(s.stats().blobs).toBe(1);
+    expect(s.resolve(scope, truncated!.handleId).upstreamTruncated).toBe(true);
+    expect(s.resolve(scope, complete!.handleId).upstreamTruncated).toBe(false);
+  });
+
   it("stores identical content once and refcounts it", () => {
     const s = store();
     const scope = identity();
@@ -443,22 +456,25 @@ describe("cross-language interoperability", () => {
       "from context_shunt.store import SnapshotStore, ScopeIdentity, Capture",
       `s = SnapshotStore(${JSON.stringify(root)})`,
       "i = ScopeIdentity(host='test-host', profile='test', principal='local', session='shared')",
-      "h = s.publish(i, [Capture(data=b'written by python\\n', media_type='text/plain', line_count=1)])[0]",
-      "print(json.dumps({'handle': h.handle_id, 'snapshot': h.snapshot_id}))",
+      "h = s.publish(i, [Capture(data=b'written by python\\n', media_type='text/plain', line_count=1, upstream_truncated=True)])[0]",
+      "print(json.dumps({'handle': h.handle_id, 'snapshot': h.snapshot_id, 'upstream_truncated': h.upstream_truncated}))",
     ].join(";");
     const written = JSON.parse(
       execFileSync(python, ["-c", program], { encoding: "utf8" }).trim(),
-    ) as { handle: string; snapshot: string };
+    ) as { handle: string; snapshot: string; upstream_truncated: boolean };
 
     // The TypeScript core opens the same file and authorizes the same handle.
     const s = new SnapshotStore(root, L);
     const scope = identity("shared");
     const handle = s.resolve(scope, written.handle);
     expect(snapshotIdOf(handle)).toBe(written.snapshot);
+    expect(handle.upstreamTruncated).toBe(true);
     expect(new TextDecoder().decode(s.loadPayload(handle))).toBe("written by python\n");
 
     // ...and a handle this core publishes resolves back in the Python core.
-    const mine = s.publish(scope, [capture(enc("written by typescript\n"))])[0]!;
+    const mine = s.publish(scope, [
+      capture(enc("written by typescript\n"), { upstreamTruncated: true }),
+    ])[0]!;
     s.close();
     const readBack = [
       "import sys, json",
@@ -467,13 +483,14 @@ describe("cross-language interoperability", () => {
       `s = SnapshotStore(${JSON.stringify(root)})`,
       "i = ScopeIdentity(host='test-host', profile='test', principal='local', session='shared')",
       `h = s.resolve(i, ${JSON.stringify(mine.handleId)})`,
-      "print(json.dumps({'snapshot': h.snapshot_id, 'text': s.load_payload(h).decode()}))",
+      "print(json.dumps({'snapshot': h.snapshot_id, 'text': s.load_payload(h).decode(), 'upstream_truncated': h.upstream_truncated}))",
     ].join(";");
     const echoed = JSON.parse(
       execFileSync(python, ["-c", readBack], { encoding: "utf8" }).trim(),
-    ) as { snapshot: string; text: string };
+    ) as { snapshot: string; text: string; upstream_truncated: boolean };
     expect(echoed.snapshot).toBe(snapshotIdOf(mine));
     expect(echoed.text).toBe("written by typescript\n");
+    expect(echoed.upstream_truncated).toBe(true);
   });
 });
 
@@ -860,6 +877,11 @@ describe("cross-process behaviour in separate node processes", () => {
         "CREATE INDEX IF NOT EXISTS disclosure_by_source ON disclosure_events (scope_id, blob_hash);\n",
         "",
       );
+      ddl = ddl.replace("    upstream_truncated INTEGER,\n", "");
+      ddl = ddl.replace(
+        "    CHECK (upstream_truncated IS NULL OR upstream_truncated IN (0, 1)),\n",
+        "",
+      );
       const db = new DatabaseSync(join(root, "store.sqlite3"));
       db.exec(ddl);
       for (const [k, v] of [
@@ -875,6 +897,54 @@ describe("cross-process behaviour in separate node processes", () => {
       const results = await Promise.all(Array.from({ length: 12 }, () => run(OPENER, [root])));
       for (const r of results) expect(r.code, r.err).toBe(0);
       expect(results.map((r) => JSON.parse(r.out.trim()))).toEqual(Array(12).fill("ok"));
+      expect(new SnapshotStore(root).ddlVersion()).toBe(3);
     }
   }, SUBPROCESS_TIMEOUT_MS);
+
+  it("migrates a revision-2 handle as unknown instead of inventing completeness", () => {
+    const root = join(tmp(), "cache-v2");
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    let ddl = readFileSync(join(REPO, "contracts", "store", "v1.sql"), "utf8");
+    ddl = ddl.replace("    upstream_truncated INTEGER,\n", "");
+    ddl = ddl.replace(
+      "    CHECK (upstream_truncated IS NULL OR upstream_truncated IN (0, 1)),\n",
+      "",
+    );
+    const scope = identity();
+    const handleId = "src_" + "1".repeat(16);
+    const blobHash = "a".repeat(64);
+    const db = new DatabaseSync(join(root, "store.sqlite3"));
+    db.exec(ddl);
+    for (const [key, value] of [
+      ["ddl_version", "2"],
+      ["store_id", "ab".repeat(16)],
+      ["clock_high_water_ms", "0"],
+      ["cursor_key", "cd".repeat(32)],
+    ] as const) {
+      db.prepare("INSERT INTO store_metadata (key,value) VALUES (?,?)").run(key, value);
+    }
+    db.prepare(
+      "INSERT INTO scopes "
+        + "(scope_id, host, profile, principal, session, generation, created_at_ms) "
+        + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(scope.scopeId, ...scope.columns(), 1);
+    db.prepare(
+      "INSERT INTO blobs "
+        + "(hash, bytes, media_type, line_count, refcount, pending_delete, created_at_ms) "
+        + "VALUES (?, 0, 'text/plain', 0, 1, 0, 1)",
+    ).run(blobHash);
+    db.prepare(
+      "INSERT INTO handles "
+        + "(handle_id, scope_id, blob_hash, kind, internal, generation, created_at_ms, "
+        + "expires_at_ms, revoked, baseline_credited, disclosed_bytes) "
+        + "VALUES (?, ?, ?, 'spilled_tool', 1, 1, 1, 4000000000000, 0, 0, 0)",
+    ).run(handleId, scope.scopeId, blobHash);
+    db.close();
+
+    const migratedStore = new SnapshotStore(root);
+    expect(migratedStore.resolve(scope, handleId).upstreamTruncated).toBeNull();
+    expect(migratedStore.ddlVersion()).toBe(3);
+    const current = migratedStore.publish(scope, [capture(enc("new complete bytes\n"))])[0]!;
+    expect(current.upstreamTruncated).toBe(false);
+  });
 });

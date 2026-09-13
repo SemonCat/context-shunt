@@ -26,12 +26,9 @@ import { estimateTokens as accountingTokens } from "../src/accounting.js";
 import { estimateTokens, planChunks } from "../src/chunking.js";
 import { referencedIds } from "../src/citations.js";
 import {
-  INCOMPLETE_ANSWER_GUIDANCE,
   INCOMPLETE_ANSWER_PREFIX,
-  INCOMPLETE_NO_MATCH_GUIDANCE,
   MAX_RAW_CITATIONS,
   Reader,
-  scopePublishedAnswer,
 } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
@@ -315,35 +312,139 @@ describe("reader gate", () => {
     expect(env.guidance).toContain("not a confirmed absence");
   });
 
-  it("keys incomplete publication on completeness, not on the omission reason", () => {
-    // The live reader always hard-sets `upstream_truncated: false` on its own coverage
-    // (see docs/limitations.md); only the session capture/import path ever observes real
-    // upstream truncation, and that fact isn't persisted for a later read to consult. This
-    // builds the envelope directly with an upstream-truncated, incomplete coverage - the
-    // same shape `guidance` is attached from in reader.ts - to prove the caveat generalizes
-    // to that shape and is keyed purely on `coverage.complete`, not on which reason produced
-    // it.
-    const coverage = new Coverage();
-    coverage.complete = false;
-    coverage.processedChunks = 1;
-    coverage.plannedChunks = 1;
-    coverage.upstreamTruncated = true;
-    const env = buildEnvelope({
-      requestId: "req_upstream_truncated",
-      status: "partial",
-      code: "ANSWERED",
-      answer: scopePublishedAnswer("Exactly 0 matches.", coverage.complete),
-      coverage,
-      resultKind: "model_derived",
-      provenance: derivedProvenance(),
-      guidance: INCOMPLETE_ANSWER_GUIDANCE,
+  const CAPTURED_BODY = "observed marker value\n" + "padding line\n".repeat(4_000);
+
+  function captureSession(provider: FakeLuna): ShuntSession {
+    const dir = tmp();
+    return new ShuntSession(
+      "sess",
+      makeConfig(dir, {
+        tool_result_capture: { enabled: true, host_ordering_verified_locally: true },
+      }),
+      makeCapability(true),
+      { provider },
+    );
+  }
+
+  function capturePointer(session: ShuntSession, upstreamTruncated: boolean) {
+    const outcome = session.postToolResult(
+      "req_capture",
+      CAPTURED_BODY,
+      { upstreamTruncated },
+    );
+    expect(outcome?.action).toBe("spill");
+    return outcome!.envelope!.sources[0]!;
+  }
+
+  function laterRead(session: ShuntSession, sources: Array<{ source_id: string; snapshot_id: string }>) {
+    return session.read({
+      schema_version: "1.0",
+      request_id: "req_later_read",
+      operation: "read",
+      question: "What does the retained evidence say?",
+      sources: sources.map((source) => ({
+        source_id: source.source_id,
+        snapshot_id: source.snapshot_id,
+        selector: { kind: "lines", start: 1, end: 1 },
+      })),
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
     });
-    expect(env.coverage.upstream_truncated).toBe(true);
+  }
+
+  it("keeps a truncated capture partial on a later positive read", async () => {
+    const provider = new FakeLuna([answerJson(
+      "The observed fragment has a marker [c1].",
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "observed marker value" }],
+    )]);
+    const session = captureSession(provider);
+    const source = capturePointer(session, true);
+
+    const forged = await session.read({
+      schema_version: "1.0",
+      request_id: "req_forged",
+      operation: "read",
+      question: "What happened?",
+      sources: [{
+        source_id: source.source_id,
+        snapshot_id: source.snapshot_id,
+        selector: { kind: "all" },
+        upstream_truncated: false,
+      }],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+    });
+    expect(forged.code).toBe("INVALID_REQUEST");
+    expect(provider.callCount).toBe(0);
+
+    const env = await laterRead(session, [source]);
+    expect(env.code).toBe("ANSWERED");
+    expect(env.status).toBe("partial");
     expect(env.coverage.complete).toBe(false);
+    expect(env.coverage.upstream_truncated).toBe(true);
     expect(env.answer.startsWith(INCOMPLETE_ANSWER_PREFIX)).toBe(true);
-    expect(env.answer.endsWith("Exactly 0 matches.")).toBe(true);
-    expect(env.guidance).toBe(INCOMPLETE_ANSWER_GUIDANCE);
-    expect(INCOMPLETE_ANSWER_GUIDANCE).not.toBe(INCOMPLETE_NO_MATCH_GUIDANCE);
+    expect(env.answer).toContain("has a marker");
+    session.close();
+  });
+
+  it("keeps a truncated capture partial on a later no-match read", async () => {
+    const session = captureSession(new FakeLuna([answerJson("", [])]));
+    const env = await laterRead(session, [capturePointer(session, true)]);
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("partial");
+    expect(env.coverage.complete).toBe(false);
+    expect(env.coverage.upstream_truncated).toBe(true);
+    expect(env.guidance).toContain("not a confirmed absence");
+    session.close();
+  });
+
+  it("keeps a known-complete capture complete on a later no-match read", async () => {
+    const session = captureSession(new FakeLuna([answerJson("", [])]));
+    const env = await laterRead(session, [capturePointer(session, false)]);
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("ok");
+    expect(env.coverage.complete).toBe(true);
+    expect(env.coverage.upstream_truncated).toBe(false);
+    expect(env.guidance).toBeUndefined();
+    session.close();
+  });
+
+  it("aggregates multiple source origins without letting false reset true", async () => {
+    const session = captureSession(new FakeLuna([answerJson("", []), answerJson("", [])]));
+    const complete = capturePointer(session, false);
+    const truncated = capturePointer(session, true);
+    const env = await laterRead(session, [complete, truncated]);
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("partial");
+    expect(env.coverage.complete).toBe(false);
+    expect(env.coverage.upstream_truncated).toBe(true);
+    expect(session.store.stats().blobs).toBe(1);
+    session.close();
+  });
+
+  it("keeps an unknown legacy origin partial when mixed with a complete source", async () => {
+    const registry = makeRegistry(tmp(), { sessionId: "sess" });
+    const complete = registry.register("sess", snapshotBytes(enc("complete local bytes\n")));
+    const unknown = registry.register(
+      "sess",
+      snapshotBytes(enc("legacy observed bytes\n")),
+      false,
+      "spilled_tool",
+      null,
+    );
+    const env = await new Reader(
+      registry,
+      new FakeLuna([answerJson("", []), answerJson("", [])]),
+    ).answer("sess", request(complete, {
+      sources: [complete, unknown].map((entry) => ({
+        source_id: entry.sourceId,
+        snapshot_id: entry.snapshot.snapshotId,
+        selector: { kind: "all" },
+      })),
+    }));
+    expect(env.code).toBe("NO_MATCH");
+    expect(env.status).toBe("partial");
+    expect(env.coverage.complete).toBe(false);
+    expect(env.coverage.upstream_truncated).toBeNull();
+    expect(env.guidance).toContain("not a confirmed absence");
   });
 
   it("gets one format retry on invalid model output, then fails closed leaking nothing", async () => {
@@ -744,6 +845,13 @@ describe("output guard", () => {
     expect(() =>
       enforce({ ...base(), citations: Array.from({ length: L.maxCitations + 1 }, citation) }),
     ).toThrowError(OutputGuardError);
+    for (const upstream of [true, null]) {
+      const env = base();
+      expect(() => enforce({
+        ...env,
+        coverage: { ...env.coverage, upstream_truncated: upstream },
+      })).toThrow("known-complete origin");
+    }
   });
 
   it("never lets an unverified citation out", () => {

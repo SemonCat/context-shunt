@@ -231,7 +231,7 @@ Use a larger budget for exact inspection; no extraction cursor is advanced by co
 | `spill_ttl_seconds` | 3,600 | TTL used by the optional spill engine. |
 | `json_max_depth` | 64 | Structured payload nesting limit. |
 | `json_max_nodes` | 100,000 | Structured payload node limit. |
-| `store_ddl_version` | 2 | Accepted current SQLite DDL revision. |
+| `store_ddl_version` | 3 | Accepted current SQLite DDL revision. |
 | `store_busy_timeout_ms` | 5,000 | SQLite busy timeout. |
 | `store_max_entries` | 512 | Live handle ceiling. |
 | `store_max_bytes` | 268,435,456 | Distinct content bytes in the store. |

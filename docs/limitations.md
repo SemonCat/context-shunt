@@ -235,7 +235,8 @@ machines.
 
 Revision 1.1 accepts 1.0 requests and validates 1.0 envelopes. It does not accept a request
 that declares 1.0 while carrying a 1.1 field — that is refused rather than ignored. A store
-created by a different DDL revision is refused rather than migrated by guesswork; see
+created by an unsupported DDL revision is refused rather than migrated by guesswork;
+revisions 1 and 2 have explicit additive migrations to revision 3. See
 [`install.md`](install.md) for the supported path.
 
 The reader model became configurable in 1.1, where 1.0 refused anything but the default.

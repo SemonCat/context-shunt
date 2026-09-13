@@ -35,6 +35,7 @@ class RegisteredSource:
     expires_at_epoch: float
     internal: bool = False
     kind: str = "shunted_read"
+    upstream_truncated: bool | None = False
 
 
 class SourceRegistry:
@@ -77,9 +78,16 @@ class SourceRegistry:
         *,
         internal: bool = False,
         kind: str = "shunted_read",
+        upstream_truncated: bool | None = False,
     ) -> RegisteredSource:
         """Publish one snapshot. Convenience wrapper over the all-or-none batch path."""
-        return self.register_batch(session_id, [snapshot], internal=internal, kind=kind)[0]
+        return self.register_batch(
+            session_id,
+            [snapshot],
+            internal=internal,
+            kind=kind,
+            upstream_truncated=upstream_truncated,
+        )[0]
 
     def register_batch(
         self,
@@ -88,6 +96,7 @@ class SourceRegistry:
         *,
         internal: bool = False,
         kind: str = "shunted_read",
+        upstream_truncated: bool | None = False,
     ) -> list[RegisteredSource]:
         """Publish a batch. Every handle appears or none does.
 
@@ -103,6 +112,7 @@ class SourceRegistry:
                 line_count=snapshot.line_count,
                 kind=kind,
                 internal=internal,
+                upstream_truncated=upstream_truncated,
             )
             for snapshot in snapshots
         ]
@@ -172,6 +182,7 @@ class SourceRegistry:
             expires_at_epoch=handle.expires_at_epoch,
             internal=handle.internal,
             kind=handle.kind,
+            upstream_truncated=handle.upstream_truncated,
         )
 
     def _snapshot_for(self, handle: PublishedHandle) -> Snapshot:

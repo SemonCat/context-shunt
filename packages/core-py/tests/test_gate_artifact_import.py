@@ -229,7 +229,7 @@ class World:
 
     # -- session -------------------------------------------------------------
 
-    def session(self) -> ShuntSession:
+    def session(self, *, provider=None) -> ShuntSession:
         overrides = dict(self.case.get("config") or {})
         enabled = bool(overrides.get("enabled", True))
         roots = overrides.get("roots", [str(self.import_root)])
@@ -249,7 +249,8 @@ class World:
         capability = make_capability(
             artifact_import=bool(overrides.get("capability_supported", True))
         )
-        return ShuntSession("sess-import", config, capability)
+        options = {"provider": provider} if provider is not None else {}
+        return ShuntSession("sess-import", config, capability, **options)
 
 
 # -- the corpus -------------------------------------------------------------
@@ -470,6 +471,36 @@ IMPORTED_BODY = (
 )
 
 
+def _later_read(
+    session: ShuntSession,
+    sources: list[dict[str, Any]],
+    *,
+    request_id: str = "req_read",
+) -> dict[str, Any]:
+    return session.read(
+        {
+            "schema_version": EMITTED_SCHEMA_VERSION,
+            "request_id": request_id,
+            "operation": "read",
+            "question": "What does the retained evidence say?",
+            "refined": True,
+            "sources": [
+                {
+                    "source_id": source["source_id"],
+                    "snapshot_id": source["snapshot_id"],
+                    "selector": {"kind": "lines", "start": 1, "end": 4},
+                }
+                for source in sources
+            ],
+            "budgets": {
+                "max_chunks": 8,
+                "max_answer_bytes": 8192,
+                "deadline_ms": 60000,
+            },
+        }
+    )
+
+
 def _imported_session(tmp_path) -> tuple[ShuntSession, dict[str, Any], World]:
     world = World(
         tmp_path,
@@ -547,6 +578,128 @@ def test_an_imported_handle_answers_a_question_with_a_verified_citation(tmp_path
         assert answered["citations"][0]["quote"] == quote
         # The question reached the model, and the model saw only the excerpt.
         assert "Why did the run stop?" in luna.calls[0].user
+    finally:
+        session.close()
+
+
+def test_truncated_import_stays_partial_on_a_later_positive_read(tmp_path):
+    world = World(
+        tmp_path,
+        {
+            "setup": {"artifact": {"content": IMPORTED_BODY}},
+            "manifest": {"upstream_truncated": True},
+        },
+    )
+    quote = "level=info msg=start"
+    luna = FakeLuna(
+        replies=[
+            answer_json(
+                "The observed fragment starts a run [c1].",
+                [{"id": "c1", "line_start": 1, "line_end": 1, "quote": quote}],
+            )
+        ]
+    )
+    session = world.session(provider=luna)
+    try:
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
+        pointer = imported["pointer"]
+
+        forged = {
+            "schema_version": EMITTED_SCHEMA_VERSION,
+            "request_id": "req_forged",
+            "operation": "read",
+            "question": "What happened?",
+            "refined": True,
+            "sources": [
+                {
+                    "source_id": pointer["source_id"],
+                    "snapshot_id": pointer["snapshot_id"],
+                    "selector": {"kind": "all"},
+                    "upstream_truncated": False,
+                }
+            ],
+            "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": 60000},
+        }
+        refused = session.read(forged)
+        assert refused["code"] == "INVALID_REQUEST"
+        assert luna.call_count == 0
+
+        answered = _later_read(session, [pointer])
+        assert answered["code"] == "ANSWERED"
+        assert answered["status"] == "partial"
+        assert answered["coverage"]["complete"] is False
+        assert answered["coverage"]["upstream_truncated"] is True
+        assert answered["answer"].startswith("[Reviewed subset only;")
+        assert "starts a run" in answered["answer"]
+    finally:
+        session.close()
+
+
+def test_truncated_import_stays_partial_on_a_later_no_match(tmp_path):
+    world = World(
+        tmp_path,
+        {
+            "setup": {"artifact": {"content": IMPORTED_BODY}},
+            "manifest": {"upstream_truncated": True},
+        },
+    )
+    session = world.session(provider=FakeLuna(replies=[answer_json("", [])]))
+    try:
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
+        answered = _later_read(session, [imported["pointer"]])
+        assert answered["code"] == "NO_MATCH"
+        assert answered["status"] == "partial"
+        assert answered["coverage"]["complete"] is False
+        assert answered["coverage"]["upstream_truncated"] is True
+        assert "not a confirmed absence" in answered["guidance"]
+    finally:
+        session.close()
+
+
+def test_complete_import_remains_complete_on_a_later_no_match(tmp_path):
+    world = World(
+        tmp_path,
+        {"setup": {"artifact": {"content": IMPORTED_BODY}}, "manifest": {}},
+    )
+    session = world.session(provider=FakeLuna(replies=[answer_json("", [])]))
+    try:
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
+        answered = _later_read(session, [imported["pointer"]])
+        assert answered["code"] == "NO_MATCH"
+        assert answered["status"] == "ok"
+        assert answered["coverage"]["complete"] is True
+        assert answered["coverage"]["upstream_truncated"] is False
+        assert "guidance" not in answered
+    finally:
+        session.close()
+
+
+def test_multi_source_read_is_truncated_when_any_import_was_truncated(tmp_path):
+    world = World(
+        tmp_path,
+        {
+            "setup": {"artifact": {"content": IMPORTED_BODY}},
+            "manifest": {"upstream_truncated": True},
+        },
+    )
+    session = world.session(
+        provider=FakeLuna(replies=[answer_json("", []), answer_json("", [])])
+    )
+    try:
+        imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
+        local_path = world.workspace / "complete.log"
+        local_path.write_text("complete local evidence\n", encoding="utf-8")
+        local = session.register_path(str(local_path))
+        local_pointer = {
+            "source_id": local.source_id,
+            "snapshot_id": local.snapshot.snapshot_id,
+        }
+
+        answered = _later_read(session, [local_pointer, imported["pointer"]])
+        assert answered["code"] == "NO_MATCH"
+        assert answered["status"] == "partial"
+        assert answered["coverage"]["complete"] is False
+        assert answered["coverage"]["upstream_truncated"] is True
     finally:
         session.close()
 
@@ -875,16 +1028,12 @@ def test_an_imported_and_a_captured_handle_share_the_same_store(tmp_path):
         session.close()
 
 
-def test_the_store_ddl_version_is_unchanged_by_this_feature():
-    """The import boundary needed no schema migration, and this pins that.
-
-    The DDL's ``handles.kind`` enum was deliberately not widened: the store holds no
-    producer identity by design, so a new enum value would have bought a table rebuild in
-    both cores and told an operator nothing the receipt does not already say.
-    """
+def test_the_store_keeps_origin_completeness_without_widening_handle_kind():
+    """Origin completeness is handle metadata, not a producer identity or new kind."""
     from context_shunt.limits import DEFAULT_LIMITS, store_ddl
 
-    assert DEFAULT_LIMITS.store_ddl_version == 2
+    assert DEFAULT_LIMITS.store_ddl_version == 3
+    assert "upstream_truncated INTEGER" in store_ddl()
     assert "CHECK (kind IN ('shunted_read', 'spilled_tool'))" in store_ddl()
 
 

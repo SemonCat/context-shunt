@@ -176,10 +176,15 @@ class Capture:
     line_count: int
     kind: str = "shunted_read"
     internal: bool = False
+    upstream_truncated: bool | None = False
 
     def __post_init__(self) -> None:
         if self.kind not in HANDLE_KINDS:
             raise ShuntError("STORE_FAILED", "BAD_HANDLE_KIND", retryable=False)
+        if self.upstream_truncated is not None and not isinstance(
+            self.upstream_truncated, bool
+        ):
+            raise ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", retryable=False)
 
     @property
     def hash(self) -> str:
@@ -196,6 +201,7 @@ class PublishedHandle:
     line_count: int
     kind: str
     internal: bool
+    upstream_truncated: bool | None
     created_at_ms: int
     expires_at_ms: int
 
@@ -385,9 +391,8 @@ class SnapshotStore:
                 conn.execute(f"PRAGMA busy_timeout = {int(self._limits.store_busy_timeout_ms)}")
                 conn.execute("PRAGMA foreign_keys = ON")
                 conn.execute("PRAGMA synchronous = FULL")
-                # Before the DDL, not after: revision 2 indexes a column revision 1 does
-                # not have, so executing the script first fails on a store that still
-                # needs the column added.
+                # Before the DDL, not after: newer revisions may reference columns an old
+                # store does not have, so the additive columns must exist first.
                 self._migrate_schema(conn)
                 conn.executescript(store_ddl())
                 with contextlib.suppress(OSError):
@@ -435,7 +440,10 @@ class SnapshotStore:
             raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
         found = self._metadata(conn, "ddl_version")
         if found != str(self._limits.store_ddl_version):
-            if found != "1" or str(self._limits.store_ddl_version) != "2":
+            if (
+                found not in {"1", "2"}
+                or str(self._limits.store_ddl_version) != "3"
+            ):
                 # A store from an unknown revision is refused rather than migrated in
                 # place by guesswork; docs/install.md documents the supported path.
                 raise ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", retryable=False)
@@ -454,41 +462,48 @@ class SnapshotStore:
         """Add what a newer revision needs, before the DDL script runs. Never destructive.
 
         Only additive steps, and only between revisions this core knows how to bridge.
-        Revision 1 to 2 adds the durable disclosure identity: ``disclosure_events`` gains a
-        nullable ``blob_hash``. The contract DDL creates that column for a *new* store and
-        also indexes it, which is why this has to run first - the index cannot be built on
-        a table that still lacks the column.
+        Revision 1 to 2 added durable disclosure identity. Revision 3 adds nullable trusted
+        origin completeness to each handle. The contract DDL creates both columns for a
+        new store and may reference them, which is why this runs first.
 
-        A revision-1 row keeps a null ``blob_hash``. That is honest rather than convenient:
-        the content it disclosed is genuinely unattributable now, so it still counts toward
-        the session ceiling - where it was always counted - and is never credited to a
-        specific source's ceiling, which would mean inventing the identity it lacks.
+        Old rows keep null for metadata they never recorded. That is honest rather than
+        convenient: a migrated handle's upstream completeness remains unknown, so a later
+        reader cannot publish source-wide completeness from it.
         """
         try:
             has_metadata = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_metadata'"
             ).fetchone()
             if has_metadata is None:
-                return  # A brand-new store; the DDL builds revision 2 directly.
+                return  # A brand-new store; the DDL builds revision 3 directly.
             found = self._metadata(conn, "ddl_version")
-            if found != "1" or str(self._limits.store_ddl_version) != "2":
+            if found not in {"1", "2"} or str(self._limits.store_ddl_version) != "3":
                 return  # Not a bridge this core knows; `_bootstrap_metadata` decides.
-            columns = {
-                str(row["name"]) for row in conn.execute("PRAGMA table_info(disclosure_events)")
+            additions: list[tuple[str, str]] = []
+            disclosure_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(disclosure_events)")
             }
-            if not columns or "blob_hash" in columns:
-                return
-            try:
-                with _write_txn(conn):
-                    conn.execute("ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT")
-            except sqlite3.OperationalError as exc:
-                # Every process opening this store observes the same missing column and
-                # races to add it. `ALTER TABLE ADD COLUMN` has no `IF NOT EXISTS`, so the
-                # losers fail with "duplicate column name". Losing that race is a
-                # successful migration: the column the loser wanted now exists. Only a
-                # genuinely different failure is worth reporting.
-                if "duplicate column name" not in str(exc).lower():
-                    raise
+            if found == "1" and disclosure_columns and "blob_hash" not in disclosure_columns:
+                additions.append(
+                    ("disclosure_events", "ALTER TABLE disclosure_events ADD COLUMN blob_hash TEXT")
+                )
+            handle_columns = {
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(handles)")
+            }
+            if handle_columns and "upstream_truncated" not in handle_columns:
+                additions.append(
+                    ("handles", "ALTER TABLE handles ADD COLUMN upstream_truncated INTEGER")
+                )
+            for _table, statement in additions:
+                try:
+                    with _write_txn(conn):
+                        conn.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    # Simultaneous openers can race to add the same column. Losing that
+                    # race is success because the desired column now exists.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
         except sqlite3.Error:
             raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
 
@@ -719,7 +734,8 @@ class SnapshotStore:
                             "INSERT INTO handles "
                             "(handle_id, scope_id, blob_hash, kind, internal, generation, "
                             " created_at_ms, expires_at_ms, revoked, baseline_credited, "
-                            " disclosed_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)",
+                            " disclosed_bytes, upstream_truncated) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)",
                             (
                                 handle_id,
                                 scope_id,
@@ -729,6 +745,11 @@ class SnapshotStore:
                                 identity.generation,
                                 now,
                                 expires,
+                                (
+                                    None
+                                    if capture.upstream_truncated is None
+                                    else int(capture.upstream_truncated)
+                                ),
                             ),
                         )
                         published.append(
@@ -741,6 +762,7 @@ class SnapshotStore:
                                 line_count=capture.line_count,
                                 kind=capture.kind,
                                 internal=capture.internal,
+                                upstream_truncated=capture.upstream_truncated,
                                 created_at_ms=now,
                                 expires_at_ms=expires,
                             )
@@ -976,6 +998,7 @@ class SnapshotStore:
             conn = self._connect()
             row = conn.execute(
                 "SELECT h.handle_id, h.scope_id, h.blob_hash, h.kind, h.internal, "
+                "       h.upstream_truncated, "
                 "       h.created_at_ms, h.expires_at_ms, b.bytes, b.media_type, b.line_count "
                 "  FROM handles h "
                 "  JOIN scopes s ON s.scope_id = h.scope_id "
@@ -986,6 +1009,9 @@ class SnapshotStore:
             ).fetchone()
         if row is None:
             raise ShuntError("SOURCE_EXPIRED", self._refusal_detail(identity, handle_id, now))
+        stored_origin = row["upstream_truncated"]
+        if stored_origin not in (None, 0, 1):
+            raise ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", retryable=False)
         handle = PublishedHandle(
             handle_id=str(row["handle_id"]),
             scope_id=str(row["scope_id"]),
@@ -995,6 +1021,9 @@ class SnapshotStore:
             line_count=int(row["line_count"]),
             kind=str(row["kind"]),
             internal=bool(row["internal"]),
+            upstream_truncated=(
+                None if stored_origin is None else bool(stored_origin)
+            ),
             created_at_ms=int(row["created_at_ms"]),
             expires_at_ms=int(row["expires_at_ms"]),
         )

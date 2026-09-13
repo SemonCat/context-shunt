@@ -171,6 +171,14 @@ def test_answer_quote_and_citation_caps_are_enforced():
         enforce({**base, "citations": [{**_citation(), "quote": "q" * (L.max_quote_bytes + 1)}]})
     with pytest.raises(OutputGuardError):
         enforce({**base, "citations": [_citation() for _ in range(L.max_citations + 1)]})
+    for upstream in (True, None):
+        with pytest.raises(OutputGuardError, match="known-complete origin"):
+            enforce(
+                {
+                    **base,
+                    "coverage": {**base["coverage"], "upstream_truncated": upstream},
+                }
+            )
 
 
 def test_unverified_citation_never_leaves_the_guard():

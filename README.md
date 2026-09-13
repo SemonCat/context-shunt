@@ -97,7 +97,9 @@ and locators. Code verifies quotes against the immutable snapshot byte-for-byte;
 upstream truncation before relying on an answer. When coverage is incomplete, the main
 `answer` is deterministically prefixed as reviewed-subset-only; exact totals, exhaustive
 negatives, and source-wide conclusions in the model prose remain scoped by that prefix even
-if a consumer ignores the envelope's separate coverage and guidance fields.
+if a consumer ignores the envelope's separate coverage and guidance fields. Trusted
+capture/import origin truncation is stored with the handle and aggregated across every
+source in later reads; legacy handles whose origin is unknown remain incomplete.
 
 | Tool | Purpose | Model calls |
 | --- | --- | --- |

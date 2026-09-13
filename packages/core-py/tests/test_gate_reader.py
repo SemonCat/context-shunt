@@ -340,42 +340,29 @@ def test_no_match_with_omitted_chunk_is_partial_and_not_a_confirmed_absence(tmp_
     assert "not a confirmed absence" in env["guidance"]
 
 
-def test_incomplete_publication_is_keyed_on_completeness_not_on_the_reason():
-    # The guidance must generalize across every way coverage can end up incomplete -
-    # including a reason (upstream truncation) the live reader itself never sets on its own
-    # per-answer coverage today (it always reports `upstream_truncated: false`; only the
-    # capture/import path can observe that fact - see docs/limitations.md). Building the
-    # envelope directly with an upstream-truncated, incomplete coverage - the same shape
-    # `guidance=` is attached from in reader.py - proves the caveat is keyed purely on
-    # `coverage.complete`, not on which omission reason produced it, and that it survives
-    # alongside a real `upstream_truncated` flag rather than being specific to omissions.
-    from context_shunt import envelope as E
-    from context_shunt.provenance import Provenance, ProvenanceLabel
-    from context_shunt.reader import (
-        _INCOMPLETE_ANSWER_GUIDANCE,
-        _INCOMPLETE_NO_MATCH_GUIDANCE,
-        _scope_published_answer,
+def test_unknown_legacy_origin_keeps_a_multi_source_no_match_partial(tmp_path):
+    registry = make_registry(tmp_path, session_id="sess")
+    unknown = registry.register(
+        "sess", snapshot_bytes(b"legacy observed bytes\n"), upstream_truncated=None
     )
-
-    coverage = E.Coverage(
-        complete=False, processed_chunks=1, planned_chunks=1, upstream_truncated=True
-    )
-    env = E.build(
-        request_id="req_upstream_truncated",
-        status="partial",
-        code="ANSWERED",
-        answer=_scope_published_answer("Exactly 0 matches.", complete=coverage.complete),
-        coverage=coverage,
-        result_kind=E.ResultKind.MODEL_DERIVED,
-        provenance=Provenance(derived=True, label=ProvenanceLabel.MODEL_GENERATED_ANSWER),
-        guidance=_INCOMPLETE_ANSWER_GUIDANCE,
-    )
-    assert env["coverage"]["upstream_truncated"] is True
+    complete = registry.register("sess", snapshot_bytes(b"complete local bytes\n"))
+    sources = [
+        {
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "all"},
+        }
+        for entry in (complete, unknown)
+    ]
+    luna = FakeLuna(replies=[answer_json("", []), answer_json("", [])])
+    env = Reader(registry, luna).answer(
+        "sess", _request(complete, sources=sources)
+    ).envelope
+    assert env["code"] == "NO_MATCH"
+    assert env["status"] == "partial"
     assert env["coverage"]["complete"] is False
-    assert env["answer"].startswith(_INCOMPLETE_ANSWER_PREFIX)
-    assert env["answer"].endswith("Exactly 0 matches.")
-    assert env["guidance"] == _INCOMPLETE_ANSWER_GUIDANCE
-    assert _INCOMPLETE_ANSWER_GUIDANCE != _INCOMPLETE_NO_MATCH_GUIDANCE
+    assert env["coverage"]["upstream_truncated"] is None
+    assert "not a confirmed absence" in env["guidance"]
 
 
 def test_invalid_model_output_gets_one_format_retry_then_fails_closed_and_leaks_nothing(

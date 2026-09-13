@@ -401,6 +401,7 @@ class ArtifactImporter:
             # holds no producer identity by design, so that distinction travels in the
             # envelope receipt and in the `capture` accounting kind instead.
             kind="spilled_tool",
+            upstream_truncated=manifest.upstream_truncated,
         )
         return ImportOutcome(
             source=entry,

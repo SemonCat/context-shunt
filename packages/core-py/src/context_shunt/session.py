@@ -1227,7 +1227,11 @@ class ShuntSession:
         operation_id = new_operation_id()
         try:
             outcome = self._spill.evaluate(
-                self.session_id, request_id, result, internal_source_id=internal_source_id
+                self.session_id,
+                request_id,
+                result,
+                internal_source_id=internal_source_id,
+                upstream_truncated=upstream_truncated,
             )
         except Exception as raw_exc:
             if (
