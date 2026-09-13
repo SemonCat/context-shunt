@@ -79,7 +79,7 @@ If the output guard rejects its pointer envelope, the effective result is an err
 
 | Host | Pre-tool hook | Model bridge |
 | --- | --- | --- |
-| Hermes | `pre_tool_call` fires inside `handle_function_call()` before the tool handler runs, and returning `{"action": "block", "message": ...}` short-circuits the call. | `ctx.llm.complete(...)`, with provider/model override gated per plugin by `plugins.entries.<id>.llm`. |
+| Hermes | `pre_tool_call` fires inside `handle_function_call()` before the tool handler runs, and returning `{"action": "block", "message": ...}` short-circuits the call. | Current hosts: `ctx.llm.complete(task="context_shunt_reader", ...)`, using the plugin-owned auxiliary slot; older supported hosts use the provider/model compatibility path. Overrides remain gated per plugin by `plugins.entries.<id>.llm`. |
 | OpenClaw | `api.on("before_tool_call", ...)` runs before tool execution, can deny the call, and the host fails this hook closed on timeout. | `api.runtime.llm.complete` with `execution.mode: "isolated-agent-runtime"` — a fresh, literal-zero-tool completion with no replayed chat history. |
 
 ## Model attribution: the ceiling on each host
@@ -90,15 +90,15 @@ now a reported capability boundary: the envelope states what can be proven and n
 
 | Host | Best attainable `attribution_status` | Evidence |
 | --- | --- | --- |
-| Hermes | `unverified` | `agent/plugin_llm.py::_resolve_attribution` records `response.model` when the provider returned one, and otherwise the plugin's own override or `_read_main_model()`. A caller cannot tell those cases apart from the result object, so the adapter passes `provider_confirms_generation=false` and never claims `actual`. |
+| Hermes | `resolved` on the current task-aware host; `unverified` on the compatibility path | With `task=`, `PluginLlm` asks `auxiliary_client.call_llm` for `route_info`, returns that post-policy provider/model, and records the task in `result.audit`; the adapter reports those fields as `resolved_*`. Older task-agnostic builds cannot separate a provider report from an override echo, so they stay `unverified`. Neither path claims `actual`. |
 | OpenClaw | `resolved` | The isolated path returns `selection.provider` / `selection.modelId` through `runIsolatedAgentRuntimeCompletion` (`src/plugins/runtime/runtime-llm.runtime.ts`). That is the host's own post-policy selection — a routing fact, not a provider confirmation — so it is reported as `resolved_*`. |
 
 A value that *contradicts* the request is a hard `MODEL_ERROR` on both hosts under either
 policy: a different model is a wrong answer, not a weakly attributed one.
 
-`reader.attribution_policy: require_match` refuses anything below `actual`/`resolved`. On
-Hermes that disables the reader entirely, which is a legitimate deployment choice but never
-the silent default; `inspect` and `stats` keep working either way.
+`reader.attribution_policy: require_match` refuses anything below `actual`/`resolved`. It
+works on the current task-aware Hermes route and disables the reader on the older
+task-agnostic compatibility path; `inspect` and `stats` keep working either way.
 
 Pinning the model on Hermes requires `plugins.entries.context-shunt.llm.allow_model_override:
 true`. Without it `_check_overrides` raises and the reader runs on whatever the host picks —
@@ -301,10 +301,10 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 | `shadow reader` | `expected_unsupported` (printed `N/A`) — task correctness, semantic evidence support, mechanical citation validity and follow-up rate are scored by `eval luna`, which owns the fixed corpus, thresholds and runs-per-item; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
 | `benchmark all` | includes a NOT_RUN provider half: reader latency and token cost need live Luna |
-| `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna **or** without a route that preserves the system/user role split, forwards the reader's output cap **and** is production-equivalent. No route here is production-equivalent, so this stays NOT_RUN in every environment this repository can reach - still NOT_RUN and not `expected_unsupported`, because a production-equivalent route is a thing that can exist (see [Acceptance](acceptance.md#reader-evaluation)) |
+| `eval luna` | implemented harness with a fixed 40-item corpus; NOT_RUN without live Luna **or** without a route that preserves the system/user role split, forwards the reader's output cap **and** is production-equivalent. `bridges.openclaw_inhost` qualifies by using OpenClaw's host-owned `runtime.llm.complete` isolated-agent-runtime path; it still needs a configured host checkout and resolvable Luna route (see [Acceptance](acceptance.md#reader-evaluation)) |
 | `release attest` | implemented — attests the commit, a clean tree, the corpus/prompt/scorer/route/provider-config hashes, and the per-physical-call model identities behind the live evidence. Live evidence must *bind* to this release (same commit, same effective provider configuration, a release-quality route) and must satisfy the required eval outcomes and identity totals; a benchmark report has to be a report rather than an empty object. Evidence that does not bind is NOT_RUN; evidence that binds and contradicts a claim is a failure |
 | `packaging all` | builds and inspects archives; clean-installs/imports/uninstalls both npm packages, the Python wheel, and the Hermes copy bundle |
-| `release all` | runs everything and finishes with the attestation; exits 0 exactly when every **required** gate passed. `expected_unsupported` gates do not block; `eval luna`, `benchmark provider` and `release attest` are required, so it returns `NOT_RUN` while they lack a live qualifying route |
+| `release all` | runs everything and finishes with the attestation; exits 0 exactly when every **required** gate passed. `expected_unsupported` gates do not block; `eval luna`, `benchmark provider` and `release attest` are required, so it returns `NOT_RUN` until a qualifying route such as `bridges.openclaw_inhost` can resolve live Luna access |
 
 ## Shadow rollout, and what has to be true before anything is replaced
 
@@ -360,11 +360,6 @@ is deployable and unproven at production equivalence — not that it is better.
 - A host that lets a plugin observe the provider's own report of which model generated the
   tokens. Until one exists, `attribution_status: actual` stays reachable by the contract and
   unclaimed by every supported adapter.
-- A task-aware plugin LLM surface on Hermes. `ctx.llm` calls `call_llm(task=None)`
-  (`agent/plugin_llm.py`), so the registered auxiliary task would route nothing on its own;
-  the adapter reads `auxiliary.context_shunt_reader` itself through the public
-  `hermes_cli.config.load_config` and applies the same user-over-plugin precedence. If the
-  facade gains a `task=` parameter, that indirection can go away.
 - Adapter registration schemas that expose the shared optional read selector and inspect
   per-call budget fields consistently on both hosts.
 

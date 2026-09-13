@@ -658,10 +658,11 @@ def test_reader_refuses_a_reported_model_that_contradicts_the_request(tmp_path):
     assert out["recovery"]["handles_valid"] is True
 
 
-def test_hermes_attribution_is_unverified_and_never_claims_actual(tmp_path):
-    """The facade cannot separate a provider report from an echo, so we do not pretend."""
+def test_old_hermes_attribution_is_unverified_and_never_claims_actual(tmp_path):
+    """The compatibility facade cannot separate a provider report from an echo."""
     module = _load_adapter()
-    module.register(FakeCtx(_config(tmp_path), llm=FakeLlm()))
+    llm = FakeLlm()
+    module.register(FakeCtx(_config(tmp_path), llm=llm))
     path = tmp_path / "ws" / "conf.txt"
     path.write_text("max_retries = 3\n")
     out = json.loads(
@@ -672,8 +673,38 @@ def test_hermes_attribution_is_unverified_and_never_claims_actual(tmp_path):
     assert out["provenance"]["derived"] is True
     assert out["provenance"]["attribution_status"] == "unverified"
     assert out["provenance"]["resolved_model"] is None
+    assert "task" not in llm.calls[0]
     reader = module._capability.mode("reader")
     assert any("never claims actual" in line for line in reader.evidence)
+
+
+def test_task_aware_hermes_routes_the_registered_slot_and_reports_resolution(tmp_path):
+    """Current Hermes returns the auxiliary router's selected route as a routing fact."""
+
+    class TaskAwareLlm(FakeLlm):
+        def complete(self, messages, *, task=None, **kwargs):
+            result = super().complete(messages, **kwargs)
+            self.calls[-1]["task"] = task
+            result.provider = kwargs.get("provider", "")
+            result.audit = {"task": task}
+            return result
+
+    module = _load_adapter()
+    llm = TaskAwareLlm()
+    module.register(FakeCtx(_config(tmp_path), llm=llm))
+    path = tmp_path / "ws" / "conf.txt"
+    path.write_text("max_retries = 3\n")
+    out = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?", paths=[str(path)], task_id="t6-current"
+        )
+    )
+    assert llm.calls[0]["task"] == module.AUX_TASK_KEY
+    assert out["provenance"]["attribution_status"] == "resolved"
+    assert out["provenance"]["resolved_model"] == READER_MODEL
+    assert out["provenance"]["reported_model"] is None
+    reader = module._capability.mode("reader")
+    assert any("post-policy route" in line for line in reader.evidence)
 
 
 def test_tool_schemas_declare_no_write_surface_and_no_full_retrieval():

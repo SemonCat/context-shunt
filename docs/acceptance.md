@@ -77,20 +77,24 @@ times. The gate requires live `gpt-5.6-luna`; without it the result is `NOT_RUN`
 mock pass.
 
 It also requires a **qualifying route**. A live number describes the route it was measured
-on, and two properties decide whether it describes this product: the reader's fixed
-instruction must be sent as a *system* message separate from the excerpt, and the reader's
-`max_output_tokens` must reach the provider. Each bridge in [`evals/bridges/`](../evals/bridges/)
-declares both in a `BRIDGE` descriptor, `unit bridge-contract` verifies the declaration
-against observed behaviour, and `eval luna` and `benchmark provider` report `NOT_RUN` -
-naming the missing property - rather than scoring through a route that lacks either.
+on, and three properties decide whether it describes this product: the reader's fixed
+instruction must be sent as a *system* message separate from the excerpt, the reader's
+`max_output_tokens` must reach the provider, and model dispatch must use the same
+production path as the shipped adapter. Each bridge in
+[`evals/bridges/`](../evals/bridges/) declares all three in a `BRIDGE` descriptor,
+`unit bridge-contract` verifies the declarations against observed behaviour and source
+contracts, and `eval luna` and `benchmark provider` report `NOT_RUN` - naming the missing
+property - rather than scoring through a route that lacks one.
 
 `bridges.openclaw_cli` does lack both, and cannot be fixed: `openclaw infer model run`
 takes a single `--prompt` and has no output-token flag. `bridges.openclaw_inhost` provides
-both by driving the host's own completion runtime with `systemPrompt` and `maxTokens` set
-from the reader's ceiling, and forwards the host's `usage` block, which is what makes the
-token half of the provider benchmark measurable. Neither is *production-equivalent* - the
-shipped adapter reaches the model through the isolated agent runtime - and neither claims
-to be; the gap is a field in the descriptor that the release attestation records verbatim.
+all three by constructing the host-owned `runtime.llm.complete` facade and selecting its
+`isolated-agent-runtime` branch with `systemPrompt` and `maxTokens` set from the reader's
+request. OpenClaw's command-scoped resolver materializes model-provider secret references
+only into the in-memory config before dispatch; the bridge never inspects or returns their
+values. It forwards the host's `usage` block, which makes the token half of the provider
+benchmark measurable. The CLI route stays non-production-equivalent, and both routes'
+claims and gaps are fields the release attestation records verbatim.
 
 Acceptance requires 100% mechanical citation validity; at least 95% task correctness and
 semantic citation support; no false completeness on no-answer/partial cases; and zero

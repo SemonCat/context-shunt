@@ -1,10 +1,9 @@
 /**
  * In-host reader bridge server: role-preserving model access for the Luna gates.
  *
- * NOT production-equivalent, and not wired into any gate. It reaches the model through the
- * simple-completion transport, while the production adapter uses the isolated agent
- * runtime (see "Not matched" below). No score from this file may be reported as a
- * production-equivalent result.
+ * Production-equivalent model dispatch for the OpenClaw adapter. It constructs the same
+ * host-owned `runtime.llm.complete` facade the plugin API supplies and invokes the same
+ * `execution.mode: "isolated-agent-runtime"` request shape as `adapters/openclaw/index.ts`.
  *
  * Why this exists
  * ---------------
@@ -18,10 +17,10 @@
  * A role-less prompt is a different prompt, and a different prompt can move a result in
  * either direction - so the CLI bridge cannot be used to claim a release-representative
  * score, and equally cannot be read as a pessimistic one. This server restores the role
- * separation; it does not by itself make a score representative.
+ * separation and the shipped runtime path.
  *
- * What it matches, and what it does not
- * -------------------------------------
+ * What it matches
+ * ---------------
  * Matched to the production adapter, deliberately and verifiably:
  *   - separate system role (`context.systemPrompt`) and a single user message;
  *   - the reader's own output cap (`maxTokens`), not the model's catalogue maximum;
@@ -29,21 +28,20 @@
  *   - no reasoning/thinking level, because the adapter passes none. The CLI bridge pinned
  *     `--thinking low`, which is a second deviation from production, not a neutral choice.
  *
- * Not matched, and recorded rather than glossed: production reaches the model through the
- * agent-harness runtime (`runIsolatedCompletion`). In this environment that path is not
- * reachable for the reader model - `openai/gpt-5.6-luna` resolves to the `codex` agent
- * runtime, which reports `owner-plugin-degraded`, and a bare `sub2api-openai` call fails
- * auth lookup because the harness resolves the auth profile upstream. This server uses the
- * simple-completion transport, which resolves the same credentials through the host's own
- * profile store, and reports `transport: "simple-completion"` in every result so no report
- * can imply the harness path was exercised.
+ * `createRuntimeLlm` is the owner of `api.runtime.llm.complete`; its isolated branch calls
+ * `runIsolatedAgentRuntimeCompletion`, which in turn calls `runIsolatedCompletion`. The
+ * bridge supplies a dedicated plugin caller id, a closed model allowlist, a bound agent,
+ * and the same purpose, temperature, role split, timeout and output cap as the adapter. A
+ * dedicated caller keeps this isolated evaluation independent of any disabled/stale plugin
+ * entry in the local host config. It does not enable or load the plugin, open a
+ * conversation, or register tools.
  *
  * Protocol: newline-delimited JSON on stdin/stdout. Startup (config + catalogue load) costs
  * ~20s, so the caller spawns this once and keeps it, rather than paying it 120 times.
  *
- * It reads no secret: `prepareSimpleCompletionModelForAgent` resolves credentials inside
- * the host, and only `auth.apiKey` is handed straight back to the host's own completion
- * call. Nothing is logged, echoed, or written.
+ * It reads no secret value: OpenClaw's command-scoped resolver materializes only registered
+ * model-provider references into the in-memory config supplied back to OpenClaw's runtime.
+ * This server never inspects, logs, echoes or writes those values.
  */
 import { createInterface } from "node:readline";
 
@@ -54,52 +52,73 @@ if (!HOST) {
 }
 
 const { loadConfig } = await import(`${HOST}/src/config/io.runtime.js`);
-const { prepareSimpleCompletionModelForAgent, completeWithPreparedSimpleCompletionModel } =
-  await import(`${HOST}/src/agents/simple-completion-runtime.js`);
+const { resolveCommandConfigWithSecrets } =
+  await import(`${HOST}/src/cli/command-config-resolution.js`);
+const { getModelsCommandSecretTargetIds } =
+  await import(`${HOST}/src/cli/command-secret-targets.js`);
+const { createRuntimeLlm } =
+  await import(`${HOST}/src/plugins/runtime/runtime-llm.runtime.js`);
 
-const cfg = await loadConfig();
+const authoredCfg = await loadConfig();
+const { resolvedConfig: cfg } = await resolveCommandConfigWithSecrets({
+  config: authoredCfg,
+  commandName: "context-shunt isolated reader evaluation",
+  targetIds: getModelsCommandSecretTargetIds(),
+  autoEnable: false,
+});
 const AGENT = process.env["CONTEXT_SHUNT_OPENCLAW_AGENT"] || "main";
 const ROUTE = process.env["CONTEXT_SHUNT_OPENCLAW_ROUTE"] || "sub2api-openai/gpt-5.6-luna";
-
-const prepared = await prepareSimpleCompletionModelForAgent({
-  cfg,
-  agentId: AGENT,
-  modelRef: ROUTE,
-  skipAgentDiscovery: true,
-  allowBundledStaticCatalogFallback: true,
-});
-if ("error" in prepared) {
-  process.stderr.write(`prepare failed: ${prepared.error}\n`);
+const routeSlash = ROUTE.indexOf("/");
+if (routeSlash <= 0 || routeSlash === ROUTE.length - 1) {
+  process.stderr.write("CONTEXT_SHUNT_OPENCLAW_ROUTE must be <provider>/<model>\n");
   process.exit(2);
 }
 
-/** Identity of what actually answered, recorded once and echoed on every result. */
+const llm = createRuntimeLlm({
+  getConfig: () => cfg,
+  authority: {
+    caller: { kind: "plugin", id: "context-shunt-eval" },
+    agentId: AGENT,
+    requiresBoundAgent: true,
+    allowComplete: true,
+    allowModelOverride: true,
+    allowedModels: [ROUTE],
+    allowedCompletionModels: [ROUTE],
+  },
+});
+
+/** Requested identity at startup; resolved identity is reported by every real call. */
 const identity = {
-  transport: "simple-completion",
+  transport: "runtime.llm.complete/isolated-agent-runtime",
   agent: AGENT,
   requested_route: ROUTE,
-  resolved_provider: prepared.selection.provider,
-  resolved_model: prepared.selection.modelId,
-  model_api: prepared.model.api,
-  host_version: cfg?.version ?? null,
+  host_version: (cfg as { version?: unknown })?.version ?? null,
 };
 process.stdout.write(JSON.stringify({ ready: true, identity }) + "\n");
 
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((p): p is { type: string; text: string } =>
-      Boolean(p && typeof p === "object" && (p as { type?: string }).type === "text"),
-    )
-    .map((p) => p.text)
-    .join("");
+const rl = createInterface({ input: process.stdin });
+
+function errorChain(error: unknown): string[] {
+  const chain: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const item = current as { code?: unknown; name?: unknown; cause?: unknown };
+    const kind = typeof item.code === "string" ? item.code : item.name;
+    if (typeof kind === "string" && kind) chain.push(kind.slice(0, 64));
+    current = item.cause;
+  }
+  return chain;
 }
 
-const rl = createInterface({ input: process.stdin });
 for await (const line of rl) {
   if (!line.trim()) continue;
-  let req: { id: number; system: string; user: string; max_output_tokens: number };
+  let req: {
+    id: number;
+    system: string;
+    user: string;
+    max_output_tokens: number;
+    timeout_ms: number;
+  };
   try {
     req = JSON.parse(line);
   } catch {
@@ -107,27 +126,26 @@ for await (const line of rl) {
   }
   const started = Date.now();
   try {
-    const result = await completeWithPreparedSimpleCompletionModel({
-      model: prepared.model,
-      auth: prepared.auth,
-      cfg,
-      // The production shape: system instructions in their own role, one user turn.
-      context: {
-        systemPrompt: req.system,
-        messages: [{ role: "user", content: req.user, timestamp: Date.now() }],
-      },
-      // The reader's cap, and the adapter's temperature. No reasoning: production sends none.
-      options: { maxTokens: req.max_output_tokens, temperature: 0 },
+    const result = await llm.complete({
+      messages: [{ role: "user", content: req.user }],
+      systemPrompt: req.system,
+      model: ROUTE,
+      maxTokens: req.max_output_tokens,
+      temperature: 0,
+      purpose: "context-shunt-reader",
+      execution: { mode: "isolated-agent-runtime", timeoutMs: req.timeout_ms },
     });
-    const usage = (result as { usage?: Record<string, number> }).usage;
     process.stdout.write(
       JSON.stringify({
         id: req.id,
         ok: true,
-        text: textOf((result as { content?: unknown }).content),
+        text: result.text,
         elapsed_ms: Date.now() - started,
         ...identity,
-        usage: usage ?? null,
+        resolved_provider: result.provider,
+        resolved_model: result.model,
+        execution: result.execution,
+        usage: result.usage ?? null,
       }) + "\n",
     );
   } catch (error) {
@@ -138,6 +156,7 @@ for await (const line of rl) {
         id: req.id,
         ok: false,
         error_kind: String(code ?? "UNKNOWN").slice(0, 64),
+        error_chain: errorChain(error),
         elapsed_ms: Date.now() - started,
       }) + "\n",
     );

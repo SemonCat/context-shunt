@@ -306,11 +306,10 @@ def _openclaw_prereq() -> tuple[bool, str]:
 #: ``production_equivalent`` is the strictest of the three and was added last, deliberately.
 #: A route can preserve roles and enforce the cap and still not be the product: the shipped
 #: adapter reaches the model through the isolated agent runtime, and a route that bypasses
-#: it measures a different stack. Every route in this repository declares
-#: ``production_equivalent: false`` and says why in its own ``production_gap``, so a
-#: release-quality live number cannot be produced here at all - which is the truthful
-#: answer, and better than a number this project would have to caveat into meaninglessness.
-#: `unit bridge-contract` verifies each route against its own declaration.
+#: it measures a different stack. ``openclaw_inhost`` qualifies by constructing the host's
+#: ``runtime.llm.complete`` facade and selecting its isolated-agent-runtime branch; the CLI
+#: route remains disqualified. `unit bridge-contract` verifies each route against its own
+#: declaration and pins the server/adapter/host source relationship behind that claim.
 REQUIRED_BRIDGE_PROPERTIES = ("preserves_roles", "enforces_output_cap", "production_equivalent")
 
 

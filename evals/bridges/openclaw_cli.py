@@ -123,7 +123,8 @@ LATENCIES_MS: list[int] = []
 #: `--prompt` and has no output-token flag. A gate that scored through this route would be
 #: measuring a different prompt under no ceiling and reporting it as the product's number,
 #: so the release gates report NOT_RUN with this reason instead. See
-#: `bridges.openclaw_inhost` for the route that does provide both.
+#: `bridges.openclaw_inhost` for the route that provides both and uses the production model
+#: dispatch path.
 BRIDGE: dict[str, object] = {
     "id": "openclaw_cli",
     "host": "openclaw",

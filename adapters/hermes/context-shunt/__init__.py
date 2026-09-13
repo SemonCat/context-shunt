@@ -38,19 +38,21 @@ Reader model configuration and its honest ceiling
 -------------------------------------------------
 ``register_auxiliary_task`` makes ``auxiliary.context_shunt_reader`` the canonical place a
 user pins the reader's provider/model, and user config wins over the plugin's defaults.
-The adapter reads that block itself through the public ``hermes_cli.config.load_config``
-and layers it over its own defaults, because ``ctx.llm`` is task-agnostic - the
-``PluginLlm`` facade calls ``agent.auxiliary_client.call_llm`` with ``task=None``
-(``agent/plugin_llm.py``), so registering the task alone would not route anything. No
-private resolver is imported, nothing is monkeypatched, and no log is parsed.
+Current Hermes exposes ``ctx.llm.complete(task=...)``; the adapter uses its own registered
+task key so the host owns that routing and returns its selected route. Older supported
+Hermes builds have the same facade without ``task``. The adapter detects the public method
+signature before any provider call and retains its compatibility path: it reads the same
+auxiliary block through public ``hermes_cli.config.load_config`` and supplies the resolved
+provider/model overrides itself. It never retries a provider call to discover capability.
+No private resolver is imported, nothing is monkeypatched, and no log is parsed.
 
 Attribution has a real ceiling here, and the adapter reports it rather than papering over
-it. ``PluginLlm._resolve_attribution`` records ``response.model`` when the provider
-returned one and otherwise falls back to the plugin's own override or the host's main
-model. A caller cannot tell those cases apart from the result object, so this adapter
-never claims ``provider_confirms_generation``: attribution comes back ``unverified`` (or
-``mismatch`` when the value contradicts the request), never ``actual``. Capture, inspect
-and stats do not depend on the reader and stay fully usable either way.
+it. On the task-aware surface, ``PluginLlm`` requests ``route_info`` from the auxiliary
+router and returns that post-policy provider/model; the adapter reports it as ``resolved``.
+On an older task-agnostic surface, the result can still be an echo of the override, so the
+compatibility path remains ``unverified``. Neither path claims
+``provider_confirms_generation`` or ``actual``. A contradiction is still ``mismatch``.
+Capture, inspect and stats do not depend on the reader and stay fully usable either way.
 
 The optional oversized-tool-result capture mode (``tool_result_capture``, formerly
 documented under the internal name ``suma_post_tool``) is wired but not claimed
@@ -80,6 +82,7 @@ a producer manifest schema.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from copy import deepcopy
@@ -197,14 +200,25 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
     if llm is None or not hasattr(llm, "complete"):
         modes.append(unsupported("reader", DisabledReason.MODEL_UNAVAILABLE))
     else:
+        task_aware = _llm_accepts_task(llm)
         modes.append(
             supported(
                 "reader",
                 evidence=(
-                    f"ctx.llm.complete requested with model={_reader_target()[1]}",
-                    "attribution ceiling: PluginLlm._resolve_attribution cannot separate a "
-                    "provider report from an echo of the request, so this adapter reports "
-                    "attribution_status=unverified and never claims actual",
+                    (
+                        f"ctx.llm.complete(task={AUX_TASK_KEY}) requested with "
+                        f"model={_reader_target()[1]}"
+                        if task_aware
+                        else "ctx.llm.complete compatibility path requested with "
+                        f"model={_reader_target()[1]}"
+                    ),
+                    (
+                        "task-aware PluginLlm returns the auxiliary router's post-policy "
+                        "route as resolved attribution; never claims actual"
+                        if task_aware
+                        else "task-agnostic PluginLlm cannot separate a provider report "
+                        "from an echo, so attribution is unverified; never claims actual"
+                    ),
                 ),
             )
         )
@@ -402,10 +416,10 @@ def _detect_host_version() -> str:
 def _auxiliary_task_config() -> dict[str, Any]:
     """Read ``auxiliary.context_shunt_reader`` from the host config.
 
-    Only the public ``hermes_cli.config.load_config`` is used. The host layers plugin
-    defaults under user config for task-aware calls; ``ctx.llm`` does not take a task, so
-    the adapter performs the same layering itself and keeps the precedence identical:
-    **user config wins over the plugin defaults.**
+    Only the public ``hermes_cli.config.load_config`` is used. This computes the target the
+    core requests and validates against the returned route. Current task-aware hosts apply
+    the same block themselves; on older hosts it also supplies the compatibility override.
+    In both cases **user config wins over the plugin defaults.**
     """
     try:
         from hermes_cli.config import load_config as load_host_config
@@ -438,6 +452,22 @@ AUX_TASK_DEFAULTS: dict[str, Any] = {
     "model": READER_MODEL,
     "timeout": 20,
 }
+
+
+def _llm_accepts_task(llm: Any) -> bool:
+    """Whether the public bound ``complete`` signature explicitly offers ``task``.
+
+    Do not probe by calling with the keyword: an internal ``TypeError`` after dispatch
+    would otherwise make a compatibility retry duplicate a billable provider call.
+    A wrapper exposing only ``**kwargs`` is treated as the older ceiling, fail-closed.
+    """
+    complete = getattr(llm, "complete", None)
+    if not callable(complete):
+        return False
+    try:
+        return "task" in inspect.signature(complete).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 # -- normalization ---------------------------------------------------------
@@ -529,11 +559,11 @@ def _bridge_call(
     ``ctx.llm`` never exposes credentials, and provider exception text is dropped by
     ``HostBridgeProvider`` - only ``MODEL_ERROR`` crosses back.
 
-    ``result.provider``/``result.model`` come from ``PluginLlm._resolve_attribution``,
-    which records ``response.model`` when the provider supplied one and otherwise the
-    plugin's own override or the host's main model. Those cases are indistinguishable from
-    here, so they are reported as ``reported_*`` with
-    ``provider_confirms_generation=False``: the truthful outcome is ``unverified``.
+    Current ``PluginLlm.complete(task=...)`` populates its result from the auxiliary
+    router's ``route_info`` and provider response; a matching ``audit.task`` proves this
+    call used that surface, so provider/model are reported as host-resolved routing facts.
+    The task-agnostic compatibility result stays ``reported_*`` because it cannot separate
+    a provider report from an echo of the requested override. Neither is provider proof.
     """
     kwargs: dict[str, Any] = {
         "max_tokens": max_output_tokens,
@@ -545,6 +575,9 @@ def _bridge_call(
         kwargs["model"] = model
     if provider:
         kwargs["provider"] = provider
+    task_aware = _llm_accepts_task(_llm)
+    if task_aware:
+        kwargs["task"] = AUX_TASK_KEY
     result = _llm.complete(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         **kwargs,
@@ -552,13 +585,18 @@ def _bridge_call(
     usage = getattr(result, "usage", None)
     reported_model = getattr(result, "model", "") or ""
     reported_provider = getattr(result, "provider", "") or ""
+    audit = getattr(result, "audit", None)
+    task_routed = (
+        task_aware
+        and isinstance(audit, dict)
+        and audit.get("task") == AUX_TASK_KEY
+    )
     return {
         "text": getattr(result, "text", "") or "",
-        "reported_provider": reported_provider or None,
-        "reported_model": reported_model or None,
-        # Deliberately absent: the facade exposes no separate resolved selection.
-        "resolved_provider": None,
-        "resolved_model": None,
+        "reported_provider": None if task_routed else reported_provider or None,
+        "reported_model": None if task_routed else reported_model or None,
+        "resolved_provider": (reported_provider or None) if task_routed else None,
+        "resolved_model": (reported_model or None) if task_routed else None,
         "provider_confirms_generation": False,
         "input_tokens": _usage_field(usage, "input_tokens"),
         "output_tokens": _usage_field(usage, "output_tokens"),

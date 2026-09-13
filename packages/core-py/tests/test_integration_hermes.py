@@ -360,8 +360,8 @@ def test_stats_reports_this_session_without_content(host_result):
     assert "What is the retry ceiling?" not in blob
 
 
-def test_hermes_attribution_is_unverified_and_never_claims_actual(host_result):
-    """The facade cannot separate a provider report from an echo, so we do not pretend."""
+def test_hermes_compatibility_host_is_unverified_and_never_claims_actual(host_result):
+    """This pinned older checkout has no task argument, so its result stays unverified."""
     envelope = json.loads(host_result["reader_result"])
     provenance = envelope["provenance"]
     assert provenance["derived"] is True

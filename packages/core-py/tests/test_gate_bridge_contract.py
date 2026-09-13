@@ -46,8 +46,8 @@ BRIDGES = REPO / "evals" / "bridges"
 #: The two properties a required live gate will not score without.
 #: The two protocol properties this gate verifies against each route's own behaviour.
 #: `scripts/verify` requires a third - `production_equivalent` - before a live number may
-#: be reported as this project's, and nothing here can satisfy it; see
-#: `test_no_route_here_is_release_quality_and_that_is_why_the_live_gates_are_not_run`.
+#: be reported as this project's. The in-host route earns it by driving the same
+#: `runtime.llm.complete` isolated-agent path as the shipped OpenClaw adapter.
 REQUIRED_PROPERTIES = ("preserves_roles", "enforces_output_cap")
 
 #: What `scripts/verify` actually gates a release-quality live number on. Duplicated as a
@@ -174,6 +174,7 @@ def test_the_in_host_route_forwards_the_readers_output_cap(inhost):
     )
     sent = _requests(received)
     assert sent[0]["max_output_tokens"] == DEFAULT_LIMITS.max_output_tokens_per_call
+    assert sent[0]["timeout_ms"] == 30000
     assert module.BRIDGE["enforces_output_cap"] is True
 
 
@@ -343,18 +344,52 @@ def test_every_bridge_declares_the_properties_the_release_gates_read():
             assert key in descriptor, (path.name, key)
         for key in REQUIRED_PROPERTIES:
             assert isinstance(descriptor.get(key), bool), (path.name, key)
-        # Nothing in this repository may claim production equivalence: no route here
-        # reaches the model the way the shipped adapter does.
-        assert descriptor["production_equivalent"] is False, path.name
         assert descriptor["production_gap"], path.name
+        if descriptor["production_equivalent"] is True:
+            assert descriptor.get("production_equivalence_evidence"), path.name
+
+
+def test_the_in_host_server_uses_the_shipped_isolated_runtime_path():
+    """Production equivalence is tied to the real server source, not descriptor prose."""
+    server = (BRIDGES / "openclaw_inhost_server.mts").read_text()
+    adapter = (REPO / "adapters" / "openclaw" / "index.ts").read_text()
+    host_runtime = (
+        Path(os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROOT", ""))
+        / "src/plugins/runtime/runtime-llm.runtime.ts"
+    )
+    for needle in (
+        "createRuntimeLlm",
+        "resolveCommandConfigWithSecrets",
+        "getModelsCommandSecretTargetIds",
+        'commandName: "context-shunt isolated reader evaluation"',
+        "autoEnable: false",
+        'caller: { kind: "plugin", id: "context-shunt-eval" }',
+        "allowedCompletionModels: [ROUTE]",
+        'execution: { mode: "isolated-agent-runtime", timeoutMs: req.timeout_ms }',
+        "maxTokens: req.max_output_tokens",
+        "systemPrompt: req.system",
+        'messages: [{ role: "user", content: req.user }]',
+    ):
+        assert needle in server
+    for needle in (
+        'execution: { mode: "isolated-agent-runtime", timeoutMs }',
+        "maxTokens: maxOutputTokens",
+        "systemPrompt: system",
+        'messages: [{ role: "user", content: user }]',
+    ):
+        assert needle in adapter
+    if host_runtime.is_file():
+        source = host_runtime.read_text()
+        assert "export function createRuntimeLlm" in source
+        assert "runIsolatedAgentRuntimeCompletion" in source
 
 
 def test_exactly_one_route_preserves_roles_and_enforces_the_cap():
     """The protocol half: one route here makes the call the reader actually budgets for.
 
-    Not a release-quality claim - see the test below - but a real distinction. The CLI
-    route folds the system prompt into the user turn and passes no output ceiling, so a
-    number measured through it describes a different prompt under no cap.
+    The production-dispatch claim is checked separately below. The CLI route folds the
+    system prompt into the user turn and passes no output ceiling, so a number measured
+    through it describes a different prompt under no cap.
     """
     qualifying = []
     for path in sorted(BRIDGES.glob("*.py")):
@@ -366,21 +401,8 @@ def test_exactly_one_route_preserves_roles_and_enforces_the_cap():
     assert qualifying == ["openclaw_inhost"], qualifying
 
 
-def test_no_route_here_is_release_quality_and_that_is_why_the_live_gates_are_not_run():
-    """Production equivalence is required, and nothing in this repository has it.
-
-    Preserving roles and enforcing the cap makes a route's *protocol* right. It does not
-    make the route the product: the shipped adapter reaches the model through the isolated
-    agent runtime, and every route here bypasses it. A gate that accepted the in-host
-    route as release-quality would publish a number measured on a different stack as this
-    project's, which is the failure mode the whole descriptor mechanism exists to prevent.
-
-    So the honest state is that no live number can be produced from here at all, and the
-    required live gates report NOT_RUN by *declaration* rather than by an absent
-    prerequisite that someone might think a checkout would fix. This test pins that: if a
-    route ever claims production equivalence, it has to be because it genuinely reaches
-    the model the way the adapter does, and this assertion is where that claim gets read.
-    """
+def test_only_the_isolated_in_host_route_is_release_quality():
+    """The CLI remains disqualified; the runtime-isolated route satisfies all three."""
     release_quality = []
     for path in sorted(BRIDGES.glob("*.py")):
         if path.name.startswith("_"):
@@ -388,7 +410,7 @@ def test_no_route_here_is_release_quality_and_that_is_why_the_live_gates_are_not
         descriptor = getattr(_bridges_module(path.stem), "BRIDGE", {})
         if all(descriptor.get(key) is True for key in RELEASE_QUALITY_PROPERTIES):
             release_quality.append(path.stem)
-    assert release_quality == [], release_quality
+    assert release_quality == ["openclaw_inhost"], release_quality
     # And the gate script must actually be asking for it, or the assertion above is
     # checking a property nothing reads.
     verify = (REPO / "scripts" / "verify").read_text()

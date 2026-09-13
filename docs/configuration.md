@@ -113,10 +113,11 @@ Hermes has two separate layers:
    registered task also has a host-facing `timeout` default of 20 seconds, but core calls
    pass their own bounded timeout derived from `model_call_deadline_ms`.
 
-The auxiliary override is read through Hermes' public config loader because the current
-`ctx.llm` facade has no task argument. The effective target still appears in envelope
-provenance. Hermes cannot distinguish a provider report from a request echo, so its maximum
-supported attribution remains `unverified`.
+The auxiliary override is read through Hermes' public config loader to compute the target
+the core requests. Current Hermes also receives `task="context_shunt_reader"`, owns the
+route selection, and returns that post-policy route as `resolved` envelope provenance.
+Older facades without an explicit `task` parameter use the same config value as a guarded
+provider/model override and remain `unverified`, because that result may echo the request.
 
 ### OpenClaw capture configuration
 

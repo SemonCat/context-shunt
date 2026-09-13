@@ -58,9 +58,9 @@ The recorded real-host integration run is no longer outstanding: Hermes and Open
 plus unsupported-mode gates executed 122 cases with 0 failures. Those historical post-tool results do not describe 1.2.0: OpenClaw 2026.9.3 now has an official middleware seam and a deterministic real-host runner gate. See the current capability matrix and release verification report for counts and limitations.
 
 A production release signal still requires the production-equivalent 40-item Luna
-evaluation and provider benchmark. Both remain `NOT_RUN` without live model access and
-must never be described as passing on the strength of deterministic or host integration
-tests.
+evaluation and provider benchmark. `bridges.openclaw_inhost` now supplies a qualifying
+isolated-runtime route, but both gates remain `NOT_RUN` without live model access and must
+never be described as passing on the strength of deterministic or host integration tests.
 
 Future host support for post-tool spill needs a new capability proof and runtime sentinel
 measurement before activation. A future writer requires a new contract revision, explicit

@@ -1,4 +1,4 @@
-/** Deterministic integration against the installed 2026.9.3 host loader/runner.
+/** Deterministic integration against the installed 2026.9.4 host loader/runner.
  * No gateway, live configuration, provider calls, deployment or host source writes.
  * Requires CONTEXT_SHUNT_OPENCLAW_ROOT; absent prerequisites are NOT_RUN in verify.
  */
@@ -26,7 +26,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   it("reads the installed host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     expect(pkg.name).toBe("openclaw");
-    expect(String(pkg.version)).toBe("2026.9.3");
+    expect(String(pkg.version)).toBe("2026.9.4");
   });
 
   it("exposes the typed hooks the adapter depends on", () => {
@@ -37,7 +37,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   });
 
   it("still documents after_tool_call as observe-only", () => {
-    const docs = hostFile("docs/plugins/hooks.md");
+    const docs = hostFile("docs/plugins/hooks/reference.md");
     // The capability table row, not the matcher row that merely names the hook.
     const row = docs
       .split("\n")
@@ -101,6 +101,18 @@ describe.skipIf(!available)("openclaw host integration", () => {
     const runtime = hostFile("src/plugins/runtime/types-core.ts");
     expect(runtime).toContain("Fresh, literal-zero-tool completion through the configured agent runtime.");
     expect(runtime).toContain("Isolated runtimes currently accept one fresh user prompt, not a replayed chat history.");
+  });
+
+  it("exposes the production isolated LLM dispatch and command-scoped secret resolver", () => {
+    const runtime = hostFile("src/plugins/runtime/runtime-llm.runtime.ts");
+    expect(runtime).toContain("export function createRuntimeLlm");
+    expect(runtime).toContain("runIsolatedAgentRuntimeCompletion({");
+    const isolated = hostFile("src/plugins/runtime/runtime-llm-isolated.ts");
+    expect(isolated).toContain("runIsolatedCompletion({");
+    expect(isolated).toContain("maxTokens: asFiniteNumber(params.request.maxTokens)");
+    const resolver = hostFile("src/cli/command-config-resolution.ts");
+    expect(resolver).toContain("resolveCommandSecretRefsViaGateway({");
+    expect(resolver).toContain("resolvedConfig");
   });
 
   it("registers a tool name the host manifest contract declares", () => {

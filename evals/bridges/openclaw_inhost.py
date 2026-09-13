@@ -1,69 +1,29 @@
-"""A role-preserving, cap-enforcing reader bridge over the OpenClaw host's own model access.
+"""A production-path reader bridge over OpenClaw's host-owned model runtime.
 
-This is the route the release gates require, and it exists because the CLI bridge cannot be
-one. ``openclaw infer model run`` takes a single ``--prompt`` and has no output-token flag,
-so :mod:`bridges.openclaw_cli` concatenates the reader's system prompt into the user turn
-and silently drops ``max_output_tokens``. A score obtained that way describes neither the
-prompt production sends nor the ceiling production imposes, in either direction: removing a
-role boundary changes what the model sees, and an unbounded completion is not the bounded
-call the reader budgets for. Both are recorded on that module; neither is fixable there.
+The CLI bridge cannot qualify: ``openclaw infer model run`` collapses the system prompt
+into one user turn and exposes no output-token flag. This bridge instead drives
+``openclaw_inhost_server.mts`` over newline-delimited JSON. The server constructs the same
+``runtime.llm.complete`` facade supplied as ``api.runtime.llm.complete`` and uses the
+shipped adapter's exact isolated request shape:
 
-What this route does instead
-----------------------------
-It drives :mod:`openclaw_inhost_server` (``openclaw_inhost_server.mts``) over
-newline-delimited JSON. That server calls the host's own completion runtime with
+* the fixed reader instruction in ``systemPrompt`` and one user excerpt;
+* ``execution.mode: isolated-agent-runtime``;
+* the reader's ``max_output_tokens`` as ``maxTokens`` and its deadline as ``timeoutMs``;
+* ``temperature: 0``, a dedicated plugin-evaluation identity, a bound agent and a closed
+  model allowlist.
 
-* ``context.systemPrompt`` and a single user message - the shape
-  ``adapters/openclaw/index.ts`` uses, and the shape the host's isolated-runtime policy
-  *requires* (``runtime-llm-isolated.ts`` rejects system instructions passed any other
-  way); and
-* ``options.maxTokens`` set from the reader's own per-call ceiling, so the cap the reader
-  budgets for is the cap the provider is given.
+``createRuntimeLlm`` dispatches that branch through ``runIsolatedAgentRuntimeCompletion``
+and ``runIsolatedCompletion``. The server therefore uses the same model path as
+``adapters/openclaw/index.ts``, not the simple-completion transport this bridge formerly
+used. A dedicated caller keeps the evaluation independent of any disabled or stale plugin
+entry in the local host config; the authority still fails closed to the one requested route.
+It neither enables the plugin nor opens a conversation or registers tools.
 
-It also forwards the host's ``usage`` block when the host reports one, which is what makes
-the token half of ``benchmark provider`` measurable at all. Absent usage stays absent: no
-key is sent, the reader records ``usage_complete: false`` with null counts, and nothing is
-laundered into a zero.
-
-What it is *not*
-----------------
-Not production-equivalent, and this module does not claim to be. Production reaches the
-model through the agent-harness isolated runtime (``runIsolatedCompletion``); this server
-uses the simple-completion transport, which resolves the same credentials through the
-host's own profile store but is a different code path. ``BRIDGE`` says so in a field the
-release attestation records verbatim, so no report can imply the harness path was
-exercised. Role preservation and cap enforcement are the two properties the release gates
-require and the two this route actually provides.
-
-What can stop it, and what that is not
---------------------------------------
-This route needs the host to resolve a credential for it, and on a host where it cannot,
-the honest result is that the *live* gate does not run. Two blockers were observed while
-this route was written, both recorded here so an operator recognises them rather than
-reading a NOT_RUN as a defect in this repository:
-
-* ``Auth lookup failed for provider "sub2api-openai": No API key found ... Auth store:
-  ~/.openclaw/agents/<agent>/agent/openclaw-agent.sqlite``. The simple-completion runtime
-  resolves credentials from the *per-agent* auth store. Where the provider's configured
-  ``apiKey`` is a secret **reference** (``{source, provider, id}``) rather than a stored
-  key, only the host's own secret provider can resolve it - the same reason the CLI bridge
-  does not call the gateway endpoint directly. Extracting that reference would be
-  credential exfiltration, so this route reports the failure instead of working around it.
-* ``prepare failed: Auth lookup failed for provider "openai": Unable to materialize
-  openai/gpt-5.6-luna for its prepared subscription route``, preceded by the host's own
-  ``openai failed to load from .../dist/extensions/openai/index.js``. The alternative
-  route's provider extension does not load in that checkout, so auth materialization fails
-  before any call. That is a host-checkout problem, and fixing it is not this
-  repository's to do.
-
-Neither is a reason to fall back to a route that would misdescribe the product. The gate
-reports NOT_RUN and names the blocker.
-
-Secrets
--------
-Nothing here reads, stores, logs or forwards a credential. The server resolves auth inside
-the host process; this module speaks only prompts and completions to it, writes no prompt
-to any log, and reduces every host error to a bounded type string.
+The host's resolved provider/model, isolated execution owner and usage block are returned.
+Absent usage stays absent; it is never projected as zero. Credentials remain inside the
+host runtime: OpenClaw's command-scoped resolver materializes registered model-provider
+references into the in-memory runtime config, and this bridge never inspects or returns
+their values. Host errors cross the bridge only as a bounded type chain.
 
 Usage
 -----
@@ -80,9 +40,9 @@ Environment:
     CONTEXT_SHUNT_OPENCLAW_SERVER    the NDJSON server to drive (default: the .mts beside
                                      this file). Overridden by the ``bridge-contract``
                                      gate, which drives this protocol against a stub so
-                                     the route's two claimed properties - separate roles
-                                     and a forwarded output cap - are *verified* rather
-                                     than asserted in a descriptor nobody checks.
+                                     the route's role/cap claims are *verified* rather than
+                                     asserted in a descriptor nobody checks; source checks
+                                     pin the production-dispatch claim.
 """
 
 from __future__ import annotations
@@ -108,23 +68,22 @@ STARTUP_TIMEOUT_S = 180.0
 #: prompt, a completion, or any source text - only timings.
 LATENCIES_MS: list[int] = []
 
-#: What this route can and cannot do, read by the release gates and recorded verbatim in
-#: the attestation. `preserves_roles` and `enforces_output_cap` are the two properties a
-#: required live gate refuses to score without: a route that fails either is measuring
-#: something other than what the reader does in production.
+#: Properties read by the release gates and recorded verbatim in the attestation. The
+#: server constructs the same host-owned runtime facade and isolated request shape the
+#: adapter uses; it does not bypass the production model-dispatch path.
 BRIDGE: dict[str, Any] = {
     "id": "openclaw_inhost",
     "host": "openclaw",
-    "route_kind": "in_host_simple_completion",
+    "route_kind": "in_host_plugin_runtime_isolated_agent",
     "preserves_roles": True,
     "enforces_output_cap": True,
     "forwards_usage": True,
-    # The honest remaining gap, stated in the descriptor rather than in prose only:
-    # production uses the isolated agent runtime, this route uses simple-completion.
-    "production_equivalent": False,
-    "production_gap": (
-        "production reaches the model through the isolated agent runtime "
-        "(runIsolatedCompletion); this route uses the host's simple-completion transport"
+    "production_equivalent": True,
+    "production_gap": "none for model dispatch",
+    "production_equivalence_evidence": (
+        "the server constructs createRuntimeLlm (the api.runtime.llm.complete owner) and "
+        "uses execution.mode=isolated-agent-runtime with the adapter's request shape; "
+        "evaluation caller authority is independently restricted to the requested route"
     ),
 }
 
@@ -249,6 +208,7 @@ class _Server:
                     "user": user,
                     # The reader's ceiling, passed through as the provider's ceiling.
                     "max_output_tokens": max_output_tokens,
+                    "timeout_ms": timeout_ms,
                 }
             )
             deadline = time.monotonic() + max(1.0, timeout_ms / 1000.0)
@@ -334,8 +294,14 @@ def complete(
 
     if result.get("ok") is not True:
         # The host's message can quote the prompt back, so only its bounded kind crosses.
+        chain = result.get("error_chain")
+        kinds = (
+            "/".join(str(item)[:64] for item in chain[:6])
+            if isinstance(chain, list)
+            else str(result.get("error_kind") or "unknown")
+        )
         raise BridgeError(
-            f"host refused the call ({result.get('error_kind') or 'unknown'})"
+            f"host refused the call ({kinds or 'unknown'})"
         )
     text = result.get("text")
     if not isinstance(text, str):
