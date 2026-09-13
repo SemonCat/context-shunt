@@ -521,6 +521,46 @@ class ShuntSession:
             coverage.omit_once(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
 
         attempts = result.cost.attempts_started
+        try:
+            raw_artifact_path = self._store.raw_artifact_path(
+                self._identity, entry.source_id
+            )
+        except ShuntError as exc:
+            if exc.code != "STORE_FAILED":
+                raise
+            raw_artifact_path = None
+        guidance = (
+            "Escape hatch: deterministic legacy-shaped compaction of the source, ported "
+            "from the incumbent tool-result compactor; not model-derived and not an LLM "
+            "summary. Original reader failure: "
+            + original_failure
+            + ". Covers only the first requested source, independent of the question; "
+            "other sources and structure the heuristic dropped are omitted. Treat the "
+            "summary only as navigation: never as the question's answer, exhaustive "
+            "coverage, an exact count, or citation evidence. Use the retained handles "
+            "with context_shunt_inspect for exact bounded evidence."
+        )
+        legacy_compaction = {
+            "deterministic": True,
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "summary": summary,
+            "summary_bytes": summary_bytes,
+            "original_bytes": original_bytes,
+            "hard_cap_chars": hard_chars,
+            "original_failure": original_failure,
+        }
+        if raw_artifact_path is not None:
+            guidance += (
+                " The complete raw source is not inlined; read it in bounded pages with "
+                "the host file tool at legacy_compaction.raw_artifact_path."
+            )
+            legacy_compaction["raw_artifact_path"] = raw_artifact_path
+        else:
+            guidance += (
+                " The full-path compatibility mirror is unavailable; the retained handles "
+                "remain the exact bounded recovery interface."
+            )
         env = E.build(
             request_id=request_id,
             status="partial",
@@ -540,29 +580,10 @@ class ShuntSession:
                     result.cost.attempts_usage_complete == attempts if attempts else True
                 ),
             ),
-            guidance=(
-                "Escape hatch: deterministic legacy-shaped compaction of the source, ported "
-                "from the incumbent tool-result compactor; not model-derived and not an LLM "
-                "summary. Original reader failure: "
-                + original_failure
-                + ". Covers only the first requested source, independent of the question; "
-                "other sources and structure the heuristic dropped are omitted. Treat the "
-                "summary only as navigation: never as the question's answer, exhaustive "
-                "coverage, an exact count, or citation evidence. Use the retained handles "
-                "with context_shunt_inspect for exact bounded evidence."
-            ),
+            guidance=guidance,
             recovery=E.recovery_for(original_failure, handles_valid=True),
             accounting_id=operation_id,
-            legacy_compaction={
-                "deterministic": True,
-                "source_id": entry.source_id,
-                "snapshot_id": entry.snapshot.snapshot_id,
-                "summary": summary,
-                "summary_bytes": summary_bytes,
-                "original_bytes": original_bytes,
-                "hard_cap_chars": hard_chars,
-                "original_failure": original_failure,
-            },
+            legacy_compaction=legacy_compaction,
         )
         fit_compaction(env, self.config.limits)
         summary_bytes = env["legacy_compaction"]["summary_bytes"]
@@ -571,6 +592,9 @@ class ShuntSession:
         )
         if not charge.granted:
             raise ShuntError("DISCLOSURE_EXHAUSTED")
+        # The path refers only to a mirror prepared during source publication. Never read,
+        # write or fsync the raw payload here: this fallback commonly runs after the reader
+        # deadline, and response publication must not acquire an unbounded I/O tail.
         return env
 
     def _emergency_compaction(self, request, result, request_id, operation_id):
@@ -813,6 +837,11 @@ class ShuntSession:
             for handle in fallback.envelope["sources"]:
                 coverage.omit(handle["source_id"], {"kind": "all"}, "UNKNOWN_REMAINDER")
             handles = fallback.envelope["sources"]
+        fallback_failure = (
+            str(fallback.availability_failure or fallback.envelope.get("code") or "MODEL_ERROR")
+            if fallback
+            else None
+        )
 
         def compose(source_used: int, session_used: int, limit_reached: bool) -> dict[str, Any]:
             block: dict[str, Any] = {
@@ -852,7 +881,7 @@ class ShuntSession:
                 guidance=(
                     "Escape hatch: exact deterministic fallback extraction; not model-derived "
                     "and not an LLM summary. Original failure: "
-                    + fallback.availability_failure
+                    + fallback_failure
                     + ". Selection: byte prefix of first requested source, independent of question "
                     "and reader selectors; other sources and unreturned bytes omitted."
                 )
@@ -861,7 +890,7 @@ class ShuntSession:
                 if selector.get("kind") == "search"
                 and any(s.kind == "bytes" for s in extraction.segments)
                 else None,
-                recovery=E.recovery_for(fallback.availability_failure) if fallback else None,
+                recovery=E.recovery_for(fallback_failure) if fallback else None,
                 accounting_id=operation_id,
                 extraction=block,
             )

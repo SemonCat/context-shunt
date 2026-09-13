@@ -7,7 +7,11 @@ scope and generation, TTL, quotas, content refcounts, disclosure totals, cleanup
 and bounded operation metrics. The immutable raw payload lives in a content-addressed
 private file whose location is *derived* from the SHA-256 internally. No source path, no
 question, no answer, no payload preview and no provider error body is ever written to the
-database, and no filesystem path is stored or exposed.
+database. No source or blob filesystem path is stored there. Python capture prepares a
+separate private exact-byte ``.txt`` mirror under a secret-derived name so a successful
+degraded reader result can expose it to the Hermes host file tool without doing raw-payload
+I/O after the reader deadline. That explicit recovery artifact is bound to handle/scope
+cleanup; it is not a database field or the content-addressed blob path.
 
 The schema is not written here. Both language cores execute ``contracts/store/v1.sql``
 verbatim, which is what makes the DDL normative and lets the cross-language
@@ -61,7 +65,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -92,7 +98,17 @@ _OPEN_ATTEMPTS = 6
 _OPEN_BACKOFF_S = 0.02
 _BLOB_DIR = "blobs"
 _TMP_DIR = "tmp"
+_ARTIFACT_DIR = "artifacts"
 _READ_CHUNK = 256 * 1024
+_SCOPE_ID_RE = re.compile(r"scp_[0-9a-f]{32}")
+_HANDLE_ID_RE = re.compile(r"src_[0-9a-f]{16}")
+_ARTIFACT_NAME_RE = re.compile(r"(src_[0-9a-f]{16})\.[0-9a-f]{32}\.txt")
+_ARTIFACT_TEMP_RE = re.compile(
+    r"src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt\.[0-9a-f]{16}\.part"
+)
+_ARTIFACT_SEAL_RE = re.compile(
+    r"(src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt)\.[0-9a-f]{32}\.seal"
+)
 
 #: Blob file names are ``<hash>.bin``; legacy spill artifacts ended in ``.spill``.
 _BLOB_SUFFIX = ".bin"
@@ -353,7 +369,12 @@ class SnapshotStore:
                 self._conn = None
 
     def _prepare_directories(self) -> None:
-        for path in (self._root, self._root / _BLOB_DIR, self._root / _TMP_DIR):
+        for path in (
+            self._root,
+            self._root / _BLOB_DIR,
+            self._root / _TMP_DIR,
+            self._root / _ARTIFACT_DIR,
+        ):
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except OSError:
@@ -636,8 +657,29 @@ class SnapshotStore:
                     self._release_refcounts_locked(conn, identity.scope_id)
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "SCOPE_CLOSE_FAILED", retryable=False) from None
+        # Authorization revocation commits before the separate best-effort cleanup
+        # transaction. The second writer lock prevents an empty scope directory from
+        # being removed under a concurrent publisher, while a cleanup failure cannot
+        # roll the already-committed authorization change back.
+        self._cleanup_closed_scope_artifacts(identity.scope_id)
         self._collect_pending_blobs()
         return revoked
+
+    def _cleanup_closed_scope_artifacts(self, scope_id: str) -> None:
+        with self._lock, contextlib.suppress(sqlite3.Error):
+            conn = self._connect()
+            with _write_txn(conn):
+                row = conn.execute(
+                    "SELECT closed_at_ms FROM scopes WHERE scope_id = ?", (scope_id,)
+                ).fetchone()
+                live = conn.execute(
+                    "SELECT 1 FROM handles "
+                    "WHERE scope_id = ? AND revoked = 0 LIMIT 1",
+                    (scope_id,),
+                ).fetchone()
+                if row is not None and row["closed_at_ms"] is not None and live is None:
+                    with contextlib.suppress(ShuntError, OSError):
+                        self._remove_scope_artifacts(scope_id)
 
     def _release_refcounts_locked(self, conn: sqlite3.Connection, scope_id: str) -> None:
         """Drop the refcount each revoked handle held, inside the caller's transaction."""
@@ -767,6 +809,19 @@ class SnapshotStore:
                                 expires_at_ms=expires,
                             )
                         )
+                    # Prepare exact host-readable mirrors while capture still owns the
+                    # payload and before any reader deadline can expire. The HMAC suffix
+                    # makes an undisclosed path unguessable from the public handle. A
+                    # mirror failure does not invalidate the handle: bounded summary and
+                    # exact inspect recovery remain available.
+                    artifact_key = self._artifact_key_locked(conn)
+                    for handle, (capture, _final, _digest) in zip(
+                        published, staged, strict=True
+                    ):
+                        with contextlib.suppress(ShuntError):
+                            self._write_or_verify_raw_artifact(
+                                handle, capture.data, artifact_key=artifact_key
+                            )
                     for temp_id in temp_ids:
                         conn.execute("DELETE FROM orphan_temps WHERE temp_id = ?", (temp_id,))
             except ShuntError:
@@ -977,9 +1032,29 @@ class SnapshotStore:
         handles = int(row["handles"]) + len(staged)
         if handles > self._limits.store_max_entries:
             raise ShuntError("LIMIT_EXCEEDED", "STORE_ENTRY_QUOTA", retryable=False)
-        known = {r["hash"] for r in conn.execute("SELECT hash FROM blobs").fetchall()}
-        added = sum(len(c.data) for c, _p, d in staged if d not in known)
-        if int(blob_row["total"]) + added > self._limits.store_max_bytes:
+        known = {str(r["hash"]) for r in conn.execute("SELECT hash FROM blobs").fetchall()}
+        new_digests: set[str] = set()
+        added_blobs = 0
+        for capture, _path, digest in staged:
+            if digest not in known and digest not in new_digests:
+                new_digests.add(digest)
+                added_blobs += len(capture.data)
+        # Each live handle reserves one exact-byte Python/Hermes recovery mirror. Using
+        # SQL reservations rather than a filesystem scan keeps the quota decision atomic
+        # with publication and is conservative when a mirror could not be prepared or a
+        # handle came from the TypeScript core, which does not create these mirrors.
+        artifact_row = conn.execute(
+            "SELECT COALESCE(SUM(b.bytes), 0) AS total "
+            "FROM handles h JOIN blobs b ON b.hash = h.blob_hash WHERE h.revoked = 0"
+        ).fetchone()
+        added_artifacts = sum(len(capture.data) for capture, _path, _digest in staged)
+        charged = (
+            int(blob_row["total"])
+            + int(artifact_row["total"])
+            + added_blobs
+            + added_artifacts
+        )
+        if charged > self._limits.store_max_bytes:
             raise ShuntError("LIMIT_EXCEEDED", "STORE_BYTE_QUOTA", retryable=False)
 
     # -- authorization -----------------------------------------------------
@@ -1009,24 +1084,7 @@ class SnapshotStore:
             ).fetchone()
         if row is None:
             raise ShuntError("SOURCE_EXPIRED", self._refusal_detail(identity, handle_id, now))
-        stored_origin = row["upstream_truncated"]
-        if stored_origin not in (None, 0, 1):
-            raise ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", retryable=False)
-        handle = PublishedHandle(
-            handle_id=str(row["handle_id"]),
-            scope_id=str(row["scope_id"]),
-            blob_hash=str(row["blob_hash"]),
-            media_type=str(row["media_type"]),
-            bytes_len=int(row["bytes"]),
-            line_count=int(row["line_count"]),
-            kind=str(row["kind"]),
-            internal=bool(row["internal"]),
-            upstream_truncated=(
-                None if stored_origin is None else bool(stored_origin)
-            ),
-            created_at_ms=int(row["created_at_ms"]),
-            expires_at_ms=int(row["expires_at_ms"]),
-        )
+        handle = _published_handle_from_row(row)
         if snapshot_id is not None and snapshot_id != handle.snapshot_id:
             raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH")
         return handle
@@ -1080,6 +1138,87 @@ class SnapshotStore:
             raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
         return data
 
+    def materialize_raw_artifact(self, identity: ScopeIdentity, handle_id: str) -> str:
+        """Write an exact private ``.txt`` mirror for the host's file reader.
+
+        The content-addressed store blob intentionally uses ``.bin`` and Hermes refuses
+        that extension through its text ``read_file`` tool. A degraded reader result must
+        nevertheless give the main agent a complete working path, so this method creates
+        a scope-bound text artifact after re-authorizing the handle and re-verifying every
+        source byte against its digest. Normal Python capture already prepared it; this
+        method remains for repair and legacy/cross-core handles. The caller receives an
+        absolute path, while the handle remains the authorization/lifetime anchor.
+        """
+        if not _HANDLE_ID_RE.fullmatch(handle_id):
+            raise ShuntError("STORE_FAILED", "BAD_HANDLE_ID", retryable=False)
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _write_txn(conn):
+                    now = self._now_locked(conn)
+                    self._bump_high_water(conn, now)
+                    row = conn.execute(
+                        "SELECT h.handle_id, h.scope_id, h.blob_hash, h.kind, h.internal, "
+                        "       h.upstream_truncated, h.created_at_ms, h.expires_at_ms, "
+                        "       b.bytes, b.media_type, b.line_count "
+                        "  FROM handles h JOIN scopes s ON s.scope_id = h.scope_id "
+                        "  JOIN blobs b ON b.hash = h.blob_hash "
+                        " WHERE h.handle_id = ? AND h.scope_id = ? AND h.revoked = 0 "
+                        "   AND h.expires_at_ms > ? AND s.closed_at_ms IS NULL "
+                        "   AND s.generation = ?",
+                        (handle_id, identity.scope_id, now, identity.generation),
+                    ).fetchone()
+                    if row is None:
+                        raise ShuntError("SOURCE_EXPIRED", "UNKNOWN_HANDLE")
+                    handle = _published_handle_from_row(row)
+                    data = self.load_payload(handle)
+                    self._assert_artifact_capacity_locked(conn)
+                    artifact_key = self._artifact_key_locked(conn)
+                    self._write_or_verify_raw_artifact(
+                        handle, data, artifact_key=artifact_key
+                    )
+                    published_path = str(
+                        self._raw_artifact_path(handle, artifact_key).absolute()
+                    )
+            except sqlite3.Error:
+                raise ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False) from None
+        return published_path
+
+    def raw_artifact_path(self, identity: ScopeIdentity, handle_id: str) -> str:
+        """Return an already-prepared mirror path without reading or writing its payload."""
+        handle = self.resolve(identity, handle_id)
+        artifact_key = self.cursor_key()
+        path_obj = self._raw_artifact_path(handle, artifact_key)
+        path = str(path_obj.absolute())
+        if (
+            not path_obj.absolute().is_absolute()
+            or any(part in {".", ".."} for part in path_obj.parts)
+            or len(path) > 1024
+            or len(path.encode("utf-8")) > 4096
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+        ):
+            raise ShuntError("STORE_FAILED", "ARTIFACT_PATH_UNAVAILABLE", retryable=False)
+        if not self._raw_artifact_exists(handle, artifact_key):
+            raise ShuntError("STORE_FAILED", "ARTIFACT_PATH_UNAVAILABLE", retryable=False)
+        return path
+
+    def _assert_artifact_capacity_locked(self, conn: sqlite3.Connection) -> None:
+        """Refuse legacy/manual mirror creation if reservations already exceed quota."""
+        row = conn.execute(
+            "SELECT "
+            " (SELECT COALESCE(SUM(bytes), 0) FROM blobs WHERE pending_delete = 0) + "
+            " (SELECT COALESCE(SUM(b.bytes), 0) FROM handles h "
+            "  JOIN blobs b ON b.hash = h.blob_hash WHERE h.revoked = 0) AS total"
+        ).fetchone()
+        if int(row["total"]) > self._limits.store_max_bytes:
+            raise ShuntError("LIMIT_EXCEEDED", "STORE_BYTE_QUOTA", retryable=False)
+
+    def _artifact_key_locked(self, conn: sqlite3.Connection) -> bytes:
+        value = self._metadata(conn, "cursor_key")
+        if not value:
+            raise ShuntError("STORE_FAILED", "CURSOR_KEY_MISSING", retryable=False)
+        return bytes.fromhex(value)
+
     def revoke(self, identity: ScopeIdentity, handle_id: str) -> bool:
         with self._lock:
             conn = self._connect()
@@ -1105,8 +1244,22 @@ class SnapshotStore:
                     )
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "REVOKE_FAILED", retryable=False) from None
+        self._cleanup_revoked_artifact(identity.scope_id, handle_id)
         self._collect_pending_blobs()
         return True
+
+    def _cleanup_revoked_artifact(self, scope_id: str, handle_id: str) -> None:
+        with self._lock, contextlib.suppress(sqlite3.Error):
+            conn = self._connect()
+            with _write_txn(conn):
+                live = conn.execute(
+                    "SELECT 1 FROM handles "
+                    "WHERE handle_id = ? AND scope_id = ? AND revoked = 0",
+                    (handle_id, scope_id),
+                ).fetchone()
+                if live is None:
+                    with contextlib.suppress(ShuntError, OSError):
+                        self._remove_raw_artifact(scope_id, handle_id)
 
     # -- baseline credit ---------------------------------------------------
 
@@ -1482,6 +1635,11 @@ class SnapshotStore:
                 with _write_txn(conn):
                     now = self._now_locked(conn)
                     self._bump_high_water(conn, now)
+                    artifact_rows = conn.execute(
+                        "SELECT scope_id, handle_id FROM handles "
+                        " WHERE expires_at_ms <= ? OR revoked = 1",
+                        (now,),
+                    ).fetchall()
                     rows = conn.execute(
                         "SELECT blob_hash, COUNT(*) AS n FROM handles "
                         " WHERE expires_at_ms <= ? OR revoked = 1 GROUP BY blob_hash",
@@ -1503,7 +1661,13 @@ class SnapshotStore:
                     )
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "SWEEP_FAILED", retryable=False) from None
+        for row in artifact_rows:
+            with contextlib.suppress(ShuntError, OSError):
+                self._remove_raw_artifact(
+                    str(row["scope_id"]), str(row["handle_id"])
+                )
         deleted = self._collect_pending_blobs()
+        self._collect_orphan_artifacts()
         orphans = self._collect_orphan_blob_files()
         return SweepReport(
             expired_handles=expired, deleted_blobs=deleted, orphan_blob_files=orphans
@@ -1665,6 +1829,447 @@ class SnapshotStore:
             raise ShuntError("STORE_FAILED", "BAD_BLOB_HASH", retryable=False)
         return self._root / _BLOB_DIR / digest[:2] / digest[2:4] / f"{digest}{_BLOB_SUFFIX}"
 
+    def _raw_artifact_name(self, handle: PublishedHandle, artifact_key: bytes) -> str:
+        if not _SCOPE_ID_RE.fullmatch(handle.scope_id) or not _HANDLE_ID_RE.fullmatch(
+            handle.handle_id
+        ):
+            raise ShuntError("STORE_FAILED", "BAD_HANDLE_ID", retryable=False)
+        material = (
+            "context-shunt-artifact\x00"
+            + handle.scope_id
+            + "\x00"
+            + handle.handle_id
+            + "\x00"
+            + handle.blob_hash
+        ).encode("ascii")
+        tag = hmac.new(artifact_key, material, hashlib.sha256).hexdigest()[:32]
+        return f"{handle.handle_id}.{tag}.txt"
+
+    def _raw_artifact_path(self, handle: PublishedHandle, artifact_key: bytes) -> Path:
+        return (
+            self._root
+            / _ARTIFACT_DIR
+            / handle.scope_id
+            / self._raw_artifact_name(handle, artifact_key)
+        )
+
+    def _artifact_seal_name(
+        self,
+        handle: PublishedHandle,
+        artifact_key: bytes,
+        artifact_name: str,
+        info: os.stat_result,
+    ) -> str:
+        """Authenticate the prepared file's identity without rereading it after timeout."""
+        material = "\x00".join(
+            (
+                "context-shunt-artifact-seal",
+                handle.scope_id,
+                handle.handle_id,
+                handle.blob_hash,
+                artifact_name,
+                str(info.st_dev),
+                str(info.st_ino),
+                str(info.st_size),
+                str(info.st_mtime_ns),
+                str(info.st_ctime_ns),
+            )
+        ).encode("ascii")
+        tag = hmac.new(artifact_key, material, hashlib.sha256).hexdigest()[:32]
+        return f"{artifact_name}.{tag}.seal"
+
+    def _open_artifact_root(self) -> int:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            fd = os.open(self._root / _ARTIFACT_DIR, flags)
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise OSError
+            os.fchmod(fd, _DIR_MODE)
+            return fd
+        except OSError:
+            with contextlib.suppress(UnboundLocalError, OSError):
+                os.close(fd)
+            raise ShuntError("STORE_FAILED", "UNSAFE_CACHE_PATH", retryable=False) from None
+
+    def _open_artifact_scope(
+        self, scope_id: str, *, create: bool
+    ) -> tuple[int, int] | None:
+        if not _SCOPE_ID_RE.fullmatch(scope_id):
+            raise ShuntError("STORE_FAILED", "BAD_HANDLE_ID", retryable=False)
+        root_fd = self._open_artifact_root()
+        try:
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(scope_id, _DIR_MODE, dir_fd=root_fd)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                scope_fd = os.open(scope_id, flags, dir_fd=root_fd)
+            except FileNotFoundError:
+                os.close(root_fd)
+                return None
+            info = os.fstat(scope_fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise OSError
+            os.fchmod(scope_fd, _DIR_MODE)
+            return root_fd, scope_fd
+        except OSError:
+            with contextlib.suppress(UnboundLocalError, OSError):
+                os.close(scope_fd)
+            os.close(root_fd)
+            raise ShuntError("STORE_FAILED", "UNSAFE_CACHE_PATH", retryable=False) from None
+
+    def _write_or_verify_raw_artifact(
+        self, handle: PublishedHandle, data: bytes, *, artifact_key: bytes | None = None
+    ) -> None:
+        artifact_key = artifact_key or self.cursor_key()
+        opened = self._open_artifact_scope(handle.scope_id, create=True)
+        assert opened is not None
+        root_fd, scope_fd = opened
+        name = self._raw_artifact_name(handle, artifact_key)
+        temp_name = f"{name}.{secrets.token_hex(8)}.part"
+        created = False
+        created_seal: str | None = None
+        try:
+            try:
+                mirrored = _read_private_at(scope_fd, name, handle.bytes_len)
+            except ShuntError as exc:
+                if exc.code != "STORE_FAILED":
+                    raise
+                # This exact derived directory entry is the disposable mirror, never the
+                # canonical blob. Unlinking it descriptor-relatively cannot follow a
+                # symlink or remove another hardlink's inode; rebuild from `data`, which
+                # materialize_raw_artifact loaded and hash-verified independently.
+                self._unlink_artifact_at(scope_fd, name)
+                mirrored = None
+            if (
+                mirrored is not None
+                and hashlib.sha256(mirrored).hexdigest() != handle.blob_hash
+            ):
+                self._unlink_artifact_at(scope_fd, name)
+                mirrored = None
+            if mirrored is None:
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                try:
+                    fd = os.open(temp_name, flags, _FILE_MODE, dir_fd=scope_fd)
+                    try:
+                        written = 0
+                        view = memoryview(data)
+                        while written < len(view):
+                            written += os.write(fd, view[written : written + _READ_CHUNK])
+                        os.fsync(fd)
+                        os.fchmod(fd, _FILE_MODE)
+                    finally:
+                        os.close(fd)
+                    os.replace(
+                        temp_name,
+                        name,
+                        src_dir_fd=scope_fd,
+                        dst_dir_fd=scope_fd,
+                    )
+                    created = True
+                    os.fsync(scope_fd)
+                except OSError:
+                    raise ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False) from None
+                mirrored = _read_private_at(scope_fd, name, handle.bytes_len)
+            if mirrored is None or hashlib.sha256(mirrored).hexdigest() != handle.blob_hash:
+                raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+            try:
+                info = os.stat(name, dir_fd=scope_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_size != handle.bytes_len
+                ):
+                    raise OSError
+                seal_name = self._artifact_seal_name(
+                    handle, artifact_key, name, info
+                )
+                flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                try:
+                    seal_fd = os.open(seal_name, flags, _FILE_MODE, dir_fd=scope_fd)
+                except FileExistsError:
+                    seal_info = os.stat(
+                        seal_name, dir_fd=scope_fd, follow_symlinks=False
+                    )
+                    if (
+                        not stat.S_ISREG(seal_info.st_mode)
+                        or seal_info.st_nlink != 1
+                        or seal_info.st_size != 0
+                    ):
+                        raise OSError from None
+                else:
+                    created_seal = seal_name
+                    try:
+                        os.fchmod(seal_fd, _FILE_MODE)
+                        os.fsync(seal_fd)
+                    finally:
+                        os.close(seal_fd)
+                for candidate in os.listdir(scope_fd):
+                    match = _ARTIFACT_SEAL_RE.fullmatch(candidate)
+                    if match and match.group(1) == name and candidate != seal_name:
+                        with contextlib.suppress(OSError):
+                            os.unlink(candidate, dir_fd=scope_fd)
+                os.fsync(scope_fd)
+            except OSError:
+                raise ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False) from None
+        except BaseException:
+            if created_seal is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(created_seal, dir_fd=scope_fd)
+            if created:
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=scope_fd)
+            raise
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name, dir_fd=scope_fd)
+            os.close(scope_fd)
+            os.close(root_fd)
+
+    @staticmethod
+    def _unlink_artifact_at(scope_fd: int, artifact_name: str) -> None:
+        with contextlib.suppress(OSError):
+            os.unlink(artifact_name, dir_fd=scope_fd)
+        for candidate in os.listdir(scope_fd):
+            match = _ARTIFACT_SEAL_RE.fullmatch(candidate)
+            if match and match.group(1) == artifact_name:
+                with contextlib.suppress(OSError):
+                    os.unlink(candidate, dir_fd=scope_fd)
+
+    def _raw_artifact_exists(
+        self, handle: PublishedHandle, artifact_key: bytes
+    ) -> bool:
+        """Check only metadata for a prepared mirror; never read the payload bytes."""
+        try:
+            opened = self._open_artifact_scope(handle.scope_id, create=False)
+        except ShuntError:
+            return False
+        if opened is None:
+            return False
+        root_fd, scope_fd = opened
+        try:
+            name = self._raw_artifact_name(handle, artifact_key)
+            return self._artifact_seal_valid_at(
+                scope_fd, handle, artifact_key, name
+            )
+        finally:
+            os.close(scope_fd)
+            os.close(root_fd)
+
+    def _artifact_seal_valid_at(
+        self,
+        scope_fd: int,
+        handle: PublishedHandle,
+        artifact_key: bytes,
+        artifact_name: str,
+        *,
+        candidate_seal: str | None = None,
+    ) -> bool:
+        try:
+            info = os.stat(artifact_name, dir_fd=scope_fd, follow_symlinks=False)
+        except OSError:
+            return False
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or int(info.st_size) != handle.bytes_len
+        ):
+            return False
+        seal_name = self._artifact_seal_name(
+            handle, artifact_key, artifact_name, info
+        )
+        if candidate_seal is not None and candidate_seal != seal_name:
+            return False
+        try:
+            seal = os.stat(seal_name, dir_fd=scope_fd, follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISREG(seal.st_mode) and seal.st_nlink == 1 and seal.st_size == 0
+
+    def _remove_raw_artifact(self, scope_id: str, handle_id: str) -> None:
+        if not _SCOPE_ID_RE.fullmatch(scope_id) or not _HANDLE_ID_RE.fullmatch(handle_id):
+            return
+        try:
+            opened = self._open_artifact_scope(scope_id, create=False)
+        except ShuntError:
+            return
+        if opened is None:
+            return
+        root_fd, scope_fd = opened
+        try:
+            for name in os.listdir(scope_fd):
+                match = _ARTIFACT_NAME_RE.fullmatch(name)
+                seal = _ARTIFACT_SEAL_RE.fullmatch(name)
+                if not (
+                    (match and match.group(1) == handle_id)
+                    or (seal and seal.group(1).startswith(handle_id + "."))
+                ):
+                    continue
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=scope_fd)
+        finally:
+            os.close(scope_fd)
+        with contextlib.suppress(OSError):
+            os.rmdir(scope_id, dir_fd=root_fd)
+        os.close(root_fd)
+
+    def _remove_scope_artifacts(self, scope_id: str) -> None:
+        if not _SCOPE_ID_RE.fullmatch(scope_id):
+            return
+        root_fd = self._open_artifact_root()
+        try:
+            try:
+                info = os.stat(scope_id, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if not stat.S_ISDIR(info.st_mode):
+                # Remove only the directory entry itself. Never traverse a replacement
+                # symlink into an attacker-selected target.
+                with contextlib.suppress(OSError):
+                    os.unlink(scope_id, dir_fd=root_fd)
+                return
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                scope_fd = os.open(scope_id, flags, dir_fd=root_fd)
+            except OSError:
+                return
+            try:
+                for name in os.listdir(scope_fd):
+                    if not (
+                        _ARTIFACT_NAME_RE.fullmatch(name)
+                        or _ARTIFACT_TEMP_RE.fullmatch(name)
+                        or _ARTIFACT_SEAL_RE.fullmatch(name)
+                    ):
+                        continue
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=scope_fd)
+            finally:
+                os.close(scope_fd)
+            with contextlib.suppress(OSError):
+                os.rmdir(scope_id, dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+
+    def _collect_orphan_artifacts(self) -> int:
+        """Remove mirrors and staging files that have no currently readable handle."""
+        removed = 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                with _write_txn(conn):
+                    now = self._now_locked(conn)
+                    self._bump_high_water(conn, now)
+                    artifact_key = self._artifact_key_locked(conn)
+                    active_handles: dict[tuple[str, str], PublishedHandle] = {}
+                    rows = conn.execute(
+                        "SELECT h.handle_id, h.scope_id, h.blob_hash, h.kind, h.internal, "
+                        " h.upstream_truncated, h.created_at_ms, h.expires_at_ms, "
+                        " b.bytes, b.media_type, b.line_count "
+                        "FROM handles h JOIN blobs b ON b.hash = h.blob_hash "
+                        "JOIN scopes s ON s.scope_id = h.scope_id "
+                        "WHERE h.revoked = 0 AND h.expires_at_ms > ? "
+                        "AND s.closed_at_ms IS NULL",
+                        (now,),
+                    ).fetchall()
+                    for row in rows:
+                        handle = _published_handle_from_row(row)
+                        active_handles[
+                            (
+                                handle.scope_id,
+                                self._raw_artifact_name(handle, artifact_key),
+                            )
+                        ] = handle
+                    root_fd = self._open_artifact_root()
+                    try:
+                        for scope_id in os.listdir(root_fd):
+                            try:
+                                info = os.stat(
+                                    scope_id, dir_fd=root_fd, follow_symlinks=False
+                                )
+                            except OSError:
+                                continue
+                            if not stat.S_ISDIR(info.st_mode):
+                                if not _SCOPE_ID_RE.fullmatch(scope_id):
+                                    continue
+                                with contextlib.suppress(OSError):
+                                    os.unlink(scope_id, dir_fd=root_fd)
+                                    removed += 1
+                                continue
+                            flags = (
+                                os.O_RDONLY
+                                | getattr(os, "O_DIRECTORY", 0)
+                                | getattr(os, "O_NOFOLLOW", 0)
+                                | getattr(os, "O_CLOEXEC", 0)
+                            )
+                            try:
+                                scope_fd = os.open(scope_id, flags, dir_fd=root_fd)
+                            except OSError:
+                                continue
+                            try:
+                                for name in os.listdir(scope_fd):
+                                    match = _ARTIFACT_NAME_RE.fullmatch(name)
+                                    seal = _ARTIFACT_SEAL_RE.fullmatch(name)
+                                    artifact_name = seal.group(1) if seal else name
+                                    handle = active_handles.get(
+                                        (scope_id, artifact_name)
+                                    )
+                                    keep = bool(
+                                        handle
+                                        and self._artifact_seal_valid_at(
+                                            scope_fd,
+                                            handle,
+                                            artifact_key,
+                                            artifact_name,
+                                            candidate_seal=name if seal else None,
+                                        )
+                                    )
+                                    if keep or not (
+                                        match
+                                        or seal
+                                        or _ARTIFACT_TEMP_RE.fullmatch(name)
+                                    ):
+                                        continue
+                                    with contextlib.suppress(OSError):
+                                        os.unlink(name, dir_fd=scope_fd)
+                                        removed += 1
+                            finally:
+                                os.close(scope_fd)
+                            with contextlib.suppress(OSError):
+                                os.rmdir(scope_id, dir_fd=root_fd)
+                    finally:
+                        os.close(root_fd)
+            except sqlite3.Error:
+                raise ShuntError("STORE_FAILED", "SWEEP_FAILED", retryable=False) from None
+        return removed
+
 
 # -- helpers ----------------------------------------------------------------
 
@@ -1705,6 +2310,25 @@ def _record_from_row(row: sqlite3.Row) -> OperationRecord:
         delivery_boundary=str(row["delivery_boundary"]),
         main_context_tokens_saved=int(row["main_context_tokens_saved"]),
         net_tokens_saved=int(row["net_tokens_saved"]),
+    )
+
+
+def _published_handle_from_row(row: sqlite3.Row) -> PublishedHandle:
+    stored_origin = row["upstream_truncated"]
+    if stored_origin not in (None, 0, 1):
+        raise ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", retryable=False)
+    return PublishedHandle(
+        handle_id=str(row["handle_id"]),
+        scope_id=str(row["scope_id"]),
+        blob_hash=str(row["blob_hash"]),
+        media_type=str(row["media_type"]),
+        bytes_len=int(row["bytes"]),
+        line_count=int(row["line_count"]),
+        kind=str(row["kind"]),
+        internal=bool(row["internal"]),
+        upstream_truncated=None if stored_origin is None else bool(stored_origin),
+        created_at_ms=int(row["created_at_ms"]),
+        expires_at_ms=int(row["expires_at_ms"]),
     )
 
 
@@ -1753,6 +2377,38 @@ def _read_private(path: Path, expected_bytes: int) -> bytes:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
             raise ShuntError("STORE_FAILED", "UNSAFE_BLOB_PATH", retryable=False)
+        out = bytearray()
+        while True:
+            block = os.read(fd, _READ_CHUNK)
+            if not block:
+                break
+            if len(out) + len(block) > expected_bytes:
+                raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+            out.extend(block)
+        if len(out) != expected_bytes:
+            raise ShuntError("STORE_FAILED", "BLOB_CONTENT_MISMATCH", retryable=False)
+        return bytes(out)
+    finally:
+        os.close(fd)
+
+
+def _read_private_at(directory_fd: int, name: str, expected_bytes: int) -> bytes | None:
+    """Descriptor-relative private read that never follows a replaced parent or file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise ShuntError("STORE_FAILED", "UNSAFE_BLOB_PATH", retryable=False) from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+            raise ShuntError("STORE_FAILED", "UNSAFE_BLOB_PATH", retryable=False)
+        try:
+            os.fchmod(fd, _FILE_MODE)
+        except OSError:
+            raise ShuntError("STORE_FAILED", "PERMISSION_FAILED", retryable=False) from None
         out = bytearray()
         while True:
             block = os.read(fd, _READ_CHUNK)

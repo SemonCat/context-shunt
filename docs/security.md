@@ -14,10 +14,14 @@ every workspace**, split in two:
 | --- | --- | --- |
 | `<cache>/store.sqlite3` | authorization only: opaque handle ids, digested session scope, TTL, quotas, content refcounts, disclosure totals, cleanup state, bounded operation metrics | a source path, a question, an answer, a quote, a payload preview, a provider error body, a model or provider name, any filesystem path |
 | `<cache>/blobs/<aa>/<bb>/<sha256>.bin` | the immutable payload bytes, content-addressed | — |
+| `<cache>/artifacts/<scope>/<source_id>.<hmac>.txt` | Python/Hermes only: an exact private mirror prepared during successful capture so timeout fallback can reveal a complete host-readable path without raw-payload I/O | questions, answers, provider errors, or files without an authorized retained handle |
 | `<cache>/tmp/` | in-flight temp files only; no live handle ever references this directory | — |
 
 The blob location is *derived* from the SHA-256 at call time. It is not stored in the
-database and is never returned to a caller.
+database and is never returned to a caller. The fallback artifact path is a distinct,
+HMAC-named compatibility mirror; its unguessable suffix is returned only in a successful
+Python legacy-compaction envelope that also carries the authorizing
+`source_id`/`snapshot_id` pair.
 
 The five scope components (host, profile, principal, session, generation) are SHA-256
 digested before storage, so no session name, account id or profile label is retained. The
@@ -29,12 +33,15 @@ never stored. The optional post-tool mode captures only results that serialize a
 `max_tool_result_bytes`. An external artifact is captured only when a deployment has
 authorized the import boundary and a caller explicitly asks for that artifact. The store
 does not become a shadow copy of the workspace, and it does not become a mirror of a
-producer's artifact directory.
+producer's artifact directory. The Python fallback mirror duplicates only a snapshot the
+same operation already captured and only when the degraded result needs a host-readable
+`.txt` path.
 
 ## Permissions
 
-Every directory is `0700` and every payload file is `0600`, re-asserted on each use rather
-than assumed from creation. Payload files are opened with `O_NOFOLLOW`; a symlink, FIFO,
+Every directory is `0700` and every payload or fallback-artifact file is `0600`,
+re-asserted on each use rather than assumed from creation. Payload files are opened with
+`O_NOFOLLOW`; a symlink, FIFO,
 directory or device where a blob belongs is treated as a path-replacement attempt and fails
 closed rather than being followed. A hardlinked payload file is refused for the same
 reason.
@@ -95,15 +102,44 @@ policy runs on the payload regardless of who wrote it.
 
 Deletion happens on four paths:
 
-1. **TTL.** A handle past `expires_at_ms` is unreadable immediately — readability is a SQL
-   predicate, not a check for whether the file still exists. The sweep removes the row and
-   the content afterwards.
+1. **TTL.** A handle past `expires_at_ms` is unreadable immediately through store-backed
+   APIs — readability is a SQL predicate, not a check for whether a file still exists. The
+   next sweep removes the row and attempts to unlink its payload and compatibility mirror.
 2. **A real session boundary.** Hermes' `on_session_finalize` / `on_session_reset`, or an
    OpenClaw `session_end` whose reason is `new`, `reset` or `deleted`, revokes the scope's
    handles and drops the content they held.
 3. **The opportunistic sweep**, run on every ordinary turn boundary and at startup.
-4. **Startup recovery**, which additionally clears staged temp files and content files that
-   have no row (the residue of a crash between the rename and the commit).
+4. **Startup recovery**, which additionally clears staged temp files, content files with no
+   row, and fallback artifacts with no readable handle.
+
+Python fallback mirrors normally follow their handle: explicit revocation, a real scope
+teardown, and TTL sweep attempt to remove the corresponding `.txt` file, while startup
+recovery removes a mirror or staging file orphaned by a crash. The returned path is
+nevertheless an ordinary host filesystem capability, not a transactional store read. A
+process inside the trusted Hermes account can read it directly after disclosure; an
+already-open descriptor remains readable after unlink, and a failed or delayed unlink can
+leave the pathname readable until recovery succeeds. TTL and revocation are strict for the
+handle/store interfaces, not retroactive revocation of a disclosed OS file capability. As
+with blob deletion, cleanup is not secure erasure. Mirror creation is serialized with
+handle lifecycle changes and happens during capture, before reader work.
+Its HMAC-derived filename is not constructible from the public handle, and only a
+successfully charged fallback reveals the path. If preparation fails, the mandatory
+summary and handle remain available without `raw_artifact_path`.
+
+Each prepared mirror also has a zero-byte HMAC seal bound to the handle, snapshot digest,
+inode, size, and modification/change timestamps. Fallback checks that seal using metadata
+before publishing the locator, so a prior same-size in-place edit, replacement, link
+change, or rename invalidates the locator without forcing a full payload reread after
+timeout. The seal does not make a later generic host `read_file` transactional: a trusted
+local process can still modify the ordinary file after publication. Consumers that need
+to detect local-host mutation compare the complete readback length/hash with
+`original_bytes`/`snapshot_id`, as the Hermes acceptance test does. Capture and explicit
+repair are the only paths that hash the mirror contents and create a fresh seal.
+
+Authorization revocation commits before best-effort mirror deletion. A missing or damaged
+artifacts directory therefore cannot roll back scope close, handle revoke, or TTL expiry;
+it can leave a disclosed ordinary-file path readable to the trusted host until startup
+recovery removes it. That residual filesystem lifetime does not revive the store handle.
 
 A per-turn event never deletes anything. That is deliberate: Hermes fires `on_session_end`
 at the end of *every* `run_conversation` call, and OpenClaw fires `session_end` with
@@ -131,16 +167,28 @@ that no source can ever be returned in full: `inspect` can return a source small
 fit the per-page, per-source, and per-session limits. The 350-line pre-read gate controls
 context cost; it is not a confidentiality boundary.
 
+`legacy_compaction.raw_artifact_path` is an intentional exception for Python/Hermes fail-open
+recovery. Reading it through the host's file tool is not charged by the store disclosure
+ledger and can recover the complete source. Deployments must therefore treat access to the
+private cache root and the host file tool as part of the same trust boundary as the original
+authorized source. This design does not defend against a compromised process running as the
+Hermes OS account; such a process could already read the authorized source and private
+cache. The fallback envelope itself still contains only the bounded summary and path, never
+the raw payload. Python quota accounting includes distinct blobs plus one
+exact-byte mirror reservation per live handle, including duplicate-content handles.
+
 Continuation cursors are HMAC-tagged with a per-store key held in `store_metadata` and bound
 to the handle, the snapshot hash and the canonical selector. A cursor cannot be edited to
 jump the scan budget, repointed at another snapshot, or replayed into a different store.
 
 ## What never leaves
 
-Outside two explicit disclosure forms—short mechanically verified citation quotes and
-bounded `inspect` segments—the intercepted raw payload does not appear in an envelope, the
-transcript, tool history, persistence, a trace, a log, a metric label, an exception, a
-fallback, or a retry. Provider error bodies are dropped at the provider boundary; only a
+Outside three explicit disclosure forms—short mechanically verified citation quotes,
+bounded `inspect` segments, and host file-tool reads of a Python/Hermes fallback artifact—the
+intercepted raw payload does not appear in an envelope, the transcript, tool history, a
+trace, a log, a metric label, an exception, or a retry. The artifact is private persistence;
+the fallback envelope carries its path and bounded summary, not its bytes. Provider error
+bodies are dropped at the provider boundary; only a
 bounded `MODEL_ERROR` crosses it, because an exception text can contain the prompt or a
 payload echo.
 

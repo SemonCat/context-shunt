@@ -146,6 +146,7 @@ export interface LegacyCompactionShape {
   deterministic: true;
   source_id?: string;
   snapshot_id?: string;
+  raw_artifact_path?: string;
   summary: string;
   summary_bytes: number;
   original_bytes: number;
@@ -346,9 +347,9 @@ export function buildEnvelope(opts: BuildOptions): Envelope {
   if (opts.guidance) envelope.guidance = opts.guidance;
   if (opts.pointer) envelope.pointer = opts.pointer;
 
-  if (schemaVersion !== "1.1") {
-    // A 1.0 envelope carries no 1.1 block, ever. Attaching one while still declaring 1.0
-    // would make the version string a lie rather than a compatible extension.
+  if (schemaVersion === "1.0") {
+    // A 1.0 envelope carries no later-revision block, ever. Attaching one while declaring
+    // 1.0 would make the version string a lie rather than an extension.
     return envelope;
   }
 

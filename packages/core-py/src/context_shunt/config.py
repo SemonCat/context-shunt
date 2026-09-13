@@ -167,9 +167,6 @@ class ReaderConfig:
     enforce_output_caps: bool = True
     automatic_extract: bool = True
     fallback_max_bytes: int = 2048
-    #: Deprecated compatibility key; never controls mandatory fallback.
-    #: Model-identity mismatch and provenance-policy refusals remain excluded.
-    legacy_compaction: bool = True
     #: Character budget handed to the compaction algorithm before the envelope's own byte
     #: cap is enforced. Kept below `limits.max_extraction_bytes` (16 KiB) by default so the
     #: algorithm's own cap is normally what fires, not the safety truncation behind it.
@@ -384,7 +381,6 @@ def _read_reader(reader_raw: dict[str, Any]) -> ReaderConfig:
     return ReaderConfig(
         automatic_extract=reader_raw.get("automatic_extract", True),
         fallback_max_bytes=fallback_bytes,
-        legacy_compaction=True,
         legacy_compaction_max_chars=legacy_compaction_max_chars,
         enabled=reader_raw.get("enabled", True),
         model=model.strip(),

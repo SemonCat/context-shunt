@@ -54,6 +54,7 @@ import {
   EMITTED_SCHEMA_VERSION,
   type Envelope,
   type GateDecision,
+  type MetricsSink,
   buildProvider,
   type ReaderProvider,
   ScopeIdentity,
@@ -226,6 +227,7 @@ export class ContextShuntPlugin {
   private readonly sessions = new Map<string, ShuntSession>();
   private readonly generations = new Map<string, number>();
   private readonly store: SnapshotStore;
+  private readonly metrics: MetricsSink;
   readonly config: Config;
   readonly capability: CapabilityReport;
   private registered = false;
@@ -234,6 +236,19 @@ export class ContextShuntPlugin {
     private readonly api: OpenClawPluginApi,
     opts: { defaultCacheDir?: string } = {},
   ) {
+    this.metrics = {
+      count: () => {},
+      observe: (name, value, labels) => {
+        if (name !== "reader_duration_ms") return;
+        this.api.logger?.info(
+          `context-shunt reader metric: ${JSON.stringify({
+            duration_ms: Math.max(0, Math.round(value)),
+            status: String(labels?.["status"] ?? "error"),
+            code: String(labels?.["code"] ?? "INTERNAL_ERROR"),
+          })}`,
+        );
+      },
+    };
     const raw = { ...(api.pluginConfig ?? {}) } as Record<string, unknown>;
     // Validate and remove the adapter-only migration field before the shared config parser.
     // OpenClaw capture is retired; these IDs never enable a result middleware.
@@ -507,7 +522,7 @@ export class ContextShuntPlugin {
     if (!session) {
       session = new ShuntSession(key, this.config, this.capability, {
         provider: this.provider(),
-        legacyCompaction: true,
+        metrics: this.metrics,
         store: this.store,
         identity: new ScopeIdentity({
           host: "openclaw",

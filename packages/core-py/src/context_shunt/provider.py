@@ -608,7 +608,15 @@ class FallbackChainProvider:
             # may start.
             if deadline is not None and getattr(deadline, "cancelled", False):
                 raise chain_failure(None, ShuntError("CANCELLED", "MODEL_CALL", retryable=False))
+            if (
+                deadline is not None
+                and callable(getattr(deadline, "expired", None))
+                and deadline.expired()
+            ):
+                raise chain_failure(None, ShuntError("TIMEOUT", "MODEL_CALL", retryable=True))
             remaining_ms = timeout_ms - int((time.monotonic() - started) * 1000)
+            if deadline is not None and callable(getattr(deadline, "remaining_ms", None)):
+                remaining_ms = min(remaining_ms, deadline.remaining_ms())
             if remaining_ms <= 0:
                 # Out of budget. Never start another provider call the caller cannot use.
                 # The aggregate is already complete - no attempt happened here - so it is

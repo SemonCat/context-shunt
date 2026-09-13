@@ -65,7 +65,7 @@ def make_registry_at(clock):
 
 def test_contract_deadlines():
     assert (L.gate_probe_deadline_ms, L.spill_io_deadline_ms) == (1000, 5000)
-    assert (L.model_call_deadline_ms, L.request_deadline_ms) == (45000, 60000)
+    assert (L.model_call_deadline_ms, L.request_deadline_ms) == (45000, 240000)
 
 
 def test_the_per_call_deadline_can_actually_serve_the_default_reader_model():

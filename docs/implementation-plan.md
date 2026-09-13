@@ -8,7 +8,7 @@ today's code.
 
 ## Implemented in the repository
 
-- Strict revision 1.0/1.1 contracts, shared fixtures, status pairs, and limit source.
+- Strict revision 1.0/1.1/1.2 contracts, shared fixtures, status pairs, and limit source.
 - Independent Python and TypeScript cores with contract parity checks.
 - Pre-execution local read gates and bounded shell-read classification.
 - Immutable snapshots, content-addressed blobs, normative SQLite authorization metadata,

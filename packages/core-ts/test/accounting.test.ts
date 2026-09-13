@@ -926,14 +926,58 @@ describe("every physical attempt is accounted for once, on every path", () => {
     return err;
   }
 
-  function fixture(provider: ConstructorParameters<typeof Reader>[1], clock?: FakeClock) {
+  function fixture(
+    provider: ConstructorParameters<typeof Reader>[1],
+    clock?: FakeClock,
+    metrics?: InMemoryMetrics,
+  ) {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc("mode = fast\n")));
     return {
-      reader: new Reader(registry, provider, L, clock),
+      reader: new Reader(registry, provider, L, clock, metrics),
       request: readRequest(entry, "What is the mode?"),
     };
   }
+
+  it("observes reader duration with bounded success and timeout outcomes", async () => {
+    const timedProvider = (clock: FakeClock, elapsedMs: number) => ({
+      target: identity,
+      async complete(): Promise<ModelResponse> {
+        clock.advance(elapsedMs);
+        return {
+          text: answerText,
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          fallbackUsed: false,
+          usage: { inputTokens: 1, outputTokens: 1, method: "exact" as const },
+        };
+      },
+    });
+
+    const successClock = new FakeClock();
+    const successMetrics = new InMemoryMetrics();
+    const success = fixture(timedProvider(successClock, 17), successClock, successMetrics);
+    expect((await success.reader.answerDetailed("sess", success.request)).envelope.code)
+      .toBe("ANSWERED");
+    expect(successMetrics.entries.at(-1)).toEqual({
+      name: "reader_duration_ms",
+      value: 17,
+      labels: { status: "ok", code: "ANSWERED" },
+    });
+
+    const timeoutClock = new FakeClock();
+    const timeoutMetrics = new InMemoryMetrics();
+    const timeout = fixture(timedProvider(timeoutClock, 60_000), timeoutClock, timeoutMetrics);
+    expect((await timeout.reader.answerDetailed("sess", timeout.request)).envelope.code)
+      .toBe("TIMEOUT");
+    expect(timeoutMetrics.entries.at(-1)).toEqual({
+      name: "reader_duration_ms",
+      value: 60_000,
+      labels: { status: "error", code: "TIMEOUT" },
+    });
+  });
 
   /**
    * A provider may throw one stable `ShuntError` instance for every call it fails. The
@@ -1024,6 +1068,49 @@ describe("every physical attempt is accounted for once, on every path", () => {
     expect(cost.attemptsStarted).toBe(1);
     expect(cost.attemptsUsageComplete).toBe(1);
     expect(cost.outputTokens).toBe(3);
+  });
+
+  it("stops provider failover when the shared absolute deadline expires", async () => {
+    const clock = new FakeClock();
+    const calls = { primary: 0, fallback: 0 };
+    const first = new HostBridgeProvider(async () => {
+      calls.primary += 1;
+      clock.advance(60_000);
+      throw billedError(5, 3);
+    }, L, READER_MODEL, "openai");
+    const never = new HostBridgeProvider(async () => {
+      calls.fallback += 1;
+      return { text: answerText };
+    }, L, "fallback", "openai");
+    const { reader, request } = fixture(new FallbackChainProvider(first, [never]), clock);
+    const { envelope, cost } = await reader.answerDetailed("sess", request);
+
+    expect(envelope.code).toBe("TIMEOUT");
+    expect(calls).toEqual({ primary: 1, fallback: 0 });
+    expect(cost.attemptsStarted).toBe(1);
+    expect(cost.attemptsUsageComplete).toBe(1);
+    expect(cost.method).toBe("exact");
+    expect(cost.inputTokens).toBe(5);
+    expect(cost.outputTokens).toBe(3);
+  });
+
+  it("gives provider failover only the absolute deadline remainder", async () => {
+    const clock = new FakeClock();
+    const fallbackTimeouts: number[] = [];
+    const first = new HostBridgeProvider(async () => {
+      clock.advance(30_000);
+      throw billedError(5, 3);
+    }, L, READER_MODEL, "openai");
+    const second = new HostBridgeProvider(async (opts) => {
+      fallbackTimeouts.push(opts.timeoutMs);
+      return { text: answerText };
+    }, L, "fallback", "openai");
+    const { reader, request } = fixture(new FallbackChainProvider(first, [second]), clock);
+    await reader.answerDetailed("sess", request);
+
+    expect(fallbackTimeouts).toHaveLength(1);
+    expect(fallbackTimeouts[0]).toBeGreaterThan(0);
+    expect(fallbackTimeouts[0]).toBeLessThanOrEqual(30_000);
   });
 
   it("merges a plain provider's over-cap billed failure honestly", async () => {

@@ -11,11 +11,11 @@ Two version constants, deliberately separate:
 * :data:`EMITTED_SCHEMA_VERSION` - the revision every envelope this core builds declares.
 * :data:`SUPPORTED_REQUEST_VERSIONS` - the revisions this core will accept on input.
 
-Revision 1.1 is backward compatible: a 1.0 request is still accepted unchanged, and a 1.0
-envelope still validates. What 1.1 adds is mandatory *for envelopes that declare 1.1* -
-``result_kind``, ``provenance`` and ``accounting_id`` - plus the optional extraction,
-stats and recovery blocks and the inspect/stats operations. A request that declares 1.0
-and carries a 1.1 field is rejected rather than accepted with the field ignored.
+Revision 1.2 keeps 1.0 and 1.1 requests accepted and their envelopes valid. Newer fields
+and limits are mandatory only when their revision is declared: 1.1 adds provenance,
+accounting, extraction, stats and recovery; 1.2 adds the longer whole-request ceiling and
+the Python/Hermes raw-artifact locator. An older request carrying a newer addition is
+rejected rather than accepted with that addition ignored.
 
 :data:`SCHEMA_VERSION` is kept as an alias of the emitted revision so existing call sites
 keep working; new code should say which of the two it means.

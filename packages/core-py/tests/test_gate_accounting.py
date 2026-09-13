@@ -648,10 +648,13 @@ def _billed_error(input_tokens: int, output_tokens: int) -> ShuntError:
     return error
 
 
-def _fixture(tmp_path, provider, *, clock=None):
+def _fixture(tmp_path, provider, *, clock=None, metrics=None):
     registry = make_registry(tmp_path, session_id="sess")
     entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
-    return Reader(registry, provider, clock=clock), _read_request(entry, "What is the mode?")
+    return (
+        Reader(registry, provider, clock=clock, metrics=metrics),
+        _read_request(entry, "What is the mode?"),
+    )
 
 
 def _plain_response(output_tokens: int) -> ModelResponse:
@@ -663,6 +666,49 @@ def _plain_response(output_tokens: int) -> ModelResponse:
         reported=identity,
         provider_confirms_generation=True,
         usage=Usage(input_tokens=1, output_tokens=output_tokens, method=TokenMethod.EXACT),
+    )
+
+
+def test_reader_duration_observes_success_and_timeout_outcomes(tmp_path):
+    class TimedProvider:
+        target = _PLAIN
+
+        def __init__(self, clock, elapsed_ms):
+            self.clock = clock
+            self.elapsed_ms = elapsed_ms
+
+        def complete(self, **_kwargs):
+            self.clock.advance(self.elapsed_ms)
+            return _plain_response(1)
+
+    success_clock = FakeClock()
+    success_metrics = InMemoryMetrics()
+    reader, request = _fixture(
+        tmp_path,
+        TimedProvider(success_clock, 17),
+        clock=success_clock,
+        metrics=success_metrics,
+    )
+    assert reader.answer("sess", request).envelope["code"] == "ANSWERED"
+    assert success_metrics.observations[-1] == (
+        "reader_duration_ms",
+        17.0,
+        (("code", "ANSWERED"), ("status", "ok")),
+    )
+
+    timeout_clock = FakeClock()
+    timeout_metrics = InMemoryMetrics()
+    reader, request = _fixture(
+        tmp_path,
+        TimedProvider(timeout_clock, 60_000),
+        clock=timeout_clock,
+        metrics=timeout_metrics,
+    )
+    assert reader.answer("sess", request).envelope["code"] == "TIMEOUT"
+    assert timeout_metrics.observations[-1] == (
+        "reader_duration_ms",
+        60_000.0,
+        (("code", "TIMEOUT"), ("status", "error")),
     )
 
 
@@ -785,6 +831,63 @@ def test_a_billed_attempt_that_cancellation_raced_is_kept(tmp_path):
     assert result.cost.attempts_started == 1
     assert result.cost.attempts_usage_complete == 1
     assert result.cost.output_tokens == 3
+
+
+def test_absolute_deadline_stops_provider_failover_before_the_next_candidate(tmp_path):
+    """An injected clock expiry is a deadline even when no cancel event fired."""
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    clock = FakeClock()
+    calls = {"primary": 0, "fallback": 0}
+
+    def expire_and_fail(**_kwargs):
+        calls["primary"] += 1
+        clock.advance(60_000)
+        raise _billed_error(5, 3)
+
+    def must_not_run(**_kwargs):
+        calls["fallback"] += 1
+        return {"text": _ANSWER_TEXT}
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(expire_and_fail, L, provider="openai"),
+        [HostBridgeProvider(must_not_run, L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain, clock=clock)
+    result = reader.answer("sess", request)
+
+    assert result.envelope["code"] == "TIMEOUT"
+    assert calls == {"primary": 1, "fallback": 0}
+    assert result.cost.attempts_started == 1
+    assert result.cost.attempts_usage_complete == 1
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 5
+    assert result.cost.output_tokens == 3
+
+
+def test_provider_failover_receives_only_the_absolute_deadline_remainder(tmp_path):
+    from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+
+    clock = FakeClock()
+    fallback_timeouts = []
+
+    def spend_half_the_request(**_kwargs):
+        clock.advance(30_000)
+        raise _billed_error(5, 3)
+
+    def answer(*, timeout_ms, **_kwargs):
+        fallback_timeouts.append(timeout_ms)
+        return {"text": _ANSWER_TEXT}
+
+    chain = FallbackChainProvider(
+        HostBridgeProvider(spend_half_the_request, L, provider="openai"),
+        [HostBridgeProvider(answer, L, "fallback", provider="openai")],
+    )
+    reader, request = _fixture(tmp_path, chain, clock=clock)
+    reader.answer("sess", request)
+
+    assert len(fallback_timeouts) == 1
+    assert 0 < fallback_timeouts[0] <= 30_000
 
 
 def test_a_plain_providers_over_cap_billed_failure_is_merged_honestly(tmp_path):

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/context-shunt/contracts/v1/request.schema.json",
   "title": "context-shunt v1 core request",
-  "description": "Revision 1.1. A 1.0 read request is still valid unchanged; the inspect and stats operations are additions that require schema_version 1.1. Sources are always opaque session-scoped handles - a filesystem path never enters this contract.",
+  "description": "Revision 1.2. A 1.0 read request remains valid unchanged; inspect and stats require schema_version 1.1 or newer. Revision 1.2 raises only the whole-reader deadline ceiling from 60 to 240 seconds. Sources are always opaque session-scoped handles - a filesystem path never enters this contract.",
   "type": "object",
   "required": ["schema_version", "request_id", "operation"],
   "oneOf": [
@@ -11,7 +11,7 @@
     { "$ref": "#/$defs/statsRequest" }
   ],
   "$defs": {
-    "schemaVersion": { "enum": ["1.0", "1.1"] },
+    "schemaVersion": { "enum": ["1.0", "1.1", "1.2"] },
     "requestId": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
     "readRequest": {
       "type": "object",
@@ -41,6 +41,18 @@
         {
           "if": { "properties": { "schema_version": { "const": "1.0" } }, "required": ["schema_version"] },
           "then": { "not": { "required": ["refined"] } }
+        },
+        {
+          "if": { "properties": { "schema_version": { "enum": ["1.0", "1.1"] } }, "required": ["schema_version"] },
+          "then": {
+            "properties": {
+              "budgets": {
+                "properties": {
+                  "deadline_ms": { "maximum": 60000 }
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -50,7 +62,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "request_id", "operation", "source_id", "snapshot_id", "selector", "budgets"],
       "properties": {
-        "schema_version": { "const": "1.1" },
+        "schema_version": { "enum": ["1.1", "1.2"] },
         "request_id": { "$ref": "#/$defs/requestId" },
         "operation": { "const": "inspect" },
         "source_id": { "$ref": "#/$defs/sourceId" },
@@ -72,7 +84,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "request_id", "operation"],
       "properties": {
-        "schema_version": { "const": "1.1" },
+        "schema_version": { "enum": ["1.1", "1.2"] },
         "request_id": { "$ref": "#/$defs/requestId" },
         "operation": { "const": "stats" },
         "page": { "type": "integer", "minimum": 1, "maximum": 64 },
@@ -183,7 +195,7 @@
       "properties": {
         "max_chunks": { "type": "integer", "minimum": 1, "maximum": 8 },
         "max_answer_bytes": { "type": "integer", "minimum": 1, "maximum": 8192 },
-        "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 60000 }
+        "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 240000 }
       }
     },
     "inspectBudgets": {

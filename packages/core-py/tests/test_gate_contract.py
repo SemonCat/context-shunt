@@ -45,6 +45,28 @@ def test_invalid_envelopes_rejected(name, doc):
     assert not envelope_validator().is_valid(doc), name
 
 
+def test_raw_artifact_locator_requires_contract_1_2():
+    doc = next(
+        d for n, d in _docs("envelope", "valid")
+        if n == "v11_partial_legacy_compacted.json"
+    )
+    doc = json.loads(json.dumps(doc))
+    doc["legacy_compaction"]["raw_artifact_path"] = (
+        "/private/cache/artifacts/scp_" + "0" * 32
+        + "/src_0123456789abcdef." + "1" * 32 + ".txt"
+    )
+    assert not envelope_validator().is_valid(doc)
+    doc["schema_version"] = "1.2"
+    assert envelope_validator().is_valid(doc)
+    for unsafe in (
+        "../../sensitive.txt",
+        "/private/../sensitive.txt",
+        "/private/cache/artifacts/scp_" + "0" * 32 + "/source.txt\n",
+    ):
+        doc["legacy_compaction"]["raw_artifact_path"] = unsafe
+        assert not envelope_validator().is_valid(doc)
+
+
 def test_propose_patch_is_rejected_as_unsupported_operation():
     doc = next(d for n, d in _docs("request", "valid") if n == "minimal.json")
     with pytest.raises(ShuntError) as exc:

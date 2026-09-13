@@ -666,6 +666,9 @@ def run_packaging(gate: str) -> list[GateResult]:
     lines: list[str] = []
     failures: list[str] = []
     checks = 0
+    emitted_contract = json.loads(
+        (ROOT / "contracts" / "v1" / "limits.json").read_text()
+    )["contract"]["emitted_version"]
 
     # 1. The TypeScript core builds, and the build output is what the package ships.
     tsc = NODE_BIN / "tsc"
@@ -705,7 +708,8 @@ def run_packaging(gate: str) -> list[GateResult]:
         "import('./packages/core-ts/dist/index.js').then(m=>{"
         "if(m.DEFAULT_LIMITS.fullReadMaxLines!==350)throw new Error('limits');"
         "if(m.READER_MODEL!=='gpt-5.6-luna')throw new Error('model');"
-        "if(m.EMITTED_SCHEMA_VERSION!=='1.1')throw new Error('contract revision');"
+        f"if(m.EMITTED_SCHEMA_VERSION!=={emitted_contract!r})"
+        "throw new Error('contract revision');"
         "if(!m.storeDdl().includes('CREATE TABLE IF NOT EXISTS handles'))"
         "throw new Error('store DDL missing from dist');"
         "m.requestValidator();m.toolArgsValidator();console.log('OK')})"
@@ -773,7 +777,9 @@ def run_packaging(gate: str) -> list[GateResult]:
         failures.append("core-py package-data does not ship contracts/store/*.sql")
 
     # 5. Inspect the actual archives, then install/import/uninstall them in clean roots.
-    artifact_checks, artifact_lines, artifact_failures = _artifact_install_smoke()
+    artifact_checks, artifact_lines, artifact_failures = _artifact_install_smoke(
+        emitted_contract
+    )
     checks += artifact_checks
     lines.extend(artifact_lines)
     failures.extend(artifact_failures)
@@ -838,7 +844,9 @@ def _example_config_loads(example: Path) -> tuple[bool, str]:
     return status == "pass" and cases > 0, detail
 
 
-def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
+def _artifact_install_smoke(
+    emitted_contract: str,
+) -> tuple[int, list[str], list[str]]:
     """Pack what will be published, inspect it, and use clean install roots."""
     lines: list[str] = []
     failures: list[str] = []
@@ -926,7 +934,7 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                     "-e",
                     "import('@context-shunt/core').then(m=>{"
                     "if(m.READER_MODEL!=='gpt-5.6-luna')process.exit(1);"
-                    "if(m.EMITTED_SCHEMA_VERSION!=='1.1')process.exit(1);"
+                    f"if(m.EMITTED_SCHEMA_VERSION!=={emitted_contract!r})process.exit(1);"
                     "if(!m.storeDdl().includes('CREATE TABLE IF NOT EXISTS handles'))"
                     "process.exit(1)}).catch(()=>process.exit(1))",
                 ],
@@ -1018,7 +1026,7 @@ def _artifact_install_smoke() -> tuple[int, list[str], list[str]]:
                     "assert version('jsonschema') == '4.26.0'; "
                     "import context_shunt as c; "
                     "assert c.__version__ == '1.1.0', c.__version__; "
-                    "assert c.EMITTED_SCHEMA_VERSION == '1.1'; "
+                    f"assert c.EMITTED_SCHEMA_VERSION == {emitted_contract!r}; "
                     # An installed wheel must be able to open a store from its own
                     # vendored DDL, in a clean root with no repository present.
                     "import tempfile, pathlib; "

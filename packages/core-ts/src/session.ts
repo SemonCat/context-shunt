@@ -148,7 +148,7 @@ export class ShuntSession {
     // callers can upgrade without a config parse break, but it cannot disable fallback.
     void opts.legacyCompaction;
     this.legacyCompactionMaxChars = opts.legacyCompactionMaxChars === undefined
-      ? DEFAULT_LEGACY_SESSION_HARD_CHARS
+      ? (config.readerLegacyCompactionMaxChars ?? DEFAULT_LEGACY_SESSION_HARD_CHARS)
       : opts.legacyCompactionMaxChars;
     if (
       !Number.isSafeInteger(this.legacyCompactionMaxChars)

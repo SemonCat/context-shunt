@@ -42,6 +42,7 @@ const ALLOWED_SOURCE_KEYS = new Set([
 const REQUIRED_V11_KEYS = ["result_kind", "provenance", "accounting_id"] as const;
 const OPTIONAL_V11_KEYS = ["failure_detail", "extraction", "legacy_compaction", "stats", "recovery", "import_receipt"] as const;
 const SAFE_ACCOUNTING_ID = /^acc_[0-9a-f]{16}$/;
+const SAFE_RAW_ARTIFACT_PATH = /^\/(?:(?!\.\.?\/)[^\x00-\x1F\x7F/]+\/)*artifacts\/scp_[0-9a-f]{32}\/src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt$/u;
 
 export class OutputGuardError extends Error {}
 
@@ -165,6 +166,18 @@ function checkLegacyCompaction(env: Record<string, unknown>, limits: Limits): vo
   }
   if (value["summary_bytes"] !== summaryBytes) {
     throw new OutputGuardError("legacy_compaction summary_bytes disagrees with summary");
+  }
+  const artifactPath = value["raw_artifact_path"];
+  if (artifactPath !== undefined && (
+    typeof artifactPath !== "string"
+    || env["schema_version"] !== "1.2"
+    || !SAFE_RAW_ARTIFACT_PATH.test(artifactPath)
+    || Array.from(artifactPath).length > 1024
+    || utf8Length(artifactPath) > 4096
+    || typeof value["source_id"] !== "string"
+    || typeof value["snapshot_id"] !== "string"
+  )) {
+    throw new OutputGuardError("legacy_compaction raw artifact path malformed");
   }
   const provenance = env["provenance"];
   if (

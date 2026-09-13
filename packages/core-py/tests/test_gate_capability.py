@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,13 @@ from context_shunt.capability import (
 from context_shunt.errors import ShuntError
 from context_shunt.limits import EMITTED_SCHEMA_VERSION, READER_MODEL
 from context_shunt.session import ShuntSession
-from tests.support import FakeLuna, answer_json, make_capability, make_config, over_old_reader_caps_fixture
+from tests.support import (
+    FakeLuna,
+    answer_json,
+    make_capability,
+    make_config,
+    over_old_reader_caps_fixture,
+)
 
 pytestmark = pytest.mark.gate_capability
 
@@ -419,6 +426,11 @@ def test_a_configured_reader_model_loads_and_is_reported_as_requested(tmp_path):
         module.context_shunt_read(question="What is it?", paths=[str(path)], task_id="taux")
     )
     assert out["provenance"]["requested_model"] == "gpt-5.6-sol"
+    assert any(
+        'context-shunt reader metric: {"duration_ms":' in message
+        and '"status":"ok","code":"ANSWERED"' in message
+        for message in ctx.messages
+    )
 
 
 def test_the_reader_is_registered_as_an_auxiliary_task(tmp_path):
@@ -618,6 +630,61 @@ def test_reader_tool_answers_with_luna_and_verified_citations(tmp_path):
     assert len(llm.calls) == 1
     assert llm.calls[0]["model"] == READER_MODEL
     assert "What is the retry ceiling?" in llm.calls[0]["messages"][1]["content"]
+
+
+def test_hermes_reader_timeout_returns_compactor_summary_and_readable_raw_path(tmp_path):
+    """The adapter-visible fail-open shape includes navigation and exact recovery."""
+
+    class SlowUnavailableLlm:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, messages, **kwargs):
+            self.calls.append({"messages": messages, **kwargs})
+            time.sleep(0.05)
+            raise RuntimeError("synthetic unavailable")
+
+    module = _load_adapter()
+    llm = SlowUnavailableLlm()
+    config = {
+        **_config(tmp_path),
+        "limits": {"request_deadline_ms": 10, "model_call_deadline_ms": 10},
+        "reader": {
+            "fallback_chain": [{"model": "gpt-5.6-sol"}],
+            "legacy_compaction_max_chars": 1_000,
+        },
+    }
+    module.register(FakeCtx(config, llm=llm))
+    marker = "omitted-middle-runtime-readback-9f8e7d"
+    rows = [f"ordinary row {index} value {index * 19}\n" for index in range(800)]
+    rows[400] = marker + "\n"
+    body = "".join(rows)
+    path = tmp_path / "ws" / "deadline-source.txt"
+    path.write_text(body)
+
+    out = json.loads(
+        module.context_shunt_read(
+            question="What was retained?", paths=[str(path)], task_id="t-deadline"
+        )
+    )
+    legacy = out["legacy_compaction"]
+    assert out["status"] == "partial" and out["code"] == "LEGACY_COMPACTED"
+    assert legacy["original_failure"] == "TIMEOUT"
+    assert legacy["summary"] and marker not in legacy["summary"]
+    artifact_path = Path(legacy["raw_artifact_path"])
+    assert artifact_path.is_absolute()
+    raw = artifact_path.read_bytes()
+    assert raw == body.encode()
+    assert len(raw) == legacy["original_bytes"]
+    assert "sha256:" + hashlib.sha256(raw).hexdigest() == legacy["snapshot_id"]
+    assert body not in json.dumps(out)
+    assert out["sources"][0]["source_id"] == legacy["source_id"]
+
+    # Let the timed-out primary finish. Neither the configured Sol fallback nor the
+    # reader's outer retry may start after the absolute deadline.
+    time.sleep(0.08)
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["model"] == READER_MODEL
 
 
 def test_reader_tool_rejects_a_source_outside_the_roots(tmp_path):

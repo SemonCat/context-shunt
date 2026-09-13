@@ -19,13 +19,14 @@ listing, "interesting key" extraction (query/time/count/status-shaped fields), r
 JSON string sampling, and inline secret-value redaction (bearer tokens, ``sk-*``, Slack
 ``xox*`` tokens).
 
-Not ported: artifact-file writing, the per-session manifest (JSON/Markdown), retention
-sweeps, and the structured-content/media (image/base64) redaction walk. Those exist in the
-incumbent because it is its own capture/persistence layer; this module is pure and has no
-filesystem or store access by design. Persistence for context-shunt's callers goes through
-the existing :mod:`context_shunt.store` snapshot instead, and its captured sources are
-already refused at binary/media content (see ``binaryguard.py``), so the media-redaction walk
-has no reachable input here.
+Not ported into this pure algorithm: artifact-file writing, the per-session manifest
+(JSON/Markdown), retention sweeps, and the structured-content/media (image/base64) redaction
+walk. This module has no filesystem or store access by design. The Python session now uses
+the existing :mod:`context_shunt.store` separately to materialize an exact private `.txt`
+mirror when it publishes a degraded fallback, preserving the incumbent's agent-readable raw
+path without duplicating persistence inside the compactor. Captured sources are already
+refused at binary/media content (see ``binaryguard.py``), so the media-redaction walk has no
+reachable input here.
 
 Contract
 --------

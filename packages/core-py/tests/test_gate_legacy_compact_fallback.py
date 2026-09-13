@@ -69,6 +69,26 @@ def test_legacy_compaction_false_cannot_disable_mandatory_fallback(tmp_path):
     assert env["legacy_compaction"]["summary"] == compact_tool_result(body, hard_chars=16000)
 
 
+def test_output_guard_rejects_untrusted_or_pre_1_2_raw_artifact_locator(tmp_path):
+    session, _, request, _ = setup(
+        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
+    )
+    env = session.read(request)
+    assert env["schema_version"] == "1.2"
+    assert "raw_artifact_path" in env["legacy_compaction"]
+    enforce(env)
+
+    arbitrary = deepcopy(env)
+    arbitrary["legacy_compaction"]["raw_artifact_path"] = "/etc/passwd"
+    with pytest.raises(OutputGuardError, match="raw artifact path malformed"):
+        enforce(arbitrary)
+
+    pre_1_2 = deepcopy(env)
+    pre_1_2["schema_version"] = "1.1"
+    with pytest.raises(OutputGuardError, match="raw artifact path malformed"):
+        enforce(pre_1_2)
+
+
 def test_reader_disabled_config_keeps_bare_failure_and_never_runs_compaction(tmp_path):
     session, _, request, _ = setup(tmp_path, _no_evidence_luna(), **{"reader": {"enabled": False}})
     env = session.read(request)

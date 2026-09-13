@@ -32,7 +32,7 @@
     "legacy_compacted_requires_empty_answer": true,
     "stats_requires_empty_answer": true,
     "retryable_allowed_statuses": ["error", "partial"],
-    "emitted_schema_version": "1.1",
-    "accepted_request_schema_versions": ["1.0", "1.1"]
+    "emitted_schema_version": "1.2",
+    "accepted_request_schema_versions": ["1.0", "1.1", "1.2"]
   }
 }

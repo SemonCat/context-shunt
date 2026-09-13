@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from context_shunt.limits import EMITTED_SCHEMA_VERSION
+
 REPO = Path(__file__).resolve().parents[3]
 ADAPTER_DIR = REPO / "adapters" / "hermes" / "context-shunt"
 ROOT_ENV = "CONTEXT_SHUNT_HERMES_ROOT"
@@ -53,7 +55,7 @@ pytestmark = [
 # Runs inside the host interpreter so the hook registry, the tool dispatcher and the
 # plugin context are all the host's own. Output is a single JSON line.
 HOST_SCRIPT = r"""
-import importlib.util, json, os, pathlib, sys, tempfile, re
+import hashlib, importlib.util, json, os, pathlib, sys, tempfile, re, time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.environ["HERMES_ROOT"])
@@ -223,6 +225,80 @@ try:
         task_id="task-local", session_id="session-local", tool_call_id="tc-gone"
     )
 
+    # Force a genuine wall-clock reader timeout through Hermes' registered tool dispatch.
+    # The primary finishes late with a retryable error; the configured Sol availability
+    # fallback must not start after the shared absolute deadline.
+    deadline_marker = "omitted-middle-runtime-readback-9f8e7d"
+    deadline_rows = [f"ordinary row {i} value {i * 19}\n" for i in range(800)]
+    deadline_rows[400] = deadline_marker + "\n"
+    deadline_body = "".join(deadline_rows)
+    deadline_source = workspace / "deadline-source.txt"
+    deadline_source.write_text(deadline_body)
+    adapter._config = adapter.load_config({
+        "workspace_roots": [str(workspace)],
+        "spill_dir": str(temp / "cache"),
+        "limits": {"request_deadline_ms": 10, "model_call_deadline_ms": 10},
+        "reader": {
+            "fallback_chain": [{"model": "gpt-5.6-sol"}],
+            "legacy_compaction_max_chars": 1000,
+        },
+    }, default_spill_dir=temp / "cache")
+
+    class SlowUnavailable:
+        def __init__(self):
+            self.calls = []
+        def complete(self, messages, **kwargs):
+            self.calls.append({"model": kwargs.get("model"), "provider": kwargs.get("provider")})
+            time.sleep(0.05)
+            raise RuntimeError("synthetic provider unavailable")
+
+    slow = SlowUnavailable()
+    adapter._llm = slow
+    out["deadline_result"] = model_tools.handle_function_call(
+        "context_shunt_read",
+        {"question": "What was retained?", "paths": [str(deadline_source)]},
+        task_id="task-deadline", session_id="session-deadline", tool_call_id="tc-deadline"
+    )
+    deadline_env = json.loads(out["deadline_result"])
+    legacy = deadline_env["legacy_compaction"]
+    artifact_path = legacy["raw_artifact_path"]
+    out["deadline_source_bytes"] = len(deadline_body.encode())
+    out["deadline_source_sha256"] = hashlib.sha256(deadline_body.encode()).hexdigest()
+    out["deadline_marker"] = deadline_marker
+    out["deadline_body_in_result"] = deadline_body in out["deadline_result"]
+
+    # Wait for the initial daemon call to finish and attempt to advance its chain. The
+    # absolute-deadline check must keep this at one Luna call (no retry, no Sol fallback).
+    time.sleep(0.08)
+    out["deadline_model_calls"] = list(slow.calls)
+
+    # Exercise Hermes' actual agent-visible read_file tool on the exact returned path.
+    # One bounded page covers this fixture and can be mechanically de-numbered back to the
+    # exact UTF-8 bytes for a full length/hash comparison, including the summary omission.
+    registry.dispatch = real_dispatch
+    out["artifact_read_result"] = model_tools.handle_function_call(
+        "read_file", {"path": artifact_path, "offset": 1, "limit": 2000},
+        task_id="task-deadline", session_id="session-deadline", tool_call_id="tc-artifact-read"
+    )
+    readback = json.loads(out["artifact_read_result"])
+    displayed = readback.get("content", "")
+    recovered_lines = []
+    for line in displayed.split("\n"):
+        prefix, separator, value = line.partition("|")
+        if not separator or not prefix.isdigit():
+            raise AssertionError("read_file did not return complete numbered text")
+        recovered_lines.append(value)
+    recovered = "\n".join(recovered_lines).encode()
+    out["artifact_readback"] = {
+        "path": artifact_path,
+        "file_size": readback.get("file_size"),
+        "truncated": readback.get("truncated"),
+        "bytes": len(recovered),
+        "sha256": hashlib.sha256(recovered).hexdigest(),
+        "matches_original": recovered == deadline_body.encode(),
+        "contains_omitted_marker": deadline_marker.encode() in recovered,
+    }
+
     out["capability"] = adapter.capability_report()
 
     # User auxiliary config wins over the plugin's own default.
@@ -375,7 +451,7 @@ def test_capability_report_names_the_real_host_version(host_result):
     assert capability.get("host", {}).get("name") == "hermes-agent"
     assert capability.get("host", {}).get("version") == "0.18.2"
     assert capability.get("reader_model") == "gpt-5.6-luna"
-    assert capability.get("contract_version") == "1.1"
+    assert capability.get("contract_version") == EMITTED_SCHEMA_VERSION
     modes = {m["mode"]: m for m in capability["modes"]}
     assert modes["tool_result_capture"]["enabled"] is False
     assert modes["deterministic_inspect"]["enabled"] is True
@@ -384,3 +460,34 @@ def test_capability_report_names_the_real_host_version(host_result):
     assert modes["session_lifecycle"]["enabled"] is True
     # The reader's attribution ceiling is stated in the report, not just in a doc.
     assert any("never claims actual" in line for line in modes["reader"]["evidence"])
+
+
+def test_real_hermes_timeout_fails_open_with_summary_path_and_no_late_fallback(host_result):
+    envelope = json.loads(host_result["deadline_result"])
+    legacy = envelope["legacy_compaction"]
+    assert envelope["status"] == "partial" and envelope["code"] == "LEGACY_COMPACTED"
+    assert legacy["original_failure"] == "TIMEOUT"
+    assert legacy["summary"]
+    assert host_result["deadline_marker"] not in legacy["summary"]
+    assert Path(legacy["raw_artifact_path"]).is_absolute()
+    assert envelope["sources"][0]["source_id"] == legacy["source_id"]
+    assert envelope["sources"][0]["snapshot_id"] == legacy["snapshot_id"]
+    assert host_result["deadline_body_in_result"] is False
+    assert host_result["deadline_model_calls"] == [
+        {"model": "gpt-5.6-luna", "provider": None}
+    ]
+
+
+def test_real_hermes_file_tool_reads_every_raw_artifact_byte(host_result):
+    envelope = json.loads(host_result["deadline_result"])
+    readback = host_result["artifact_readback"]
+    assert readback["path"] == envelope["legacy_compaction"]["raw_artifact_path"]
+    assert readback["truncated"] is False
+    assert readback["file_size"] == host_result["deadline_source_bytes"]
+    assert readback["bytes"] == host_result["deadline_source_bytes"]
+    assert readback["sha256"] == host_result["deadline_source_sha256"]
+    assert readback["sha256"] == envelope["legacy_compaction"]["snapshot_id"].removeprefix(
+        "sha256:"
+    )
+    assert readback["matches_original"] is True
+    assert readback["contains_omitted_marker"] is True

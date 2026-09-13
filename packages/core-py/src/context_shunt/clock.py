@@ -1,7 +1,7 @@
 """Deadlines and cancellation with an injectable clock.
 
 Production uses :class:`MonotonicClock`; the cancellation gate uses :class:`FakeClock`
-so the 1s / 5s / 20s / 60s budgets are asserted deterministically rather than by sleeping.
+so stage and request budgets are asserted deterministically rather than by sleeping.
 """
 
 from __future__ import annotations

@@ -177,6 +177,33 @@ _config = None
 _capability: CapabilityReport | None = None
 _llm = None
 _store: SnapshotStore | None = None
+_metrics = None
+
+
+class _ReaderMetrics:
+    """Forward only the new bounded reader outcome timer to the host logger."""
+
+    def __init__(self, logger: Any):
+        self._logger = logger
+
+    def count(self, _name: str, _labels=None, _value: int = 1) -> None:
+        return None
+
+    def observe(self, name: str, value: float, labels=None) -> None:
+        if name != "reader_duration_ms":
+            return
+        bounded = labels or {}
+        self._logger.info(
+            "context-shunt reader metric: %s",
+            json.dumps(
+                {
+                    "duration_ms": max(0, round(value)),
+                    "status": str(bounded.get("status", "error")),
+                    "code": str(bounded.get("code", "INTERNAL_ERROR")),
+                },
+                separators=(",", ":"),
+            ),
+        )
 
 
 # -- capability ------------------------------------------------------------
@@ -450,7 +477,7 @@ def _reader_target() -> tuple[str, str]:
 AUX_TASK_DEFAULTS: dict[str, Any] = {
     "provider": "auto",
     "model": READER_MODEL,
-    "timeout": 20,
+    "timeout": 45,
 }
 
 
@@ -527,6 +554,7 @@ def _session(task_id: str = "", session_id: str = "") -> ShuntSession:
             _config,
             _capability,
             provider=provider,
+            metrics=_metrics,
             store=_store,
             identity=_identity(key),
         )
@@ -1179,7 +1207,7 @@ TOOLS = (
 
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
-    global _config, _capability, _llm, _store, _capture_tool_allowlist
+    global _config, _capability, _llm, _store, _capture_tool_allowlist, _metrics
 
     for session in _sessions.values():
         session.close()
@@ -1205,6 +1233,8 @@ def register(ctx: Any) -> None:
     _config = load_config(raw, default_spill_dir=default_cache)
 
     _llm = getattr(ctx, "llm", None)
+    log = getattr(ctx, "logger", None)
+    _metrics = _ReaderMetrics(log) if log is not None else None
     _capability = build_capability_report(ctx)
 
     # Declare the auxiliary task before anything can call the reader, so the task exists
@@ -1268,7 +1298,6 @@ def register(ctx: Any) -> None:
                 description=schema["description"],
             )
 
-    log = getattr(ctx, "logger", None)
     if log is not None:
         log.info(
             "context-shunt capability report: %s", json.dumps(_capability.to_dict())

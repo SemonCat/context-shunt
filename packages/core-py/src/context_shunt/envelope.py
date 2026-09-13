@@ -219,9 +219,9 @@ def build(
     if pointer is not None:
         env["pointer"] = pointer
 
-    if schema_version != "1.1":
-        # A 1.0 envelope carries no 1.1 block, ever. Attaching one while still declaring
-        # 1.0 would make the version string a lie rather than a compatible extension.
+    if schema_version == "1.0":
+        # A 1.0 envelope carries no later-revision block, ever. Attaching one while still
+        # declaring 1.0 would make the version string a lie rather than an extension.
         return env
 
     kind = result_kind or _default_result_kind(code)

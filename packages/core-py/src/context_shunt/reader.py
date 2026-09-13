@@ -512,6 +512,7 @@ class Reader:
         deadline: Deadline | None = None,
         accounting_id: str | None = None,
     ) -> ReaderResult:
+        started_ms = self._clock.now_ms()
         request_id = _read_request_id(request)
         requested_deadline = _read_requested_deadline(request, self._limits.request_deadline_ms)
         deadline = deadline or Deadline.start(self._clock, requested_deadline)
@@ -522,7 +523,9 @@ class Reader:
         # was overstated. Whatever was actually spent before the failure is carried out.
         spent = _CostSink()
         try:
-            return self._answer(session_id, request, request_id, deadline, accounting_id, spent)
+            result = self._answer(
+                session_id, request, request_id, deadline, accounting_id, spent
+            )
         except Exception as raw_exc:
             exc = (
                 raw_exc
@@ -531,7 +534,7 @@ class Reader:
             )
             self._metrics.count("reader_error", {"code": exc.code})
             provenance = self._failure_provenance(exc, attempts_started=spent.attempts)
-            return ReaderResult(
+            result = ReaderResult(
                 envelope=E.error_envelope(
                     request_id,
                     exc,
@@ -542,6 +545,15 @@ class Reader:
                 provenance=provenance,
                 cost=spent.cost,
             )
+        self._metrics.observe(
+            "reader_duration_ms",
+            max(0, self._clock.now_ms() - started_ms),
+            {
+                "status": result.envelope["status"],
+                "code": result.envelope["code"],
+            },
+        )
+        return result
 
     # -- internals ---------------------------------------------------------
 

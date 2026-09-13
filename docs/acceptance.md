@@ -47,7 +47,7 @@ cores where applicable.
 | `citations` | Exact text and JSON record quotes, full snapshot hash, valid ranges/scope, changed sources, and removal of assertions with invalid evidence. |
 | `no-raw-leak` | Sentinel fault injection across capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard boundaries. |
 | `bounded-output` | Source/chunk/input/output/envelope/JSON caps and bounded failures for strings, objects, arrays, and content blocks. |
-| `cancellation` | 1 s probe, 5 s I/O, 45 s model call, 60 s request, bounded retry, cancellation at every stage, and no late publication. |
+| `cancellation` | 1 s probe, 5 s I/O, 45 s model call, provisional 240 s request, bounded retry, cancellation at every stage, and no late publication. |
 | `permissions` | Root, traversal, symlink/hardlink/race, regular-file, session, TTL, secret, binary, permission, quota, and cleanup controls. |
 | `no-writes` | No writer registration or operation; source tree bytes, modes, and names remain unchanged. |
 | `capability` | Missing/unsafe host seams disable the affected mode without disabling independently safe modes. |
@@ -322,7 +322,7 @@ versioned price source.
 Current targets include: every ordinary shunt envelope within 16 KiB; at least 75%
 main-context byte reduction for intercepted sources of 64 KiB or larger against the full
 counterfactual; local-gate p95 within 1 second; spill p95 within 5 seconds; bounded terminal
-response around the 60-second deadline; and core incremental peak RSS no greater than
+response around the configured request deadline (provisionally 240 seconds); and core incremental peak RSS no greater than
 32 MiB across the large-source cases. Host-side preallocation/truncation is reported
 separately.
 
@@ -384,7 +384,7 @@ Context Shunt is an availability-preserving optimization layer. When Shunt owns 
 
 Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Hermes acceptance must force a real reader deadline through the registered runtime tool, require both a nonempty degraded summary and an absolute `raw_artifact_path`, read that exact path through Hermes' agent-visible file tool, and verify every original byte by length/hash including a marker omitted from the summary. The raw body must not be inlined, the retained handle must remain usable, and no retry or fallback-provider call may begin after expiry. Capture failure before handle publication returns no source handles or path and `handles_valid: false`. TypeScript/OpenClaw currently retains only the handle recovery interface. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback obeys cumulative disclosure limits; host reads through `raw_artifact_path` are an explicit full-source exception.
 
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 

@@ -493,6 +493,7 @@ export class Reader {
     request: unknown,
     opts: { deadline?: Deadline; signal?: AbortSignal; accountingId?: string } = {},
   ): Promise<ReaderResult> {
+    const startedMs = this.clock.nowMs();
     const requestId = readRequestId(request);
     const requestedDeadline = readRequestedDeadline(request, this.limits.requestDeadlineMs);
     const budget = opts.deadline ?? Deadline.start(this.clock, requestedDeadline, opts.signal);
@@ -502,8 +503,9 @@ export class Reader {
     // session's accounting and every savings figure derived from it was overstated.
     // Whatever was actually spent before the failure is carried out.
     const spent: { cost: ReaderCost } = { cost: noReaderCost() };
+    let result: ReaderResult;
     try {
-      return await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
+      result = await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
     } catch (raw) {
       const err = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
       this.metrics.count("reader_error", { code: err.code });
@@ -513,13 +515,19 @@ export class Reader {
         handlesValid: handlesSurvive(err),
       };
       if (opts.accountingId !== undefined) envelopeOpts.accountingId = opts.accountingId;
-      return {
+      result = {
         envelope: errorEnvelope(requestId, err, envelopeOpts),
         provenance,
         cost: spent.cost,
         sourceIds: [],
       };
     }
+    this.metrics.observe(
+      "reader_duration_ms",
+      Math.max(0, this.clock.nowMs() - startedMs),
+      { status: result.envelope.status, code: result.envelope.code },
+    );
+    return result;
   }
 
   private noOutputProvenance(): Provenance {
@@ -1673,6 +1681,7 @@ export class Reader {
         maxOutputTokens: opts.maxOutputTokens,
         timeoutMs,
         signal: controller.signal,
+        deadline,
         // Only a provider that fans out reads this. It debits the request's shared input
         // budget before every extra candidate it starts, so the number of debits equals
         // the number of physical calls rather than the number of invocations.

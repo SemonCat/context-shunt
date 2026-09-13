@@ -1,10 +1,10 @@
 {
-  "schema_version": "1.1",
-  "description": "Normative caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these. Revision 1.1 adds the contract/inspect/disclosure/store/accounting/artifact_import blocks and leaves every 1.0 value unchanged.",
+  "schema_version": "1.2",
+  "description": "Normative caps from docs/architecture.md. Both cores load this file; no core may hardcode a different value. Deployments may only lower these. Revision 1.1 adds the contract/inspect/disclosure/store/accounting/artifact_import blocks; revision 1.2 adds the 240-second request ceiling and Python/Hermes raw artifact locator.",
   "reader_model": "gpt-5.6-luna",
   "contract": {
-    "emitted_version": "1.1",
-    "supported_request_versions": ["1.0", "1.1"]
+    "emitted_version": "1.2",
+    "supported_request_versions": ["1.0", "1.1", "1.2"]
   },
   "gate": {
     "full_read_max_lines": 350,
@@ -49,7 +49,7 @@
     "gate_probe": 1000,
     "spill_io": 5000,
     "model_call": 45000,
-    "request": 60000
+    "request": 240000
   },
   "spill": {
     "ttl_seconds": 3600,

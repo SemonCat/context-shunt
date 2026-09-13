@@ -203,15 +203,22 @@ destination; minimal chunks and an allowlist remain necessary defences.
 
 ## The reader's per-call deadline is sized for a reasoning model
 
-`model_call_deadline_ms` is 45 seconds, inside a 60-second `request_deadline_ms`. A
-deployment may only narrow these normative defaults, not raise them. The longer per-call
-budget accommodates slow reasoning-model calls but leaves little request time for recovery.
+`model_call_deadline_ms` is 45 seconds, inside a provisional 240-second
+`request_deadline_ms`. A deployment may narrow these normative caps. Reader-specific
+production spans are not yet available, so 240 seconds is deliberately not presented as a
+latency percentile: it bounds four 45-second waves for the maximum eight chunks at
+concurrency two, plus 60 seconds for bounded retries, verification, and publication.
 
-The consequence to know about: one call can occupy 45s of a 60s request budget, so the
-reader's single permitted retry will usually not fit. A transient provider failure
-therefore tends to surface as the failure itself rather than as a successful retry. That
-is the honest trade at these latencies; a deployment that would rather have the retry can
-narrow `model_call_deadline_ms`, at the cost of aborting slow-but-fine calls.
+The provisional cap follows bounded live 228 KiB / eight-chunk checks: one workload
+completed in 8.403 seconds; a harder eight-section workload was censored at 60.005 seconds
+with six calls completed and two still in flight under the old cap; and the hard workload
+later completed all eight chunks in 47.752 seconds under the 240-second cap. This is sparse,
+variable workload evidence, not a p95 or p99. Operators can narrow the whole-request or
+per-call ceiling when their own reader spans support it.
+
+Every retry and availability candidate receives only the remaining absolute request
+deadline. Once it expires, no later provider candidate starts; eligible failure still
+degrades to the bounded local compactor, which performs no provider work.
 
 ## Benchmarks are partial by construction
 
@@ -233,8 +240,9 @@ machines.
 
 ## Version compatibility
 
-Revision 1.1 accepts 1.0 requests and validates 1.0 envelopes. It does not accept a request
-that declares 1.0 while carrying a 1.1 field — that is refused rather than ignored. A store
+Revision 1.2 accepts 1.0/1.1 requests and validates earlier envelopes. It does not accept a
+request that declares an older revision while carrying a newer field or limit — that is
+refused rather than ignored. A store
 created by an unsupported DDL revision is refused rather than migrated by guesswork;
 revisions 1 and 2 have explicit additive migrations to revision 3. See
 [`install.md`](install.md) for the supported path.
@@ -254,7 +262,7 @@ Context Shunt is an availability-preserving optimization layer. When Shunt owns 
 
 Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Python capture prepares a private exact-byte `.txt` mirror under an HMAC-derived name before reader work; after successful fallback disclosure Hermes returns its absolute `raw_artifact_path` without post-deadline raw-payload I/O. It is removed by revocation, scope teardown, TTL sweep, or orphan recovery, but host file-tool reads are outside `inspect` disclosure accounting and can recover the complete source. Preparation failure produces pathless mandatory summary/handle fallback. Mirror copies are reserved against `store_max_bytes` per live handle. TypeScript/OpenClaw currently provides handles without this path. Capture failure before handle publication returns no source handles or path and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps.
 
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 

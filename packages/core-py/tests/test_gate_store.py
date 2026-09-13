@@ -52,6 +52,237 @@ def _store(tmp_path: Path, limits=L, clock=None) -> SnapshotStore:
     return SnapshotStore(tmp_path / "cache", limits, wall_clock_ms=clock)
 
 
+def _published(store: SnapshotStore, identity: ScopeIdentity, data: bytes = BODY):
+    store.open_scope(identity)
+    return store.publish(identity, [_capture(data)])[0]
+
+
+def test_raw_artifact_scope_cleanup_never_follows_a_replacement_symlink(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = _published(store, identity)
+    artifact = Path(store.materialize_raw_artifact(identity, handle.handle_id))
+    held = artifact.parent.with_name("held-scope-artifacts")
+    artifact.parent.rename(held)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / artifact.name
+    victim.write_bytes(b"must survive")
+    artifact.parent.symlink_to(outside, target_is_directory=True)
+
+    store.close_scope(identity)
+
+    assert victim.read_bytes() == b"must survive"
+    assert not artifact.parent.exists()
+    assert held.exists()
+    store.recover()
+    assert not held.exists()
+    assert victim.read_bytes() == b"must survive"
+
+
+def test_recovery_removes_an_artifact_orphaned_after_handle_cleanup(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = _published(store, identity)
+    artifact = Path(store.materialize_raw_artifact(identity, handle.handle_id))
+    monkeypatch.setattr(store, "_remove_scope_artifacts", lambda _scope_id: None)
+    store.close_scope(identity)
+    store.close()
+    assert artifact.exists()
+
+    recovered = _store(tmp_path)
+    recovered.recover()
+    assert not artifact.exists()
+
+
+def test_revocation_waits_for_atomic_artifact_publication(tmp_path, monkeypatch):
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    identity = _identity()
+    handle = _published(first, identity)
+    entered = threading.Event()
+    release = threading.Event()
+    original = first._write_or_verify_raw_artifact
+
+    def delayed(published, data, **kwargs):
+        original(published, data, **kwargs)
+        entered.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(first, "_write_or_verify_raw_artifact", delayed)
+    result: dict[str, object] = {}
+
+    def materialize():
+        result["path"] = first.materialize_raw_artifact(identity, handle.handle_id)
+
+    def revoke():
+        result["revoked"] = second.revoke(identity, handle.handle_id)
+
+    writer = threading.Thread(target=materialize)
+    revoker = threading.Thread(target=revoke)
+    writer.start()
+    assert entered.wait(timeout=5)
+    revoker.start()
+    revoker.join(timeout=0.05)
+    assert revoker.is_alive()
+    release.set()
+    writer.join(timeout=5)
+    revoker.join(timeout=5)
+
+    assert result["revoked"] is True
+    assert not Path(str(result["path"])).exists()
+
+
+@pytest.mark.parametrize("boundary", ["scope", "handle"])
+def test_artifact_cleanup_failure_cannot_roll_back_authorization_revocation(
+    tmp_path, monkeypatch, boundary
+):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = _published(store, identity)
+
+    def fail(*_args, **_kwargs):
+        raise ShuntError("STORE_FAILED", "UNSAFE_CACHE_PATH", retryable=False)
+
+    if boundary == "scope":
+        monkeypatch.setattr(store, "_remove_scope_artifacts", fail)
+        assert store.close_scope(identity) == 1
+    else:
+        monkeypatch.setattr(store, "_remove_raw_artifact", fail)
+        assert store.revoke(identity, handle.handle_id) is True
+
+    with pytest.raises(ShuntError) as refused:
+        store.resolve(identity, handle.handle_id)
+    assert refused.value.code == "SOURCE_EXPIRED"
+
+
+@pytest.mark.parametrize("boundary", ["scope", "handle"])
+def test_normal_revocation_removes_real_artifact_and_serializes_republish(
+    tmp_path, monkeypatch, boundary
+):
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    identity = _identity()
+    old = _published(first, identity)
+    old_artifact = Path(first.raw_artifact_path(identity, old.handle_id))
+    assert old_artifact.is_file() and old_artifact.read_bytes() == BODY
+
+    entered = threading.Event()
+    release = threading.Event()
+    cleanup_name = (
+        "_remove_scope_artifacts" if boundary == "scope" else "_remove_raw_artifact"
+    )
+    original_cleanup = getattr(first, cleanup_name)
+
+    def delayed_cleanup(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(first, cleanup_name, delayed_cleanup)
+    result: dict[str, object] = {}
+
+    def revoke():
+        result["revoked"] = (
+            first.close_scope(identity)
+            if boundary == "scope"
+            else first.revoke(identity, old.handle_id)
+        )
+
+    new_body = b"published after cleanup serialization\n"
+
+    def republish():
+        if boundary == "scope":
+            second.open_scope(identity)
+        result["new"] = second.publish(identity, [_capture(new_body)])[0]
+
+    revoker = threading.Thread(target=revoke)
+    publisher = threading.Thread(target=republish)
+    revoker.start()
+    assert entered.wait(timeout=5)
+    publisher.start()
+    publisher.join(timeout=0.05)
+    assert publisher.is_alive(), "republish bypassed the cleanup writer lock"
+    release.set()
+    revoker.join(timeout=5)
+    publisher.join(timeout=5)
+
+    assert result["revoked"] == 1 if boundary == "scope" else result["revoked"] is True
+    assert not old_artifact.exists()
+    new = result["new"]
+    new_artifact = Path(second.raw_artifact_path(identity, new.handle_id))
+    assert new_artifact.is_file() and new_artifact.read_bytes() == new_body
+
+
+@pytest.mark.parametrize("boundary", ["scope", "handle"])
+def test_cleanup_does_not_count_revoked_rows_as_live(tmp_path, boundary):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = _published(store, identity)
+    artifact = Path(store.raw_artifact_path(identity, handle.handle_id))
+    assert artifact.is_file()
+
+    # Model the tombstoned row that cleanup can observe in a shared/interrupted store.
+    # This is deliberately below the public API: ordinary Python revoke deletes its row,
+    # so only this state makes the cleanup predicate itself red before the fix.
+    with sqlite3.connect(store.root / "store.sqlite3") as conn:
+        conn.execute(
+            "UPDATE handles SET revoked = 1 WHERE handle_id = ?",
+            (handle.handle_id,),
+        )
+        if boundary == "scope":
+            conn.execute(
+                "UPDATE scopes SET closed_at_ms = 1 WHERE scope_id = ?",
+                (identity.scope_id,),
+            )
+
+    if boundary == "scope":
+        store._cleanup_closed_scope_artifacts(identity.scope_id)
+    else:
+        store._cleanup_revoked_artifact(identity.scope_id, handle.handle_id)
+
+    assert not artifact.exists()
+
+
+def test_repeated_handles_reserve_artifact_copies_against_byte_quota(tmp_path):
+    limits = L.narrow(store_max_bytes=len(BODY) * 3)
+    store = _store(tmp_path, limits=limits)
+    identity = _identity()
+
+    first = _published(store, identity)
+    assert Path(store.raw_artifact_path(identity, first.handle_id)).read_bytes() == BODY
+    second = store.publish(identity, [_capture()])[0]
+    assert Path(store.raw_artifact_path(identity, second.handle_id)).read_bytes() == BODY
+
+    with pytest.raises(ShuntError) as refused:
+        store.publish(identity, [_capture()])
+    assert refused.value.code == "LIMIT_EXCEEDED"
+    assert refused.value.detail == "STORE_BYTE_QUOTA"
+    artifact_bytes = sum(
+        path.stat().st_size for path in (store.root / "artifacts").rglob("*.txt")
+    )
+    blob_bytes = sum(path.stat().st_size for path in (store.root / "blobs").rglob("*.bin"))
+    assert artifact_bytes + blob_bytes <= limits.store_max_bytes
+
+
+def test_same_size_artifact_tamper_invalidates_the_metadata_seal(tmp_path):
+    store = _store(tmp_path)
+    identity = _identity()
+    handle = _published(store, identity)
+    artifact = Path(store.raw_artifact_path(identity, handle.handle_id))
+    artifact.write_bytes(b"x" * len(BODY))
+
+    with pytest.raises(ShuntError) as refused:
+        store.raw_artifact_path(identity, handle.handle_id)
+    assert refused.value.code == "STORE_FAILED"
+    assert refused.value.detail == "ARTIFACT_PATH_UNAVAILABLE"
+
+    repaired = Path(store.materialize_raw_artifact(identity, handle.handle_id))
+    assert repaired == artifact
+    assert repaired.read_bytes() == BODY
+    assert store.raw_artifact_path(identity, handle.handle_id) == str(artifact)
+
+
 # -- DDL is normative -------------------------------------------------------
 
 

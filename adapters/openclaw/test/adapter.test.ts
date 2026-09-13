@@ -222,7 +222,7 @@ describe("registration", () => {
   it("loads a configured reader model and reports it as requested", async () => {
     // 1.1 makes the reader model configurable; the envelope keeps it honest.
     const dir = workspace();
-    const { api } = configured(dir, { reader: { model: "gpt-5.6-sol" } });
+    const { api, logs } = configured(dir, { reader: { model: "gpt-5.6-sol" } });
     const shunt = new ContextShuntPlugin(api);
     expect(shunt.config.readerModel).toBe("gpt-5.6-sol");
     expect(shunt.capabilityJson()["reader_model"]).toBe("gpt-5.6-sol");
@@ -232,6 +232,8 @@ describe("registration", () => {
       await shunt.onReaderTool({ question: "What is it?", paths: [path] }, {}),
     );
     expect(out.provenance.requested_model).toBe("gpt-5.6-sol");
+    expect(logs.join("\n")).toContain('context-shunt reader metric: {"duration_ms":');
+    expect(logs.join("\n")).toContain(`"status":"${out.status}","code":"${out.code}"`);
   });
 
   it("refuses an unknown attribution policy", () => {

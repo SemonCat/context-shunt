@@ -199,9 +199,8 @@ export const READER_MODEL = DEFAULT_LIMITS.readerModel;
 /**
  * Contract revision. Two constants, deliberately separate: `EMITTED_SCHEMA_VERSION` is
  * what every envelope this core builds declares, `SUPPORTED_REQUEST_VERSIONS` is what it
- * will accept on input. Revision 1.1 is backward compatible - a 1.0 request is still
- * accepted and a 1.0 envelope still validates - but a request that declares 1.0 while
- * carrying a 1.1 field is refused rather than accepted with the field ignored.
+ * will accept on input. Revision 1.2 keeps 1.0 and 1.1 inputs accepted and their envelopes
+ * valid, while refusing a request that claims an older revision but uses a newer limit.
  */
 export const EMITTED_SCHEMA_VERSION: string = rawLimits().contract.emitted_version;
 export const SUPPORTED_REQUEST_VERSIONS: ReadonlySet<string> = new Set(

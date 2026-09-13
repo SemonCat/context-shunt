@@ -1,11 +1,19 @@
 """Availability is an invariant, including when the deprecated switch is false."""
 
+import hashlib
+import os
+import stat
+from pathlib import Path
+
 import pytest
 
+from context_shunt.clock import FakeClock
 from context_shunt.errors import ShuntError
 from context_shunt.guard import enforce
 from context_shunt.legacy_compact import compact_tool_result
-from tests.support import FakeLuna
+from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
+from context_shunt.session import ShuntSession
+from tests.support import FakeLuna, make_capability, make_config
 from tests.test_gate_legacy_compact_fallback import _no_evidence_luna, setup
 
 pytestmark = pytest.mark.gate_legacy_compact
@@ -29,6 +37,88 @@ def test_owned_reader_failure_is_always_legacy(tmp_path, enabled, code):
     assert not env["coverage"]["complete"]
     assert not env["provenance"]["derived"]
     enforce(env)
+
+
+def test_expired_provider_chain_fails_open_with_a_recoverable_exact_source(tmp_path):
+    clock = FakeClock()
+    calls = {"primary": 0, "fallback": 0}
+
+    def expire_and_fail(**_kwargs):
+        calls["primary"] += 1
+        clock.advance(60_000)
+        raise ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", retryable=True)
+
+    def must_not_run(**_kwargs):
+        calls["fallback"] += 1
+        return {"text": "{}"}
+
+    provider = FallbackChainProvider(
+        HostBridgeProvider(expire_and_fail),
+        [HostBridgeProvider(must_not_run, model="fallback")],
+    )
+    session = ShuntSession(
+        "sess", make_config(tmp_path), make_capability(), provider=provider, clock=clock
+    )
+    marker = "OMITTED-MIDDLE-CANARY-7d3e9a"
+    rows = [f"ordinary row {index} value {index * 17}\n" for index in range(2_000)]
+    rows[1_000] = f"exact retained evidence {marker}\n"
+    body = "ERROR: first provider unavailable\n" + "".join(rows)
+    path = tmp_path / "ws" / "deadline-source.txt"
+    path.write_text(body)
+    entry = session.register_path(str(path))
+    request = {
+        "schema_version": "1.1",
+        "request_id": "req_deadline_fallback",
+        "operation": "read",
+        "question": "What evidence was retained?",
+        "sources": [{
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "all"},
+        }],
+        "budgets": {"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60_000},
+    }
+
+    env = session.read(request)
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["original_failure"] == "TIMEOUT"
+    assert calls == {"primary": 1, "fallback": 0}
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert env["sources"][0]["snapshot_id"] == entry.snapshot.snapshot_id
+    assert any(item["reason"] == "UNKNOWN_REMAINDER" for item in env["coverage"]["omitted"])
+    legacy = env["legacy_compaction"]
+    assert legacy["summary"]
+    assert marker not in legacy["summary"]
+    artifact_path = Path(legacy["raw_artifact_path"])
+    assert artifact_path.is_absolute()
+    raw = artifact_path.read_bytes()
+    assert raw == body.encode()
+    assert len(raw) == legacy["original_bytes"]
+    assert "sha256:" + hashlib.sha256(raw).hexdigest() == legacy["snapshot_id"]
+    assert body not in str(env)
+    assert stat.S_IMODE(os.stat(artifact_path).st_mode) == 0o600
+    artifact_path.chmod(0o644)
+    assert Path(session._store.materialize_raw_artifact(session._identity, entry.source_id)) == (
+        artifact_path
+    )
+    assert stat.S_IMODE(os.stat(artifact_path).st_mode) == 0o600
+
+    inspected = session.inspect({
+        "schema_version": "1.1",
+        "request_id": "req_deadline_locator",
+        "operation": "inspect",
+        "source_id": env["sources"][0]["source_id"],
+        "snapshot_id": env["sources"][0]["snapshot_id"],
+        "selector": {"kind": "search", "needle": marker, "max_matches": 1},
+        "budgets": {"max_result_bytes": 4096, "max_scan_lines": 20_000},
+    })
+    assert inspected["code"] == "EXTRACTED"
+    assert marker in inspected["extraction"]["segments"][0]["text"]
+    assert calls == {"primary": 1, "fallback": 0}
+    session.end_turn()
+    assert artifact_path.exists()
+    session.close()
+    assert not artifact_path.exists()
 
 
 @pytest.mark.parametrize(
@@ -244,6 +334,64 @@ def test_reader_fallback_obeys_disclosure_exhaustion(tmp_path):
     env = session.read(request)
     assert env["code"] == "DISCLOSURE_EXHAUSTED"
     assert "legacy_compaction" not in env
+    # Capture may prepare an unguessable mirror, but a refused disclosure never reveals
+    # its path and the raw bytes never enter the envelope.
+    assert "raw_artifact_path" not in str(env)
+
+
+def test_artifact_write_failure_keeps_mandatory_handle_backed_compaction(tmp_path, monkeypatch):
+    session, entry, request, _ = setup(
+        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
+    )
+    artifact = Path(session._store.raw_artifact_path(session._identity, entry.source_id))
+    artifact.unlink()
+    env = session.read(request)
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["summary"]
+    assert "raw_artifact_path" not in env["legacy_compaction"]
+    assert env["sources"][0]["source_id"] == entry.source_id
+    inspected = session.inspect(
+        {
+            "schema_version": "1.1",
+            "request_id": "req_artifact_write_failed_inspect",
+            "operation": "inspect",
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "lines", "start": 1, "end": 1},
+            "budgets": {"max_result_bytes": 4096, "max_scan_lines": 20_000},
+        }
+    )
+    assert inspected["code"] == "EXTRACTED"
+
+
+def test_timeout_fallback_never_materializes_after_deadline(tmp_path, monkeypatch):
+    session, _, request, _ = setup(
+        tmp_path, FakeLuna(default_reply=ShuntError("TIMEOUT"))
+    )
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("post-deadline artifact I/O")
+
+    monkeypatch.setattr(session._store, "materialize_raw_artifact", fail)
+    env = session.read(request)
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert Path(env["legacy_compaction"]["raw_artifact_path"]).is_file()
+
+
+def test_unrepresentable_artifact_path_keeps_mandatory_compaction(tmp_path, monkeypatch):
+    session, entry, request, _ = setup(
+        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
+    )
+
+    def fail(*_args, **_kwargs):
+        raise ShuntError("STORE_FAILED", "ARTIFACT_PATH_UNAVAILABLE")
+
+    monkeypatch.setattr(session._store, "raw_artifact_path", fail)
+    env = session.read(request)
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["legacy_compaction"]["summary"]
+    assert "raw_artifact_path" not in env["legacy_compaction"]
+    assert env["sources"][0]["source_id"] == entry.source_id
 
 
 def test_safe_detail_enum_matches_canonical_contract(contracts_dir):

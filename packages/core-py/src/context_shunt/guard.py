@@ -78,6 +78,10 @@ class OutputGuardError(Exception):
 
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 _SAFE_ACCOUNTING_ID = re.compile(r"acc_[0-9a-f]{16}\Z")
+_SAFE_RAW_ARTIFACT_PATH = re.compile(
+    r"/(?:(?!\.\.?/)[^\x00-\x1f\x7f/]+/)*"
+    r"artifacts/scp_[0-9a-f]{32}/src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt\Z"
+)
 
 
 def fixed_error(request_id: str, code: str = "LIMIT_EXCEEDED") -> dict[str, Any]:
@@ -272,6 +276,17 @@ def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
         raise OutputGuardError("legacy_compaction over per-result cap")
     if block.get("summary_bytes") != len(text):
         raise OutputGuardError("legacy_compaction summary_bytes disagrees with summary")
+    artifact_path = block.get("raw_artifact_path")
+    if artifact_path is not None and (
+        not isinstance(artifact_path, str)
+        or envelope.get("schema_version") != "1.2"
+        or _SAFE_RAW_ARTIFACT_PATH.fullmatch(artifact_path) is None
+        or len(artifact_path) > 1024
+        or len(artifact_path.encode("utf-8")) > 4096
+        or not isinstance(block.get("source_id"), str)
+        or not isinstance(block.get("snapshot_id"), str)
+    ):
+        raise OutputGuardError("legacy_compaction raw artifact path malformed")
     # provenance.derived must already be false for this envelope (checked in
     # `_check_version_fields` via result_kind agreement); this is the belt to that
     # braces - a compaction block can never accompany a claim of model derivation.

@@ -27,6 +27,7 @@
  * reported provenance and usage so the envelope can say a fallback was used.
  */
 import { ShuntError } from "./errors.js";
+import type { Deadline } from "./clock.js";
 import { DEFAULT_LIMITS, Limits, READER_MODEL } from "./limits.js";
 import {
   type Attribution,
@@ -187,6 +188,9 @@ export interface CompleteOptions {
   maxOutputTokens: number;
   timeoutMs: number;
   signal?: AbortSignal | undefined;
+  /** Shared absolute request deadline. Composite providers must check it before every
+   * physical call; an abort signal alone does not observe an injected clock expiring. */
+  deadline?: Deadline | undefined;
   /**
    * Optional, and only a provider that makes more than one physical call per invocation
    * needs it: the reader debits the call it starts before the invocation begins, so a
@@ -586,8 +590,17 @@ export class FallbackChainProvider implements ReaderProvider {
       if (opts.signal?.aborted) {
         throw chainFailure(null, () => new ShuntError("CANCELLED", "MODEL_CALL", false));
       }
+      if (opts.deadline?.isCancelled()) {
+        throw chainFailure(null, () => new ShuntError("CANCELLED", "MODEL_CALL", false));
+      }
+      if (opts.deadline?.expired()) {
+        throw chainFailure(null, () => new ShuntError("TIMEOUT", "MODEL_CALL", true));
+      }
       const provider = this.chain[index] as ReaderProvider;
-      const remainingMs = opts.timeoutMs - (Date.now() - started);
+      const remainingMs = Math.min(
+        opts.timeoutMs - (Date.now() - started),
+        opts.deadline?.remainingMs() ?? Number.POSITIVE_INFINITY,
+      );
       if (remainingMs <= 0) {
         // Out of budget. Never start another provider call the caller cannot use. The
         // aggregate is already complete - no attempt happened here - so it is reported,

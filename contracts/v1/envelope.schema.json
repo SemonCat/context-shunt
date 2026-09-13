@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/context-shunt/contracts/v1/envelope.schema.json",
   "title": "context-shunt v1 bounded envelope",
-  "description": "The single reply shape for every gate, reader, inspect, stats, spill and failure path. Revision 1.1 adds result_kind, provenance, accounting_id and the extraction/stats/recovery/import_receipt blocks; a 1.0 envelope remains valid unchanged. No raw/debug field may be added, and no field may carry a filesystem path, a question, a payload preview or a provider error body.",
+  "description": "The single reply shape for every gate, reader, inspect, stats, spill and failure path. Revision 1.1 adds result_kind, provenance, accounting_id and the extraction/stats/recovery/import_receipt blocks; revision 1.2 adds the optional Python/Hermes legacy-compaction raw artifact locator. Earlier envelopes remain valid unchanged. No raw/debug field may be added, and outside that explicit 1.2 recovery locator no field may carry a filesystem path, question, payload preview, or provider error body.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "request_id", "status", "code", "answer", "citations", "coverage", "sources", "retryable"],
   "properties": {
-    "schema_version": { "enum": ["1.0", "1.1"] },
+    "schema_version": { "enum": ["1.0", "1.1", "1.2"] },
     "request_id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:-]+$" },
     "status": { "enum": ["ok", "partial", "blocked", "error"] },
     "code": {
@@ -68,8 +68,10 @@
       "then": { "properties": { "answer": { "const": "" }, "citations": { "maxItems": 0 } }, "required": ["pointer", "import_receipt", "result_kind"] } },
     { "if": { "not": { "properties": { "status": { "const": "ok" } }, "required": ["status"] } },
       "then": { "properties": { "coverage": { "properties": { "complete": { "const": false } } } } } },
-    { "if": { "properties": { "schema_version": { "const": "1.1" } }, "required": ["schema_version"] },
+    { "if": { "properties": { "schema_version": { "enum": ["1.1", "1.2"] } }, "required": ["schema_version"] },
       "then": { "required": ["result_kind", "provenance", "accounting_id"] } },
+    { "if": { "properties": { "schema_version": { "enum": ["1.0", "1.1"] } }, "required": ["schema_version"] },
+      "then": { "properties": { "legacy_compaction": { "not": { "required": ["raw_artifact_path"] } } } } },
     { "if": { "properties": { "schema_version": { "const": "1.0" } }, "required": ["schema_version"] },
       "then": { "allOf": [
         { "not": { "required": ["result_kind"] } },
@@ -295,6 +297,13 @@
         "snapshot_id": {
           "$ref": "#/$defs/snapshotId"
         },
+        "raw_artifact_path": {
+          "description": "1.2: complete absolute path to a private exact-byte artifact retained for host file-tool readback. The raw payload is not inlined in this envelope.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^/(?:(?!\\.\\.?/)[^\\u0000-\\u001F\\u007F/]+/)*artifacts/scp_[0-9a-f]{32}/src_[0-9a-f]{16}\\.[0-9a-f]{32}\\.txt$"
+        },
         "summary": {
           "type": "string",
           "maxLength": 16384
@@ -332,6 +341,10 @@
         ],
         "snapshot_id": [
           "source_id"
+        ],
+        "raw_artifact_path": [
+          "source_id",
+          "snapshot_id"
         ]
       }
     },

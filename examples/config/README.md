@@ -26,7 +26,7 @@ adding fake keys to either plugin `config` block.
 | `reader.automatic_extract` | `true` | Deprecated compatibility flag; does not control mandatory legacy compaction. |
 | `reader.fallback_max_bytes` | `2048` | 1–4096; retained compatibility cap for the retired automatic-prefix helper. |
 | `reader.legacy_compaction` | deprecated | Accepted boolean no-op. Mandatory fallback cannot be disabled, including with `false`. |
-| `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies. Python core option; TypeScript exposes the equivalent session hard cap. |
+| `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies in both cores. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
 | `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw automatic capture is unsupported, even when requested. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |

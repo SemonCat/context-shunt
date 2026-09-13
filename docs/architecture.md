@@ -1,4 +1,4 @@
-# Architecture and contract revision 1.1
+# Architecture and contract revision 1.2
 
 This is the normative design for the current implementation. Numeric values below are
 current defaults; [`contracts/v1/limits.json`](../contracts/v1/limits.json) is authoritative
@@ -6,10 +6,10 @@ and deployments may only narrow them. The entire public surface is read-only.
 
 ## Contract compatibility
 
-Revision 1.1 accepts 1.0 requests and validates 1.0 envelopes. An envelope declaring 1.1
-must include `result_kind`, `provenance`, and `accounting_id`. A request that declares 1.0
-but carries a 1.1 field or operation is refused rather than silently ignoring it. Emitted
-and accepted versions are separate constants in both cores.
+Revision 1.2 accepts 1.0/1.1 requests and validates earlier envelopes. Envelopes declaring
+1.1 or 1.2 must include `result_kind`, `provenance`, and `accounting_id`. A request that
+declares an older revision but carries a newer field or limit is refused rather than
+silently ignoring it. Emitted and accepted versions are separate constants in both cores.
 
 Revision 1.1 added deterministic `inspect`, session `stats`, the hybrid snapshot store,
 recovery guidance, model provenance, and signed token accounting. It also made the reader
@@ -26,6 +26,13 @@ bytes may be complete under one origin and truncated under another. Trusted capt
 boundaries write the flag; migrated older handles remain `NULL` rather than being invented
 complete. `handles.kind` still records only the capture category, not producer identity;
 that distinction remains in the envelope receipt and `capture` accounting kind.
+
+Revision 1.2 raises the whole-reader request ceiling from 60 to 240 seconds and adds the
+optional Python/Hermes raw artifact locator. Requests declaring 1.0 or 1.1 remain capped
+at 60 seconds, and envelopes declaring either older revision cannot carry the locator.
+The locator schema admits only an absolute, control-free cache-artifact shape. A
+metadata-only HMAC sidecar binds each prepared mirror's inode, size, timestamps, handle,
+and snapshot digest, detecting post-capture modification without payload I/O at timeout.
 
 ## Components and trust boundaries
 
@@ -174,7 +181,9 @@ staged files and blobs with no metadata row.
 SQLite stores only opaque handles, digested scope, generation, TTL, quotas, refcounts,
 disclosure totals, cleanup state, and bounded operation metrics. It never stores source
 paths, questions, answers, quotes, previews, provider error bodies, model/provider names,
-or filesystem paths. The normative schema is
+or filesystem paths. Python prepares a separate exact-byte `.txt` mirror during capture;
+its HMAC-derived path is not stored in SQLite and is revealed only by a successful
+legacy-compaction fallback. The normative schema is
 [`contracts/store/v1.sql`](../contracts/store/v1.sql), executed verbatim by both cores.
 
 Handle readability is a SQL predicate over unrevoked state, expiry, an open scope, and the
@@ -200,7 +209,7 @@ calls, and start at most one core retry per transient failure, plus at most one 
 retry for a schema or claims/citations relationship failure. The two budgets are
 independent - each may spend its own retry on the same chunk, so both can fire together -
 and the combined worst case for one chunk is bounded by the sum of the two limits, never
-more. All attempts share the 64,000-token input and 60-second request budgets. One model
+more. All attempts share the 64,000-token input and provisional 240-second request budgets. One model
 call is capped at 45 seconds and 2,048 output tokens.
 
 Each model call receives the original question. The model returns structured `claims`
@@ -230,7 +239,7 @@ Context Shunt is an availability-preserving optimization layer. When Shunt owns 
 
 Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Python capture prepares a private exact-byte `.txt` mirror under an HMAC-derived name before reader work; after successful fallback disclosure Hermes returns its complete absolute `legacy_compaction.raw_artifact_path` without post-deadline raw-payload I/O. The host file tool can page that file, while `source_id`/`snapshot_id` remain available for content-bound inspection. The raw bytes are not inlined in the envelope. Mirror creation is serialized with revocation and cleanup, mirror bytes are quota-reserved per live handle, and orphan mirrors are recovered after crashes. If preparation fails, mandatory compaction remains available with its summary and handles but without the optional path. The mirror is removed on handle revocation, real scope teardown, or TTL sweep. TypeScript/OpenClaw currently retains only the handle interface. Capture failure before handle publication returns no source handles or artifact path and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback obeys cumulative disclosure limits; direct host file-tool reads of `raw_artifact_path` are the explicit full-source recovery channel and are outside that accounting.
 
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
@@ -303,7 +312,7 @@ context. The no-raw-leak gates inject sentinels and failures across every stage.
 
 ## Provenance and accounting
 
-Every 1.1 envelope distinguishes model-derived from deterministic results. Model provenance
+Every 1.1-or-newer envelope distinguishes model-derived from deterministic results. Model provenance
 separates requested, host-resolved, and provider-reported identities and classifies the
 strongest evidence as `actual`, `resolved`, `unverified`, `mismatch`, `unknown`, or
 `not_applicable`. Requested identity is never promoted into a stronger field. See

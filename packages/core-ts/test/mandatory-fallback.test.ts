@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
+import { FakeClock } from "../src/clock.js";
 import { ShuntError } from "../src/errors.js";
 import { errorEnvelope } from "../src/envelope.js";
 import { DEFAULT_LIMITS as L, narrowLimits } from "../src/limits.js";
 import { compactToolResult } from "../src/legacy-compact.js";
+import { FallbackChainProvider, HostBridgeProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
 import { SpillEngine } from "../src/spill.js";
 import { makeCapability, makeConfig, makeRegistry, FakeLuna } from "./support.js";
@@ -188,6 +190,73 @@ describe("mandatory legacy fallback", () => {
     expect(envelope.guidance).toContain("exact count");
     expect(envelope.guidance).toContain("citation evidence");
     expect(envelope.sources[0]?.source_id).toBe(entry.sourceId);
+  });
+
+  it("uses the migrated config character ceiling without a session toggle", async () => {
+    const dir = tmp();
+    const session = new ShuntSession(
+      "sess",
+      makeConfig(dir, { reader: { legacy_compaction_max_chars: 1_000 } }),
+      makeCapability(),
+      { provider: new FakeLuna([], new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true)) },
+    );
+    const path = join(dir, "ws", "source.txt");
+    writeFileSync(path, oversizedBody());
+    const envelope = await session.read(readerRequest(session.registerPath(path)));
+
+    expect(envelope.code).toBe("LEGACY_COMPACTED");
+    expect(envelope.legacy_compaction?.hard_cap_chars).toBe(1_000);
+    expect(Array.from(envelope.legacy_compaction?.summary ?? "").length).toBeLessThanOrEqual(1_000);
+  });
+
+  it("fails open after deadline with a locator that recovers exact retained source", async () => {
+    const dir = tmp();
+    const clock = new FakeClock();
+    const calls = { primary: 0, fallback: 0 };
+    const provider = new FallbackChainProvider(
+      new HostBridgeProvider(async () => {
+        calls.primary += 1;
+        clock.advance(60_000);
+        throw new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true);
+      }),
+      [new HostBridgeProvider(async () => {
+        calls.fallback += 1;
+        return { text: "{}" };
+      }, L, "fallback")],
+    );
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider,
+      clock,
+    });
+    const marker = "LOCATOR-ONLY-CANARY-7d3e9a";
+    const body = "ERROR: first provider unavailable\n"
+      + Array.from({ length: 2_000 }, (_, index) => `ordinary row ${index}\n`).join("")
+      + `exact retained evidence ${marker}\n`;
+    const path = join(dir, "ws", "deadline-source.txt");
+    writeFileSync(path, body);
+    const entry = session.registerPath(path);
+
+    const env = await session.read(readerRequest(entry));
+    expect(env.code).toBe("LEGACY_COMPACTED");
+    expect(env.legacy_compaction?.original_failure).toBe("TIMEOUT");
+    expect(calls).toEqual({ primary: 1, fallback: 0 });
+    expect(env.sources[0]?.source_id).toBe(entry.sourceId);
+    expect(env.sources[0]?.snapshot_id).toBe(entry.snapshot.snapshotId);
+    expect(env.coverage.omitted.some((item) => item.reason === "UNKNOWN_REMAINDER")).toBe(true);
+    expect(JSON.stringify(env)).not.toContain(body);
+
+    const inspected = session.inspect({
+      schema_version: "1.1",
+      request_id: "req_deadline_locator",
+      operation: "inspect",
+      source_id: env.sources[0]?.source_id,
+      snapshot_id: env.sources[0]?.snapshot_id,
+      selector: { kind: "search", needle: marker, max_matches: 1 },
+      budgets: { max_result_bytes: 4096, max_scan_lines: 20_000 },
+    });
+    expect(inspected.code).toBe("EXTRACTED");
+    expect(inspected.extraction?.segments[0]?.text).toContain(marker);
+    expect(calls).toEqual({ primary: 1, fallback: 0 });
   });
 
   it("refuses fallback when the disclosure ceiling is already exhausted", async () => {

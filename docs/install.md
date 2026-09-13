@@ -57,7 +57,7 @@ npm install
 `scripts/verify` exits `0` on pass, `1` on failure, and `2` for `NOT_RUN` — a gate whose
 prerequisite is absent. `NOT_RUN` is never a pass.
 
-Shunt-owned failures automatically use mandatory bounded deterministic legacy compaction. Deprecated fallback toggles cannot restore error-only recovery. Caller/security/policy failures remain explicit refusals. No database migration is needed; both packages must ship the synchronized first-party 1.1 contract extensions. See [fallback and compatibility details](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover). Deployment, drift checks, draining, and restart approval remain separate operator work.
+Shunt-owned failures automatically use mandatory bounded deterministic legacy compaction. Deprecated fallback toggles cannot restore error-only recovery. Caller/security/policy failures remain explicit refusals. No database migration is needed; both packages must ship the synchronized first-party 1.2 contract. See [fallback and compatibility details](configuration.md#legacy-compaction-fallback-for-reader-outcomes-automatic-extraction-does-not-cover). Deployment, drift checks, draining, and restart approval remain separate operator work.
 
 ## Hermes
 

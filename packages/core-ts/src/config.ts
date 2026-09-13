@@ -106,6 +106,7 @@ const MAX_MODEL_REF_BYTES = 128;
 const MAX_FALLBACK_ENTRIES = 4;
 const READER_KEYS = new Set([
   "enabled", "model", "provider", "attribution_policy", "fallback_chain", "automatic_extract", "fallback_max_bytes",
+  "legacy_compaction", "legacy_compaction_max_chars",
 ]);
 const ENABLED_SECTION_KEYS = new Set(["enabled"]);
 const TOOL_RESULT_CAPTURE_KEYS = new Set(["enabled", "host_ordering_verified_locally"]);
@@ -136,6 +137,7 @@ export interface Config {
   readonly readerAttributionPolicy: AttributionPolicy;
   readonly readerAutomaticExtract?: boolean;
   readonly readerFallbackMaxBytes?: number;
+  readonly readerLegacyCompactionMaxChars: number;
   readonly readerFallbackChain: readonly ProviderRef[];
   readonly inspectEnabled: boolean;
   readonly statsEnabled: boolean;
@@ -162,6 +164,9 @@ export interface RawConfig {
     attribution_policy?: string;
     automatic_extract?: boolean;
     fallback_max_bytes?: number;
+    /** @deprecated accepted and type-checked; mandatory fallback cannot be disabled. */
+    legacy_compaction?: boolean;
+    legacy_compaction_max_chars?: number;
     fallback_chain?: Array<{ model?: string; provider?: string }>;
   };
   inspect?: { enabled?: boolean };
@@ -226,6 +231,7 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     cfg.gate_enabled,
     cfg.reader?.enabled,
     cfg.reader?.automatic_extract,
+    cfg.reader?.legacy_compaction,
     cfg.inspect?.enabled,
     cfg.stats?.enabled,
     toolResultCaptureRaw.enabled,
@@ -256,6 +262,14 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
   const fallbackMaxBytes = cfg.reader?.fallback_max_bytes === undefined
     ? 2048 : cfg.reader.fallback_max_bytes;
   if (!Number.isSafeInteger(fallbackMaxBytes) || fallbackMaxBytes < 1 || fallbackMaxBytes > 4096) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
+  }
+  const legacyCompactionMaxChars = cfg.reader?.legacy_compaction_max_chars ?? 16_000;
+  if (
+    !Number.isSafeInteger(legacyCompactionMaxChars)
+    || legacyCompactionMaxChars < 1_000
+    || legacyCompactionMaxChars > 60_000
+  ) {
     throw new ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", false);
   }
   const chainRaw = cfg.reader?.fallback_chain ?? [];
@@ -325,6 +339,7 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     readerFallbackChain: fallbackChain,
     readerAutomaticExtract: cfg.reader?.automatic_extract ?? true,
     readerFallbackMaxBytes: fallbackMaxBytes,
+    readerLegacyCompactionMaxChars: legacyCompactionMaxChars,
     inspectEnabled: cfg.inspect?.enabled ?? true,
     statsEnabled: cfg.stats?.enabled ?? true,
     toolResultCaptureEnabled: toolResultCaptureRaw.enabled ?? false,

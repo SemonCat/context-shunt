@@ -135,6 +135,22 @@ describe("legacy envelope guard", () => {
     expect(() => enforce(disguised)).toThrow("cannot masquerade");
   });
 
+  it("rejects untrusted and pre-1.2 raw artifact locators", () => {
+    const valid = legacyEnvelope("navigation only") as unknown as Record<string, any>;
+    valid["legacy_compaction"]["raw_artifact_path"] =
+      "/private/cache/artifacts/scp_" + "0".repeat(32)
+      + "/src_0123456789abcdef." + "1".repeat(32) + ".txt";
+    expect(() => enforce(valid)).not.toThrow();
+
+    const arbitrary = structuredClone(valid);
+    arbitrary["legacy_compaction"]["raw_artifact_path"] = "/etc/passwd";
+    expect(() => enforce(arbitrary)).toThrow("raw artifact path malformed");
+
+    const pre12 = structuredClone(valid);
+    pre12["schema_version"] = "1.1";
+    expect(() => enforce(pre12)).toThrow("raw artifact path malformed");
+  });
+
   it("converts an invalid legacy envelope to a fixed error without echoing its body", () => {
     const marker = "-----BEGIN PRIVATE KEY-----";
     const invalid = legacyEnvelope(marker);

@@ -23,6 +23,27 @@ describe("envelope fixtures", () => {
   for (const { name, document } of fixtureDocs("envelope", "invalid")) {
     it(`rejects ${name}`, () => expect(envelopeValidator()(document)).toBe(false));
   }
+
+  it("requires contract 1.2 for the raw artifact locator", () => {
+    const doc = structuredClone(
+      fixtureDocs("envelope", "valid")
+        .find((f) => f.name === "v11_partial_legacy_compacted.json")?.document,
+    ) as Record<string, any>;
+    doc["legacy_compaction"]["raw_artifact_path"] =
+      `/private/cache/artifacts/scp_${"0".repeat(32)}`
+      + `/src_0123456789abcdef.${"1".repeat(32)}.txt`;
+    expect(envelopeValidator()(doc)).toBe(false);
+    doc["schema_version"] = "1.2";
+    expect(envelopeValidator()(doc)).toBe(true);
+    for (const unsafe of [
+      "../../sensitive.txt",
+      "/private/../sensitive.txt",
+      `/private/cache/artifacts/scp_${"0".repeat(32)}/source.txt\n`,
+    ]) {
+      doc["legacy_compaction"]["raw_artifact_path"] = unsafe;
+      expect(envelopeValidator()(doc)).toBe(false);
+    }
+  });
 });
 
 describe("contract invariants", () => {
@@ -174,5 +195,32 @@ describe("tool_result_capture / suma_post_tool config migration", () => {
       "/tmp/context-shunt-cache",
     );
     expect(config.toolResultCaptureHostOrderingVerifiedLocally).toBe(true);
+  });
+});
+
+describe("mandatory legacy compaction config migration", () => {
+  const roots = { workspace_roots: ["/tmp/context-shunt-config"] };
+
+  it.each([false, true])("accepts and ignores the deprecated on/off key (%s)", (enabled) => {
+    const config = loadConfig(
+      { ...roots, reader: { legacy_compaction: enabled } } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.readerLegacyCompactionMaxChars).toBe(16_000);
+  });
+
+  it("carries the legacy compactor character ceiling into typed config", () => {
+    const config = loadConfig(
+      { ...roots, reader: { legacy_compaction_max_chars: 12_345 } } as never,
+      "/tmp/context-shunt-cache",
+    );
+    expect(config.readerLegacyCompactionMaxChars).toBe(12_345);
+  });
+
+  it.each([999, 60_001, 12.5, "16000"])("rejects an invalid legacy character ceiling (%s)", (value) => {
+    expect(() => loadConfig(
+      { ...roots, reader: { legacy_compaction_max_chars: value } } as never,
+      "/tmp/context-shunt-cache",
+    )).toThrowError(ShuntError);
   });
 });

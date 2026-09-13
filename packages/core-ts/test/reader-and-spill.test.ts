@@ -894,7 +894,7 @@ describe("output guard", () => {
 describe("cancellation and deadlines", () => {
   it("pins the contract deadlines", () => {
     expect([L.gateProbeDeadlineMs, L.spillIoDeadlineMs]).toEqual([1000, 5000]);
-    expect([L.modelCallDeadlineMs, L.requestDeadlineMs]).toEqual([45000, 60000]);
+    expect([L.modelCallDeadlineMs, L.requestDeadlineMs]).toEqual([45000, 240000]);
     // The default model must be reachable under the default deadline. `model_call` was
     // 20000 through the 1.1 work, but the default reader model `gpt-5.6-luna` is a
     // reasoning model and a measured live call takes roughly 34s - so every call aborted

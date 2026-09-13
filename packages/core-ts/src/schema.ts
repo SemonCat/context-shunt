@@ -8,7 +8,7 @@
  * Version handling is deliberately strict in both directions:
  *
  * - a request declaring a revision this core does not support is `UNSUPPORTED_VERSION`;
- * - a request declaring 1.0 while carrying a 1.1 field, or using a 1.1 operation, is
+ * - a request declaring an older revision while carrying a newer field or limit is
  *   `INVALID_REQUEST` - an unknown mandatory field is refused, never ignored;
  * - `propose_patch` stays reserved and refused.
  */

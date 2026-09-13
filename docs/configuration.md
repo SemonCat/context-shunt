@@ -23,7 +23,7 @@ value fails load with `LIMIT_MAY_ONLY_NARROW`.
 | `reader.enforce_output_caps` | boolean | `true` | **Python/Hermes only, trusted deployment configuration.** When `false`, removes only reader answer/claim/quote/count limits and the raw-result/final `ANSWERED` envelope byte limits. It is not a request or tool argument. Input/source/spill/disclosure, citation structure and mechanical verification, secret detection, generation-token, deadline, concurrency, and fallback controls remain enforced. TypeScript/OpenClaw and the shared public envelope schema remain bounded. |
 | `reader.automatic_extract` | boolean | `true` | Compatibility setting for exact extraction; does not disable or replace mandatory legacy fallback. |
 | `reader.fallback_max_bytes` | integer 1–4096 | `2048` | Automatic prefix byte cap, narrowed by request, inspect, disclosure and output budgets. |
-| `reader.legacy_compaction` | boolean | `true` | Deprecated no-op; false cannot disable mandatory fallback. |
+| `reader.legacy_compaction` | deprecated boolean (ignored) | n/a | Accepted only so old configuration keeps loading; remove it when convenient. Mandatory fallback cannot be disabled. |
 | `reader.legacy_compaction_max_chars` | integer 1000–60000 | `16000` | Character budget handed to the compaction algorithm before the envelope's own 16 KiB byte cap is separately enforced. |
 | `inspect.enabled` | boolean | `true` | Registers deterministic exact extraction. |
 | `stats.enabled` | boolean | `true` | Registers read-only session accounting. |
@@ -110,7 +110,7 @@ Hermes has two separate layers:
 2. The adapter registers `context_shunt_reader` as an auxiliary task. User values in
    `auxiliary.context_shunt_reader.provider` and `.model` override the plugin's
    `reader.provider` and `reader.model`. Hermes' `auto` sentinel means inherit. The
-   registered task also has a host-facing `timeout` default of 20 seconds, but core calls
+   registered task also has a host-facing `timeout` default of 45 seconds, and core calls
    pass their own bounded timeout derived from `model_call_deadline_ms`.
 
 The auxiliary override is read through Hermes' public config loader to compute the target
@@ -191,9 +191,9 @@ These names are accepted under `limits`. They are current defaults, not timeless
 | `gate_probe_deadline_ms` | 1,000 | Gate probe deadline. |
 | `spill_io_deadline_ms` | 5,000 | Snapshot/spill I/O deadline. |
 | `model_call_deadline_ms` | 45,000 | Per model call ceiling. |
-| `request_deadline_ms` | 60,000 | Whole reader request, including queueing, retries, verification, and publication. |
+| `request_deadline_ms` | 240,000 | Provisional whole-reader request cap, including queueing, retries, verification, and publication. |
 
-The 45-second call ceiling sits inside a 60-second request. A retry is permitted by count
+The 45-second call ceiling sits inside a provisional 240-second request. A retry is permitted by count
 but may not fit the remaining deadline. Narrowing the per-call ceiling can leave time for a
 retry but will reject more slow first attempts.
 
@@ -235,7 +235,7 @@ Use a larger budget for exact inspection; no extraction cursor is advanced by co
 | `store_ddl_version` | 3 | Accepted current SQLite DDL revision. |
 | `store_busy_timeout_ms` | 5,000 | SQLite busy timeout. |
 | `store_max_entries` | 512 | Live handle ceiling. |
-| `store_max_bytes` | 268,435,456 | Distinct content bytes in the store. |
+| `store_max_bytes` | 268,435,456 | Distinct content bytes plus one exact mirror reservation per live Python handle. |
 | `store_handle_ttl_seconds` | 3,600 | Handle lifetime. |
 | `stats_max_records_per_page` | 8 | Operation records returned on one stats page. |
 | `stats_max_pages` | 64 | Addressable stats pages. |
@@ -254,7 +254,7 @@ Context Shunt is an availability-preserving optimization layer. When Shunt owns 
 
 Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
-The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Capture failure before handle publication returns no source handles and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. Inspection fallback also obeys cumulative disclosure limits.
+The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Python capture prepares the private exact-byte `.txt` mirror under an HMAC-derived name before reader work; after successful fallback disclosure Hermes includes its absolute `raw_artifact_path` without post-deadline raw-payload I/O. The original bytes are not inlined. Preparation failure preserves mandatory summary/handle fallback without the optional path. TypeScript/OpenClaw currently exposes the retained handles only. Capture failure before handle publication returns no source handles or path and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps. `context_shunt_inspect` obeys cumulative disclosure limits; host reads of the fallback artifact path are the explicit full-source recovery route and fall outside that ledger.
 
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
@@ -272,4 +272,4 @@ Other oversized results retain bounded failure handling; OpenClaw behavior is un
 
 ### Migration and rollout
 
-Existing request versions and existing valid envelopes remain accepted. The `reader.legacy_compaction` boolean is accepted and type-checked as a deprecated no-op; both `true` and `false` select the mandatory invariant. No SQLite migration is required. The 1.1 envelope now admits a fixed `failure_detail`, additional explicit Shunt-owned `original_failure` values, and a handle-free legacy block when capture did not publish a capability. Older strict 1.1 validators will reject these new outputs: upgrade the Python/TypeScript packages and their synchronized first-party contract copies together. `scripts/sync-contracts --check` proves repository parity; it does not certify an installed host. Ruby owns live drift checks, session drain/restart approval, deployment, and canaries after code acceptance.
+Existing 1.0/1.1 requests and valid envelopes remain accepted. The `reader.legacy_compaction` boolean is accepted and type-checked as a deprecated no-op; both `true` and `false` select the mandatory invariant. No SQLite migration is required. Contract 1.2 negotiates the 240-second request ceiling and optional `legacy_compaction.raw_artifact_path`; 1.0/1.1 retain their 60-second ceiling and reject that locator. The fixed `failure_detail`, additional explicit Shunt-owned `original_failure` values, and handle-free legacy block are available in current envelopes. Older cores reject 1.2 explicitly instead of receiving a widened object mislabeled as 1.1, so deploy each adapter with its matching core and synchronized first-party contract copies. `scripts/sync-contracts --check` proves repository parity; it does not certify an installed host. Ruby owns live drift checks, session drain/restart approval, deployment, and canaries after code acceptance.
