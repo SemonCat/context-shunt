@@ -217,6 +217,29 @@ def test_aggregate_rejects_escaped_lone_surrogate_key(tmp_path):
     assert "extraction" not in env
 
 
+@pytest.mark.parametrize("field", ["distinct", "group_by"])
+def test_aggregate_rejects_lone_surrogate_in_emitted_pointer_name(tmp_path, field):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "ordinary.json"
+    path.write_text('{"records":[{}]}')
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "records_pointer": "/records", field: ["/\ud800"]},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
 @pytest.mark.parametrize(
     "raw_records",
     [

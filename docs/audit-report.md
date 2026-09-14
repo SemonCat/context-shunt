@@ -204,8 +204,8 @@ The machine-readable binding identifies NEW as commit
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
 the named evaluation/bridge/core files. Both checkouts must be clean before a provider call
-can start. Resume fails closed if the provider kind, route, corpus, host commit/tree, PRE
-tree, worktree commit/tree, file list, or file digest differs.
+can start. The redacted per-lane artifact is output-only and cannot be resumed or imported
+as real-provider evidence; every accepted invocation must freshly execute all lanes.
 
 Each physical call retains a redacted payload attestation only: roles, byte counts,
 SHA-256 digests, exact system-contract and user-template checks, locator kind, bounded
@@ -275,7 +275,7 @@ proof.
 
   The real-Luna continuation was reviewed separately with the same explicit command. Four
   P2 findings were accepted and fixed in `f7375f1`: pre-1.3 response schemas now reject
-  1.3-only count fields; unknown benchmark usage stays `null`; resume checkpoints are
+  1.3-only count fields; unknown benchmark usage stays `null`; evaluation evidence is
   bound to the exact provider/route/corpus/PRE/NEW/host implementation; and the TypeScript
   answer cache deep-clones nested provenance. The verification review reported one further
   P2 candidate asking that `max_matches` be cumulative across search continuations. That
@@ -288,7 +288,7 @@ proof.
 
   A final branch review against `3fa92b6` found three additional valid P2s. All are fixed
   in `ca61ad2`: reported input/output totals now remain `null` when attempts exist but none
-  reports usage; real-run checkpoints bind complete clean Git trees for the Shunt and host
+  reports usage; real runs bind complete clean Git trees for the Shunt and host
   checkouts rather than trusting a hand-maintained transitive file list; and Python and
   TypeScript failure provenance now reports `usage_complete: true` when every started
   attempt returned usage, even if a later publication deadline prevents the answer from
@@ -305,8 +305,7 @@ proof.
   The following explicit P0–P2 pass found five more valid contract/evidence P2s, all fixed
   in `1d9e75f`: input and output usage reports are aggregated independently; a transport
   total is `null` unless every attempt has that measurement (with measured-attempt counts
-  retained separately); explicit resume permits only its exact dirty redacted checkpoint
-  and still rejects every other checkout change; the mandatory guards in both ports reject
+  retained separately); the mandatory guards in both ports reject
   a usage-completeness boolean/count contradiction or a measured count above attempts; and
   the 1.3 schema requires aggregate counters/segments only with aggregate mode and forbids
   those shapes in other modes. The artifact was regenerated against the new clean Git tree.
@@ -335,6 +334,15 @@ proof.
   clean. The resulting run passed with ten completed real attempts, no failed/timed-out/
   late attempts, and a per-answer verified citation ledger; the two added aggregate tests
   bring the final canonical matrix to 2,563 passing cases.
+
+  The next P0–P2 pass found two more valid P2s and repeated the already-rejected search-cap
+  proposal. The evaluator no longer accepts any resume input: its per-lane JSON is an
+  output-only redacted artifact, so an editable file cannot stand in for fresh provider
+  calls. Both ports also reject lone surrogates in emitted `distinct`/`group_by` pointer
+  names, closing the remaining canonical-output exception. The `max_matches` candidate was
+  rechecked and rejected for the same contract-backed reason above: it is an explicit
+  bounded per-page allowance with authenticated cursor progress and independent cumulative
+  disclosure quotas, as proved by the `20 + 20 + 9` cross-port regressions.
 
 ## Residual blockers
 
@@ -380,7 +388,7 @@ proof.
   and [`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json).
 - Real Luna validation: [`docs/five-workflow-real-luna.md`](five-workflow-real-luna.md),
   [`evals/intent-reader-audit/real-luna-latest.json`](../evals/intent-reader-audit/real-luna-latest.json),
-  and the redacted per-lane checkpoint
+  and the redacted output-only per-lane evidence
   [`evals/intent-reader-audit/real-luna-lanes-latest.json`](../evals/intent-reader-audit/real-luna-lanes-latest.json).
 - Supplementary 12-item raw report: `reports/shadow-ab-latest.json` (gitignored, local only).
 - Acceptance-gate definitions (unchanged by this audit): [`docs/acceptance.md`](acceptance.md).

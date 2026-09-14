@@ -34,6 +34,12 @@ function scalar(value: unknown): Scalar | typeof MISSING {
   throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
 }
 
+function validateEmittedPointer(pointer: string): void {
+  if (/[\uD800-\uDFFF]/u.test(pointer)) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+  }
+}
+
 function scalarKey(value: Scalar): string {
   return canonicalJson(value);
 }
@@ -105,6 +111,7 @@ export function aggregateSnapshot(
 
   const distinctPaths = selector.distinct ?? [];
   const groupPaths = selector.group_by ?? [];
+  [...distinctPaths, ...groupPaths].forEach(validateEmittedPointer);
   const distinct = new Map<string, Map<string, Scalar>>(
     distinctPaths.map((path) => [path, new Map()]),
   );

@@ -37,6 +37,11 @@ def _scalar(value: Any) -> Any:
     raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
 
+def _validate_emitted_pointer(pointer: str) -> None:
+    if any("\ud800" <= char <= "\udfff" for char in pointer):
+        raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
+
+
 def _output_scalar(value: Any) -> bool:
     return len(canonical_json(value).encode("utf-8")) <= _MAX_SCALAR_BYTES
 
@@ -85,6 +90,8 @@ def aggregate_snapshot(
 
     distinct_paths = selector.get("distinct", [])
     group_paths = selector.get("group_by", [])
+    for path in [*distinct_paths, *group_paths]:
+        _validate_emitted_pointer(path)
     distinct: dict[str, dict[str, Any]] = {path: {} for path in distinct_paths}
     groups: dict[str, dict[str, Any]] = {}
     matched = 0

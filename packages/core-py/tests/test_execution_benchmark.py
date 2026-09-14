@@ -288,53 +288,15 @@ def test_real_luna_checkout_binding_refuses_uncommitted_source(tmp_path: Path) -
     source.write_text("BOUND = True\n")
     checkpoint = checkout / "checkpoint.json"
     checkpoint.write_text("{}\n")
-    resumed = real_run._checkout_identity(
-        checkout, "fixture", allowed_resume_artifact=checkpoint
-    )
-    assert resumed["clean"] is True
-    (checkout / "other.txt").write_text("not allowed\n")
     with pytest.raises(SystemExit, match="fixture checkout is not clean"):
-        real_run._checkout_identity(
-            checkout, "fixture", allowed_resume_artifact=checkpoint
-        )
+        real_run._checkout_identity(checkout, "fixture")
 
 
-def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
+def test_real_luna_has_no_resume_path_for_editable_lane_evidence() -> None:
     root = Path(__file__).resolve().parents[3]
-    real_run = _real_run_module(root)
-    binding = {
-        "provider_kind": "live",
-        "route": "provider/gpt-5.6-luna",
-        "model": "gpt-5.6-luna",
-        "corpus_sha256": "a" * 64,
-        "worktree_head": "b" * 40,
-        "worktree_git_tree": "c" * 40,
-        "worktree_checkout_clean": True,
-        "working_tree_relevant_files": ["one"],
-        "working_tree_relevant_files_sha256": "d" * 64,
-        "pre_git_tree": "e" * 40,
-        "host_git_commit": "f" * 40,
-        "host_git_tree": "0" * 40,
-        "host_checkout_clean": True,
-    }
-    payloads = {
-        lane: {"provider_kind": "live", "rows": [{} for _ in range(5)]}
-        for lane in real_run.LANES
-    }
-    checkpoint = {
-        "schema": real_run.CHECKPOINT_SCHEMA,
-        "binding": binding,
-        "payloads": payloads,
-    }
-    assert real_run._checkpoint_errors(checkpoint, binding) == []
-
-    stale = json.loads(json.dumps(checkpoint))
-    stale["binding"]["corpus_sha256"] = "f" * 64
-    assert real_run._checkpoint_errors(stale, binding)
-
-    mock_lane = json.loads(json.dumps(checkpoint))
-    mock_lane["payloads"]["new"]["provider_kind"] = "mock"
-    assert real_run._checkpoint_errors(mock_lane, binding)
+    source = (root / "evals/intent-reader-audit/real_run.py").read_text()
+    assert "--resume-lanes" not in source
+    assert "_checkpoint_errors" not in source
 
 
 def test_real_luna_acceptance_rejects_a_citationless_semantic_answer() -> None:

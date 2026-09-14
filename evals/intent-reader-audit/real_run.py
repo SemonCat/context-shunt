@@ -25,7 +25,7 @@ BASELINE = "1686db6"
 MODEL = "gpt-5.6-luna"
 DEFAULT_ROUTE = "sub2api-openai/gpt-5.6-luna"
 LANES = ("legacy_compactor", "pre", "new")
-CHECKPOINT_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v2"
+LANE_EVIDENCE_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v3"
 RELEVANT_FILES = (
     "evals/bridges/openclaw_inhost.py",
     "evals/bridges/openclaw_inhost_server.mts",
@@ -55,9 +55,7 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _checkout_identity(
-    root: Path, label: str, *, allowed_resume_artifact: Path | None = None
-) -> dict[str, Any]:
+def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
     """Bind an evaluation checkout to its complete committed tree or refuse it.
 
     A hand-maintained file list cannot prove which transitive modules a Python or host
@@ -68,19 +66,7 @@ def _checkout_identity(
     """
     dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
     if dirty:
-        allowed: str | None = None
-        if allowed_resume_artifact is not None:
-            try:
-                allowed = allowed_resume_artifact.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                pass
-        changed = [line[3:] for line in dirty.splitlines() if len(line) >= 4]
-        # A just-written lane checkpoint is presentation-independent, contains only
-        # redacted evidence, and is validated against this exact binding immediately
-        # after this check. Permit only that named file during explicit resume; any source
-        # or second artifact change still fails closed.
-        if allowed is None or not changed or any(path != allowed for path in changed):
-            raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
+        raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
     return {
         "commit": _git(root, "rev-parse", "HEAD"),
         "git_tree": _git(root, "rev-parse", "HEAD^{tree}"),
@@ -88,12 +74,8 @@ def _checkout_identity(
     }
 
 
-def _binding(
-    host_root: Path, route: str, *, resume_checkpoint: Path | None = None
-) -> dict[str, Any]:
-    worktree = _checkout_identity(
-        ROOT, "context-shunt", allowed_resume_artifact=resume_checkpoint
-    )
+def _binding(host_root: Path, route: str) -> dict[str, Any]:
+    worktree = _checkout_identity(ROOT, "context-shunt")
     host = _checkout_identity(host_root, "OpenClaw host")
     return {
         "provider_kind": "live",
@@ -112,29 +94,6 @@ def _binding(
         "host_git_tree": host["git_tree"],
         "host_checkout_clean": host["clean"],
     }
-
-
-def _checkpoint_errors(
-    checkpoint: Any, expected_binding: dict[str, Any]
-) -> list[str]:
-    if not isinstance(checkpoint, dict):
-        return ["checkpoint is not an object"]
-    if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
-        return ["checkpoint schema mismatch"]
-    errors = []
-    if checkpoint.get("binding") != expected_binding:
-        errors.append("checkpoint binding does not match current corpus/route/host/code")
-    payloads = checkpoint.get("payloads")
-    if not isinstance(payloads, dict) or set(payloads) != set(LANES):
-        errors.append("checkpoint lane set is invalid")
-        return errors
-    for lane in LANES:
-        payload = payloads.get(lane)
-        if not isinstance(payload, dict) or payload.get("provider_kind") != "live":
-            errors.append(f"checkpoint {lane} lane is not live-provider evidence")
-        elif len(payload.get("rows", [])) != 5:
-            errors.append(f"checkpoint {lane} lane does not contain five workflows")
-    return errors
 
 
 def _calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -369,7 +328,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--markdown-output", type=Path)
-    parser.add_argument("--resume-lanes", type=Path)
     args = parser.parse_args()
     if os.environ.get("CONTEXT_SHUNT_LUNA_EVAL") != "1":
         raise SystemExit("NOT_RUN: set CONTEXT_SHUNT_LUNA_EVAL=1")
@@ -382,54 +340,42 @@ def main() -> None:
     route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE", DEFAULT_ROUTE)
     if "/" not in route or route.split("/", 1)[1] != MODEL:
         raise SystemExit("NOT_RUN: configured route is not gpt-5.6-luna")
-    lane_checkpoint = HERE / "real-luna-lanes-latest.json"
-    current_binding = _binding(
-        host_root, route, resume_checkpoint=args.resume_lanes if args.resume_lanes else None
-    )
-    if args.resume_lanes:
-        checkpoint = json.loads(args.resume_lanes.read_text())
-        checkpoint_errors = _checkpoint_errors(checkpoint, current_binding)
-        if checkpoint_errors:
-            raise SystemExit("NOT_RUN: " + "; ".join(checkpoint_errors))
-        payloads = checkpoint["payloads"]
-        evidence_binding = checkpoint["binding"]
-    else:
-        current_package = ROOT / "packages" / "core-py" / "src"
-        with TemporaryDirectory(prefix="context-shunt-real-pre-") as temporary:
-            baseline_package = local_benchmark.extract_baseline(Path(temporary))
-            payloads = {
-                "legacy_compactor": local_benchmark.run_worker(
-                    "legacy_compactor", current_package, provider_kind="live"
-                ),
-                "pre": local_benchmark.run_worker(
-                    "pre", baseline_package, provider_kind="live"
-                ),
-                "new": local_benchmark.run_worker(
-                    "new", current_package, provider_kind="live"
-                ),
-            }
-            labels = {
-                "legacy_compactor": "working_tree:packages/core-py/src/context_shunt/__init__.py",
-                "pre": f"isolated_git_archive:{BASELINE}:packages/core-py/src/context_shunt/__init__.py",
-                "new": "working_tree:packages/core-py/src/context_shunt/__init__.py",
-            }
-            roots = {
-                "legacy_compactor": current_package,
-                "pre": baseline_package,
-                "new": current_package,
-            }
-            for lane, payload in payloads.items():
-                local_benchmark.normalize_origins(payload, labels[lane], roots[lane])
-        # Written before any aggregate/report rendering. It contains the same redacted
-        # rows as the final artifact and lets a presentation-only failure be repaired
-        # without spending another real provider call.
-        evidence_binding = current_binding
-        checkpoint = {
-            "schema": CHECKPOINT_SCHEMA,
-            "binding": evidence_binding,
-            "payloads": payloads,
+    lane_evidence_path = HERE / "real-luna-lanes-latest.json"
+    evidence_binding = _binding(host_root, route)
+    current_package = ROOT / "packages" / "core-py" / "src"
+    with TemporaryDirectory(prefix="context-shunt-real-pre-") as temporary:
+        baseline_package = local_benchmark.extract_baseline(Path(temporary))
+        payloads = {
+            "legacy_compactor": local_benchmark.run_worker(
+                "legacy_compactor", current_package, provider_kind="live"
+            ),
+            "pre": local_benchmark.run_worker(
+                "pre", baseline_package, provider_kind="live"
+            ),
+            "new": local_benchmark.run_worker(
+                "new", current_package, provider_kind="live"
+            ),
         }
-        lane_checkpoint.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
+        labels = {
+            "legacy_compactor": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+            "pre": f"isolated_git_archive:{BASELINE}:packages/core-py/src/context_shunt/__init__.py",
+            "new": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+        }
+        roots = {
+            "legacy_compactor": current_package,
+            "pre": baseline_package,
+            "new": current_package,
+        }
+        for lane, payload in payloads.items():
+            local_benchmark.normalize_origins(payload, labels[lane], roots[lane])
+    # This is a redacted output artifact only. No code path reads it back as real-provider
+    # evidence; a fresh run must start from clean source trees and execute every lane.
+    lane_evidence = {
+        "schema": LANE_EVIDENCE_SCHEMA,
+        "binding": evidence_binding,
+        "payloads": payloads,
+    }
+    lane_evidence_path.write_text(json.dumps(lane_evidence, indent=2, sort_keys=True) + "\n")
 
     corpus_raw = CORPUS.read_bytes()
     errors = _acceptance_errors(payloads, route)
