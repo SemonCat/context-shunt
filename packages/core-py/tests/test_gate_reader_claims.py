@@ -597,7 +597,13 @@ def test_one_model_answering_every_chunk_still_certifies_it(tmp_path):
             [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "alpha = 1"}],
         ),
     ]
-    env = Reader(registry, FakeLuna(replies=replies)).answer("sess", _request(entries)).envelope
+    # Chunks execute concurrently, so a shared pop-order reply list makes this proof depend
+    # on scheduler order and can attach each valid citation to the wrong source. Select the
+    # grounded fixture response from the actual chunk payload instead.
+    provider = FakeLuna(
+        default_reply=lambda user: replies[1] if "alpha = 1" in user else replies[0]
+    )
+    env = Reader(registry, provider).answer("sess", _request(entries)).envelope
     assert env["provenance"]["attribution_status"] == "actual"
     assert env["provenance"]["reported_model"] == READER_MODEL
     assert env["provenance"]["requested_model"] == READER_MODEL
