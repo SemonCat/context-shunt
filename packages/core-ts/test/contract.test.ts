@@ -62,6 +62,20 @@ describe("envelope fixtures", () => {
     expect(EMITTED_SCHEMA_VERSION).toBe("1.3");
   });
 
+  it("requires zero attempts when a complete answer is reused from cache", () => {
+    const doc = structuredClone(
+      fixtureDocs("envelope", "valid")
+        .find((f) => f.name === "v11_ok_answered_derived.json")?.document,
+    ) as Record<string, any>;
+    doc["schema_version"] = "1.3";
+    doc["provenance"]["attempts_usage_complete"] = 1;
+    doc["provenance"]["cache_reused"] = true;
+    expect(envelopeValidator()(doc)).toBe(false);
+    doc["provenance"]["attempts_started"] = 0;
+    doc["provenance"]["attempts_usage_complete"] = 0;
+    expect(envelopeValidator()(doc)).toBe(true);
+  });
+
   it("requires envelope 1.3 for aggregate scan counters", () => {
     const doc = structuredClone(
       fixtureDocs("envelope", "valid")

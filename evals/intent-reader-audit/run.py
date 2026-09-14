@@ -416,7 +416,9 @@ def main() -> None:
             "new_python_relevant_files": digest_files(
                 ROOT,
                 [
+                    "contracts/v1/envelope.schema.json",
                     "packages/core-py/src/context_shunt/aggregate.py",
+                    "packages/core-py/src/context_shunt/guard.py",
                     "packages/core-py/src/context_shunt/inspect.py",
                     "packages/core-py/src/context_shunt/reader.py",
                     "packages/core-py/src/context_shunt/session.py",

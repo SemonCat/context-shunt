@@ -27,6 +27,7 @@ DEFAULT_ROUTE = "sub2api-openai/gpt-5.6-luna"
 LANES = ("legacy_compactor", "pre", "new")
 LANE_EVIDENCE_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v3"
 RELEVANT_FILES = (
+    "contracts/v1/envelope.schema.json",
     "evals/bridges/openclaw_inhost.py",
     "evals/bridges/openclaw_inhost_server.mts",
     "evals/intent-reader-audit/corpus.json",
@@ -34,6 +35,7 @@ RELEVANT_FILES = (
     "evals/intent-reader-audit/run.py",
     "evals/intent-reader-audit/worker.py",
     "packages/core-py/src/context_shunt/aggregate.py",
+    "packages/core-py/src/context_shunt/guard.py",
     "packages/core-py/src/context_shunt/inspect.py",
     "packages/core-py/src/context_shunt/limits.py",
     "packages/core-py/src/context_shunt/provider.py",
@@ -41,6 +43,7 @@ RELEVANT_FILES = (
     "packages/core-py/src/context_shunt/session.py",
     "packages/core-py/src/context_shunt/snapshot.py",
     "packages/core-ts/src/aggregate.ts",
+    "packages/core-ts/src/guard.ts",
 )
 
 sys.path.insert(0, str(HERE))

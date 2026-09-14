@@ -174,6 +174,8 @@ def test_answer_quote_and_citation_caps_are_enforced():
     ):
         with pytest.raises(OutputGuardError, match="usage counts disagree"):
             enforce({**base, "provenance": provenance})
+    with pytest.raises(OutputGuardError, match="cache provenance disagrees with attempts"):
+        enforce({**base, "provenance": {**base["provenance"], "cache_reused": True}})
     with pytest.raises(OutputGuardError):
         enforce({**base, "answer": "x" * (L.max_answer_bytes + 1)})
     with pytest.raises(OutputGuardError):

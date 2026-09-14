@@ -266,7 +266,18 @@
           "description": "True when this call reused a previously complete answer under the same session, source snapshots, exact query, selectors, budgets, and reader-model contract. attempts_started is zero for this call.",
           "type": "boolean"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "cache_reused": { "const": true } },
+            "required": ["cache_reused"]
+          },
+          "then": {
+            "properties": { "attempts_started": { "const": 0 } }
+          }
+        }
+      ]
     },
     "extraction": {
       "description": "1.1: exact bytes taken from the immutable snapshot, or a canonical exact structured aggregate computed over it. Deterministic, zero model calls, never an LLM summary.",

@@ -902,6 +902,10 @@ describe("output guard", () => {
     ]) {
       expect(() => enforce({ ...base(), provenance })).toThrow("usage counts disagree");
     }
+    expect(() => enforce({
+      ...base(),
+      provenance: { ...base().provenance, cache_reused: true },
+    })).toThrow("cache provenance disagrees with attempts");
     expect(() => enforce({ ...base(), answer: "x".repeat(L.maxAnswerBytes + 1) })).toThrowError(OutputGuardError);
     expect(() =>
       enforce({ ...base(), citations: [{ ...citation(), quote: "q".repeat(L.maxQuoteBytes + 1) }] }),

@@ -230,6 +230,8 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
             or usage_complete is not (measured == started)
         ):
             raise OutputGuardError("provenance usage counts disagree")
+        if provenance.get("cache_reused") is True and started != 0:
+            raise OutputGuardError("cache provenance disagrees with attempts")
     if derived != (envelope.get("result_kind") == "model_derived"):
         raise OutputGuardError("provenance.derived disagrees with result_kind")
 

@@ -81,6 +81,18 @@ def test_new_provenance_fields_require_envelope_1_3():
     assert EMITTED_SCHEMA_VERSION == "1.3"
 
 
+def test_cache_reuse_requires_zero_attempts():
+    doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_ok_answered_derived.json")
+    doc = json.loads(json.dumps(doc))
+    doc["schema_version"] = "1.3"
+    doc["provenance"]["attempts_usage_complete"] = 1
+    doc["provenance"]["cache_reused"] = True
+    assert not envelope_validator().is_valid(doc)
+    doc["provenance"]["attempts_started"] = 0
+    doc["provenance"]["attempts_usage_complete"] = 0
+    assert envelope_validator().is_valid(doc)
+
+
 def test_aggregate_scan_counters_require_envelope_1_3():
     doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_ok_extracted.json")
     doc = json.loads(json.dumps(doc))

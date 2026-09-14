@@ -105,6 +105,9 @@ function checkVersionFields(env: Record<string, unknown>, version: string): void
     ) {
       throw new OutputGuardError("provenance usage counts disagree");
     }
+    if (block["cache_reused"] === true && started !== 0) {
+      throw new OutputGuardError("cache provenance disagrees with attempts");
+    }
   }
 }
 
