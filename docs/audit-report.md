@@ -186,9 +186,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 80.508 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 2/2 | 8 (8/0) | 6,172/2,588/19,200 | 180,834 | 84,311.104 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/141/0 | 5,132 | 38,424.311 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 85.761 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/3,004/15,360 | 180,834 | 91,472.118 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 33,220.270 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -199,7 +199,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`1d9e75f7de51b7aa5d50f725279d5512fc9850d3`, PRE as commit `1686db6` with tree
+`37f5359302adfb780d47f797ce1b1b3e7a519b9e`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -306,6 +306,14 @@ proof.
   the 1.3 schema requires aggregate counters/segments only with aggregate mode and forbids
   those shapes in other modes. The artifact was regenerated against the new clean Git tree,
   and the expanded final unit matrix executes 2,557 cases across all 17 passing gates.
+
+  The subsequent pass found three valid P2s, fixed in `37f5359`: the OpenClaw bridge now
+  carries one absolute deadline across first-call startup, server-lock contention,
+  nonblocking pipe dispatch, and a final host-side pre-provider clamp; per-workflow input,
+  output and cache usage lower bounds are aggregated independently; and real acceptance
+  requires every published semantic answer to have verified citations rather than treating
+  a missing citation set as inapplicable. Red tests cover slow startup, a contended writer,
+  pipe backpressure, partial provider usage fields, and a citationless semantic answer.
 
 ## Residual blockers
 
