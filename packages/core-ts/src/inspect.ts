@@ -112,7 +112,7 @@ export interface Extraction {
    * difference between "this unit is larger than any page" and "this unit is larger than
    * what is left of the disclosure allowance" - two refusals with different remedies.
    */
-  stallReason: "content" | "wire";
+  stallReason: "content" | "wire" | "cap";
 }
 
 function emptyExtraction(mode: Extraction["mode"]): Extraction {
@@ -549,7 +549,22 @@ export class Inspector {
     let wireUsed = 0;
     const startLine = ordinal;
     const remainingMatches = maxMatches - already;
-    if (remainingMatches <= 0) return out;
+    if (remainingMatches <= 0) {
+      // Only reachable by resuming a cursor whose prior page already encoded
+      // `matches === maxMatches` (the schema requires `max_matches >= 1`, so a fresh
+      // request can never start here). Returning the default extraction here - as this
+      // branch did before this fix - would report `complete: true` after looking at zero
+      // further lines: the exact "found the first N, claim that is all of them" falsehood
+      // the cap-cursor fix below already refuses to make, just relocated one page later.
+      // `maxMatches` is bound into the cursor's selector (see `canonicalSelector`), so
+      // resuming this cursor unchanged can never make progress either - the caller must
+      // issue a fresh request with a larger `max_matches`. Mark this a stall so the
+      // session layer raises a clear, actionable error instead of silently claiming
+      // completeness or handing back a cursor that loops forever if followed as-is.
+      out.stalled = true;
+      out.stallReason = "cap";
+      return out;
+    }
 
     while (ordinal <= index.lineCount && out.linesScanned < scanBudget) {
       let line: string;

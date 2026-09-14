@@ -176,6 +176,21 @@ hits, not the omitted context. Deliberately tiny budgets that cannot fit one
 character or envelope metadata can still fail; exhausted cumulative allowance remains
 `DISCLOSURE_EXHAUSTED`, and failed delivery consumes no disclosure bytes.
 
+A `search` page that stops only because it hit its own requested `max_matches` — not
+because the remaining source ran out — reports `complete: false` with a continuation cursor,
+exactly like a byte- or scan-budget cutoff already did; it no longer claims a whole-source
+count under partial coverage. Resuming that cursor unchanged still cannot make progress,
+because `max_matches` is bound into the selector the cursor carries: that resumed call fails
+explicitly with `LIMIT_EXCEEDED`/`SEARCH_MAX_MATCHES_EXHAUSTED` rather than silently
+reporting completeness or handing back a cursor that would loop forever if followed as
+instructed. The caller's own remedy is a fresh request with a larger `max_matches`. One
+narrower case is not yet covered by this fix: the oversized-single-line byte-window fallback
+above always reports `complete: false` once it has emitted a window, even on the source's
+last line, because that flag conflates "more matches may exist" with "surrounding context was
+omitted" — a caller relying on `complete` alone to know whether another cursor visit is
+worthwhile in that specific narrow path may page one extra, empty time. It is a known,
+narrow residual, not a false completeness claim, and out of scope for this pass.
+
 ## An answer may lose evidence to fit the envelope
 
 The per-field caps are not jointly satisfiable: the maximum answer plus the maximum number
@@ -260,7 +275,7 @@ OpenClaw's own floor). Python requires ≥3.11.
 
 Context Shunt is an availability-preserving optimization layer. When Shunt owns a failure and the authorized source bytes or immutable snapshot are available, both cores automatically return the incumbent bounded deterministic compactor output. This is mandatory: `reader.legacy_compaction` and the TypeScript `legacyCompaction` option are deprecated compatibility no-ops, including when set to `false`.
 
-Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
+Eligible failures include `MODEL_ERROR`, `TIMEOUT`, `INVALID_MODEL_OUTPUT`, `CITATION_INVALID`, capture/store failures, and unexpected safe internal errors. `LIMIT_EXCEEDED` is classified by detail: store capacity and implementation output/page capacity qualify; source/input safety caps and disclosure policy caps do not. `SEARCH_MAX_MATCHES_EXHAUSTED` — a resumed `inspect` search cursor whose own requested `max_matches` was already fully spent by the prior page, before a single further line was scanned — also does not qualify, on purpose: unlike the capacity walls above, it is exactly and cheaply resolvable by the caller reissuing the same search with a larger `max_matches`, entirely deterministically and with zero reader cost. Routing it into legacy compaction instead would silently trade that exact, resumable count for a sampled, partial approximation. Invalid arguments, unsupported versions/operations, unsafe/binary/secret sources, cross-session or snapshot mismatch, expired/changed sources, provenance-policy refusal, attribution mismatch, cancellation, and disclosure exhaustion remain explicit refusals. Fallback never authorizes a handle that the store cannot authorize.
 
 The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compaction`, and `provenance.derived: false`, with empty `answer` and `citations`. `legacy_compaction.original_failure` retains the failure code; the bounded explicit `failure_detail` enum distinguishes verifier, argument, and capacity failures without carrying arbitrary exception text. Coverage is incomplete, question-independent, and limited to the first requested source. Python capture prepares a private exact-byte `.txt` mirror under an HMAC-derived name before reader work; after successful fallback disclosure Hermes returns its absolute `raw_artifact_path` without post-deadline raw-payload I/O. It is removed by revocation, scope teardown, TTL sweep, or orphan recovery, but host file-tool reads are outside `inspect` disclosure accounting and can recover the complete source. Preparation failure produces pathless mandatory summary/handle fallback. Mirror copies are reserved against `store_max_bytes` per live handle. TypeScript/OpenClaw currently provides handles without this path. Capture failure before handle publication returns no source handles or path and `handles_valid: false`. The compactor retains the incumbent signal lines, head/tail samples, repetition collapsing, and JSON shaping, within character, byte, and envelope caps.
 

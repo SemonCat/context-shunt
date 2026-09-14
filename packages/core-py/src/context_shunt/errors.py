@@ -228,6 +228,7 @@ SAFE_FAILURE_DETAILS = frozenset(
         "SCOPE_INCOMPLETE",
         "SCOPE_OPEN_FAILED",
         "SEARCH_INDEX_MISMATCH",
+        "SEARCH_MAX_MATCHES_EXHAUSTED",
         "SECRET_IN_ANSWER",
         "SECRET_IN_QUESTION",
         "SECRET_IN_QUOTE",
@@ -284,6 +285,14 @@ CAPACITY_FAILURE_DETAILS = frozenset(
         "ANSWER_OVER_CAP",
         "ANSWER_OVER_ENVELOPE",
         "INTERNAL_ERROR",
+        # Deliberately does NOT include SEARCH_MAX_MATCHES_EXHAUSTED: that failure is not a
+        # "this cannot be served deterministically" capacity wall like the others here - it
+        # is a resumed cursor whose own max_matches the caller already fully spent, and the
+        # exact remedy is a fresh deterministic search with a larger max_matches. Classing it
+        # as a capacity failure would route it into the legacy heuristic compaction fallback
+        # below, silently trading an exact, cheaply-resumable deterministic count for a
+        # partial, sampled approximation - a strictly worse answer to a problem the caller
+        # could otherwise solve exactly, still at zero reader cost.
     )
 )
 

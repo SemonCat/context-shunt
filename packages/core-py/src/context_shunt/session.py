@@ -809,6 +809,13 @@ class ShuntSession:
                 # This unit cannot fit any envelope, whatever the allowance says. Calling it
                 # a disclosure problem would send the caller to a remedy that never works.
                 raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", retryable=False)
+            if extraction.stall_reason == "cap":
+                # The resumed search's own `max_matches` was already fully spent by a prior
+                # page, before a single further line was looked at. This is not a byte or
+                # wire budget problem - raising UNIT_OVER_PAGE_BUDGET here would send the
+                # caller to raise the wrong limit. The only way to keep paging toward a true
+                # total is a fresh request with a larger `max_matches`.
+                raise ShuntError("LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", retryable=False)
             if clipped_by_allowance:
                 return self._disclosure_exhausted(
                     request_id, operation_id, entry, selector, handles, allowance

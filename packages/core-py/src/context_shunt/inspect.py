@@ -520,6 +520,20 @@ class Inspector:
         wire_used = 0
         remaining_matches = max_matches - already
         if remaining_matches <= 0:
+            # Only reachable by resuming a cursor whose prior page already encoded
+            # ``matches == max_matches`` (the schema requires ``max_matches >= 1``, so a
+            # fresh request can never start here). Returning the default ``Extraction``
+            # here - as this branch did before this fix - would report ``complete: True``
+            # after looking at zero further lines: the exact "found the first N, claim
+            # that is all of them" falsehood the cap-cursor fix below already refuses to
+            # make, just relocated one page later. ``max_matches`` is bound into the
+            # cursor's selector (see ``canonical_selector``), so resuming this cursor
+            # unchanged can never make progress either - the caller must issue a fresh
+            # request with a larger ``max_matches``. Mark this a stall so the session
+            # layer raises a clear, actionable error instead of silently claiming
+            # completeness or handing back a cursor that loops forever if followed as-is.
+            out.stalled = True
+            out.stall_reason = "cap"
             return out
 
         while ordinal <= index.line_count and out.lines_scanned < scan_budget:

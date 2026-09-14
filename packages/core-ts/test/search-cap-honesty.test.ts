@@ -136,6 +136,39 @@ describe("a search capped by max_matches no longer claims the whole source was s
     expect(seen).toBe(trueCount);
   });
 
+  it("raises instead of lying when a resumed cursor's own max_matches is already spent", () => {
+    // Found by the reviewer on the honest cap-cursor fix above: that fix makes a capped page
+    // emit `complete: false` plus a cursor encoding `matches: max_matches`. But the cursor is
+    // bound to its selector (max_matches included), so a caller who resumes it exactly as
+    // instructed hands max_matches straight back unchanged, and the resumed call starts with
+    // `already === maxMatches` - the cap is spent before a single further line is looked at.
+    // Before this fix, that early-out path returned the bare default extraction
+    // (`complete: true`, no cursor) after scanning nothing: the identical "found the first N,
+    // claim that's all of them" falsehood the fix above closes, simply relocated one request
+    // later. The honest answer is neither a silent `complete: true` nor a cursor that would
+    // loop forever if followed unchanged: raise a clear, distinct error naming exactly what a
+    // caller must do differently (reissue with a larger max_matches).
+    const session = newSession();
+    const { body, trueCount } = lokiShapedSource();
+    expect(trueCount).toBe(49);
+    const pointer = spilledPointer(session, body);
+
+    const capped = session.inspect(searchRequest(pointer, { maxMatches: 20 }));
+    const extraction: ExtractionShape = capped.extraction!;
+    expect(extraction.matches_found).toBe(20);
+    expect(extraction.complete).toBe(false);
+    const cursor = extraction.next_cursor as string;
+    expect(cursor).not.toBeNull();
+
+    const resumed = session.inspect(searchRequest(pointer, { maxMatches: 20, cursor }));
+    // Must not silently claim completeness, and must not be routed through the legacy
+    // heuristic-compaction fallback either - this is exactly solvable deterministically by
+    // raising max_matches, so it must say that plainly rather than approximate an answer.
+    expect(resumed.extraction).toBeUndefined();
+    expect(resumed.code).toBe("LIMIT_EXCEEDED");
+    expect(resumed.failure_detail).toBe("SEARCH_MAX_MATCHES_EXHAUSTED");
+  });
+
   it("reports an honest exact count in one page when the cap is never actually reached", () => {
     const session = newSession();
     const { body, trueCount } = lokiShapedSource();
