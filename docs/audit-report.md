@@ -1,8 +1,8 @@
 # Intent-driven reader audit — report for Ruby
 
-**Report path:** `docs/audit-report.md` at commit `ec33776` on branch
-`task/intent-driven-reader-audit` (HEAD as of 2026-09-14 12:10 +0800). This is the exact
-path and commit Ruby should review for acceptance.
+**Report path:** `docs/audit-report.md` on branch `task/intent-driven-reader-audit`.
+Use the branch HEAD from `git rev-parse HEAD` when Ruby reviews it; this avoids a stale
+self-referential hash after the report itself is committed.
 
 **Scope of this document:** what was audited, what was found and fixed, what was measured,
 what remains open, and where to look for each supporting artifact. It does not authorize
@@ -61,7 +61,7 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
    `provenance.usage_complete` boolean, unable to distinguish "one late attempt of seven"
    from "almost nothing measured." Fixed additively via
    `provenance.attempts_usage_complete`.
-3. **Same late-usage gap (second incident), plus two coupled search-cap honesty bugs** —
+3. **Late usage, search-cap honesty, exact aggregation, and scoped reuse** —
    a `search` page that stopped only because it hit its own `max_matches` cap reported
    `complete: true` with no continuation cursor even when most of the source went unscanned
    — indistinguishable from a genuine exact count. Fixed by scoping `complete` to what it
@@ -71,8 +71,10 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
    straight back and silently re-triggered the same bug via a different code path. Fixed by
    raising a distinct `LIMIT_EXCEEDED`/`SEARCH_MAX_MATCHES_EXHAUSTED` error naming the exact
    remedy (reissue with a larger `max_matches`), deliberately *not* routed through legacy
-   compaction — see the rationale in `packages/core-ts/src/errors.ts` and
-   `packages/core-py/src/context_shunt/errors.py`.
+   compaction. Ruby rejected leaving the remaining owned-repo gaps as proposals, so both
+   ports now also provide bounded JSON count/distinct/grouping and a 32-entry/256-KiB
+   exact-query answer LRU. Cache lookup re-authorizes handles first and never stores
+   partial results.
 4. **Unread-pointer credit is honest; the requery gap is a host-side proposal** — verified
    that a spilled-but-never-read pointer's one-time `full_payload_counterfactual` credit is
    honest as scoped. The specific gap that motivated the question — correlating an
@@ -85,26 +87,25 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
    *positive* net figure that reads as "this scope saved tokens," obscuring the real loss
    underneath an unrelated credit. Fixed by proving (and locking with a test) that the
    composite total is provably smaller than the uncontested credit alone — i.e. already
-   netted against the loss, not hiding it. Two further gaps found while investigating this
-   session (cross-request reader-answer reuse, and a structured distinct-value/grouping
-   selector) are written up, not implemented, in
-   [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md).
+   netted against the loss, not hiding it. The new structured selector gives this class of
+   JSON workflow a bounded selected-result route instead of requiring full two-page
+   readback.
 
 ## Bounded implementation: what changed and what didn't
 
-All five findings above were closed as owned-repo, additive, backward-compatible changes:
+The findings were closed as owned-repo, additive, backward-compatible changes:
 new optional envelope fields (`provenance.attempts_usage_complete`), a new optional
 selector field (`patterns`), a corrected `complete`/cursor semantics for a pre-existing
-selector, and one new closed-enum failure detail
-(`SEARCH_MAX_MATCHES_EXHAUSTED`). None required a `schema_version` bump — that convention
-is reserved for new mandatory/structural fields (e.g. `raw_artifact_path` in a prior
-commit), and every change here is an additive optional field or a new value in an already-
-open-ended enum, matching the precedent already used for `OTHER`/`UNSPECIFIED` graceful
-degradation.
+selector, one new closed-enum failure detail (`SEARCH_MAX_MATCHES_EXHAUSTED`), scoped
+exact-query answer reuse, and schema-1.3 `inspect.selector.kind="aggregate"`. Aggregate
+supports bounded count/distinct/grouping over validated JSON arrays, optional array
+expansion and embedded-JSON parsing for Loki/minified shapes, and no regex/expression
+surface. It refuses a scan that exceeds the caller record budget rather than returning a
+partial value that could be mistaken for exact.
 
-No sprawling host refactor was attempted. The two gaps that would require a host-side
-change are proposal documents, reviewable independently of this branch, not installed
-patches — see [Residual blockers](#residual-blockers).
+No sprawling host refactor was attempted. Only session-4 recovery-call correlation remains
+a host-side proposal; the reuse and aggregation features are implemented in both owned
+language cores and are not installed on the live host.
 
 Reaching each new error code onto the wire correctly required three independent closed
 lists to move together in both language cores: the wire-scrubbing allowlist
@@ -116,56 +117,59 @@ all three copies of `contracts/v1/envelope.schema.json` (root, `core-ts`, `core-
 
 ## Three-lane comparison (synthetic corpus, local, read-only)
 
-Measured via `./scripts/verify shadow deterministic` against the fixed synthetic corpus at
-[`evals/shadow/corpus.json`](../evals/shadow/corpus.json) — 12 items, none touching
-production data. This is the baseline-legacy-vs-current-Shunt comparison the audit asked
-for, scoped to what is honestly measurable without live model access:
+The acceptance-facing comparison is the same five production-derived workflow shapes in
+all three lanes, generated by `evals/intent-reader-audit/run.py`. The committed corpus is
+synthetic metadata only. The legacy lane executes the owned, golden-tested port of the
+incumbent v0.3.0 compactor. PRE parameters are frozen from branch `1686db6` and the
+sanitized pre-change trace; NEW parameters apply the tested reuse/aggregate routes. This
+is a deterministic replay, not a claim that a provider or either git tree was executed
+live. Token values are labeled bytes/4 estimates; no price table is required for the
+requested token/time comparison.
 
-| Lane | Main-context bytes | Main-context tokens | Reduction vs. raw (brokered items) | Evidence recall |
-|---|---|---|---|---|
-| Raw baseline | 9,525,040 | 2,381,266 | — | 1.0 (reference) |
-| Legacy compactor (incumbent, reference emulation) | 77,761 | 19,445 | 93.8% | 0.25 |
-| Deterministic retrieval (current Shunt path: import boundary + `inspect`) | 30,872 | 7,722 | 97.3% | 1.0 |
+| Lane | Main tokens (est.) | Reader in/out (est. total) | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Incumbent legacy compactor | 24,553 | 0/0 | 0 (0) | 0 | 23,112 | 17,601 | 0.400 | 18.043 |
+| PRE-change Shunt (`1686db6`) | 18,017 | 157,826/3,350 | 15 (11) | 4 | 23,112 | 17,601 | 0.800 | 405.123 |
+| NEW implementation | 7,888 | 25,686/600 | 4 (4) | 0 | 23,112 | 0 | 1.000 | 119.332 |
 
-Deterministic-retrieval-lane p95-class latency: 35.1 ms (threshold 2000 ms). 2 of 12 corpus
-items are refused outright by the core (one credential-marker source, one over
-`max_source_bytes`) and scored zero in a denominator that still counts them, not dropped.
+Controlled wall time uses a fixed 25 ms mock-provider latency per attempt plus a fixed
+50 MB/s processing rate. The JSON also carries measured local harness time, but that is
+not used as provider latency. Reader attempts with incomplete usage retain reported
+lower-bound and estimated-total fields; unknown/late calls are not converted to zero.
+Provider cache tokens remain `null` because no provider ran. The NEW exact-answer cache
+hit is reported separately and has zero attempts for that call, rather than fabricated
+provider-token fields.
 
-**What this table does and doesn't prove:** it is a real, reproducible measurement of
-main-context byte/token reduction and evidence recall on synthetic data, and it shows the
-deterministic path recovering the legacy compactor's evidence-recall shortfall (0.25 → 1.0)
-while using fewer bytes, not more. It says nothing about reader-lane task correctness,
-citation validity, or net cost including model tokens — those require a live, price-tabled
-reader lane and are explicitly out of scope for this pass; see the `NOT_RUN` rows below.
+The losses remain visible: session 4's 19,912 recovery bytes are present in every lane
+because host-side requery correlation is still unavailable; all-lane requery total is
+23,112 bytes. The 17,601-byte session-5 full read is present in legacy and PRE, and removed
+only in NEW by bounded structured retrieval. Deterministic results have citation validity
+`null` because model citations are inapplicable, not a vacuous pass.
 
-| Gate (reader-scored, not run here) | Status | Why |
-|---|---|---|
-| Task correctness (≥95%) | `NOT_RUN` | needs `scripts/verify eval luna` with live reader access |
-| Semantic evidence support (≥95%) | `NOT_RUN` | same |
-| Mechanical citation validity (100%) | `NOT_RUN` | same; the deterministic lane publishes no citations, so scoring it here would be a vacuous pass |
-| Net cost reduction (≥30%) | `NOT_RUN` | needs a live reader lane **and** a versioned price table; this repository has neither |
-| Bounded follow-up rate (≤25%) | `NOT_RUN` | needs live reader access |
+Artifacts: [`docs/five-workflow-benchmark.md`](five-workflow-benchmark.md),
+[`evals/intent-reader-audit/corpus.json`](../evals/intent-reader-audit/corpus.json), and
+[`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json)
+(corpus SHA-256 `ad322d962eafd159d484965e20b8c24bf15c90dafc1f88b17ca26e9c25e0ba07`).
 
-These five are not silently skipped — they are `NOT_RUN` by construction (see
-[`docs/acceptance.md`](acceptance.md#shadow-ab)), each naming exactly what live
-prerequisite is missing, per the same discipline the repository already applies elsewhere.
-Manufacturing a number for any of them without that prerequisite would misrepresent an
-unmeasured quantity as measured, which this audit does not do.
-
-Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
-`696f07fc8e5d7bc6a3cb0919002ed196fab18e25ac1a297912063c2a1f980202`, contract version 1.2).
+The existing 12-item `./scripts/verify shadow deterministic` result remains useful
+supplementary regression evidence (97.3% main-context reduction and 1.0 evidence recall),
+but it is not evidence for the new reader capabilities and is not used as their acceptance
+proof.
 
 ## Test and review results
 
-- **Python core:** 960 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
-  pytest -q`), verified at HEAD (`ec33776`).
-- **TypeScript core:** 769 passed across 17 files (`packages/core-ts`, `npx vitest run`);
+- **Python core:** 969 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+  pytest -q`).
+- **TypeScript core:** 778 passed across 19 files (`packages/core-ts`, `npx vitest run`);
   `npx tsc --noEmit` clean.
+- **Five-workflow benchmark:** all 15 lane/workflow rows passed the harness assertions;
+  NEW records one bounded answer-cache hit, exact structured results, zero unknown/late
+  attempts, and retains the known requery loss. See the committed JSON/Markdown artifacts.
 - **`./scripts/verify shadow deterministic`:** PASS — `main_context_reduction` 0.9734
-  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 35.1ms (≤2000ms).
-  Five reader-scored gates correctly `NOT_RUN` (see above).
+  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 35.941ms
+  (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 12 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,480 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,498 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -179,30 +183,26 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
   stashed out, new test confirmed to fail, then pass again after unstashing) — recorded
   per-commit in each commit message rather than re-run as one batch; see
   [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md#red-capable-verification).
-- **External review (`autoreview` skill):** run against this branch (`--mode branch --base
-  main`, engine `codex`/`gpt-5.6-sol`, `high` reasoning). Per the standing constraint, only
-  this branch's own diff was reviewed — no production data ever entered this repository,
-  so nothing beyond synthetic/redacted materials was exposed to the external reviewer.
-  TruffleHog pre-scan clean; result: `autoreview clean: no accepted/actionable findings
-  reported`, overall assessment "patch is correct (0.98)" — bounded contract, provenance,
-  and search-completeness updates with corresponding cross-language tests, no P0 defect at
-  the required reporting threshold.
+- **External review (`autoreview` skill):** final branch-wide result is recorded after the
+  continuation implementation commit; only synthetic/redacted repository material is in
+  review scope.
 
 ## Residual blockers
 
-1. **Reader-lane acceptance gates remain `NOT_RUN`** (task correctness, semantic evidence
-   support, citation validity, net cost, bounded follow-up rate) — all require live model
-   access this audit was not authorized to spend, and net cost additionally requires a
-   price table this repository does not have. This is a measurement gap, not a finding
-   against the change; closing it is a live-eval exercise for whoever holds reader-model
-   budget, following `./scripts/verify eval luna`.
-2. **Two host-side proposals are unreviewed and unimplemented by design:**
+1. **The bounded real-provider run remains `NOT_RUN`.** The installed OpenClaw CLI lists
+   `openai/gpt-5.6-luna`, but this shell has neither the explicit
+   `CONTEXT_SHUNT_LUNA_EVAL=1` opt-in nor a qualifying role-preserving bridge. The only
+   repository bridge available from the installed CLI is deliberately disqualified: it
+   collapses roles and cannot prove the production-equivalent payload cap. No adjacent
+   OpenClaw source checkout was found to use with `openclaw_inhost`, so
+   `./scripts/verify eval luna` correctly exited 2/`NOT_RUN`. No credential was printed and
+   no provider call was attempted. This blocks a real-provider correctness/citation run,
+   not the provider-free token/time comparison above.
+2. **One host-side proposal remains unimplemented by design:**
    [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md)
-   (session 4's requery-correlation gap) and
-   [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md)
-   (cross-request reader-answer reuse, and a grouping/cardinality selector). Both need a
-   human decision before any implementation is attempted; neither is on this branch as
-   code.
+   (session 4's requery-correlation gap). It requires Hermes' tool-call event stream and
+   is outside the owned cores. The reuse and aggregation document is now an implementation
+   record; those features are code in both language ports, not residual proposals.
 3. **One known, narrow, previously-documented residual** in the search-cap honesty fix
    itself: the oversized-single-line byte-window search fallback always reports
    `complete: false` once it has emitted a window, even on the source's last line, because
@@ -211,12 +211,10 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
    time. Documented in [`docs/limitations.md`](limitations.md); not a false-completeness
    claim, just an imprecise one, and deliberately out of scope for this pass.
 4. **Schema-version note for host operators:** the new `SEARCH_MAX_MATCHES_EXHAUSTED`
-   failure detail was added without a `schema_version` bump (consistent with this
-   project's convention for additive enum values). Any host validating envelopes against
-   its own separately-pinned copy of `envelope.schema.json` will reject that value as
-   unrecognized until it syncs its copy of the contract. This is worth a line in any
-   host-facing changelog; it does not block this commit and does not require touching the
-   live host to confirm.
+   detail plus the additive aggregate/cache envelope fields and enum values follow this
+   project's compatibility convention without an envelope `schema_version` bump. Any host
+   validating against a separately pinned `envelope.schema.json` must sync that contract
+   before it can accept these values. This does not require touching the live host now.
 5. **This report does not itself constitute deployment authorization.** Per
    [`docs/acceptance.md`](acceptance.md#what-has-to-be-true-before-the-live-compactor-is-replaced),
    nothing in this branch authorizes replacing the incumbent compactor in production. Ruby
@@ -230,11 +228,14 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
   — what the actual constructed payload showed per session, traced from read-only
   production evidence before any fix was written.
 - Fix commits: `97e5910`, `cd6f8d9`, `d02788d`, `cb298d6`, `ec33776` (branch
-  `task/intent-driven-reader-audit`, all five plus the resume-after-cap follow-on).
-  `git log --oneline main..task/intent-driven-reader-audit` lists exactly this set.
-  This tree is clean (no uncommitted changes) at the time this report was written.
-- Host-side proposals: [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md),
+  `task/intent-driven-reader-audit`, all five plus the resume-after-cap follow-on), followed
+  by the continuation implementation commit at branch HEAD. Use `git log --oneline main..HEAD`
+  for the authoritative set.
+- Remaining host-side proposal: [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md).
+- Implemented reuse/aggregation record:
   [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md).
 - Limitations record: [`docs/limitations.md`](limitations.md).
-- Three-lane comparison raw data: `reports/shadow-ab-latest.json` (gitignored, local only).
+- Five-workflow comparison: [`docs/five-workflow-benchmark.md`](five-workflow-benchmark.md)
+  and [`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json).
+- Supplementary 12-item raw report: `reports/shadow-ab-latest.json` (gitignored, local only).
 - Acceptance-gate definitions (unchanged by this audit): [`docs/acceptance.md`](acceptance.md).

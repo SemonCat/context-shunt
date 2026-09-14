@@ -148,9 +148,9 @@ credit alone) rather than merely happening to land positive by coincidence of sc
 grouping. Closed by `cd6f8d9` (single-source verification) and `cb298d6` (composite test) —
 manifest row 5. Two further, unrelated gaps noticed while investigating this session
 (cross-request reader-answer reuse, and a structured grouping/cardinality selector) are
-written up in
+now implemented in both owned cores and documented in
 [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md),
-not implemented.
+with bounded cross-port regression coverage.
 
 ## Whole-window figures, traced and labeled
 
@@ -169,8 +169,8 @@ usage rows for this window. Recorded tool-elapsed sums across the five sessions:
 `#1 0.03s`, `#2 121.15s`, `#3 168.30s`, `#4` unrecorded in this trace, `#5 0.03s` — these
 are traced tool elapsed-time sums, not a controlled A/B wall-time comparison; see the
 [three-lane comparison](audit-report.md#three-lane-comparison-synthetic-corpus-local-read-only)
-in the main report for the controlled, synthetic-corpus latency measurement this document
-does not attempt to substitute for.
+in the main report for the controlled five-workflow replay this document does not attempt
+to substitute for.
 
 ## Why this document exists separately from the manifest and the report
 

@@ -34,6 +34,7 @@ import {
   totalsToShape,
   withheldPayloadBaseline,
 } from "./accounting.js";
+import { type AggregateSelector, aggregateSnapshot } from "./aggregate.js";
 import { CapabilityReport, modeEnabled } from "./capability.js";
 import { Clock, monotonicClock } from "./clock.js";
 import { Config, ProviderRef } from "./config.js";
@@ -663,18 +664,30 @@ export class ShuntSession {
 
     // Reserve room for all handles, omissions and escape-hatch guidance. The full
     // composed envelope is still guarded before any disclosure is charged.
-    const extraction = this.inspector.extract(
-      entry.snapshot.data,
-      entry.snapshot.lineIndex,
-      selector,
-      {
-        maxResultBytes: budget,
-        maxScanLines: validated.budgets.max_scan_lines,
-        maxWireBytes: this.extractionWireBudget(requestId, operationId, entry, selector, handles)
-          - (fallback ? 4096 : 0),
-        state,
-      },
-    );
+    if (selector["kind"] === "aggregate" && validated.cursor !== undefined) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_CURSOR", false);
+    }
+    const maxWireBytes = this.extractionWireBudget(
+      requestId, operationId, entry, selector, handles,
+    ) - (fallback ? 4096 : 0);
+    const extraction = selector["kind"] === "aggregate"
+      ? aggregateSnapshot(entry.snapshot, selector as unknown as AggregateSelector, {
+          maxResultBytes: budget,
+          maxWireBytes,
+          maxRecords: validated.budgets.max_scan_lines,
+          limits: this.config.limits,
+        })
+      : this.inspector.extract(
+          entry.snapshot.data,
+          entry.snapshot.lineIndex,
+          selector,
+          {
+            maxResultBytes: budget,
+            maxScanLines: validated.budgets.max_scan_lines,
+            maxWireBytes,
+            state,
+          },
+        );
     if (extraction.stalled) {
       // The page emitted nothing *and* the cursor did not move, so continuing would loop
       // forever. A scan-budget stop is not this case: it emits nothing but does advance.
@@ -739,6 +752,12 @@ export class ShuntSession {
         ...(extraction.matchesFound !== undefined
           ? { matches_found: extraction.matchesFound }
           : {}),
+        ...(extraction.recordsScanned !== undefined
+          ? { records_scanned: extraction.recordsScanned }
+          : {}),
+        ...(extraction.recordsMatched !== undefined
+          ? { records_matched: extraction.recordsMatched }
+          : {}),
       };
       return buildEnvelope({
         requestId,
@@ -785,7 +804,8 @@ export class ShuntSession {
     // Check-and-increment before a byte is returned: a concurrent inspect that consumed
     // the allowance in the meantime causes this page to disclose nothing.
     const charge = this.store.chargeDisclosure(
-      this.identity, sourceId, extraction.mode, extraction.resultBytes,
+      this.identity, sourceId, extraction.mode === "aggregate" ? "bytes" : extraction.mode,
+      extraction.resultBytes,
     );
     if (!charge.granted) {
       if (fallback) throw new ShuntError("DISCLOSURE_EXHAUSTED");

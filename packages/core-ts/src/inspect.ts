@@ -5,7 +5,8 @@
  * is deliberately not a retrieval tool. Four properties make it safe to hand to an agent:
  *
  * **It is exact, and it says so.** Every byte returned is copied from the immutable
- * snapshot the caller named. The envelope is labelled `deterministic_extraction` with
+ * snapshot the caller named, or a canonical exact aggregate computed over that snapshot.
+ * The envelope is labelled `deterministic_extraction` with
  * `provenance.derived = false`, so it can never be read as a summary. No provider is
  * consulted; the class below has no provider reference at all, which is what makes "zero
  * LLM calls" a structural fact rather than a promise.
@@ -79,7 +80,7 @@ export function segmentWireOverhead(kind: string, start: number, end: number): n
 }
 
 export interface Segment {
-  kind: "lines" | "bytes";
+  kind: "lines" | "bytes" | "aggregate";
   start: number;
   end: number;
   text: string;
@@ -92,7 +93,7 @@ export interface CursorState {
 }
 
 export interface Extraction {
-  mode: "lines" | "bytes" | "search";
+  mode: "lines" | "bytes" | "search" | "aggregate";
   segments: Segment[];
   resultBytes: number;
   complete: boolean;
@@ -100,6 +101,8 @@ export interface Extraction {
   linesScanned: number;
   scanBudgetExhausted: boolean;
   matchesFound: number | undefined;
+  recordsScanned?: number;
+  recordsMatched?: number;
   /**
    * True when the page emitted nothing *and* the scan position did not move, so a caller
    * following `next_cursor` would loop forever. The extractor knows the start position, so

@@ -139,6 +139,7 @@ export interface Provenance {
   resolved?: ModelIdentity;
   reported?: ModelIdentity;
   fallbackUsed?: boolean;
+  cacheReused?: boolean;
   /**
    * One identity record per physical provider call behind this request, in call order.
    * Deliberately **not** carried into `ProvenanceShape`: the envelope contract is a
@@ -168,6 +169,7 @@ export interface ProvenanceShape {
   reported_provider?: string | null;
   reported_model?: string | null;
   fallback_used?: boolean;
+  cache_reused?: boolean;
 }
 
 export function provenanceToShape(provenance: Provenance): ProvenanceShape {
@@ -197,6 +199,7 @@ export function provenanceToShape(provenance: Provenance): ProvenanceShape {
     shape.reported_model = provenance.reported?.model ?? null;
   }
   if (provenance.fallbackUsed !== undefined) shape.fallback_used = provenance.fallbackUsed;
+  if (provenance.cacheReused !== undefined) shape.cache_reused = provenance.cacheReused;
   return shape;
 }
 

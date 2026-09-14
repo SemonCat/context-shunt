@@ -104,7 +104,7 @@ source in later reads; legacy handles whose origin is unknown remain incomplete.
 | Tool | Purpose | Model calls |
 | --- | --- | --- |
 | `context_shunt_read` | Ask about authorized paths or snapshot handles. | Per processed chunk; retries and model fallbacks can add attempts. |
-| `context_shunt_inspect` | Exact lines, UTF-8-safe byte ranges, or literal-search matches. | Zero |
+| `context_shunt_inspect` | Exact lines/bytes/search, or bounded JSON count/distinct/grouping. | Zero |
 | `context_shunt_stats` | Bounded session token and disclosure accounting. | Zero |
 | `context_shunt_import` | Adopt a producer's persisted artifact (Hermes only, when configured). | Zero |
 
@@ -117,6 +117,14 @@ For minified one-line payloads, use a literal `search` selector to locate a stab
 then request only the needed 0-based, half-open UTF-8 `bytes` range. Continue a partial page
 by resending the identical selector with `extraction.next_cursor`; restarting `lines: 1..1`
 without the cursor restarts the same bounded first page.
+
+For structured minified JSON, schema 1.3 adds `selector.kind: "aggregate"` with a JSON-array
+`records_pointer`, optional `expand_pointer`/`record_pointer`/`parse_json`, an exact scalar
+or literal filter, and bounded `group_by`/`distinct` pointer lists. It scans only within the
+declared record budget and returns deterministic canonical JSON with exact counts and
+explicit completeness flags for capped value/group samples. Fully covered reader answers
+are reused only for an exact session/snapshot/query/selector/budget/model-contract match;
+authorization is rechecked before every hit and partial answers are never cached.
 
 ## When the reader fails
 

@@ -243,6 +243,16 @@ The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compacti
 
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
+A fully covered `ANSWERED`/`NO_MATCH` model result is eligible for exact reuse inside the
+same live session. The 32-entry/256-KiB LRU key binds schema, exact question, ordered
+source/snapshot/selector set, budgets, refined flag, fixed reader instruction, requested
+provider/model and attribution policy. Its `Reader`/registry instance is itself bound to
+the full trusted host/profile/principal/session/generation identity, so entries are never
+shared across security scopes. Every handle is authorized and snapshot-checked
+before lookup. Partial, timeout, failed, fallback and zero-model results are never cached.
+A hit carries a fresh request/accounting id, `cache_reused: true`, zero attempts for that
+call, and no copied reader-token charge.
+
 Hermes tool schemas are derived from the canonical tool-argument contract. Malformed handles and well-formed snapshot mismatches are refused with fixed diagnostics and guidance to reuse the exact `source_id`/`snapshot_id` pair from the original pointer; hashes are never guessed or repaired. `SNAPSHOT_MISMATCH` does not itself ask for recapture: the handle remains available for the original pair. Other source-change details retain `RECAPTURE_SOURCE`.
 
 The algorithm itself (`context_shunt.legacy_compact`) is a function-for-function port of
@@ -254,9 +264,15 @@ algorithm). See the module's own docstring for exactly what was and was not port
 
 ## Exact inspection and disclosure
 
-`context_shunt_inspect` returns exact text with no provider call. `lines` uses 1-based
+`context_shunt_inspect` returns deterministic bounded results with no provider call. `lines` uses 1-based
 inclusive coordinates, `bytes` uses 0-based half-open coordinates adjusted to safe UTF-8
-boundaries, and `search` takes a literal needle. A page is limited by both source bytes and
+boundaries, and `search` takes a literal needle. Schema 1.3 also adds `aggregate` for exact
+count/distinct/grouping over validated JSON arrays. Its RFC 6901 `records_pointer`, optional
+array expansion/record pointer and bounded embedded-JSON parsing cover minified Loki
+`result[*].values[*][1]` records without regular expressions or executable expressions.
+The selected record set must fit the caller scan budget; otherwise it refuses without a
+partial count. Returned keys are capped and explicitly marked incomplete while the scalar
+counts remain exact after a complete scan. A page is limited by both result bytes and
 serialized envelope headroom. Search also has line/byte scan budgets.
 
 For a minified one-line payload, first use
@@ -306,8 +322,9 @@ reader provider and constrain roots. The system refuses instead of redacting and
 modified text as an original quote.
 
 Raw payloads and provider exception bodies are excluded from envelopes, logs, traces,
-metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments (including automatic availability escape hatches) and short
-verified citation quotes are the only deliberate source-text disclosures to the main
+metric labels, retry/fallback errors, and fixed guard failures. `inspect` segments
+(including bounded aggregate keys and automatic availability escape hatches) and short
+verified citation quotes are the only deliberate source-content disclosures to the main
 context. The no-raw-leak gates inject sentinels and failures across every stage.
 
 ## Provenance and accounting
@@ -322,6 +339,8 @@ Accounting measures the final serialized delivery boundary, credits a measured b
 once per snapshot, and includes all physical retry/fallback attempts. Missing provider
 input/output counts use a measured-byte estimate labeled `bytes_div_4`; unavailable cache
 usage remains null. It separates signed main-context savings from reader input/output cost.
+Local answer-cache hits are identified by provenance rather than misreported as provider
+cache tokens; `reader_cache_tokens` retains its provider-usage meaning.
 See [`metrics.md`](metrics.md) for the exact fields and formulas.
 
 ## Lifecycle, compatibility, and release proof

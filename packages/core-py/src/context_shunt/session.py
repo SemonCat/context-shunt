@@ -44,6 +44,7 @@ from .accounting import (
     new_operation_id,
     totals_to_dict,
 )
+from .aggregate import aggregate_snapshot
 from .artifacts import ArtifactImporter, ArtifactManifest
 from .binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from .capability import CapabilityReport
@@ -789,17 +790,30 @@ class ShuntSession:
 
         # Reserve extra room for all handles, omissions and escape-hatch guidance.
         # The full composed envelope is still guarded before any disclosure is charged.
-        extraction = self._inspector.extract(
-            entry.snapshot.data,
-            entry.snapshot.line_index,
-            selector,
-            max_result_bytes=budget,
-            max_scan_lines=int(budgets["max_scan_lines"]),
-            max_wire_bytes=self._extraction_wire_budget(
-                request_id, operation_id, entry, selector, handles
+        if selector["kind"] == "aggregate" and "cursor" in validated:
+            raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
+        max_wire_bytes = self._extraction_wire_budget(
+            request_id, operation_id, entry, selector, handles
+        ) - (4096 if fallback is not None else 0)
+        extraction = (
+            aggregate_snapshot(
+                entry.snapshot,
+                selector,
+                max_result_bytes=budget,
+                max_wire_bytes=max_wire_bytes,
+                max_records=int(budgets["max_scan_lines"]),
+                limits=self.config.limits,
             )
-            - (4096 if fallback is not None else 0),
-            state=state,
+            if selector["kind"] == "aggregate"
+            else self._inspector.extract(
+                entry.snapshot.data,
+                entry.snapshot.line_index,
+                selector,
+                max_result_bytes=budget,
+                max_scan_lines=int(budgets["max_scan_lines"]),
+                max_wire_bytes=max_wire_bytes,
+                state=state,
+            )
         )
         if extraction.stalled:
             # The page emitted nothing *and* the cursor did not move, so continuing would
@@ -868,6 +882,10 @@ class ShuntSession:
             }
             if extraction.matches_found is not None:
                 block["matches_found"] = extraction.matches_found
+            if extraction.records_scanned is not None:
+                block["records_scanned"] = extraction.records_scanned
+            if extraction.records_matched is not None:
+                block["records_matched"] = extraction.records_matched
             return E.build(
                 request_id=request_id,
                 status="ok" if extraction.complete and fallback is None else "partial",
@@ -922,7 +940,10 @@ class ShuntSession:
         # Check-and-increment before a byte is returned: a concurrent inspect that
         # consumed the allowance in the meantime causes this page to disclose nothing.
         charge = self._store.charge_disclosure(
-            self._identity, source_id, extraction.mode, extraction.result_bytes
+            self._identity,
+            source_id,
+            "bytes" if extraction.mode == "aggregate" else extraction.mode,
+            extraction.result_bytes,
         )
         if not charge.granted:
             if fallback is not None:

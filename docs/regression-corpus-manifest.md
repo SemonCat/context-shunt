@@ -47,22 +47,36 @@ message) rather than re-verified as one batch here, since stashing out an alread
 five-commit chain would require re-deriving which lines belong to which finding — the
 per-commit record is the authoritative one.
 
-## Host-side proposals (not installed patches)
+## Continuation features and remaining host boundary
 
-Two gaps found during this audit are out of scope for an in-repo fix and are written up as
-separately reviewable proposal documents rather than any installed change:
+Ruby rejected treating the two owned-reader gaps as proposal-only completion. They are now
+implemented and exercised against the same sanitized production-derived shapes:
+
+- Scoped exact-query answer reuse: `packages/core-py/tests/test_gate_reader_answer_cache.py`
+  and `packages/core-ts/test/reader-answer-cache.test.ts` cover authorization before hit,
+  snapshot/query/selector/budget/model-contract isolation, complete-result-only storage,
+  per-call usage provenance, and bounded LRU eviction.
+- Bounded structured count/distinct/grouping, including Loki-style embedded minified JSON:
+  `packages/core-py/tests/test_gate_aggregate.py` and
+  `packages/core-ts/test/aggregate.test.ts` cover exact results and whole-operation refusal
+  when the record scan cap cannot be honored.
+- The same five workflow shapes are replayed across incumbent/PRE/NEW in
+  [`evals/intent-reader-audit/corpus.json`](../evals/intent-reader-audit/corpus.json); the
+  machine-readable result is [`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json).
+
+One gap remains outside an in-repo core fix and is a separately reviewable host proposal:
 
 - [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md) —
   session 4's requery-correlation gap.
-- [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md) —
-  cross-request reader-answer reuse/caching, and a structured distinct-value/grouping
-  cardinality selector, both sketched while investigating session 3, neither implemented.
+
+[`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md)
+is retained as the implementation/design record, not as an unimplemented proposal.
 
 ## What this manifest is not
 
 This is not a claim that every possible inefficiency in the five sessions has been found;
 it is the closed set of findings this audit pursued to a tested fix or a written proposal.
-See [`audit-report.md`](audit-report.md) for the full account, the three-lane comparison,
+See [`audit-report.md`](audit-report.md) for the full account, the five-workflow three-lane comparison,
 and residual blockers, and [`current-payload-trace.md`](current-payload-trace.md) for the
 source-backed trace of each session's actual constructed payload that this manifest's
 fixtures were shaped from.

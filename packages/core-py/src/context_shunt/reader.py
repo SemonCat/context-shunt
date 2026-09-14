@@ -33,11 +33,13 @@ capture the source again.
 
 from __future__ import annotations
 
+import copy
 import json
 import queue
 import re
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -408,6 +410,7 @@ class ReaderResult(dict):
     cost: ReaderCost
     source_ids: tuple[str, ...] = ()
     availability_failure: str | None = None
+    cache_hit: bool = False
 
     def __post_init__(self) -> None:
         # Carry the envelope's own contents, so a pre-1.1 caller can subscript it, pass it
@@ -487,6 +490,11 @@ class Reader:
         self._enforce_output_caps = enforce_output_caps
         self._verifier = CitationVerifier(registry, limits, enforce_output_caps=enforce_output_caps)
         self._policy = attribution_policy
+        self._answer_cache: OrderedDict[
+            str, tuple[dict[str, Any], Provenance, tuple[str, ...], int]
+        ] = OrderedDict()
+        self._answer_cache_bytes = 0
+        self._answer_cache_lock = threading.Lock()
 
     # -- public ------------------------------------------------------------
 
@@ -527,9 +535,15 @@ class Reader:
         # was overstated. Whatever was actually spent before the failure is carried out.
         spent = _CostSink()
         try:
-            result = self._answer(
-                session_id, request, request_id, deadline, accounting_id, spent
-            )
+            cache_key = self._authorized_cache_key(session_id, request, deadline)
+            cached = self._cache_get(cache_key, request_id, accounting_id)
+            if cached is not None:
+                result = cached
+            else:
+                result = self._answer(
+                    session_id, request, request_id, deadline, accounting_id, spent
+                )
+                self._cache_put(cache_key, result)
         except Exception as raw_exc:
             exc = (
                 raw_exc
@@ -564,6 +578,99 @@ class Reader:
         return result
 
     # -- internals ---------------------------------------------------------
+
+    def _authorized_cache_key(
+        self, session_id: str, raw: dict[str, Any], deadline: Deadline
+    ) -> str:
+        """Validate and re-authorize every handle before looking up cached content."""
+        request = validate_request(raw)
+        assert_no_secret(request["question"].encode("utf-8"), "QUESTION")
+        deadline.check("RESOLVE")
+        for source in request["sources"]:
+            entry = self._registry.resolve(session_id, source["source_id"])
+            if entry.snapshot.snapshot_id != source["snapshot_id"]:
+                raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", retryable=False)
+        deadline.check("RESOLVE")
+        target = getattr(self._provider, "target", ProviderTarget(model="", provider=""))
+        return json.dumps(
+            {
+                "session": session_id,
+                "schema": request["schema_version"],
+                "question": request["question"],
+                "sources": request["sources"],
+                "budgets": request["budgets"],
+                "refined": request.get("refined", False),
+                "reader_contract": {
+                    "system": READER_SYSTEM_PROMPT,
+                    "target": {"provider": target.provider, "model": target.model},
+                    "attribution_policy": self._policy.value,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _cache_get(
+        self, key: str, request_id: str, accounting_id: str | None
+    ) -> ReaderResult | None:
+        with self._answer_cache_lock:
+            cached = self._answer_cache.pop(key, None)
+            if cached is None:
+                return None
+            envelope, original, source_ids, _size = cached
+            self._answer_cache[key] = cached
+        provenance = replace(
+            original,
+            attempts_started=0,
+            attempts_usage_complete=0,
+            usage_complete=True,
+            fallback_used=None,
+            call_identities=(),
+            cache_reused=True,
+        )
+        result = copy.deepcopy(envelope)
+        result["request_id"] = request_id
+        if accounting_id is None:
+            result.pop("accounting_id", None)
+        else:
+            result["accounting_id"] = accounting_id
+        result["provenance"] = provenance.to_dict()
+        self._metrics.count("reader_answer_cache", {"result": "hit"})
+        return ReaderResult(
+            envelope=result,
+            provenance=provenance,
+            cost=ReaderCost.none(),
+            source_ids=source_ids,
+            cache_hit=True,
+        )
+
+    def _cache_put(self, key: str, result: ReaderResult) -> None:
+        envelope = result.envelope
+        if not (
+            envelope.get("status") == "ok"
+            and envelope.get("coverage", {}).get("complete") is True
+            and envelope.get("code") in ("ANSWERED", "NO_MATCH")
+            and result.cost.attempts_started > 0
+            and result.provenance.derived
+        ):
+            return
+        stored = copy.deepcopy(envelope)
+        size = E.serialized_bytes(stored)
+        max_bytes = 256 * 1024
+        if size > max_bytes:
+            return
+        with self._answer_cache_lock:
+            prior = self._answer_cache.pop(key, None)
+            if prior is not None:
+                self._answer_cache_bytes -= prior[3]
+            self._answer_cache[key] = (
+                stored, copy.deepcopy(result.provenance), tuple(result.source_ids), size
+            )
+            self._answer_cache_bytes += size
+            while len(self._answer_cache) > 32 or self._answer_cache_bytes > max_bytes:
+                _, removed = self._answer_cache.popitem(last=False)
+                self._answer_cache_bytes -= removed[3]
+        self._metrics.count("reader_answer_cache", {"result": "stored"})
 
     def _answer(
         self,

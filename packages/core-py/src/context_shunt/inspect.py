@@ -4,7 +4,8 @@
 is deliberately not a retrieval tool. Four properties make it safe to hand to an agent:
 
 **It is exact, and it says so.** Every byte returned is copied from the immutable snapshot
-the caller named. The envelope is labelled ``deterministic_extraction`` with
+the caller named, or a canonical exact aggregate computed over that snapshot. The envelope
+is labelled ``deterministic_extraction`` with
 ``provenance.derived = false``, so it can never be read as a summary. No provider is
 consulted; the engine has no provider reference at all, which is what makes "zero LLM
 calls" a structural fact rather than a promise.
@@ -126,6 +127,8 @@ class Extraction:
     lines_scanned: int = 0
     scan_budget_exhausted: bool = False
     matches_found: int | None = None
+    records_scanned: int | None = None
+    records_matched: int | None = None
     #: True when the page emitted nothing *and* the scan position did not move, so a
     #: caller following ``next_cursor`` would loop forever. The extractor knows the start
     #: position, so it is the only place that can tell this apart from an honest empty

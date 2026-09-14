@@ -70,7 +70,10 @@ OPENCLAW_ADAPTER = ROOT / "adapters" / "openclaw"
 UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "contract": ("gate_contract", [(CORE_TS, "test/contract.test.ts")]),
     "pre-read": ("gate_pre_read", [(CORE_TS, "test/gate.test.ts")]),
-    "reader": ("gate_reader", [(CORE_TS, "test/reader-and-spill.test.ts")]),
+    "reader": ("gate_reader", [
+        (CORE_TS, "test/reader-and-spill.test.ts"),
+        (CORE_TS, "test/reader-answer-cache.test.ts"),
+    ]),
     "citations": ("gate_citations", [(CORE_TS, "test/citations.test.ts")]),
     "no-raw-leak": ("gate_no_raw_leak", [(CORE_TS, "test/reader-and-spill.test.ts")]),
     "bounded-output": (
@@ -87,7 +90,11 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "store": ("gate_store", [(CORE_TS, "test/store.test.ts")]),
     "inspect": (
         "gate_inspect",
-        [(CORE_TS, "test/inspect.test.ts"), (CORE_TS, "test/automatic-extract.test.ts")],
+        [
+            (CORE_TS, "test/inspect.test.ts"),
+            (CORE_TS, "test/automatic-extract.test.ts"),
+            (CORE_TS, "test/aggregate.test.ts"),
+        ],
     ),
     "accounting": ("gate_accounting", [(CORE_TS, "test/accounting.test.ts")]),
     # Python-only: the import boundary lives in the Python core, and the OpenClaw

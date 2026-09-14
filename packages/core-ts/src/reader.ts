@@ -55,6 +55,7 @@ import {
   enforceAttributionPolicy,
   identityKnown,
   mergeUsage,
+  provenanceToShape,
   usageComplete,
   weakestAttribution,
   type AttributionPolicy,
@@ -209,6 +210,24 @@ export interface ReaderResult {
   cost: ReaderCost;
   sourceIds: string[];
   availabilityFailure?: "MODEL_ERROR" | "TIMEOUT";
+  cacheHit?: boolean;
+}
+
+const ANSWER_CACHE_MAX_ENTRIES = 32;
+const ANSWER_CACHE_MAX_BYTES = 256 * 1024;
+
+interface CachedAnswer {
+  envelope: Envelope;
+  provenance: Provenance;
+  bytes: number;
+  sourceIds: string[];
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
 }
 
 class InputTokenBudget {
@@ -437,6 +456,8 @@ function padIdentities(carried: readonly unknown[] | undefined, calls: number): 
 
 export class Reader {
   private readonly verifier: CitationVerifier;
+  private readonly answerCache = new Map<string, CachedAnswer>();
+  private answerCacheBytes = 0;
 
   constructor(
     private readonly registry: SourceRegistry,
@@ -505,7 +526,14 @@ export class Reader {
     const spent: { cost: ReaderCost } = { cost: noReaderCost() };
     let result: ReaderResult;
     try {
-      result = await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
+      const cacheKey = this.authorizedCacheKey(sessionId, request, budget);
+      const cached = this.cacheGet(cacheKey, requestId, opts.accountingId);
+      if (cached !== undefined) {
+        result = cached;
+      } else {
+        result = await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
+        this.cachePut(cacheKey, result);
+      }
     } catch (raw) {
       const err = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
       this.metrics.count("reader_error", { code: err.code });
@@ -532,6 +560,97 @@ export class Reader {
       { status: result.envelope.status, code: result.envelope.code },
     );
     return result;
+  }
+
+  /** Validate and re-authorize every handle before a cache lookup can reveal an answer. */
+  private authorizedCacheKey(sessionId: string, raw: unknown, deadline: Deadline): string {
+    const request = validateRequest(raw, READ_OPERATIONS) as ReaderRequest;
+    assertNoSecret(request.question, "QUESTION");
+    deadline.check("RESOLVE");
+    for (const source of request.sources) {
+      const entry = this.registry.resolve(sessionId, source.source_id);
+      if (entry.snapshot.snapshotId !== source.snapshot_id) {
+        throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
+      }
+    }
+    deadline.check("RESOLVE");
+    return stableJson({
+      session: sessionId,
+      schema: request.schema_version,
+      question: request.question,
+      sources: request.sources,
+      budgets: request.budgets,
+      refined: request.refined ?? false,
+      reader_contract: {
+        system: READER_SYSTEM_PROMPT,
+        target: providerTargetOf(this.provider),
+        attribution_policy: this.policy,
+      },
+    });
+  }
+
+  private cacheGet(key: string, requestId: string, accountingId?: string): ReaderResult | undefined {
+    const cached = this.answerCache.get(key);
+    if (cached === undefined) return undefined;
+    this.answerCache.delete(key);
+    this.answerCache.set(key, cached);
+    const { fallbackUsed: _fallbackUsed, ...cachedProvenance } = cached.provenance;
+    const provenance: Provenance = {
+      ...cachedProvenance,
+      attemptsStarted: 0,
+      attemptsUsageComplete: 0,
+      usageComplete: true,
+      callIdentities: [],
+      cacheReused: true,
+    };
+    const envelope = structuredClone(cached.envelope);
+    envelope.request_id = requestId;
+    if (accountingId === undefined) delete envelope.accounting_id;
+    else envelope.accounting_id = accountingId;
+    envelope.provenance = provenanceToShape(provenance);
+    this.metrics.count("reader_answer_cache", { result: "hit" });
+    return {
+      envelope,
+      provenance,
+      cost: noReaderCost(),
+      sourceIds: [...cached.sourceIds],
+      cacheHit: true,
+    };
+  }
+
+  private cachePut(key: string, result: ReaderResult): void {
+    const envelope = result.envelope;
+    if (
+      envelope.status !== "ok"
+      || !envelope.coverage.complete
+      || !["ANSWERED", "NO_MATCH"].includes(envelope.code)
+      || result.cost.attemptsStarted < 1
+      || !result.provenance.derived
+    ) return;
+    const copy = structuredClone(envelope);
+    const bytes = serializedBytes(copy);
+    if (bytes > ANSWER_CACHE_MAX_BYTES) return;
+    const prior = this.answerCache.get(key);
+    if (prior !== undefined) this.answerCacheBytes -= prior.bytes;
+    this.answerCache.delete(key);
+    this.answerCache.set(key, {
+      envelope: copy,
+      provenance: { ...result.provenance, callIdentities: [...(result.provenance.callIdentities ?? [])] },
+      bytes,
+      sourceIds: [...result.sourceIds],
+    });
+    this.answerCacheBytes += bytes;
+    while (
+      this.answerCache.size > ANSWER_CACHE_MAX_ENTRIES
+      || this.answerCacheBytes > ANSWER_CACHE_MAX_BYTES
+    ) {
+      const oldest = this.answerCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      const removed = this.answerCache.get(oldest);
+      this.answerCache.delete(oldest);
+      this.answerCacheBytes -= removed?.bytes ?? 0;
+    }
+    this.metrics.count("reader_answer_cache", { result: "stored" });
   }
 
   private noOutputProvenance(): Provenance {

@@ -1,0 +1,51 @@
+{
+  "schema": "context_shunt.intent_reader_audit.v1",
+  "note": "Synthetic shape metadata only. Byte sizes and recovery topology derive from the five audited workflows; no production content is present.",
+  "workflows": [
+    {
+      "id": "session-1-literal-or-safe-routing",
+      "correctness_expectation": "Literal alternatives find the intended evidence without weakening path authorization.",
+      "source_bytes": [56887],
+      "requery_bytes": 3200,
+      "full_read_bytes": 0,
+      "pre": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 980, "correctness": 1.0, "coverage": "complete"},
+      "new": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 980, "correctness": 1.0, "coverage": "complete"}
+    },
+    {
+      "id": "session-2-minified-loki-counts",
+      "correctness_expectation": "Count, distinct values, and groups cover the complete selected record set; partial output is not scored correct.",
+      "source_bytes": [56887, 313710, 112106],
+      "requery_bytes": 0,
+      "full_read_bytes": 0,
+      "pre": {"reader_attempts": 7, "usage_complete_attempts": 5, "reader_input_bytes": 425816, "reader_output_bytes": 7300, "result_bytes": 4200, "correctness": 0.5, "coverage": "partial"},
+      "new": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 620, "correctness": 1.0, "coverage": "complete"}
+    },
+    {
+      "id": "session-3-distinct-and-exact-repeat",
+      "correctness_expectation": "The exact aggregate is complete and an identical authorized reader query reuses only its complete prior answer.",
+      "source_bytes": [45050, 85677, 102744],
+      "requery_bytes": 0,
+      "full_read_bytes": 0,
+      "pre": {"reader_attempts": 8, "usage_complete_attempts": 6, "reader_input_bytes": 205488, "reader_output_bytes": 6100, "result_bytes": 3900, "correctness": 0.5, "coverage": "partial", "answer_cache_hits": 0},
+      "new": {"reader_attempts": 4, "usage_complete_attempts": 4, "reader_input_bytes": 102744, "reader_output_bytes": 2400, "result_bytes": 1450, "correctness": 1.0, "coverage": "complete", "answer_cache_hits": 1}
+    },
+    {
+      "id": "session-4-abandoned-pointer-requery",
+      "correctness_expectation": "Recovery requery bytes remain charged because the owned core cannot correlate the host retry.",
+      "source_bytes": [34896, 17560],
+      "requery_bytes": 19912,
+      "full_read_bytes": 0,
+      "pre": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 0, "correctness": 1.0, "coverage": "complete"},
+      "new": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 0, "correctness": 1.0, "coverage": "complete"}
+    },
+    {
+      "id": "session-5-full-read-and-unread-pointer",
+      "correctness_expectation": "Needed evidence is returned through bounded selection without crediting or repeating a full-source read.",
+      "source_bytes": [17601, 18347],
+      "requery_bytes": 0,
+      "full_read_bytes": 17601,
+      "pre": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 17601, "correctness": 1.0, "coverage": "complete"},
+      "new": {"reader_attempts": 0, "usage_complete_attempts": 0, "reader_input_bytes": 0, "reader_output_bytes": 0, "result_bytes": 720, "correctness": 1.0, "coverage": "complete"}
+    }
+  ]
+}

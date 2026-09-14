@@ -111,7 +111,7 @@ export interface SpillPointer {
 }
 
 export interface ExtractionShape {
-  mode: "lines" | "bytes" | "search";
+  mode: "lines" | "bytes" | "search" | "aggregate";
   source_id: string;
   snapshot_id: string;
   deterministic: true;
@@ -122,6 +122,8 @@ export interface ExtractionShape {
   lines_scanned: number;
   scan_budget_exhausted: boolean;
   matches_found?: number;
+  records_scanned?: number;
+  records_matched?: number;
   disclosed_bytes_source: number;
   disclosed_bytes_session: number;
   disclosure_limit_reached: boolean;
