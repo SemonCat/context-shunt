@@ -183,10 +183,10 @@ proof.
   stashed out, new test confirmed to fail, then pass again after unstashing) — recorded
   per-commit in each commit message rather than re-run as one batch; see
   [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md#red-capable-verification).
-- **External review (`autoreview` skill):** final branch-wide review ran after continuation
-  commit `7a96e7a` with `--mode branch --base main` (Codex `gpt-5.6-sol`, high reasoning).
+- **External review (`autoreview` skill):** final branch-wide review ran after code/evidence
+  commit `4c4ac97` with `--mode branch --base main` (Codex `gpt-5.6-sol`, high reasoning).
   TruffleHog pre-scan was clean; result: `autoreview clean: no accepted/actionable findings
-  reported`, overall `patch is correct (0.98)`. Only synthetic/redacted repository material
+  reported`, overall `patch is correct (0.97)`. Only synthetic/redacted repository material
   was in the review bundle.
 
 ## Residual blockers
