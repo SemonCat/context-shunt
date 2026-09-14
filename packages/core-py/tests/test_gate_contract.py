@@ -89,7 +89,24 @@ def test_aggregate_scan_counters_require_envelope_1_3():
     assert not envelope_validator().is_valid(doc)
     doc["schema_version"] = "1.3"
     doc["provenance"]["attempts_usage_complete"] = 0
+    doc["extraction"]["mode"] = "aggregate"
+    doc["extraction"]["segments"][0]["kind"] = "aggregate"
     assert envelope_validator().is_valid(doc)
+
+
+def test_aggregate_extraction_shape_is_mode_bound():
+    doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_ok_extracted.json")
+    doc = json.loads(json.dumps(doc))
+    doc["schema_version"] = "1.3"
+    doc["provenance"]["attempts_usage_complete"] = 0
+    doc["extraction"]["mode"] = "aggregate"
+    doc["extraction"]["records_scanned"] = 4
+    doc["extraction"]["records_matched"] = 2
+    assert not envelope_validator().is_valid(doc), "aggregate mode cannot carry line segments"
+    doc["extraction"]["segments"][0]["kind"] = "aggregate"
+    assert envelope_validator().is_valid(doc)
+    doc["extraction"]["mode"] = "lines"
+    assert not envelope_validator().is_valid(doc), "line mode cannot carry aggregate shape"
 
 
 def test_propose_patch_is_rejected_as_unsupported_operation():

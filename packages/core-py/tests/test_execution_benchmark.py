@@ -230,6 +230,27 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     assert unknown["reader_input_tokens_reported_lower_bound"] is None
     assert unknown["reader_output_tokens_reported_lower_bound"] is None
 
+    # Providers may expose the two fields independently; neither direction crashes or
+    # fabricates the absent half.
+    first_call = next(
+        call for row in pre_rows for call in row["reader"]["calls"]
+    )
+    first_call["reported_input_tokens"] = 17
+    input_only = real_run_totals(root, pre_rows)
+    assert input_only["reader_input_tokens_reported_lower_bound"] == 17
+    assert input_only["reader_output_tokens_reported_lower_bound"] is None
+    first_call["reported_input_tokens"] = None
+    first_call["reported_output_tokens"] = 9
+    output_only = real_run_totals(root, pre_rows)
+    assert output_only["reader_input_tokens_reported_lower_bound"] is None
+    assert output_only["reader_output_tokens_reported_lower_bound"] == 9
+
+    first_call["transport_input_bytes"] = None
+    first_call["transport_output_bytes"] = None
+    incomplete_transport = real_run._live_totals({"rows": pre_rows, "lane_elapsed_ms_observed": 1})
+    assert incomplete_transport["transport_input_bytes_observed"] is None
+    assert incomplete_transport["transport_output_bytes_observed"] is None
+
 
 def test_real_luna_checkout_binding_refuses_uncommitted_source(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[3]
@@ -256,6 +277,19 @@ def test_real_luna_checkout_binding_refuses_uncommitted_source(tmp_path: Path) -
     source.write_text("BOUND = False\n")
     with pytest.raises(SystemExit, match="fixture checkout is not clean"):
         real_run._checkout_identity(checkout, "fixture")
+
+    source.write_text("BOUND = True\n")
+    checkpoint = checkout / "checkpoint.json"
+    checkpoint.write_text("{}\n")
+    resumed = real_run._checkout_identity(
+        checkout, "fixture", allowed_resume_artifact=checkpoint
+    )
+    assert resumed["clean"] is True
+    (checkout / "other.txt").write_text("not allowed\n")
+    with pytest.raises(SystemExit, match="fixture checkout is not clean"):
+        real_run._checkout_identity(
+            checkout, "fixture", allowed_resume_artifact=checkpoint
+        )
 
 
 def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:

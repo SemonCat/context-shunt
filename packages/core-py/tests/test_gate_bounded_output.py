@@ -165,6 +165,15 @@ def test_answer_quote_and_citation_caps_are_enforced():
         accounting_id="acc_" + "0" * 15 + "1",
     )
     enforce(base)
+    for provenance in (
+        {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 2},
+        {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 0,
+         "usage_complete": True},
+        {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 1,
+         "usage_complete": False},
+    ):
+        with pytest.raises(OutputGuardError, match="usage counts disagree"):
+            enforce({**base, "provenance": provenance})
     with pytest.raises(OutputGuardError):
         enforce({**base, "answer": "x" * (L.max_answer_bytes + 1)})
     with pytest.raises(OutputGuardError):

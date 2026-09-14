@@ -54,7 +54,9 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
+def _checkout_identity(
+    root: Path, label: str, *, allowed_resume_artifact: Path | None = None
+) -> dict[str, Any]:
     """Bind an evaluation checkout to its complete committed tree or refuse it.
 
     A hand-maintained file list cannot prove which transitive modules a Python or host
@@ -63,8 +65,21 @@ def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
     call is started.  Ignored runtime caches and installed dependencies are not source
     inputs owned by either checkout.
     """
-    if _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
+    dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+    if dirty:
+        allowed: str | None = None
+        if allowed_resume_artifact is not None:
+            try:
+                allowed = allowed_resume_artifact.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                pass
+        changed = [line[3:] for line in dirty.splitlines() if len(line) >= 4]
+        # A just-written lane checkpoint is presentation-independent, contains only
+        # redacted evidence, and is validated against this exact binding immediately
+        # after this check. Permit only that named file during explicit resume; any source
+        # or second artifact change still fails closed.
+        if allowed is None or not changed or any(path != allowed for path in changed):
+            raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
     return {
         "commit": _git(root, "rev-parse", "HEAD"),
         "git_tree": _git(root, "rev-parse", "HEAD^{tree}"),
@@ -72,8 +87,12 @@ def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
     }
 
 
-def _binding(host_root: Path, route: str) -> dict[str, Any]:
-    worktree = _checkout_identity(ROOT, "context-shunt")
+def _binding(
+    host_root: Path, route: str, *, resume_checkpoint: Path | None = None
+) -> dict[str, Any]:
+    worktree = _checkout_identity(
+        ROOT, "context-shunt", allowed_resume_artifact=resume_checkpoint
+    )
     host = _checkout_identity(host_root, "OpenClaw host")
     return {
         "provider_kind": "live",
@@ -124,6 +143,13 @@ def _calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def _live_totals(payload: dict[str, Any]) -> dict[str, Any]:
     base = local_benchmark.totals(payload)
     calls = _calls(payload)
+
+    def complete_transport_total(field: str) -> int | None:
+        values = [call.get(field) for call in calls]
+        if not values or any(type(value) is not int for value in values):
+            return None
+        return sum(values)
+
     base.update(
         {
             "lane_elapsed_ms_observed": payload["lane_elapsed_ms_observed"],
@@ -137,23 +163,17 @@ def _live_totals(payload: dict[str, Any]) -> dict[str, Any]:
             "in_flight_or_late_unknown_attempts": sum(
                 call.get("status") == "in_flight_usage_unknown" for call in calls
             ),
-            "transport_input_bytes_observed": (
-                sum(
-                    call["transport_input_bytes"]
-                    for call in calls
-                    if isinstance(call.get("transport_input_bytes"), int)
-                )
-                if calls
-                else None
+            "transport_input_bytes_observed": complete_transport_total(
+                "transport_input_bytes"
             ),
-            "transport_output_bytes_observed": (
-                sum(
-                    call["transport_output_bytes"]
-                    for call in calls
-                    if isinstance(call.get("transport_output_bytes"), int)
-                )
-                if calls
-                else None
+            "transport_output_bytes_observed": complete_transport_total(
+                "transport_output_bytes"
+            ),
+            "transport_input_attempts_measured": sum(
+                type(call.get("transport_input_bytes")) is int for call in calls
+            ),
+            "transport_output_attempts_measured": sum(
+                type(call.get("transport_output_bytes")) is int for call in calls
             ),
             "coverage_envelopes": sum(
                 len(row.get("coverage_observed", [])) for row in payload["rows"]
@@ -330,9 +350,10 @@ def main() -> None:
     route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE", DEFAULT_ROUTE)
     if "/" not in route or route.split("/", 1)[1] != MODEL:
         raise SystemExit("NOT_RUN: configured route is not gpt-5.6-luna")
-    current_binding = _binding(host_root, route)
-
     lane_checkpoint = HERE / "real-luna-lanes-latest.json"
+    current_binding = _binding(
+        host_root, route, resume_checkpoint=args.resume_lanes if args.resume_lanes else None
+    )
     if args.resume_lanes:
         checkpoint = json.loads(args.resume_lanes.read_text())
         checkpoint_errors = _checkpoint_errors(checkpoint, current_binding)

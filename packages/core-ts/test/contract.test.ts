@@ -72,7 +72,26 @@ describe("envelope fixtures", () => {
     expect(envelopeValidator()(doc)).toBe(false);
     doc["schema_version"] = "1.3";
     doc["provenance"]["attempts_usage_complete"] = 0;
+    doc["extraction"]["mode"] = "aggregate";
+    doc["extraction"]["segments"][0]["kind"] = "aggregate";
     expect(envelopeValidator()(doc)).toBe(true);
+  });
+
+  it("binds aggregate counters and segments to aggregate mode", () => {
+    const doc = structuredClone(
+      fixtureDocs("envelope", "valid")
+        .find((f) => f.name === "v11_ok_extracted.json")?.document,
+    ) as Record<string, any>;
+    doc["schema_version"] = "1.3";
+    doc["provenance"]["attempts_usage_complete"] = 0;
+    doc["extraction"]["mode"] = "aggregate";
+    doc["extraction"]["records_scanned"] = 4;
+    doc["extraction"]["records_matched"] = 2;
+    expect(envelopeValidator()(doc)).toBe(false);
+    doc["extraction"]["segments"][0]["kind"] = "aggregate";
+    expect(envelopeValidator()(doc)).toBe(true);
+    doc["extraction"]["mode"] = "lines";
+    expect(envelopeValidator()(doc)).toBe(false);
   });
 });
 

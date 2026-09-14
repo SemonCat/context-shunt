@@ -895,6 +895,13 @@ describe("output guard", () => {
 
   it("enforces answer, quote and citation caps", () => {
     expect(() => enforce(base())).not.toThrow();
+    for (const provenance of [
+      { ...base().provenance, attempts_started: 1, attempts_usage_complete: 2 },
+      { ...base().provenance, attempts_started: 1, attempts_usage_complete: 0, usage_complete: true },
+      { ...base().provenance, attempts_started: 1, attempts_usage_complete: 1, usage_complete: false },
+    ]) {
+      expect(() => enforce({ ...base(), provenance })).toThrow("usage counts disagree");
+    }
     expect(() => enforce({ ...base(), answer: "x".repeat(L.maxAnswerBytes + 1) })).toThrowError(OutputGuardError);
     expect(() =>
       enforce({ ...base(), citations: [{ ...citation(), quote: "q".repeat(L.maxQuoteBytes + 1) }] }),

@@ -304,7 +304,34 @@
         "disclosed_bytes_source": { "type": "integer", "minimum": 0 },
         "disclosed_bytes_session": { "type": "integer", "minimum": 0 },
         "disclosure_limit_reached": { "type": "boolean" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "aggregate" } }, "required": ["mode"] },
+          "then": {
+            "required": ["records_scanned", "records_matched"],
+            "not": { "required": ["matches_found"] },
+            "properties": {
+              "segments": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": { "properties": { "kind": { "const": "aggregate" } } }
+              }
+            }
+          },
+          "else": {
+            "allOf": [
+              { "not": { "required": ["records_scanned"] } },
+              { "not": { "required": ["records_matched"] } }
+            ],
+            "properties": {
+              "segments": {
+                "items": { "properties": { "kind": { "enum": ["lines", "bytes"] } } }
+              }
+            }
+          }
+        }
+      ]
     },
     "legacyCompaction": {
       "description": "Bounded deterministic incumbent compaction after a Shunt-owned failure. Always partial and never model-derived. Handle pair is absent when capture failed before publication; sources must then be empty.",

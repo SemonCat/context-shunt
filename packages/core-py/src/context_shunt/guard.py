@@ -218,6 +218,18 @@ def _check_version_fields(envelope: dict[str, Any], version: str) -> None:
     derived = provenance.get("derived")
     if not isinstance(derived, bool):
         raise OutputGuardError("provenance.derived must be a boolean")
+    if version == "1.3":
+        started = provenance.get("attempts_started")
+        measured = provenance.get("attempts_usage_complete")
+        usage_complete = provenance.get("usage_complete")
+        if (
+            type(started) is not int
+            or type(measured) is not int
+            or not isinstance(usage_complete, bool)
+            or measured > started
+            or usage_complete is not (measured == started)
+        ):
+            raise OutputGuardError("provenance usage counts disagree")
     if derived != (envelope.get("result_kind") == "model_derived"):
         raise OutputGuardError("provenance.derived disagrees with result_kind")
 

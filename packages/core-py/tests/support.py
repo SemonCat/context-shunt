@@ -142,6 +142,7 @@ def derived_provenance(**overrides: Any) -> Provenance:
         "attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED,
         "attempts_started": 1,
         "usage_complete": True,
+        "attempts_usage_complete": 1,
         "citations_mechanically_verified": True,
         "requested": ModelIdentity(provider="openai", model=READER_MODEL),
         "resolved": ModelIdentity(provider="openai", model=READER_MODEL),

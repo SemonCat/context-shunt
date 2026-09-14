@@ -114,9 +114,20 @@ def indexed(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def totals(payload: dict[str, Any]) -> dict[str, Any]:
     rows = payload["rows"]
     calls = [call for row in rows for call in row["reader"]["calls"]]
-    reported = [call for call in calls if call["reported_input_tokens"] is not None]
+    input_reported = [
+        call for call in calls if call.get("reported_input_tokens") is not None
+    ]
+    output_reported = [
+        call for call in calls if call.get("reported_output_tokens") is not None
+    ]
+    reported = [
+        call
+        for call in calls
+        if call.get("reported_input_tokens") is not None
+        and call.get("reported_output_tokens") is not None
+    ]
     cache_reported = [
-        call for call in reported if call.get("reported_cache_tokens") is not None
+        call for call in calls if call.get("reported_cache_tokens") is not None
     ]
     main_bytes = sum(row["main_context_bytes_observed"] for row in rows)
 
@@ -157,12 +168,16 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         # These are fixture-returned Usage fields. Missing reports remain unknown;
-        # the totals are lower bounds and never reconstructed from a ratio.
+        # each field is independently a lower bound and never reconstructed from a ratio.
         "reader_input_tokens_reported_lower_bound": (
-            sum(call["reported_input_tokens"] for call in reported) if reported else None
+            sum(call["reported_input_tokens"] for call in input_reported)
+            if input_reported
+            else None
         ),
         "reader_output_tokens_reported_lower_bound": (
-            sum(call["reported_output_tokens"] for call in reported) if reported else None
+            sum(call["reported_output_tokens"] for call in output_reported)
+            if output_reported
+            else None
         ),
         "reader_cache_tokens_reported_lower_bound": (
             sum(call["reported_cache_tokens"] for call in cache_reported)

@@ -91,6 +91,21 @@ function checkVersionFields(env: Record<string, unknown>, version: string): void
   if (derived !== (env["result_kind"] === "model_derived")) {
     throw new OutputGuardError("provenance.derived disagrees with result_kind");
   }
+  if (version === "1.3") {
+    const block = provenance as Record<string, unknown>;
+    const started = block["attempts_started"];
+    const measured = block["attempts_usage_complete"];
+    const usageComplete = block["usage_complete"];
+    if (
+      !Number.isInteger(started)
+      || !Number.isInteger(measured)
+      || typeof usageComplete !== "boolean"
+      || (measured as number) > (started as number)
+      || usageComplete !== (measured === started)
+    ) {
+      throw new OutputGuardError("provenance usage counts disagree");
+    }
+  }
 }
 
 function checkExtraction(env: Record<string, unknown>, limits: Limits): void {
