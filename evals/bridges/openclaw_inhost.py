@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import select
 import subprocess
 import threading
 import time
@@ -124,7 +125,7 @@ class _Server:
     fails before any model call.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, startup_deadline: float | None = None) -> None:
         root = _root()
         server = Path(
             os.environ.get("CONTEXT_SHUNT_OPENCLAW_SERVER")
@@ -155,6 +156,7 @@ class _Server:
                 f"could not start the in-host server ({type(exc).__name__})"
             ) from None
         self._write_lock = threading.Lock()
+        self._usable = True
         self._pending_lock = threading.Lock()
         self._next_id = 0
         self._startup_messages: queue.Queue[
@@ -176,13 +178,25 @@ class _Server:
         )
         self._stderr_reader.start()
         self.identity: dict[str, Any] = {}
-        ready = self._read_json(
-            deadline=time.monotonic() + STARTUP_TIMEOUT_S, want_ready=True
-        )
+        deadline = time.monotonic() + STARTUP_TIMEOUT_S
+        if startup_deadline is not None:
+            deadline = min(deadline, startup_deadline)
+        try:
+            ready = self._read_json(deadline=deadline, want_ready=True)
+        except Exception:
+            # Construction failed before this instance could be registered globally.
+            # Stop it immediately so it cannot finish startup and dispatch work later.
+            self._usable = False
+            self._process.terminate()
+            raise
         if not ready.get("ready"):
             raise BridgeError("in-host server did not report ready")
         identity = ready.get("identity")
         self.identity = identity if isinstance(identity, dict) else {}
+
+        stdin = self._process.stdin
+        assert stdin is not None
+        os.set_blocking(stdin.fileno(), False)
 
     def _read_stdout(self) -> None:
         """Parse host output without letting a blocking ``readline`` defeat deadlines."""
@@ -253,18 +267,34 @@ class _Server:
                 return value
 
     def complete(
-        self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
+        self,
+        *,
+        system: str,
+        user: str,
+        max_output_tokens: int,
+        timeout_ms: int,
+        deadline: float | None = None,
     ) -> dict:
         """One multiplexed request/response exchange, correlated by protocol id."""
-        deadline = time.monotonic() + max(0.001, timeout_ms / 1000.0)
+        call_deadline = time.monotonic() + max(0.001, timeout_ms / 1000.0)
+        deadline = min(call_deadline, deadline) if deadline is not None else call_deadline
         responses: queue.Queue[tuple[dict[str, Any] | None, int]] = queue.Queue(maxsize=1)
-        with self._write_lock:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._write_lock.acquire(timeout=remaining):
+            raise TimeoutError("in-host server exceeded the reader deadline before dispatch")
+        request_id: int | None = None
+        sent = 0
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("in-host server exceeded the reader deadline before dispatch")
             self._next_id += 1
             request_id = self._next_id
             with self._pending_lock:
                 self._pending[request_id] = responses
             stdin = self._process.stdin
             assert stdin is not None
+            dispatch_timeout_ms = max(1, min(timeout_ms, int(remaining * 1000)))
             payload = json.dumps(
                 {
                     "id": request_id,
@@ -272,16 +302,50 @@ class _Server:
                     "user": user,
                     # The reader's ceiling, passed through as the provider's ceiling.
                     "max_output_tokens": max_output_tokens,
-                    "timeout_ms": timeout_ms,
+                    "timeout_ms": dispatch_timeout_ms,
+                    # The server clamps again immediately before the provider call. This
+                    # closes the time spent writing the frame, which cannot be reflected
+                    # by the relative timeout serialized at dispatch start.
+                    "deadline_unix_ms": int(time.time() * 1000 + remaining * 1000),
                 }
             )
+            frame = (payload + "\n").encode("utf-8")
             try:
-                stdin.write(payload + "\n")
-                stdin.flush()
+                fd = stdin.fileno()
+                while sent < len(frame):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "in-host server exceeded the reader deadline during dispatch"
+                        )
+                    _, writable, _ = select.select([], [fd], [], remaining)
+                    if not writable:
+                        raise TimeoutError(
+                            "in-host server exceeded the reader deadline during dispatch"
+                        )
+                    try:
+                        count = os.write(fd, frame[sent:])
+                    except BlockingIOError:
+                        continue
+                    if count <= 0:
+                        raise OSError("closed protocol input")
+                    sent += count
+            except TimeoutError:
+                raise
             except OSError:
+                raise BridgeError("in-host server closed its input") from None
+        except Exception:
+            if request_id is not None:
                 with self._pending_lock:
                     self._pending.pop(request_id, None)
-                raise BridgeError("in-host server closed its input") from None
+            if sent:
+                # A partial NDJSON frame must never be completed by a later caller. Stop
+                # this server without waiting; `_server` will replace it on the next call.
+                self._usable = False
+                self._process.terminate()
+            raise
+        finally:
+            self._write_lock.release()
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -323,12 +387,24 @@ _SERVER: _Server | None = None
 _SERVER_LOCK = threading.Lock()
 
 
-def _server() -> _Server:
+def _server(deadline: float | None = None) -> _Server:
     global _SERVER
-    with _SERVER_LOCK:
-        if _SERVER is None:
-            _SERVER = _Server()
+    if deadline is None:
+        acquired = _SERVER_LOCK.acquire()
+    else:
+        remaining = deadline - time.monotonic()
+        acquired = remaining > 0 and _SERVER_LOCK.acquire(timeout=remaining)
+    if not acquired:
+        raise TimeoutError("in-host server exceeded the reader deadline during startup")
+    try:
+        if _SERVER is None or not _SERVER._usable or _SERVER._process.poll() is not None:
+            stale, _SERVER = _SERVER, None
+            if stale is not None:
+                stale.close()
+            _SERVER = _Server(startup_deadline=deadline)
         return _SERVER
+    finally:
+        _SERVER_LOCK.release()
 
 
 def identity() -> dict[str, Any]:
@@ -379,11 +455,13 @@ def complete(
     os.environ["CONTEXT_SHUNT_OPENCLAW_ROUTE"] = route
 
     started = time.monotonic()
-    result = _server().complete(
+    deadline = started + timeout_ms / 1000.0
+    result = _server(deadline).complete(
         system=system,
         user=user,
         max_output_tokens=max_output_tokens,
         timeout_ms=timeout_ms,
+        deadline=deadline,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
 

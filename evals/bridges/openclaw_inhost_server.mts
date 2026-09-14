@@ -118,6 +118,7 @@ async function handle(line: string): Promise<void> {
     user: string;
     max_output_tokens: number;
     timeout_ms: number;
+    deadline_unix_ms: number;
   };
   try {
     req = JSON.parse(line);
@@ -126,6 +127,12 @@ async function handle(line: string): Promise<void> {
   }
   const started = Date.now();
   try {
+    const remainingMs = Math.min(req.timeout_ms, req.deadline_unix_ms - Date.now());
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      throw Object.assign(new Error("expired before provider dispatch"), {
+        code: "DEADLINE_EXPIRED",
+      });
+    }
     const result = await llm.complete({
       messages: [{ role: "user", content: req.user }],
       systemPrompt: req.system,
@@ -133,7 +140,7 @@ async function handle(line: string): Promise<void> {
       maxTokens: req.max_output_tokens,
       temperature: 0,
       purpose: "context-shunt-reader",
-      execution: { mode: "isolated-agent-runtime", timeoutMs: req.timeout_ms },
+      execution: { mode: "isolated-agent-runtime", timeoutMs: Math.max(1, remainingMs) },
     });
     process.stdout.write(
       JSON.stringify({

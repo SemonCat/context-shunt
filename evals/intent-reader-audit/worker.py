@@ -482,6 +482,12 @@ def summarize_reader(
     provider: Any, stats: dict[str, Any]
 ) -> dict[str, Any]:
     calls = sorted(provider.calls, key=lambda call: call["call"])
+    input_reported = [
+        call for call in calls if call.get("reported_input_tokens") is not None
+    ]
+    output_reported = [
+        call for call in calls if call.get("reported_output_tokens") is not None
+    ]
     reported = [
         call
         for call in calls
@@ -489,7 +495,7 @@ def summarize_reader(
         and call.get("reported_output_tokens") is not None
     ]
     cache_reported = [
-        call for call in reported if call.get("reported_cache_tokens") is not None
+        call for call in calls if call.get("reported_cache_tokens") is not None
     ]
     totals = stats["stats"]["totals"]
     methods = sorted(
@@ -511,13 +517,13 @@ def summarize_reader(
             call.get("output_payload_bytes", 0) for call in calls
         ),
         "input_tokens_reported_lower_bound": (
-            sum(call["reported_input_tokens"] for call in reported)
-            if reported
+            sum(call["reported_input_tokens"] for call in input_reported)
+            if input_reported
             else None
         ),
         "output_tokens_reported_lower_bound": (
-            sum(call["reported_output_tokens"] for call in reported)
-            if reported
+            sum(call["reported_output_tokens"] for call in output_reported)
+            if output_reported
             else None
         ),
         "cache_tokens_reported_lower_bound": (
@@ -718,6 +724,12 @@ def execute_shunt(
             if isinstance(value, dict)
             for citation in value.get("citations", [])
         ]
+        semantic_answer_published = any(
+            isinstance(value, dict)
+            and value.get("result_kind") == "model_derived"
+            and bool(value.get("answer"))
+            for value in main_outputs
+        )
         coverage = [
             {
                 "status": value.get("status"),
@@ -754,6 +766,7 @@ def execute_shunt(
             "correct": correct,
             "correctness_checks": checks,
             "citation_validity": all(citation_values) if citation_values else None,
+            "semantic_answer_published": semantic_answer_published,
             "coverage_observed": coverage,
             "harness_elapsed_ms_observed": round(elapsed_ms, 6),
             "mock_delay_ms_configured_total": (
@@ -820,6 +833,7 @@ def execute_legacy(workflow: dict[str, Any]) -> dict[str, Any]:
         "correct": correct,
         "correctness_checks": checks,
         "citation_validity": None,
+        "semantic_answer_published": False,
         "harness_elapsed_ms_observed": round((time.perf_counter() - started) * 1000, 6),
         "mock_delay_ms_configured_total": 0.0,
         "mock_delay_ms_observed_total": 0.0,

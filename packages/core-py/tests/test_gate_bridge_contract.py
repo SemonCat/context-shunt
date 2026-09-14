@@ -134,6 +134,18 @@ for line in sys.stdin:
     time.sleep(1)
 """
 
+_NO_READ_SERVER = """
+import json, time
+print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
+time.sleep(5)
+"""
+
+_SLOW_START_SERVER = """
+import json, time
+time.sleep(1)
+print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
+"""
+
 _OUT_OF_ORDER_SERVER = """
 import json, sys
 print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
@@ -224,7 +236,8 @@ def test_the_in_host_route_forwards_the_readers_output_cap(inhost):
     )
     sent = _requests(received)
     assert sent[0]["max_output_tokens"] == DEFAULT_LIMITS.max_output_tokens_per_call
-    assert sent[0]["timeout_ms"] == 30000
+    assert 0 < sent[0]["timeout_ms"] <= 30000
+    assert sent[0]["deadline_unix_ms"] >= int(__import__("time").time() * 1000)
     assert module.BRIDGE["enforces_output_cap"] is True
 
 
@@ -310,6 +323,56 @@ def test_the_protocol_readline_cannot_outlive_the_call_deadline(inhost):
     with pytest.raises(TimeoutError):
         module.complete(
             system="s",
+            user="u",
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=20,
+        )
+    assert __import__("time").monotonic() - started < 0.5
+
+
+def test_server_startup_cannot_refresh_an_expired_call_deadline(inhost):
+    module, _ = inhost(server=_SLOW_START_SERVER)
+    started = __import__("time").monotonic()
+    with pytest.raises(TimeoutError):
+        module.complete(
+            system="s",
+            user="u",
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=20,
+        )
+    assert __import__("time").monotonic() - started < 0.5
+
+
+def test_an_expired_request_waiting_for_the_write_lock_is_never_dispatched(inhost):
+    module, received = inhost()
+    server = module._server()
+    server._write_lock.acquire()
+    try:
+        with pytest.raises(TimeoutError, match="before dispatch"):
+            module.complete(
+                system="s",
+                user="u",
+                provider="",
+                model=READER_MODEL,
+                max_output_tokens=2048,
+                timeout_ms=20,
+            )
+    finally:
+        server._write_lock.release()
+    assert not received.exists() or received.read_text() == ""
+
+
+def test_pipe_backpressure_cannot_outlive_the_dispatch_deadline(inhost):
+    module, _ = inhost(server=_NO_READ_SERVER)
+    module.identity()  # isolate pipe backpressure from the separately tested startup bound
+    started = __import__("time").monotonic()
+    with pytest.raises(TimeoutError, match="during dispatch"):
+        module.complete(
+            system="s" * 200_000,
             user="u",
             provider="",
             model=READER_MODEL,
@@ -483,7 +546,7 @@ def test_the_in_host_server_uses_the_shipped_isolated_runtime_path():
         "autoEnable: false",
         'caller: { kind: "plugin", id: "context-shunt-eval" }',
         "allowedCompletionModels: [ROUTE]",
-        'execution: { mode: "isolated-agent-runtime", timeoutMs: req.timeout_ms }',
+        'execution: { mode: "isolated-agent-runtime", timeoutMs: Math.max(1, remainingMs) }',
         "maxTokens: req.max_output_tokens",
         "systemPrompt: req.system",
         'messages: [{ role: "user", content: req.user }]',

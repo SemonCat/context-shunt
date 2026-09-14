@@ -198,6 +198,12 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         and call["payload"]["parent_context_canary_absent"]
         for call in real_calls
     )
+    assert all(
+        row.get("semantic_answer_published") is False
+        or row["citation_validity"] is True
+        for row in report["results"]
+        if row["lane"] in {"pre", "new"}
+    )
 
     new = {
         row["workflow"]: row
@@ -329,6 +335,35 @@ def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
     mock_lane = json.loads(json.dumps(checkpoint))
     mock_lane["payloads"]["new"]["provider_kind"] = "mock"
     assert real_run._checkpoint_errors(mock_lane, binding)
+
+
+def test_real_luna_acceptance_rejects_a_citationless_semantic_answer() -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    report = json.loads(
+        (root / "evals/intent-reader-audit/real-luna-latest.json").read_text()
+    )
+    payloads = {
+        lane: {
+            "rows": [
+                json.loads(json.dumps(row))
+                for row in report["results"]
+                if row["lane"] == lane
+            ]
+        }
+        for lane in real_run.LANES
+    }
+    target = next(
+        row for row in payloads["new"]["rows"]
+        if row["reader"]["attempts_observed"] > 0
+    )
+    for lane in ("pre", "new"):
+        for row in payloads[lane]["rows"]:
+            row.setdefault("semantic_answer_published", False)
+    target["semantic_answer_published"] = True
+    target["citation_validity"] = None
+    errors = real_run._acceptance_errors(payloads, report["route"]["requested"])
+    assert any("semantic answer lacked verified citations" in error for error in errors)
 
 
 def real_run_totals(root: Path, rows: list[dict]):

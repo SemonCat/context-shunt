@@ -266,7 +266,14 @@ def _acceptance_errors(payloads: dict[str, dict[str, Any]], route: str) -> list[
             errors.append(f"NEW deterministic workflow {workflow} called Luna")
     for lane in ("pre", "new"):
         for row in payloads[lane]["rows"]:
-            if row["citation_validity"] is False:
+            semantic = row.get("semantic_answer_published")
+            if not isinstance(semantic, bool):
+                errors.append(f"{lane}/{row['workflow']}: semantic-output evidence missing")
+            elif semantic and row["citation_validity"] is not True:
+                errors.append(
+                    f"{lane}/{row['workflow']}: semantic answer lacked verified citations"
+                )
+            elif row["citation_validity"] is False:
                 errors.append(f"{lane}/{row['workflow']}: published citation failed verification")
     return errors
 
