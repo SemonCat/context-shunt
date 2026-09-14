@@ -189,6 +189,13 @@ omitted" — a caller relying on `complete` alone to know whether another cursor
 worthwhile in that specific narrow path may page one extra, empty time. It is a known,
 narrow residual, not a false completeness claim, and out of scope for this pass.
 
+Aggregate filter/distinct/group numeric values are deliberately restricted to integers in
+the cross-runtime exact range `[-(2^53-1), 2^53-1]`. Fractional numbers and larger numeric
+identifiers return `INVALID_REQUEST`/`BAD_SELECTOR`; encode them as JSON strings when exact
+identity is required. This prevents JavaScript number rounding from silently merging keys
+that Python would keep distinct. Count-only aggregation does not key record values and is
+unaffected.
+
 ## An answer may lose evidence to fit the envelope
 
 The per-field caps are not jointly satisfiable: the maximum answer plus the maximum number

@@ -23,10 +23,20 @@ function optionalPointer(value: unknown, pointer: string): unknown | typeof MISS
 
 function scalar(value: unknown): Scalar | typeof MISSING {
   if (value === MISSING) return MISSING;
-  if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
-    return value as string | number | boolean | null;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+    }
+    return value;
+  }
+  if (value === null || ["string", "boolean"].includes(typeof value)) {
+    return value as string | boolean | null;
   }
   throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+}
+
+function normalizeFilterNumber(value: unknown): unknown {
+  return typeof value === "number" ? scalar(value) : value;
 }
 
 function scalarKey(value: Scalar): string {
@@ -136,7 +146,9 @@ export function aggregateSnapshot(
       const candidate = optionalPointer(record, filter.pointer);
       if (candidate === MISSING) continue;
       if (Object.prototype.hasOwnProperty.call(filter, "equals")) {
-        if (canonicalJson(candidate) !== canonicalJson(filter.equals)) continue;
+        const normalizedCandidate = normalizeFilterNumber(candidate);
+        const normalizedExpected = normalizeFilterNumber(filter.equals);
+        if (canonicalJson(normalizedCandidate) !== canonicalJson(normalizedExpected)) continue;
       } else if (typeof candidate !== "string" || !candidate.includes(filter.contains ?? "")) {
         continue;
       }

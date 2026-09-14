@@ -190,6 +190,35 @@ def test_aggregate_keys_use_cross_runtime_utf8_order(tmp_path):
     assert [row["key"] for row in result["groups"]] == [["\ue000"], ["😀"]]
 
 
+@pytest.mark.parametrize(
+    "raw_records",
+    [
+        '[{"value":9007199254740992},{"value":9007199254740993}]',
+        '[{"value":1.5}]',
+    ],
+)
+def test_aggregate_rejects_numbers_outside_cross_runtime_exact_domain(tmp_path, raw_records):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "unsafe-number.json"
+    path.write_text('{"records":' + raw_records + "}")
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "records_pointer": "/records", "distinct": ["/value"]},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
 def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "records.json"

@@ -127,6 +127,26 @@ describe("structured deterministic aggregation", () => {
       .toEqual([["\ue000"], ["😀"]]);
   });
 
+  it.each([
+    '[{"value":9007199254740992},{"value":9007199254740993}]',
+    '[{"value":1.5}]',
+  ])("rejects numbers outside the cross-runtime exact domain: %s", (rawRecords) => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-number-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "unsafe-number.json");
+    writeFileSync(path, `{"records":${rawRecords}}`);
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    const entry = session.registerPath(path);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/records", distinct: ["/value"],
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_SELECTOR");
+    expect(env.extraction).toBeUndefined();
+  });
+
   it("keeps exact cardinalities when bounded key samples are truncated", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-cardinality-"));
     mkdirSync(join(dir, "ws"), { recursive: true });

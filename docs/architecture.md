@@ -279,7 +279,10 @@ array expansion/record pointer and bounded embedded-JSON parsing cover minified 
 `result[*].values[*][1]` records without regular expressions or executable expressions.
 The selected record set must fit the caller scan budget; otherwise it refuses without a
 partial count. Returned keys are capped and explicitly marked incomplete while the scalar
-counts remain exact after a complete scan. A page is limited by both result bytes and
+counts remain exact after a complete scan. Filter/distinct/group numeric values are limited
+to the shared exact integer range `[-(2^53-1), 2^53-1]`; larger identifiers and decimals
+must be JSON strings. Values outside that domain are refused rather than rounded. Canonical
+keys are ordered by UTF-8 bytes in both ports. A page is limited by both result bytes and
 serialized envelope headroom. Search also has line/byte scan budgets.
 
 For a minified one-line payload, first use

@@ -91,6 +91,11 @@ exact after a full scan; returned distinct values and group rows are capped at 2
 `values_complete`/`groups_complete` when high cardinality prevents publishing every key.
 Distinct values and group keys are ordered by the UTF-8 bytes of their canonical JSON in
 both ports, avoiding Python-code-point versus JavaScript-UTF-16 ordering drift. The
+shared exact numeric domain for filter/distinct/group values is integers from
+`-(2^53-1)` through `2^53-1`; fractional numbers and larger numeric identifiers are
+rejected with `INVALID_REQUEST`/`BAD_SELECTOR` rather than rounded. Callers use JSON strings
+when exact decimal or larger numeric identifiers are required. Count-only aggregation does
+not compare or key record values and is unaffected. The
 canonical JSON result is still charged against per-result,
 wire-envelope, per-source and per-session disclosure ceilings. It makes zero model calls.
 Missing grouping fields use the explicit JSON marker `{\"missing\":true}` so they cannot
