@@ -279,7 +279,7 @@ def _check_legacy_compaction(envelope: dict[str, Any], limits: Limits) -> None:
     artifact_path = block.get("raw_artifact_path")
     if artifact_path is not None and (
         not isinstance(artifact_path, str)
-        or envelope.get("schema_version") != "1.2"
+        or envelope.get("schema_version") not in ("1.2", "1.3")
         or _SAFE_RAW_ARTIFACT_PATH.fullmatch(artifact_path) is None
         or len(artifact_path) > 1024
         or len(artifact_path.encode("utf-8")) > 4096

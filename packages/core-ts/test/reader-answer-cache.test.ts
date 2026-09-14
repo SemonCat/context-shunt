@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { serializedBytes } from "../src/envelope.js";
+import { ShuntError } from "../src/errors.js";
+import { DEFAULT_LIMITS, type Limits } from "../src/limits.js";
+import { FallbackChainProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
 import { FakeLuna, claimsJson, makeCapability, makeConfig } from "./support.js";
 
@@ -89,6 +93,45 @@ describe("scoped exact reader answer reuse", () => {
     limited.request_id = "req_partial_again";
     expect((await session.read(limited)).status).toBe("partial");
     expect(provider.callCount).toBe(2);
+  });
+
+  it("never stores an answer produced by a fallback provider", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-cache-fallback-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "source.txt");
+    writeFileSync(path, "retry_limit: 7\n");
+    const reply = claimsJson(
+      [{ text: "retry_limit is 7", citation_ids: ["c1"] }],
+      [{ id: "c1", line_start: 1, line_end: 1, quote: "retry_limit: 7" }],
+    );
+    const primary = new FakeLuna([
+      new ShuntError("MODEL_ERROR", "PROVIDER_CALL_FAILED", true),
+    ], reply);
+    const fallback = new FakeLuna([], reply, "fallback-model");
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new FallbackChainProvider(primary, [fallback]),
+    });
+    const entry = session.registerPath(path);
+
+    const first = await session.read(request(entry, "req_fallback"));
+    const second = await session.read(request(entry, "req_primary"));
+    expect(first.provenance?.fallback_used).toBe(true);
+    expect(second.provenance?.cache_reused).not.toBe(true);
+    expect(primary.callCount).toBe(2);
+    expect(fallback.callCount).toBe(1);
+  });
+
+  it("rechecks the envelope cap after replacing cached request metadata", async () => {
+    const { session, provider, entry } = fixture();
+    const first = await session.read(request(entry, "a"));
+    const narrowed = {
+      ...DEFAULT_LIMITS, maxEnvelopeBytes: serializedBytes(first) + 10,
+    } satisfies Limits;
+    (session as unknown as { reader: { limits: Limits } }).reader.limits = narrowed;
+
+    const second = await session.read(request(entry, "x".repeat(64)));
+    expect(provider.callCount).toBe(2);
+    expect(second.provenance?.cache_reused).not.toBe(true);
   });
 
   it("evicts the least-recently-used answer after the fixed 32-entry bound", async () => {

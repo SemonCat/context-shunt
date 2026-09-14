@@ -114,6 +114,32 @@ def test_refuses_over_budget_scan_without_partial_count(tmp_path):
     assert "extraction" not in env
 
 
+def test_empty_expansions_still_consume_the_outer_scan_budget(tmp_path):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "empty-expansions.json"
+    path.write_text(json.dumps({"outer": [{"records": []}, {"records": []}]}))
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "records_pointer": "/outer",
+                "expand_pointer": "/records",
+            },
+            max_scan=1,
+        )
+    )
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert "extraction" not in env
+
+
 def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "records.json"

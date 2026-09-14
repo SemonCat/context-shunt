@@ -1,4 +1,4 @@
-# Architecture and contract revision 1.2
+# Architecture and contract revision 1.3
 
 This is the normative design for the current implementation. Numeric values below are
 current defaults; [`contracts/v1/limits.json`](../contracts/v1/limits.json) is authoritative
@@ -6,8 +6,8 @@ and deployments may only narrow them. The entire public surface is read-only.
 
 ## Contract compatibility
 
-Revision 1.2 accepts 1.0/1.1 requests and validates earlier envelopes. Envelopes declaring
-1.1 or 1.2 must include `result_kind`, `provenance`, and `accounting_id`. A request that
+Revision 1.3 accepts 1.0–1.2 requests and validates earlier envelopes. Envelopes declaring
+1.1 through 1.3 must include `result_kind`, `provenance`, and `accounting_id`. A request that
 declares an older revision but carries a newer field or limit is refused rather than
 silently ignoring it. Emitted and accepted versions are separate constants in both cores.
 
@@ -33,6 +33,11 @@ at 60 seconds, and envelopes declaring either older revision cannot carry the lo
 The locator schema admits only an absolute, control-free cache-artifact shape. A
 metadata-only HMAC sidecar binds each prepared mirror's inode, size, timestamps, handle,
 and snapshot digest, detecting post-capture modification without payload I/O at timeout.
+
+Revision 1.3 adds literal-OR read selection, bounded structured aggregation, scoped exact
+answer reuse, and the per-attempt usage-completeness count. These fields and aggregate
+extraction are emitted only on envelopes declaring 1.3; earlier envelope shapes remain
+closed and valid unchanged. Requests declaring 1.0–1.2 cannot use `patterns` or aggregate.
 
 ## Components and trust boundaries
 

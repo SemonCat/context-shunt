@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import { loadConfig } from "../src/config.js";
 import { ShuntError } from "../src/errors.js";
-import { DEFAULT_LIMITS, statusCodePairs, legalPair } from "../src/limits.js";
+import {
+  DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION, statusCodePairs, legalPair,
+} from "../src/limits.js";
 import { envelopeValidator, requestValidator, validateRequest } from "../src/schema.js";
 import { fixtureDocs } from "./fixtures.js";
 
@@ -35,6 +37,9 @@ describe("envelope fixtures", () => {
     expect(envelopeValidator()(doc)).toBe(false);
     doc["schema_version"] = "1.2";
     expect(envelopeValidator()(doc)).toBe(true);
+    doc["schema_version"] = "1.3";
+    doc["provenance"]["attempts_usage_complete"] = 0;
+    expect(envelopeValidator()(doc)).toBe(true);
     for (const unsafe of [
       "../../sensitive.txt",
       "/private/../sensitive.txt",
@@ -43,6 +48,18 @@ describe("envelope fixtures", () => {
       doc["legacy_compaction"]["raw_artifact_path"] = unsafe;
       expect(envelopeValidator()(doc)).toBe(false);
     }
+  });
+
+  it("requires envelope 1.3 for the new provenance fields", () => {
+    const doc = structuredClone(
+      fixtureDocs("envelope", "valid")
+        .find((f) => f.name === "v11_ok_answered_derived.json")?.document,
+    ) as Record<string, any>;
+    doc["provenance"]["attempts_usage_complete"] = 1;
+    expect(envelopeValidator()(doc)).toBe(false);
+    doc["schema_version"] = "1.3";
+    expect(envelopeValidator()(doc)).toBe(true);
+    expect(EMITTED_SCHEMA_VERSION).toBe("1.3");
   });
 });
 

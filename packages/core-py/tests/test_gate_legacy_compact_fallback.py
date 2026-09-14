@@ -10,6 +10,7 @@ import pytest
 from context_shunt.errors import ShuntError
 from context_shunt.guard import OutputGuardError, enforce
 from context_shunt.legacy_compact import compact_tool_result
+from context_shunt.limits import EMITTED_SCHEMA_VERSION
 from context_shunt.session import ShuntSession
 from tests.support import FakeLuna, claims_json, make_capability, make_config
 
@@ -70,11 +71,9 @@ def test_legacy_compaction_false_cannot_disable_mandatory_fallback(tmp_path):
 
 
 def test_output_guard_rejects_untrusted_or_pre_1_2_raw_artifact_locator(tmp_path):
-    session, _, request, _ = setup(
-        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
-    )
+    session, _, request, _ = setup(tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR")))
     env = session.read(request)
-    assert env["schema_version"] == "1.2"
+    assert env["schema_version"] == EMITTED_SCHEMA_VERSION == "1.3"
     assert "raw_artifact_path" in env["legacy_compaction"]
     enforce(env)
 

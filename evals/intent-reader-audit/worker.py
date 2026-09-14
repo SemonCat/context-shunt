@@ -18,6 +18,7 @@ import context_shunt
 from context_shunt.capability import CapabilityReport, supported
 from context_shunt.config import load as load_config
 from context_shunt.legacy_compact import compact_tool_result
+from context_shunt.limits import EMITTED_SCHEMA_VERSION
 from context_shunt.provider import ModelResponse, ProviderTarget
 from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
 from context_shunt.session import ShuntSession
@@ -181,7 +182,7 @@ def capability() -> CapabilityReport:
         adapter_version="1",
         host_name="local",
         host_version="1",
-        contract_version="1.2",
+        contract_version=EMITTED_SCHEMA_VERSION,
         reader_model=MODEL,
         modes=[supported("tool_result_capture", evidence=("synthetic benchmark",))],
     )
@@ -526,6 +527,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
             "execution": "actual_shunt_session",
             "operation_trace": trace,
             "module_origin": str(Path(context_shunt.__file__).resolve()),
+            "core_emitted_envelope_version": EMITTED_SCHEMA_VERSION,
             "source_sha256": [
                 hashlib.sha256(source.encode()).hexdigest() for source in sources
             ],
@@ -576,6 +578,7 @@ def execute_legacy(workflow: dict[str, Any]) -> dict[str, Any]:
         "execution": "actual_incumbent_compactor_port",
         "operation_trace": trace,
         "module_origin": str(Path(context_shunt.__file__).resolve()),
+        "core_emitted_envelope_version": None,
         "source_sha256": [
             hashlib.sha256(source.encode()).hexdigest() for source in sources
         ],

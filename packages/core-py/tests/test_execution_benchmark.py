@@ -41,6 +41,8 @@ def test_intent_reader_benchmark_executes_pinned_pre_and_working_new(tmp_path: P
         "actual_incumbent_compactor_port",
         "actual_shunt_session",
     }
+    versions = {row["lane"]: row["core_emitted_envelope_version"] for row in report["results"]}
+    assert versions == {"legacy_compactor": None, "pre": "1.2", "new": "1.3"}
     assert not any("controlled_wall_ms" in row for row in report["results"])
     corpus = json.loads((root / "evals/intent-reader-audit/corpus.json").read_text())
     forbidden_profile_fields = {

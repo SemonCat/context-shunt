@@ -170,7 +170,7 @@ function checkLegacyCompaction(env: Record<string, unknown>, limits: Limits): vo
   const artifactPath = value["raw_artifact_path"];
   if (artifactPath !== undefined && (
     typeof artifactPath !== "string"
-    || env["schema_version"] !== "1.2"
+    || !["1.2", "1.3"].includes(String(env["schema_version"]))
     || !SAFE_RAW_ARTIFACT_PATH.test(artifactPath)
     || Array.from(artifactPath).length > 1024
     || utf8Length(artifactPath) > 4096

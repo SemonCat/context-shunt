@@ -72,6 +72,22 @@ describe("structured deterministic aggregation", () => {
     expect(env.extraction).toBeUndefined();
   });
 
+  it("charges empty outer expansions against the scan budget", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-empty-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "empty-expansions.json");
+    writeFileSync(path, JSON.stringify({ outer: [{ records: [] }, { records: [] }] }));
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    const entry = session.registerPath(path);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/outer", expand_pointer: "/records",
+    }, 1));
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.extraction).toBeUndefined();
+  });
+
   it("keeps exact cardinalities when bounded key samples are truncated", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-cardinality-"));
     mkdirSync(join(dir, "ws"), { recursive: true });

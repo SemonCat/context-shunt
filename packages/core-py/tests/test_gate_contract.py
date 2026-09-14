@@ -9,7 +9,12 @@ import pytest
 
 from context_shunt.config import load as load_config
 from context_shunt.errors import ShuntError
-from context_shunt.limits import DEFAULT_LIMITS, legal_pair, status_code_pairs
+from context_shunt.limits import (
+    DEFAULT_LIMITS,
+    EMITTED_SCHEMA_VERSION,
+    legal_pair,
+    status_code_pairs,
+)
 from context_shunt.schema import envelope_validator, request_validator, validate_request
 
 pytestmark = pytest.mark.gate_contract
@@ -46,17 +51,16 @@ def test_invalid_envelopes_rejected(name, doc):
 
 
 def test_raw_artifact_locator_requires_contract_1_2():
-    doc = next(
-        d for n, d in _docs("envelope", "valid")
-        if n == "v11_partial_legacy_compacted.json"
-    )
+    doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_partial_legacy_compacted.json")
     doc = json.loads(json.dumps(doc))
     doc["legacy_compaction"]["raw_artifact_path"] = (
-        "/private/cache/artifacts/scp_" + "0" * 32
-        + "/src_0123456789abcdef." + "1" * 32 + ".txt"
+        "/private/cache/artifacts/scp_" + "0" * 32 + "/src_0123456789abcdef." + "1" * 32 + ".txt"
     )
     assert not envelope_validator().is_valid(doc)
     doc["schema_version"] = "1.2"
+    assert envelope_validator().is_valid(doc)
+    doc["schema_version"] = "1.3"
+    doc["provenance"]["attempts_usage_complete"] = 0
     assert envelope_validator().is_valid(doc)
     for unsafe in (
         "../../sensitive.txt",
@@ -65,6 +69,16 @@ def test_raw_artifact_locator_requires_contract_1_2():
     ):
         doc["legacy_compaction"]["raw_artifact_path"] = unsafe
         assert not envelope_validator().is_valid(doc)
+
+
+def test_new_provenance_fields_require_envelope_1_3():
+    doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_ok_answered_derived.json")
+    doc = json.loads(json.dumps(doc))
+    doc["provenance"]["attempts_usage_complete"] = 1
+    assert not envelope_validator().is_valid(doc)
+    doc["schema_version"] = "1.3"
+    assert envelope_validator().is_valid(doc)
+    assert EMITTED_SCHEMA_VERSION == "1.3"
 
 
 def test_propose_patch_is_rejected_as_unsupported_operation():

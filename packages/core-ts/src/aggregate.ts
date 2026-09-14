@@ -78,14 +78,20 @@ export function aggregateSnapshot(
   }
 
   const records: unknown[] = [];
+  let workUnits = 0;
   for (const item of outer) {
+    workUnits += 1;
+    if (workUnits > opts.maxRecords) {
+      throw new ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", false);
+    }
     const expanded = selector.expand_pointer === undefined
       ? [item]
       : resolvePointer(item, selector.expand_pointer);
     if (!Array.isArray(expanded)) {
       throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
     }
-    if (records.length + expanded.length > opts.maxRecords) {
+    if (selector.expand_pointer !== undefined) workUnits += expanded.length;
+    if (workUnits > opts.maxRecords) {
       throw new ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", false);
     }
     records.push(...expanded);

@@ -15,7 +15,7 @@
     "timing": "observed harness elapsed; fixture delay separately reported"
   },
   "implementation_sha256": {
-    "new_python_relevant_files": "288cacebb94c7eaa780fcc50099871e84a18897e4f3ff18e860a0f1cda7a3913",
+    "new_python_relevant_files": "6457f154593814020be8b26049cc62ecd6982977ea2a6428ae2f3d7a4064cf50",
     "pre_git_tree": "bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da"
   },
   "red_checks": [
@@ -46,6 +46,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": null,
       "correct": true,
       "correctness_checks": [
         {
@@ -61,7 +62,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 6.722417,
+      "harness_elapsed_ms_observed": 6.260892,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 293,
       "mock_delay_ms_configured_total": 0.0,
@@ -95,6 +96,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": null,
       "correct": false,
       "correctness_checks": [
         {
@@ -130,7 +132,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 42.245766,
+      "harness_elapsed_ms_observed": 41.618138,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 13671,
       "mock_delay_ms_configured_total": 0.0,
@@ -168,6 +170,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": null,
       "correct": false,
       "correctness_checks": [
         {
@@ -193,7 +196,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 21.161753,
+      "harness_elapsed_ms_observed": 20.944141,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 12072,
       "mock_delay_ms_configured_total": 0.0,
@@ -231,6 +234,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": null,
       "correct": true,
       "correctness_checks": [
         {
@@ -246,7 +250,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 5.564204,
+      "harness_elapsed_ms_observed": 6.447024,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 20424,
       "mock_delay_ms_configured_total": 0.0,
@@ -284,6 +288,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": null,
       "correct": true,
       "correctness_checks": [
         {
@@ -294,7 +299,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 3.687992,
+      "harness_elapsed_ms_observed": 4.070367,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 18207,
       "mock_delay_ms_configured_total": 0.0,
@@ -331,6 +336,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": true,
+      "core_emitted_envelope_version": "1.2",
       "correct": true,
       "correctness_checks": [
         {
@@ -346,11 +352,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 41.333596,
+      "harness_elapsed_ms_observed": 43.295378,
       "lane": "pre",
       "main_context_bytes_observed": 2510,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 3.047225,
+      "mock_delay_ms_observed_total": 2.332867,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -366,7 +372,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2597,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.047225,
+            "observed_mock_call_ms": 2.332867,
             "output_payload_bytes": 193,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 650,
@@ -397,6 +403,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": true,
+      "core_emitted_envelope_version": "1.2",
       "correct": false,
       "correctness_checks": [
         {
@@ -432,11 +439,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 54.189984,
+      "harness_elapsed_ms_observed": 64.511402,
       "lane": "pre",
       "main_context_bytes_observed": 6045,
       "mock_delay_ms_configured_total": 8.0,
-      "mock_delay_ms_observed_total": 10.585331,
+      "mock_delay_ms_observed_total": 10.622412,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -454,7 +461,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.268726,
+            "observed_mock_call_ms": 3.044135,
             "output_payload_bytes": 543,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 8646,
@@ -467,7 +474,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.259127,
+            "observed_mock_call_ms": 2.60745,
             "output_payload_bytes": 28,
             "reported_cache_tokens": null,
             "reported_input_tokens": null,
@@ -480,7 +487,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.024033,
+            "observed_mock_call_ms": 2.719551,
             "output_payload_bytes": 28,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 8646,
@@ -493,7 +500,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.033445,
+            "observed_mock_call_ms": 2.251276,
             "output_payload_bytes": 28,
             "reported_cache_tokens": null,
             "reported_input_tokens": null,
@@ -526,6 +533,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": true,
+      "core_emitted_envelope_version": "1.2",
       "correct": false,
       "correctness_checks": [
         {
@@ -551,11 +559,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 62.969655,
+      "harness_elapsed_ms_observed": 76.911265,
       "lane": "pre",
       "main_context_bytes_observed": 6111,
       "mock_delay_ms_configured_total": 4.0,
-      "mock_delay_ms_observed_total": 5.341261,
+      "mock_delay_ms_observed_total": 6.10912,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -574,7 +582,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.298446,
+            "observed_mock_call_ms": 3.066135,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -587,7 +595,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.042815,
+            "observed_mock_call_ms": 3.042985,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -620,6 +628,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": "1.2",
       "correct": true,
       "correctness_checks": [
         {
@@ -635,7 +644,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 27.513556,
+      "harness_elapsed_ms_observed": 27.517836,
       "lane": "pre",
       "main_context_bytes_observed": 22306,
       "mock_delay_ms_configured_total": 0.0,
@@ -673,6 +682,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": "1.2",
       "correct": true,
       "correctness_checks": [
         {
@@ -683,7 +693,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 39.584635,
+      "harness_elapsed_ms_observed": 38.771776,
       "lane": "pre",
       "main_context_bytes_observed": 23299,
       "mock_delay_ms_configured_total": 0.0,
@@ -721,6 +731,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": true,
+      "core_emitted_envelope_version": "1.3",
       "correct": true,
       "correctness_checks": [
         {
@@ -736,11 +747,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 50.773614,
+      "harness_elapsed_ms_observed": 53.349013,
       "lane": "new",
       "main_context_bytes_observed": 2510,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 2.542699,
+      "mock_delay_ms_observed_total": 2.052944,
       "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -756,7 +767,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2597,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.542699,
+            "observed_mock_call_ms": 2.052944,
             "output_payload_bytes": 193,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 650,
@@ -787,6 +798,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": "1.3",
       "correct": true,
       "correctness_checks": [
         {
@@ -838,7 +850,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 62.789013,
+      "harness_elapsed_ms_observed": 49.576691,
       "lane": "new",
       "main_context_bytes_observed": 6899,
       "mock_delay_ms_configured_total": 0.0,
@@ -878,6 +890,7 @@
     {
       "answer_cache_hits_observed": 1,
       "citation_validity": true,
+      "core_emitted_envelope_version": "1.3",
       "correct": true,
       "correctness_checks": [
         {
@@ -911,11 +924,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 68.526809,
+      "harness_elapsed_ms_observed": 58.878597,
       "lane": "new",
       "main_context_bytes_observed": 7767,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 2.157235,
+      "mock_delay_ms_observed_total": 2.391477,
       "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -935,7 +948,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.157235,
+            "observed_mock_call_ms": 2.391477,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -968,6 +981,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": "1.3",
       "correct": true,
       "correctness_checks": [
         {
@@ -983,7 +997,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 40.614057,
+      "harness_elapsed_ms_observed": 26.413204,
       "lane": "new",
       "main_context_bytes_observed": 22306,
       "mock_delay_ms_configured_total": 0.0,
@@ -1021,6 +1035,7 @@
     {
       "answer_cache_hits_observed": 0,
       "citation_validity": null,
+      "core_emitted_envelope_version": "1.3",
       "correct": true,
       "correctness_checks": [
         {
@@ -1031,7 +1046,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 36.734372,
+      "harness_elapsed_ms_observed": 41.942952,
       "lane": "new",
       "main_context_bytes_observed": 3688,
       "mock_delay_ms_configured_total": 0.0,
@@ -1072,7 +1087,7 @@
       "answer_cache_hits_observed": 0,
       "correctness_rate_observed": 0.6,
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 79.382132,
+      "harness_elapsed_ms_observed": 79.340562,
       "main_context_bytes_observed": 64667,
       "main_context_tokens_estimated_bytes_div_4": 16167,
       "mock_delay_ms_configured_total": 0.0,
@@ -1096,11 +1111,11 @@
       "answer_cache_hits_observed": 1,
       "correctness_rate_observed": 1.0,
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 259.437865,
+      "harness_elapsed_ms_observed": 230.160457,
       "main_context_bytes_observed": 43170,
       "main_context_tokens_estimated_bytes_div_4": 10793,
       "mock_delay_ms_configured_total": 4.0,
-      "mock_delay_ms_observed_total": 4.699934,
+      "mock_delay_ms_observed_total": 4.444421,
       "reader_attempts_observed": 2,
       "reader_attempts_usage_reported": 2,
       "reader_cache_tokens_reported_lower_bound": 0,
@@ -1120,11 +1135,11 @@
       "answer_cache_hits_observed": 0,
       "correctness_rate_observed": 0.6,
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 225.591426,
+      "harness_elapsed_ms_observed": 251.007657,
       "main_context_bytes_observed": 60271,
       "main_context_tokens_estimated_bytes_div_4": 15068,
       "mock_delay_ms_configured_total": 14.0,
-      "mock_delay_ms_observed_total": 18.973817,
+      "mock_delay_ms_observed_total": 19.064399,
       "reader_attempts_observed": 7,
       "reader_attempts_usage_reported": 5,
       "reader_cache_tokens_reported_lower_bound": 0,

@@ -107,6 +107,14 @@ No sprawling host refactor was attempted. Only session-4 recovery-call correlati
 a host-side proposal; the reuse and aggregation features are implemented in both owned
 language cores and are not installed on the live host.
 
+The final P0–P2 review reproduced four additional boundary defects and they were corrected
+in both ports: fallback-produced answers are not admitted to the cache; a cache hit is
+rechecked against the serialized envelope cap after request/accounting metadata changes;
+outer elements (including empty Loki expansions) consume the aggregate scan budget; and
+`patterns` is rejected on requests declaring a pre-1.3 schema. The same review's response-
+version finding resulted in a real 1.3 emitted envelope contract instead of placing new
+fields under the closed 1.2 label.
+
 Reaching each new error code onto the wire correctly required three independent closed
 lists to move together in both language cores: the wire-scrubbing allowlist
 (`SAFE_FAILURE_DETAILS`), the fallback-eligibility set (`CAPACITY_FAILURE_DETAILS` —
@@ -129,9 +137,9 @@ attempts, and `ModelResponse.usage` it returns.
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 79.382 | 0/0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 225.591 | 14/18.974 |
-| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 259.438 | 4/4.700 |
+| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 79.341 | 0/0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 251.008 | 14/19.064 |
+| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 230.160 | 4/4.444 |
 
 \* Provider token values are copied from the fixture's returned usage. The fixture's
 explicit tariff is bytes/4, but the harness does not derive a "reported" total after the
@@ -139,9 +147,9 @@ fact. Calls configured without usage remain unknown; PRE's reported total is the
 lower bound, never scaled by a completion ratio. Main-context tokens alone are explicitly
 estimated from observed serialized bytes. Harness elapsed time is measured independently
 on each run and recorded in the artifact; configured and observed mock delay are separate
-fields, with no arithmetic controlled-time substitute. In this frozen run NEW took
-259.438 ms versus PRE's 225.591 ms despite less configured mock delay; this benchmark
-therefore demonstrates token/attempt/correctness gains, not a wall-time gain.
+fields, with no arithmetic controlled-time substitute. In this frozen local run NEW took
+230.160 ms versus PRE's 251.008 ms. That one controlled-fixture observation is reported as
+measured, but is not presented as proof of a production wall-time gain.
 
 Correctness is evaluated from actual emitted answers and aggregate extractions. In this
 run NEW satisfies all five independent expectations; PRE and legacy each satisfy three.
@@ -169,9 +177,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 971 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+- **Python core:** 976 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
   pytest -q`).
-- **TypeScript/adapter suite:** 941 passed, 10 skipped across 23 files (`npx vitest run`);
+- **TypeScript/adapter suite:** 946 passed, 10 skipped across 23 files (`npx vitest run`);
   `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
   acceptance assertions passed. Its opt-in regression test also passed in the Python
@@ -180,10 +188,10 @@ proof.
   records one bounded answer-cache hit, exact structured results, zero unknown usage
   attempts, and the known requery loss. See the committed JSON/Markdown artifacts.
 - **`./scripts/verify shadow deterministic`:** PASS — `main_context_reduction` 0.9734
-  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 35.941ms
+  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 37.593ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,500 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,510 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -225,11 +233,12 @@ proof.
    caller relying on `complete` alone in that one narrow path may page one extra, empty
    time. Documented in [`docs/limitations.md`](limitations.md); not a false-completeness
    claim, just an imprecise one, and deliberately out of scope for this pass.
-4. **Schema-version note for host operators:** the new `SEARCH_MAX_MATCHES_EXHAUSTED`
-   detail plus the additive aggregate/cache envelope fields and enum values follow this
-   project's compatibility convention without an envelope `schema_version` bump. Any host
-   validating against a separately pinned `envelope.schema.json` must sync that contract
-   before it can accept these values. This does not require touching the live host now.
+4. **Schema-version note for host operators:** the final P0–P2 review correctly found that
+   emitting new provenance/aggregate fields while still labelling the envelope 1.2 would
+   break a consumer pinned to the closed 1.2 schema. The owned cores now emit envelope 1.3;
+   1.0–1.2 envelope schemas remain closed, and pre-1.3 requests cannot select `patterns` or
+   aggregate. Any host pinned to the prior contract must explicitly sync 1.3 before it can
+   accept these envelopes. No live-host change was made here.
 5. **This report does not itself constitute deployment authorization.** Per
    [`docs/acceptance.md`](acceptance.md#what-has-to-be-true-before-the-live-compactor-is-replaced),
    nothing in this branch authorizes replacing the incumbent compactor in production. Ruby

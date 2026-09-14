@@ -58,7 +58,11 @@ def aggregate_snapshot(
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
     records: list[Any] = []
+    work_units = 0
     for item in outer:
+        work_units += 1
+        if work_units > max_records:
+            raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
         expanded = (
             [item]
             if "expand_pointer" not in selector
@@ -66,7 +70,9 @@ def aggregate_snapshot(
         )
         if not isinstance(expanded, list):
             raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
-        if len(records) + len(expanded) > max_records:
+        if "expand_pointer" in selector:
+            work_units += len(expanded)
+        if work_units > max_records:
             raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
         records.extend(expanded)
 

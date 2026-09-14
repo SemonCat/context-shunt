@@ -608,6 +608,14 @@ export class Reader {
     if (accountingId === undefined) delete envelope.accounting_id;
     else envelope.accounting_id = accountingId;
     envelope.provenance = provenanceToShape(provenance);
+    if (serializedBytes(envelope) > envelopeByteCap(envelope.result_kind, this.limits)) {
+      if (this.answerCache.get(key) === cached) {
+        this.answerCache.delete(key);
+        this.answerCacheBytes -= cached.bytes;
+      }
+      this.metrics.count("reader_answer_cache", { result: "oversize_miss" });
+      return undefined;
+    }
     this.metrics.count("reader_answer_cache", { result: "hit" });
     return {
       envelope,
@@ -626,6 +634,7 @@ export class Reader {
       || !["ANSWERED", "NO_MATCH"].includes(envelope.code)
       || result.cost.attemptsStarted < 1
       || !result.provenance.derived
+      || result.provenance.fallbackUsed === true
     ) return;
     const copy = structuredClone(envelope);
     const bytes = serializedBytes(copy);

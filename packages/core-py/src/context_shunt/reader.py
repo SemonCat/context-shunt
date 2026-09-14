@@ -111,9 +111,7 @@ _MAX_CITATION_REPAIR_REASONS = 8
 # `status: partial` and a sibling guidance field were not enough: a consumer that surfaced
 # only `answer` could still publish the model's "exactly zero" as a source-wide conclusion.
 # Prefixing the main answer creates a boundary that survives such consumers and languages.
-_INCOMPLETE_ANSWER_PREFIX = (
-    "[Reviewed subset only; citations verify bytes, not claims] "
-)
+_INCOMPLETE_ANSWER_PREFIX = "[Reviewed subset only; citations verify bytes, not claims] "
 _INCOMPLETE_NO_MATCH_GUIDANCE = (
     "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
     "was omitted or reported as upstream-truncated (see coverage.omitted and "
@@ -635,6 +633,16 @@ class Reader:
         else:
             result["accounting_id"] = accounting_id
         result["provenance"] = provenance.to_dict()
+        if self._enforce_output_caps and E.serialized_bytes(result) > envelope_byte_cap(
+            result.get("result_kind"), self._limits
+        ):
+            with self._answer_cache_lock:
+                current = self._answer_cache.get(key)
+                if current is cached:
+                    self._answer_cache.pop(key)
+                    self._answer_cache_bytes -= cached[3]
+            self._metrics.count("reader_answer_cache", {"result": "oversize_miss"})
+            return None
         self._metrics.count("reader_answer_cache", {"result": "hit"})
         return ReaderResult(
             envelope=result,
@@ -652,6 +660,7 @@ class Reader:
             and envelope.get("code") in ("ANSWERED", "NO_MATCH")
             and result.cost.attempts_started > 0
             and result.provenance.derived
+            and result.provenance.fallback_used is not True
         ):
             return
         stored = copy.deepcopy(envelope)
@@ -664,7 +673,10 @@ class Reader:
             if prior is not None:
                 self._answer_cache_bytes -= prior[3]
             self._answer_cache[key] = (
-                stored, copy.deepcopy(result.provenance), tuple(result.source_ids), size
+                stored,
+                copy.deepcopy(result.provenance),
+                tuple(result.source_ids),
+                size,
             )
             self._answer_cache_bytes += size
             while len(self._answer_cache) > 32 or self._answer_cache_bytes > max_bytes:
@@ -1121,7 +1133,7 @@ class Reader:
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
-                attempts_usage_complete=usage_complete_calls,
+                    attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1154,7 +1166,7 @@ class Reader:
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
-                attempts_usage_complete=usage_complete_calls,
+                    attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1190,7 +1202,7 @@ class Reader:
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
-                attempts_usage_complete=usage_complete_calls,
+                    attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1221,7 +1233,7 @@ class Reader:
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
-                attempts_usage_complete=usage_complete_calls,
+                    attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1317,9 +1329,9 @@ class Reader:
         while (
             self._enforce_output_caps
             and len(
-                _scope_published_answer(
-                    answer, complete=_coverage_is_complete(coverage)
-                ).encode("utf-8")
+                _scope_published_answer(answer, complete=_coverage_is_complete(coverage)).encode(
+                    "utf-8"
+                )
             )
             > max_answer
             and (kept_claims or legacy_answer)
