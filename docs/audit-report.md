@@ -126,11 +126,11 @@ is a deterministic replay, not a claim that a provider or either git tree was ex
 live. Token values are labeled bytes/4 estimates; no price table is required for the
 requested token/time comparison.
 
-| Lane | Main tokens (est.) | Reader in/out (est. total) | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 24,553 | 0/0 | 0 (0) | 0 | 23,112 | 17,601 | 0.400 | 18.043 |
-| PRE-change Shunt (`1686db6`) | 18,017 | 157,826/3,350 | 15 (11) | 4 | 23,112 | 17,601 | 0.800 | 405.123 |
-| NEW implementation | 7,888 | 25,686/600 | 4 (4) | 0 | 23,112 | 0 | 1.000 | 119.332 |
+| Lane | Main tokens (est.) | Reader in/out reported | Reader in/out est. total | Provider cache | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Incumbent legacy compactor | 24,553 | null/null | null/null | null | 0 (0) | 0 | 23,112 | 17,601 | 0.400 | 18.043 |
+| PRE-change Shunt (`1686db6`) | 18,017 | 114,567/2,446 | 157,826/3,350 | null | 15 (11) | 4 | 23,112 | 17,601 | 0.800 | 405.123 |
+| NEW implementation | 7,888 | 25,686/600 | 25,686/600 | null | 4 (4) | 0 | 23,112 | 0 | 1.000 | 119.332 |
 
 Controlled wall time uses a fixed 25 ms mock-provider latency per attempt plus a fixed
 50 MB/s processing rate. The JSON also carries measured local harness time, but that is

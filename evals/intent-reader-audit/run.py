@@ -140,14 +140,17 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "Synthetic production-derived shapes; no production content or provider call. Token values are bytes/4 estimates, not billed tokens. Controlled wall time uses a fixed 25ms mock-provider latency per attempt plus 50 MB/s processing. `null` reader/cache tokens mean not applicable or not reported—never zero substituted for unknown.",
         "",
-        "| Lane | Main tokens (est.) | Reader in/out (est. total) | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Lane | Main tokens (est.) | Reader in/out reported | Reader in/out est. total | Provider cache | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for lane in ("legacy_compactor", "pre", "new"):
         row = totals[lane]
+        shown = lambda value: json.dumps(value, separators=(",", ":"))
         rows.append(
             f"| {lane} | {row['main_context_tokens_estimated']} | "
-            f"{row['reader_input_tokens_estimated_total']}/{row['reader_output_tokens_estimated_total']} | "
+            f"{shown(row['reader_input_tokens_reported'])}/{shown(row['reader_output_tokens_reported'])} | "
+            f"{shown(row['reader_input_tokens_estimated_total'])}/{shown(row['reader_output_tokens_estimated_total'])} | "
+            f"{shown(row['reader_cache_tokens'])} | "
             f"{row['attempts_started']} ({row['attempts_usage_complete']}) | "
             f"{row['unknown_or_late_attempts']} | {row['requery_bytes']} | {row['full_read_bytes']} | "
             f"{row['mean_correctness']:.3f} | {row['controlled_wall_ms']:.3f} |"
@@ -194,11 +197,27 @@ def main() -> None:
     totals: dict[str, Any] = {}
     for lane in ("legacy_compactor", "pre", "new"):
         selected = [row for row in results if row["lane"] == lane]
+        has_attempts = any(row["attempts_started"] for row in selected)
         totals[lane] = {
             "main_context_bytes": sum(row["main_context_bytes"] for row in selected),
             "main_context_tokens_estimated": sum(row["main_context_tokens_estimated"] for row in selected),
-            "reader_input_tokens_estimated_total": sum(row["reader_input_tokens_estimated_total"] or 0 for row in selected),
-            "reader_output_tokens_estimated_total": sum(row["reader_output_tokens_estimated_total"] or 0 for row in selected),
+            "reader_input_tokens_estimated_total": (
+                sum(row["reader_input_tokens_estimated_total"] or 0 for row in selected)
+                if has_attempts else None
+            ),
+            "reader_output_tokens_estimated_total": (
+                sum(row["reader_output_tokens_estimated_total"] or 0 for row in selected)
+                if has_attempts else None
+            ),
+            "reader_input_tokens_reported": (
+                sum(row["reader_input_tokens_reported"] or 0 for row in selected)
+                if has_attempts else None
+            ),
+            "reader_output_tokens_reported": (
+                sum(row["reader_output_tokens_reported"] or 0 for row in selected)
+                if has_attempts else None
+            ),
+            "reader_cache_tokens": None,
             "attempts_started": sum(row["attempts_started"] for row in selected),
             "attempts_usage_complete": sum(row["attempts_usage_complete"] for row in selected),
             "unknown_or_late_attempts": sum(row["unknown_or_late_attempts"] for row in selected),
