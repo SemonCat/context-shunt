@@ -228,10 +228,11 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 997 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,006 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
-- **TypeScript/adapter suite:** 958 passed, 10 skipped across 23 files (`npx vitest run`);
-  `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
+- **TypeScript core suite:** 801 passed across 19 files (`npm --prefix packages/core-ts
+  test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
+  exercised by the canonical capability gate below.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
   acceptance assertions passed. Its opt-in regression test also passed in the Python
   suite. Both internal red checks passed, and explicit `--candidate-new-variant no-cache`
@@ -242,7 +243,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,560 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,563 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -250,7 +251,8 @@ proof.
   (root, traversal, symlink/hardlink/race, secret, binary, quota controls), `cancellation`
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
-  running them confirms the audit changes did not regress an existing invariant.
+  running them confirms the audit changes did not regress an existing invariant. Machine
+  report: `reports/verify-20260914T103825Z-229289000-63431.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -316,7 +318,7 @@ proof.
   requires every published semantic answer to have verified citations rather than treating
   a missing citation set as inapplicable. Red tests cover slow startup, a contended writer,
   pipe backpressure, partial provider usage fields, and a citationless semantic answer.
-  Those bridge tests bring the canonical final matrix to 2,560 cases across all 17 passing
+  Those bridge tests brought the canonical matrix to 2,560 cases across all 17 passing
   gates. Its first expanded run also exposed a pre-existing scheduler race in one
   multi-chunk Python test: a shared reply list could attach valid fixture citations to the
   wrong concurrently executing source. Commit `9972bbd` makes the fixture select its reply
@@ -329,8 +331,10 @@ proof.
   redacted digest/citation record per answer, requires every answer's citations to verify,
   and proves a cache hit reproduces an earlier uncached verified answer. Direct red tests
   cover each boundary. Because these changes alter the bound implementation and evidence
-  schema, the real-Luna artifacts are regenerated only after this state is committed and
-  clean.
+  schema, the real-Luna artifacts were regenerated only after this state was committed and
+  clean. The resulting run passed with ten completed real attempts, no failed/timed-out/
+  late attempts, and a per-answer verified citation ledger; the two added aggregate tests
+  bring the final canonical matrix to 2,563 passing cases.
 
 ## Residual blockers
 
