@@ -229,9 +229,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 1,008 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,011 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
-- **TypeScript core suite:** 803 passed across 19 files (`npm --prefix packages/core-ts
+- **TypeScript core suite:** 806 passed across 19 files (`npm --prefix packages/core-ts
   test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
   exercised by the canonical capability gate below.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
@@ -244,7 +244,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,567 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,573 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -253,7 +253,7 @@ proof.
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
   running them confirms the audit changes did not regress an existing invariant. Machine
-  report: `reports/verify-20260914T105722Z-654159000-25042.json`.
+  report: `reports/verify-20260914T111917Z-312128000-68351.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -344,7 +344,10 @@ proof.
   the narrower backward-compatibility defect: the new per-page behavior had also reached
   accepted 1.1/1.2 requests. Both ports now gate the reset to 1.3, preserve cumulative
   match state for older cursors, and fail a spent legacy cursor explicitly rather than
-  granting more results. Cross-port regressions cover 1.1, 1.2, and 1.3 behavior.
+  granting more results. Signed cursor state also binds the request version, preventing a
+  legacy cursor from being relabeled as 1.3 to gain a fresh allowance. Cross-port
+  regressions cover 1.1, 1.2, and 1.3 behavior; the six added cases bring the final
+  canonical matrix to 2,573 passing cases.
 
 ## Residual blockers
 
