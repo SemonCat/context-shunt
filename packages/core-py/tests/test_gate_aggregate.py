@@ -190,6 +190,33 @@ def test_aggregate_keys_use_cross_runtime_utf8_order(tmp_path):
     assert [row["key"] for row in result["groups"]] == [["\ue000"], ["😀"]]
 
 
+def test_aggregate_rejects_escaped_lone_surrogate_key(tmp_path):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "lone-surrogate.json"
+    path.write_text('{"records":[{"value":"\\ud800"}]}')
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "records_pointer": "/records",
+                "distinct": ["/value"],
+                "group_by": ["/value"],
+            },
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
 @pytest.mark.parametrize(
     "raw_records",
     [

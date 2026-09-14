@@ -454,13 +454,22 @@ def evaluate(
                 "passed": needle in joined,
             }
         )
-    joined_answers = "\n".join(answers or [])
+    actual_answers = answers or []
     for pattern in expected.get("answer_matches", []):
+        per_answer = [
+            re.search(pattern, answer, re.IGNORECASE) is not None
+            for answer in actual_answers
+        ]
         checks.append(
             {
                 "kind": "answer_matches",
                 "expected_regex": pattern,
-                "passed": re.search(pattern, joined_answers, re.IGNORECASE) is not None,
+                "answers_observed": len(actual_answers),
+                "answers_matching": sum(per_answer),
+                # Every published answer to a repeated exact query must independently
+                # satisfy the expectation. Joining answers let one good first response
+                # conceal an empty or corrupt cache response.
+                "passed": bool(per_answer) and all(per_answer),
             }
         )
     by_source = {row["source"]: row for row in aggregates}
@@ -718,18 +727,42 @@ def execute_shunt(
             if isinstance(value, dict)
             and value.get("provenance", {}).get("cache_reused") is True
         )
-        citation_values = [
-            citation.get("verified")
+        semantic_outputs = [
+            value
             for value in main_outputs
             if isinstance(value, dict)
-            for citation in value.get("citations", [])
-        ]
-        semantic_answer_published = any(
-            isinstance(value, dict)
             and value.get("result_kind") == "model_derived"
             and bool(value.get("answer"))
-            for value in main_outputs
-        )
+        ]
+        semantic_answer_evidence: list[dict[str, Any]] = []
+        prior_uncached_answer_digests: set[str] = set()
+        for value in semantic_outputs:
+            answer = value["answer"]
+            answer_bytes = answer.encode("utf-8")
+            answer_digest = hashlib.sha256(answer_bytes).hexdigest()
+            citations = value.get("citations", [])
+            cache_reused = value.get("provenance", {}).get("cache_reused") is True
+            semantic_answer_evidence.append(
+                {
+                    "answer_sha256": answer_digest,
+                    "answer_bytes": len(answer_bytes),
+                    "citations_published": len(citations),
+                    "citations_all_verified": bool(citations)
+                    and all(citation.get("verified") is True for citation in citations),
+                    "cache_reused": cache_reused,
+                    "matches_prior_uncached_answer": (
+                        answer_digest in prior_uncached_answer_digests
+                        if cache_reused
+                        else None
+                    ),
+                }
+            )
+            if not cache_reused:
+                prior_uncached_answer_digests.add(answer_digest)
+        citation_values = [
+            item["citations_all_verified"] for item in semantic_answer_evidence
+        ]
+        semantic_answer_published = bool(semantic_answer_evidence)
         coverage = [
             {
                 "status": value.get("status"),
@@ -767,6 +800,7 @@ def execute_shunt(
             "correctness_checks": checks,
             "citation_validity": all(citation_values) if citation_values else None,
             "semantic_answer_published": semantic_answer_published,
+            "semantic_answer_evidence": semantic_answer_evidence,
             "coverage_observed": coverage,
             "harness_elapsed_ms_observed": round(elapsed_ms, 6),
             "mock_delay_ms_configured_total": (

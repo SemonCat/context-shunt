@@ -319,6 +319,16 @@ proof.
   wrong concurrently executing source. Commit `9972bbd` makes the fixture select its reply
   from the chunk payload; the reader gate and the repeated full matrix are clean.
 
+  The next explicit P0–P2 pass found four further valid P2s. Both aggregate ports now
+  reject escaped lone-surrogate keys before canonicalization, and TypeScript uses a fatal
+  UTF-8 decoder for direct text/plain aggregation instead of replacement decoding. The
+  execution harness now evaluates every repeated semantic answer independently, retains a
+  redacted digest/citation record per answer, requires every answer's citations to verify,
+  and proves a cache hit reproduces an earlier uncached verified answer. Direct red tests
+  cover each boundary. Because these changes alter the bound implementation and evidence
+  schema, the real-Luna artifacts are regenerated only after this state is committed and
+  clean.
+
 ## Residual blockers
 
 1. **One host-side proposal remains unimplemented by design:**

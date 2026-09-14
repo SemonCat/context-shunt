@@ -15,7 +15,7 @@
     "timing": "observed harness elapsed; fixture delay separately reported"
   },
   "implementation_sha256": {
-    "new_python_relevant_files": "0a5bd4cc09a5de6e8dbca0e95626dfb50775eed9f7431f5e622ba07866595f16",
+    "new_python_relevant_files": "70293c7cbf7ac89e9bd5145c2eb7f3a539b573b6460eccfb8deb87d5d2fc389d",
     "pre_git_tree": "bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da"
   },
   "red_checks": [
@@ -63,7 +63,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 7.290604,
+      "harness_elapsed_ms_observed": 6.650057,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 293,
       "mock_delay_ms_configured_total": 0.0,
@@ -88,6 +88,7 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_published": false,
       "source_sha256": [
         "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
       ],
@@ -134,7 +135,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 45.381072,
+      "harness_elapsed_ms_observed": 43.514881,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 13671,
       "mock_delay_ms_configured_total": 0.0,
@@ -161,6 +162,7 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_published": false,
       "source_sha256": [
         "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
         "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
@@ -177,6 +179,8 @@
       "correct": false,
       "correctness_checks": [
         {
+          "answers_matching": 0,
+          "answers_observed": 0,
           "expected_regex": "\\bretry_limit\\s*(?::|=|\\bis\\b)\\s*7\\b",
           "kind": "answer_matches",
           "passed": false
@@ -199,7 +203,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 21.216044,
+      "harness_elapsed_ms_observed": 21.875701,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 12072,
       "mock_delay_ms_configured_total": 0.0,
@@ -226,6 +230,7 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_published": false,
       "source_sha256": [
         "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
         "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
@@ -254,7 +259,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 5.557434,
+      "harness_elapsed_ms_observed": 5.316651,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 20424,
       "mock_delay_ms_configured_total": 0.0,
@@ -282,6 +287,7 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 19912,
+      "semantic_answer_published": false,
       "source_sha256": [
         "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
         "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
@@ -304,7 +310,7 @@
       ],
       "execution": "actual_incumbent_compactor_port",
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 3.912255,
+      "harness_elapsed_ms_observed": 4.042916,
       "lane": "legacy_compactor",
       "main_context_bytes_observed": 18207,
       "mock_delay_ms_configured_total": 0.0,
@@ -331,6 +337,7 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_published": false,
       "source_sha256": [
         "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
         "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
@@ -377,11 +384,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 43.50671,
+      "harness_elapsed_ms_observed": 56.600701,
       "lane": "pre",
       "main_context_bytes_observed": 2510,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 3.031105,
+      "mock_delay_ms_observed_total": 3.051975,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -400,7 +407,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2597,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.031105,
+            "observed_mock_call_ms": 3.051975,
             "output_payload_bytes": 193,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 650,
@@ -422,6 +429,17 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [
+        {
+          "answer_bytes": 46,
+          "answer_sha256": "0e5bdf3b7cf780e3a0ceeec5dd1aa135e8ff37ee5d258e5dd8d2be835cada805",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        }
+      ],
+      "semantic_answer_published": true,
       "source_sha256": [
         "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
       ],
@@ -499,11 +517,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 57.659683,
+      "harness_elapsed_ms_observed": 71.634044,
       "lane": "pre",
       "main_context_bytes_observed": 6045,
       "mock_delay_ms_configured_total": 8.0,
-      "mock_delay_ms_observed_total": 9.914754,
+      "mock_delay_ms_observed_total": 11.649964,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -524,7 +542,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.387838,
+            "observed_mock_call_ms": 3.073786,
             "output_payload_bytes": 543,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 8646,
@@ -537,7 +555,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.418707,
+            "observed_mock_call_ms": 2.466038,
             "output_payload_bytes": 28,
             "reported_cache_tokens": null,
             "reported_input_tokens": null,
@@ -550,7 +568,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.067274,
+            "observed_mock_call_ms": 3.055795,
             "output_payload_bytes": 28,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 8646,
@@ -563,7 +581,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 34581,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.040935,
+            "observed_mock_call_ms": 3.054345,
             "output_payload_bytes": 28,
             "reported_cache_tokens": null,
             "reported_input_tokens": null,
@@ -585,6 +603,17 @@
         "unknown_usage_attempts": 2
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [
+        {
+          "answer_bytes": 224,
+          "answer_sha256": "ed86b58418434c72d2758530517eff10138dd6c0a5d6d510620c618b0b5c4e45",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        }
+      ],
+      "semantic_answer_published": true,
       "source_sha256": [
         "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
         "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
@@ -606,6 +635,8 @@
       "correct": false,
       "correctness_checks": [
         {
+          "answers_matching": 2,
+          "answers_observed": 2,
           "expected_regex": "\\bretry_limit\\s*(?::|=|\\bis\\b)\\s*7\\b",
           "kind": "answer_matches",
           "passed": true
@@ -660,11 +691,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 70.067496,
+      "harness_elapsed_ms_observed": 103.958696,
       "lane": "pre",
       "main_context_bytes_observed": 6111,
       "mock_delay_ms_configured_total": 4.0,
-      "mock_delay_ms_observed_total": 5.060478,
+      "mock_delay_ms_observed_total": 5.049069,
       "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -686,7 +717,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.027433,
+            "observed_mock_call_ms": 2.376168,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -699,7 +730,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.033045,
+            "observed_mock_call_ms": 2.672901,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -721,6 +752,25 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [
+        {
+          "answer_bytes": 19,
+          "answer_sha256": "2157604ed254f5762600ee7434dcb5c7f41a9778c59625ef10d4aaa6d4ce55aa",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        },
+        {
+          "answer_bytes": 19,
+          "answer_sha256": "2157604ed254f5762600ee7434dcb5c7f41a9778c59625ef10d4aaa6d4ce55aa",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        }
+      ],
+      "semantic_answer_published": true,
       "source_sha256": [
         "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
         "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
@@ -768,7 +818,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 25.065759,
+      "harness_elapsed_ms_observed": 27.84316,
       "lane": "pre",
       "main_context_bytes_observed": 22306,
       "mock_delay_ms_configured_total": 0.0,
@@ -797,6 +847,8 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 19912,
+      "semantic_answer_evidence": [],
+      "semantic_answer_published": false,
       "source_sha256": [
         "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
         "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
@@ -850,7 +902,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 36.724182,
+      "harness_elapsed_ms_observed": 39.891199,
       "lane": "pre",
       "main_context_bytes_observed": 23299,
       "mock_delay_ms_configured_total": 0.0,
@@ -879,6 +931,8 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [],
+      "semantic_answer_published": false,
       "source_sha256": [
         "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
         "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
@@ -925,11 +979,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 36.55459,
+      "harness_elapsed_ms_observed": 46.07697,
       "lane": "new",
       "main_context_bytes_observed": 2510,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 3.045175,
+      "mock_delay_ms_observed_total": 3.038345,
       "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -948,7 +1002,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2597,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 3.045175,
+            "observed_mock_call_ms": 3.038345,
             "output_payload_bytes": 193,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 650,
@@ -970,6 +1024,17 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [
+        {
+          "answer_bytes": 46,
+          "answer_sha256": "0e5bdf3b7cf780e3a0ceeec5dd1aa135e8ff37ee5d258e5dd8d2be835cada805",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        }
+      ],
+      "semantic_answer_published": true,
       "source_sha256": [
         "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
       ],
@@ -1069,7 +1134,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 47.921562,
+      "harness_elapsed_ms_observed": 49.163975,
       "lane": "new",
       "main_context_bytes_observed": 6899,
       "mock_delay_ms_configured_total": 0.0,
@@ -1099,6 +1164,8 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [],
+      "semantic_answer_published": false,
       "source_sha256": [
         "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
         "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
@@ -1120,6 +1187,8 @@
       "correct": true,
       "correctness_checks": [
         {
+          "answers_matching": 2,
+          "answers_observed": 2,
           "expected_regex": "\\bretry_limit\\s*(?::|=|\\bis\\b)\\s*7\\b",
           "kind": "answer_matches",
           "passed": true
@@ -1188,11 +1257,11 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 58.777246,
+      "harness_elapsed_ms_observed": 62.206605,
       "lane": "new",
       "main_context_bytes_observed": 7767,
       "mock_delay_ms_configured_total": 2.0,
-      "mock_delay_ms_observed_total": 2.935794,
+      "mock_delay_ms_observed_total": 3.050235,
       "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
       "operation_trace": [
         "spill:0",
@@ -1215,7 +1284,7 @@
             "configured_mock_delay_ms": 2.0,
             "input_payload_bytes": 2535,
             "max_output_tokens": 2048,
-            "observed_mock_call_ms": 2.935794,
+            "observed_mock_call_ms": 3.050235,
             "output_payload_bytes": 139,
             "reported_cache_tokens": 0,
             "reported_input_tokens": 634,
@@ -1237,6 +1306,25 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [
+        {
+          "answer_bytes": 19,
+          "answer_sha256": "2157604ed254f5762600ee7434dcb5c7f41a9778c59625ef10d4aaa6d4ce55aa",
+          "cache_reused": false,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": null
+        },
+        {
+          "answer_bytes": 19,
+          "answer_sha256": "2157604ed254f5762600ee7434dcb5c7f41a9778c59625ef10d4aaa6d4ce55aa",
+          "cache_reused": true,
+          "citations_all_verified": true,
+          "citations_published": 1,
+          "matches_prior_uncached_answer": true
+        }
+      ],
+      "semantic_answer_published": true,
       "source_sha256": [
         "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
         "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
@@ -1284,7 +1372,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 31.941797,
+      "harness_elapsed_ms_observed": 25.730046,
       "lane": "new",
       "main_context_bytes_observed": 22306,
       "mock_delay_ms_configured_total": 0.0,
@@ -1313,6 +1401,8 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 19912,
+      "semantic_answer_evidence": [],
+      "semantic_answer_published": false,
       "source_sha256": [
         "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
         "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
@@ -1360,7 +1450,7 @@
       ],
       "execution": "actual_shunt_session",
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 29.228776,
+      "harness_elapsed_ms_observed": 29.209246,
       "lane": "new",
       "main_context_bytes_observed": 3688,
       "mock_delay_ms_configured_total": 0.0,
@@ -1388,6 +1478,8 @@
         "unknown_usage_attempts": 0
       },
       "requery_bytes_observed": 0,
+      "semantic_answer_evidence": [],
+      "semantic_answer_published": false,
       "source_sha256": [
         "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
         "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
@@ -1402,7 +1494,7 @@
       "answer_cache_hits_observed": 0,
       "correctness_rate_observed": 0.6,
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 83.357409,
+      "harness_elapsed_ms_observed": 81.400206,
       "main_context_bytes_observed": 64667,
       "main_context_tokens_estimated_bytes_div_4": 16167,
       "mock_delay_ms_configured_total": 0.0,
@@ -1426,11 +1518,11 @@
       "answer_cache_hits_observed": 1,
       "correctness_rate_observed": 1.0,
       "full_read_bytes_observed": 0,
-      "harness_elapsed_ms_observed": 204.423971,
+      "harness_elapsed_ms_observed": 212.386842,
       "main_context_bytes_observed": 43170,
       "main_context_tokens_estimated_bytes_div_4": 10793,
       "mock_delay_ms_configured_total": 4.0,
-      "mock_delay_ms_observed_total": 5.980969,
+      "mock_delay_ms_observed_total": 6.08858,
       "reader_attempts_observed": 2,
       "reader_attempts_usage_reported": 2,
       "reader_cache_tokens_reported_lower_bound": 0,
@@ -1450,15 +1542,15 @@
       "answer_cache_hits_observed": 0,
       "correctness_rate_observed": 0.6,
       "full_read_bytes_observed": 17601,
-      "harness_elapsed_ms_observed": 233.02383,
+      "harness_elapsed_ms_observed": 299.9278,
       "main_context_bytes_observed": 60271,
       "main_context_tokens_estimated_bytes_div_4": 15068,
       "mock_delay_ms_configured_total": 14.0,
-      "mock_delay_ms_observed_total": 18.006337,
+      "mock_delay_ms_observed_total": 19.751008,
       "reader_attempts_observed": 7,
       "reader_attempts_usage_reported": 5,
       "reader_cache_tokens_reported_lower_bound": 0,
-      "reader_core_accounted_cache_tokens": 0,
+      "reader_core_accounted_cache_tokens": null,
       "reader_core_accounted_input_tokens": 36499,
       "reader_core_accounted_output_tokens": 276,
       "reader_input_payload_bytes_observed": 145991,

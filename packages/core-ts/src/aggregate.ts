@@ -23,6 +23,11 @@ function optionalPointer(value: unknown, pointer: string): unknown | typeof MISS
 
 function scalar(value: unknown): Scalar | typeof MISSING {
   if (value === MISSING) return MISSING;
+  if (typeof value === "string" && /[\uD800-\uDFFF]/u.test(value)) {
+    // Escaped JSON can contain unpaired UTF-16 surrogates. They are not Unicode scalar
+    // values, so rejecting them keeps canonical aggregate keys identical across ports.
+    throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+  }
   if (value === null || ["string", "boolean"].includes(typeof value)) {
     return value as string | boolean | null;
   }
@@ -67,7 +72,7 @@ export function aggregateSnapshot(
       throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
     }
     try {
-      root = JSON.parse(Buffer.from(snapshot.data).toString("utf8"));
+      root = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(snapshot.data));
     } catch {
       throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
     }

@@ -38,6 +38,7 @@ RELEVANT_FILES = (
     "packages/core-py/src/context_shunt/provider.py",
     "packages/core-py/src/context_shunt/reader.py",
     "packages/core-py/src/context_shunt/session.py",
+    "packages/core-ts/src/aggregate.ts",
 )
 
 sys.path.insert(0, str(HERE))
@@ -253,6 +254,40 @@ def _transport_errors(payloads: dict[str, dict[str, Any]], route: str) -> list[s
     return errors
 
 
+def _semantic_evidence_errors(payloads: dict[str, dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    for lane in ("pre", "new"):
+        for row in payloads[lane]["rows"]:
+            semantic = row.get("semantic_answer_published")
+            if not isinstance(semantic, bool):
+                errors.append(f"{lane}/{row['workflow']}: semantic-output evidence missing")
+                continue
+            answer_evidence = row.get("semantic_answer_evidence")
+            if not isinstance(answer_evidence, list):
+                errors.append(f"{lane}/{row['workflow']}: per-answer evidence missing")
+                continue
+            if semantic != bool(answer_evidence):
+                errors.append(f"{lane}/{row['workflow']}: semantic-answer ledger mismatch")
+            for index, answer in enumerate(answer_evidence):
+                prefix = f"{lane}/{row['workflow']}/answer-{index + 1}"
+                if not isinstance(answer, dict):
+                    errors.append(f"{prefix}: malformed per-answer evidence")
+                    continue
+                if answer.get("citations_published", 0) < 1 or answer.get(
+                    "citations_all_verified"
+                ) is not True:
+                    errors.append(f"{prefix}: semantic answer lacked verified citations")
+                if answer.get("cache_reused") is True and answer.get(
+                    "matches_prior_uncached_answer"
+                ) is not True:
+                    errors.append(f"{prefix}: cached answer did not match its verified origin")
+            if semantic and row["citation_validity"] is not True:
+                errors.append(f"{lane}/{row['workflow']}: citation summary mismatch")
+            elif row["citation_validity"] is False:
+                errors.append(f"{lane}/{row['workflow']}: published citation failed verification")
+    return errors
+
+
 def _acceptance_errors(payloads: dict[str, dict[str, Any]], route: str) -> list[str]:
     errors = local_benchmark.acceptance_errors(payloads)
     errors.extend(_transport_errors(payloads, route))
@@ -264,17 +299,7 @@ def _acceptance_errors(payloads: dict[str, dict[str, Any]], route: str) -> list[
     ):
         if new[workflow]["reader"]["attempts_observed"] != 0:
             errors.append(f"NEW deterministic workflow {workflow} called Luna")
-    for lane in ("pre", "new"):
-        for row in payloads[lane]["rows"]:
-            semantic = row.get("semantic_answer_published")
-            if not isinstance(semantic, bool):
-                errors.append(f"{lane}/{row['workflow']}: semantic-output evidence missing")
-            elif semantic and row["citation_validity"] is not True:
-                errors.append(
-                    f"{lane}/{row['workflow']}: semantic answer lacked verified citations"
-                )
-            elif row["citation_validity"] is False:
-                errors.append(f"{lane}/{row['workflow']}: published citation failed verification")
+    errors.extend(_semantic_evidence_errors(payloads))
     return errors
 
 

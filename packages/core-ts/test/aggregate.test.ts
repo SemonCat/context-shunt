@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { aggregateSnapshot } from "../src/aggregate.js";
+import { DEFAULT_LIMITS } from "../src/limits.js";
 import { UnavailableProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
+import { type Snapshot } from "../src/snapshot.js";
 import { makeCapability, makeConfig } from "./support.js";
 
 function setup() {
@@ -125,6 +128,46 @@ describe("structured deterministic aggregation", () => {
     expect(result.distinct[0].values).toEqual(["\ue000", "😀"]);
     expect(result.groups.map((row: { key: string[] }) => row.key))
       .toEqual([["\ue000"], ["😀"]]);
+  });
+
+  it("rejects escaped lone surrogate aggregate keys", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-surrogate-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "lone-surrogate.json");
+    writeFileSync(path, '{"records":[{"value":"\\ud800"}]}');
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    const entry = session.registerPath(path);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/records",
+      distinct: ["/value"], group_by: ["/value"],
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_SELECTOR");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("rejects malformed UTF-8 in a direct text snapshot without replacement", () => {
+    const malformed = {
+      snapshotId: "sha256:fixture",
+      mediaType: "text/plain",
+      data: Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xc3, 0x28, 0x7d]),
+      lineIndex: undefined,
+      jsonValue: undefined,
+      bytesLen: 8,
+      lineCount: 1,
+    } as unknown as Snapshot;
+    expect(() => aggregateSnapshot(
+      malformed,
+      { records_pointer: "/records" },
+      {
+        maxResultBytes: 16_384,
+        maxWireBytes: 20_000,
+        maxRecords: 20_000,
+        limits: DEFAULT_LIMITS,
+      },
+    )).toThrowError(expect.objectContaining({ code: "INVALID_REQUEST", detail: "BAD_JSON" }));
   });
 
   it.each([

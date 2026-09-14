@@ -362,8 +362,76 @@ def test_real_luna_acceptance_rejects_a_citationless_semantic_answer() -> None:
             row.setdefault("semantic_answer_published", False)
     target["semantic_answer_published"] = True
     target["citation_validity"] = None
+    target["semantic_answer_evidence"] = [
+        {
+            "answer_sha256": "a" * 64,
+            "answer_bytes": 1,
+            "citations_published": 0,
+            "citations_all_verified": False,
+            "cache_reused": False,
+            "matches_prior_uncached_answer": None,
+        }
+    ]
     errors = real_run._acceptance_errors(payloads, report["route"]["requested"])
     assert any("semantic answer lacked verified citations" in error for error in errors)
+
+
+def test_repeated_answer_correctness_cannot_be_satisfied_by_only_one_answer() -> None:
+    root = Path(__file__).resolve().parents[3]
+    worker = _worker_module(root)
+    expected = {"answer_matches": [r"retry_limit\s*:\s*7"]}
+    correct, checks = worker.evaluate(
+        expected,
+        evidence=[],
+        aggregates=[],
+        answers=["retry_limit: 7", ""],
+    )
+    assert correct is False
+    assert checks == [
+        {
+            "kind": "answer_matches",
+            "expected_regex": r"retry_limit\s*:\s*7",
+            "answers_observed": 2,
+            "answers_matching": 1,
+            "passed": False,
+        }
+    ]
+
+
+def test_real_luna_acceptance_rejects_bad_per_answer_and_cache_evidence() -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    base_row = {
+        "workflow": "fixture",
+        "reader": {"attempts_observed": 0, "calls": []},
+        "semantic_answer_published": True,
+        "semantic_answer_evidence": [
+            {
+                "answer_sha256": "a" * 64,
+                "answer_bytes": 10,
+                "citations_published": 1,
+                "citations_all_verified": True,
+                "cache_reused": False,
+                "matches_prior_uncached_answer": None,
+            },
+            {
+                "answer_sha256": "b" * 64,
+                "answer_bytes": 10,
+                "citations_published": 0,
+                "citations_all_verified": False,
+                "cache_reused": True,
+                "matches_prior_uncached_answer": False,
+            },
+        ],
+        "citation_validity": False,
+    }
+    payloads = {
+        "pre": {"rows": [json.loads(json.dumps(base_row))]},
+        "new": {"rows": []},
+    }
+    errors = real_run._semantic_evidence_errors(payloads)
+    assert any("answer-2: semantic answer lacked verified citations" in error for error in errors)
+    assert any("answer-2: cached answer did not match its verified origin" in error for error in errors)
 
 
 def real_run_totals(root: Path, rows: list[dict]):

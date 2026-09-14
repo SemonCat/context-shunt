@@ -27,6 +27,11 @@ def _optional_pointer(value: Any, pointer: str) -> Any:
 
 
 def _scalar(value: Any) -> Any:
+    if isinstance(value, str) and any("\ud800" <= char <= "\udfff" for char in value):
+        # JSON permits escaped UTF-16 surrogate code units, but they are not Unicode
+        # scalar values and cannot be represented by Python's strict UTF-8 encoder.
+        # Reject them before canonical key construction so both ports fail closed.
+        raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
     if value is _MISSING or value is None or isinstance(value, (str, bool)):
         return value
     raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
