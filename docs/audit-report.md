@@ -209,7 +209,7 @@ proof.
   records one bounded answer-cache hit, exact structured results, zero unknown usage
   attempts, and the known requery loss. See the committed JSON/Markdown artifacts.
 - **`./scripts/verify shadow deterministic`:** PASS — `main_context_reduction` 0.9734
-  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 38.208ms
+  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
 - **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,534 cases, 0
@@ -219,15 +219,15 @@ proof.
   boundaries), `bounded-output` (source/chunk/input/output/envelope/JSON caps), `permissions`
   (root, traversal, symlink/hardlink/race, secret, binary, quota controls), `cancellation`
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
-  host seams disable only the affected mode). None of these gates were modified by this
-  audit's fixes; running them confirms the five findings closed above did not regress any
-  existing invariant.
-- Every fix in this audit was verified red-capable at the time it was made (fix files
-  stashed out, new test confirmed to fail, then pass again after unstashing) — recorded
-  per-commit in each commit message rather than re-run as one batch; see
+  host seams disable only the affected mode). The gate definitions were not weakened;
+  running them confirms the audit changes did not regress an existing invariant.
+- The original regression fixes were verified red-capable at the time they were made
+  (recorded per commit), the execution harness has explicit cache/aggregation sabotage
+  modes that fail acceptance, and every accepted review finding has a direct regression
+  covering its reproduced pre-fix behavior; see
   [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md#red-capable-verification).
 - **External review (`autoreview` skill):** the prior P0-only result was discarded because
-  it did not inspect P1/P2 findings. Two branch-wide reviews were then run explicitly with
+  it did not inspect P1/P2 findings. Successive branch-wide reviews were then run with
   `--max-priority P2`. The first produced five accepted findings, all fixed in `2d319a2`;
   the second produced three candidates, of which the two aggregate/cursor findings above
   were reproduced and fixed and the PRE-version claim was rejected using the archived
@@ -236,8 +236,10 @@ proof.
   the numeric-precision P2 above; it too was reproduced and fixed. The next verification
   found the equality-string bound above; it was also reproduced and fixed. The following
   pass found the rounded-lexeme hole in the initial safe-integer remedy, which was closed by
-  rejecting numeric identities entirely. A final P0–P2 verification follows the closeout
-  commit containing that fix.
+  rejecting numeric identities entirely. The final command
+  `autoreview --mode branch --base main --max-priority P2` against `495a20d` completed with
+  a clean secret scan and **no accepted/actionable P0–P2 findings** (`patch is correct`,
+  confidence 0.87).
 
 ## Residual blockers
 
