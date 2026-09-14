@@ -303,6 +303,29 @@ def test_real_luna_has_no_resume_path_for_editable_lane_evidence() -> None:
     assert "_checkpoint_errors" not in source
 
 
+def test_real_luna_refuses_an_alternate_provider_before_starting_a_lane(
+    monkeypatch, tmp_path
+) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    host = tmp_path / "host"
+    host.mkdir()
+    monkeypatch.setenv("CONTEXT_SHUNT_LUNA_EVAL", "1")
+    monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROOT", str(host))
+    monkeypatch.setenv(
+        "CONTEXT_SHUNT_OPENCLAW_ROUTE", "alternate-provider/gpt-5.6-luna"
+    )
+    monkeypatch.delenv("CONTEXT_SHUNT_OPENCLAW_SERVER", raising=False)
+    monkeypatch.setattr("sys.argv", ["real_run.py"])
+    monkeypatch.setattr(
+        real_run.local_benchmark,
+        "run_worker",
+        lambda *_args, **_kwargs: pytest.fail("a live lane was started"),
+    )
+    with pytest.raises(SystemExit, match="must be the qualifying route"):
+        real_run.main()
+
+
 def test_real_luna_revalidates_checkout_binding_between_stages(monkeypatch) -> None:
     root = Path(__file__).resolve().parents[3]
     real_run = _real_run_module(root)

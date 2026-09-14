@@ -351,8 +351,10 @@ def main() -> None:
     if not host_root.is_dir():
         raise SystemExit("NOT_RUN: CONTEXT_SHUNT_OPENCLAW_ROOT is not a checkout")
     route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE", DEFAULT_ROUTE)
-    if "/" not in route or route.split("/", 1)[1] != MODEL:
-        raise SystemExit("NOT_RUN: configured route is not gpt-5.6-luna")
+    if route != DEFAULT_ROUTE:
+        raise SystemExit(
+            f"NOT_RUN: configured route must be the qualifying route {DEFAULT_ROUTE}"
+        )
     lane_evidence_path = HERE / "real-luna-lanes-latest.json"
     evidence_binding = _binding(host_root, route)
     current_package = ROOT / "packages" / "core-py" / "src"
