@@ -187,9 +187,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 84.964 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/2,535/15,360 | 180,834 | 87,430.266 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/108/0 | 5,132 | 28,520.647 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 90.089 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 6,172/3,037/19,200 | 180,834 | 89,491.759 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/144/0 | 5,132 | 30,380.515 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -200,7 +200,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`5ccc893d57297b240aecb271d772a54a8f5ed0db`, PRE as commit `1686db6` with tree
+`113776abb4cfdb8e305995f81576d914ace834af`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -253,7 +253,7 @@ proof.
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
   running them confirms the audit changes did not regress an existing invariant. Machine
-  report: `reports/verify-20260914T121703Z-212167000-62918.json`.
+  report: `reports/verify-20260914T125157Z-237501000-67692.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -382,6 +382,21 @@ proof.
   worker with a tripwire and proves the alternate-provider input exits first. All five
   real lanes were then executed again from that clean commit; no earlier live output was
   reused.
+
+  The following explicit P0–P2 review returned two candidates. The cursor candidate was
+  valid: a 1.3 request resuming a pre-versioned cursor received a new cursor tagged 1.2,
+  which the same request could not use. Commit `113776a` separates the authenticated legacy
+  cumulative-match marker from the cursor's request-version binding in both ports; the
+  cross-port regression resumes the returned 1.3 cursor and proves cumulative accounting
+  continues. The aggregate-oracle candidate was rejected after threat-model verification:
+  a valid handle already authorizes deterministic inspection of that snapshot, aggregate
+  deliberately supports direct `distinct` value disclosure, and
+  [`docs/security.md`](security.md#the-disclosure-ceiling-and-why-it-exists) explicitly
+  defines the disclosure ceiling as a context-cost bound rather than a confidentiality
+  boundary. The source/content secret denylist remains best effort as documented; this
+  review did not justify removing an authorized exact filter while leaving equivalent
+  authorized direct inspection available. The real lanes were executed again from the
+  clean cursor-fix commit.
 
 ## Residual blockers
 
