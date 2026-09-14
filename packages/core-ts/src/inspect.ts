@@ -622,7 +622,17 @@ export class Inspector {
     if (moreLines && out.linesScanned >= scanBudget && !matchedAll) {
       out.scanBudgetExhausted = true;
     }
-    if (moreLines && !matchedAll) {
+    if (moreLines) {
+      // Unscanned source remains, whether the page stopped because a budget ran out or
+      // because the caller's own `max_matches` cap was satisfied. Reaching the cap proves
+      // at least that many matches exist - it does not prove there is no match just past
+      // the cutoff. "complete" means the source was actually looked at, not merely that
+      // the request's own cap was met; conflating the two would let a caller mistake
+      // "found the first N" for "found all of them", which is exactly the "whole-source
+      // count under partial coverage" claim this project refuses to make on the reader's
+      // side. A continuation cursor is offered either way, so a caller that wants the true
+      // total can keep paging (raising `max_matches` if needed) until the source is
+      // genuinely exhausted.
       out.complete = false;
       out.nextCursorState = { line: ordinal, matches: already + (out.matchesFound ?? 0) };
     }

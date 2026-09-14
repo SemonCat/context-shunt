@@ -587,7 +587,17 @@ class Inspector:
         matched_all = (out.matches_found or 0) >= remaining_matches
         if more_lines and out.lines_scanned >= scan_budget and not matched_all:
             out.scan_budget_exhausted = True
-        if more_lines and not matched_all:
+        if more_lines:
+            # Unscanned source remains, whether the page stopped because a budget ran out
+            # or because the caller's own ``max_matches`` cap was satisfied. Reaching the
+            # cap proves at least that many matches exist - it does not prove there is no
+            # match just past the cutoff. "complete" means the source was actually looked
+            # at, not merely that the request's own cap was met; conflating the two would
+            # let a caller mistake "found the first N" for "found all of them", which is
+            # exactly the "whole-source count under partial coverage" claim this project
+            # refuses to make on the reader's side. A continuation cursor is offered either
+            # way, so a caller that wants the true total can keep paging (raising
+            # ``max_matches`` if needed) until the source is genuinely exhausted.
             out.complete = False
             out.next_cursor_state = {
                 "line": ordinal,
