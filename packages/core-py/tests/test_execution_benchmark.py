@@ -128,10 +128,17 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     assert report["acceptance"] == {"passed": True, "errors": []}
     assert report["attempt_outcomes"] == {
         "completed": 10,
-        "timed_out": 0,
+        "timed_out": 1,
         "failed": 0,
         "late_or_in_flight_usage_unknown": 0,
     }
+    assert sum(report["attempt_outcomes"].values()) == sum(
+        report["totals"][lane]["reader_attempts_observed"] for lane in ("pre", "new")
+    )
+    assert sum(
+        report["totals"][lane]["reader_unknown_usage_attempts"]
+        for lane in ("pre", "new")
+    ) == 1
     assert report["corpus_sha256"] == hashlib.sha256(corpus.read_bytes()).hexdigest()
 
     digest = hashlib.sha256()
@@ -162,8 +169,20 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         if row["lane"] in {"pre", "new"}
         for call in row["reader"]["calls"]
     ]
-    assert len(real_calls) == 10
-    assert all(call["resolved_model"] == "gpt-5.6-luna" for call in real_calls)
+    assert len(real_calls) == 11
+    completed = [call for call in real_calls if call["status"] == "completed"]
+    timed_out = [
+        call for call in real_calls if call["status"] == "timed_out_usage_unknown"
+    ]
+    assert len(completed) == 10 and len(timed_out) == 1
+    assert all(call["resolved_model"] == "gpt-5.6-luna" for call in completed)
+    assert all(call.get("resolved_model") is None for call in timed_out)
+    assert all(
+        call.get("reported_input_tokens") is None
+        and call.get("reported_output_tokens") is None
+        and call.get("reported_cache_tokens") is None
+        for call in timed_out
+    )
     assert all(call["payload"]["roles"] == ["system", "user"] for call in real_calls)
     assert all(
         call["payload"]["system_is_exact_reader_contract"]

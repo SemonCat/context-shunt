@@ -217,7 +217,7 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         "Wall time is the observed duration of each independently launched lane, including its own initialization. It is reported as execution evidence, not as an end-to-end time-savings claim; the legacy lane makes no provider calls and is not latency-comparable to PRE/NEW.",
         "",
-        f"All {report['attempt_outcomes']['completed']} real attempts completed; this accepted run observed {report['attempt_outcomes']['timed_out']} timeouts, {report['attempt_outcomes']['failed']} failures, and {report['attempt_outcomes']['late_or_in_flight_usage_unknown']} late/in-flight attempts with unknown usage. A nonzero value would remain in those fields rather than being reconstructed from response bytes.",
+        f"The run started {sum(report['attempt_outcomes'].values())} real attempts: {report['attempt_outcomes']['completed']} completed, {report['attempt_outcomes']['timed_out']} timed out, {report['attempt_outcomes']['failed']} failed, and {report['attempt_outcomes']['late_or_in_flight_usage_unknown']} remained late/in-flight. Timed-out, failed, or late usage remains unknown rather than being reconstructed from response bytes.",
         "",
         "Each real call retains only redacted payload evidence: role names, byte lengths, SHA-256 digests, exact-template booleans, bounded caps, resolved route/execution identity, status, duration, and provider usage when reported. It stores no system prompt, question, source excerpt, completion, citation quote, credential, or host stderr.",
         "",
