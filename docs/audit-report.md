@@ -186,11 +186,11 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 77.922 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 7 (7/0) | 5,222/1,547/15,360 | 145,991 | 57,778.780 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/143/0 | 5,132 | 29,772.595 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 89.593 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 2/2 | 8 (8/0) | 13,852/2,844/11,520 | 180,835 | 85,202.169 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/141/0 | 5,132 | 30,640.489 | 1 |
 
-The accepted run started nine real attempts, all of which completed with reported usage
+The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
 the lane closed. Missing usage would remain unknown; no token field is
 derived from payload bytes or a completion ratio.
@@ -199,11 +199,13 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`f7375f14e751b9c0d9b545f28595876e360e3b36`, PRE as git tree `1686db6`, and the
+`ca61ad296a8f14794d51f423c7a6a510fa225b8b`, PRE as commit `1686db6` with tree
+`bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
-corpus hash and exact digest of every evaluation/bridge/core file used by the run. Resume
-fails closed if the provider kind, route, corpus, host commit, PRE tree, worktree commit,
-file list, or file digest differs.
+corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
+the named evaluation/bridge/core files. Both checkouts must be clean before a provider call
+can start. Resume fails closed if the provider kind, route, corpus, host commit/tree, PRE
+tree, worktree commit/tree, file list, or file digest differs.
 
 Each physical call retains a redacted payload attestation only: roles, byte counts,
 SHA-256 digests, exact system-contract and user-template checks, locator kind, bounded
@@ -277,8 +279,16 @@ proof.
   Python and TypeScript regressions both prove the bounded `20 + 20 + 9` traversal. Making
   it cumulative would recreate the already-fixed non-progressing cursor for sources with
   more matches than the global one-page cap; cumulative source/session disclosure quotas
-  remain enforced independently. The final rerun retained a clean secret scan and no
-  accepted/actionable P0–P2 finding.
+  remain enforced independently.
+
+  A final branch review against `3fa92b6` found three additional valid P2s. All are fixed
+  in `ca61ad2`: reported input/output totals now remain `null` when attempts exist but none
+  reports usage; real-run checkpoints bind complete clean Git trees for the Shunt and host
+  checkouts rather than trusting a hand-maintained transitive file list; and Python and
+  TypeScript failure provenance now reports `usage_complete: true` when every started
+  attempt returned usage, even if a later publication deadline prevents the answer from
+  shipping. Direct regressions cover all three cases, and changing the bound implementation
+  made the prior Luna artifact fail its digest check until the real run was repeated.
 
 ## Residual blockers
 
