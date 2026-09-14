@@ -229,9 +229,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 1,011 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,012 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
-- **TypeScript core suite:** 806 passed across 19 files (`npm --prefix packages/core-ts
+- **TypeScript core suite:** 807 passed across 19 files (`npm --prefix packages/core-ts
   test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
   exercised by the canonical capability gate below.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
@@ -244,7 +244,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,573 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,575 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -253,7 +253,7 @@ proof.
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
   running them confirms the audit changes did not regress an existing invariant. Machine
-  report: `reports/verify-20260914T111917Z-312128000-68351.json`.
+  report: `reports/verify-20260914T113830Z-624085000-50124.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -355,7 +355,8 @@ proof.
   `$CONTEXT_SHUNT_OPENCLAW_ROOT` variable reference; the operator's absolute checkout path
   is absent from JSON and Markdown artifacts. Direct tests cover both boundaries, and the
   real run is repeated against the resulting clean commit rather than reusing prior lane
-  output.
+  output. The two new cross-port cases bring the final canonical matrix to 2,575 passing
+  cases.
 
 ## Residual blockers
 
