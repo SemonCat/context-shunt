@@ -165,6 +165,16 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 35.1ms (≤2000ms).
   Five reader-scored gates correctly `NOT_RUN` (see above).
 - **`./scripts/verify benchmark core`:** PASS, 12 cases, no live provider required.
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,480 cases, 0
+  failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
+  forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
+  capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
+  boundaries), `bounded-output` (source/chunk/input/output/envelope/JSON caps), `permissions`
+  (root, traversal, symlink/hardlink/race, secret, binary, quota controls), `cancellation`
+  (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
+  host seams disable only the affected mode). None of these gates were modified by this
+  audit's fixes; running them confirms the five findings closed above did not regress any
+  existing invariant.
 - Every fix in this audit was verified red-capable at the time it was made (fix files
   stashed out, new test confirmed to fail, then pass again after unstashing) — recorded
   per-commit in each commit message rather than re-run as one batch; see
