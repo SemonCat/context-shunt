@@ -383,15 +383,6 @@ proof.
   real lanes were then executed again from that clean commit; no earlier live output was
   reused.
 
-  The next explicit P0–P2 pass returned one Python reader-operation candidate. Direct code
-  inspection and execution rejected it as a behavior defect: `validate_request` already
-  defaults to `READ_OPERATIONS`, so a valid `inspect`/`stats` document is rejected before
-  the cache-key path indexes read-only fields. Commit `e98c34a` nevertheless makes that
-  existing restriction explicit at both reader validation sites and adds a public-boundary
-  regression proving `OPERATION_NOT_ACCEPTED_HERE` with zero provider calls. This is
-  coverage/clarity, not a claimed functional fix. The real lanes were executed one final
-  time from that clean commit.
-
   The following explicit P0–P2 review returned two candidates. The cursor candidate was
   valid: a 1.3 request resuming a pre-versioned cursor received a new cursor tagged 1.2,
   which the same request could not use. Commit `113776a` separates the authenticated legacy
@@ -406,6 +397,24 @@ proof.
   review did not justify removing an authorized exact filter while leaving equivalent
   authorized direct inspection available. The real lanes were executed again from the
   clean cursor-fix commit.
+
+  The next explicit P0–P2 pass returned one Python reader-operation candidate. Direct code
+  inspection and execution rejected it as a behavior defect: `validate_request` already
+  defaults to `READ_OPERATIONS`, so a valid `inspect`/`stats` document is rejected before
+  the cache-key path indexes read-only fields. Commit `e98c34a` nevertheless makes that
+  existing restriction explicit at both reader validation sites and adds a public-boundary
+  regression proving `OPERATION_NOT_ACCEPTED_HERE` with zero provider calls. This is
+  coverage/clarity, not a claimed functional fix. The real lanes were executed one final
+  time from that clean commit.
+
+  The final two-pass P0–P2 rerun had a clean secret scan and emitted one evidence-binding
+  candidate, which was rejected after checking Git ancestry and source equivalence:
+  `113776a` is an ancestor of the evaluated `e98c34a`, and the only later commit contains
+  the generated human/machine evidence itself. `git diff` reports no implementation-source
+  change after `e98c34a`, while the committed evidence regression independently recomputes
+  the named-file digest and passes. Requiring the generated artifact to identify its own
+  later artifact-only commit would be self-referential. No accepted/actionable P0–P2
+  finding remains.
 
 ## Residual blockers
 
