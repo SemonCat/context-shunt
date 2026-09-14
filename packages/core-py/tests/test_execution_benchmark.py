@@ -204,6 +204,10 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         for row in report["results"]
         if row["lane"] in {"pre", "new"}
     )
+    assert "/Users/" not in report["command"]
+    assert 'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT"' in report[
+        "command"
+    ]
 
     new = {
         row["workflow"]: row

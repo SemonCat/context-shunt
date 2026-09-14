@@ -137,6 +137,11 @@ export function aggregateSnapshot(
       if (typeof record !== "string") {
         throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
       }
+      if (/[\uD800-\uDFFF]/u.test(record)) {
+        // TextEncoder replaces lone surrogates. Reject before byte accounting so the
+        // structured parser stays strict and matches Python's BAD_JSON behavior.
+        throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
+      }
       parsedBytes += Buffer.byteLength(record, "utf8");
       if (parsedBytes > opts.limits.maxSourceBytes) {
         throw new ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", false);

@@ -148,6 +148,26 @@ describe("structured deterministic aggregation", () => {
     expect(env.extraction).toBeUndefined();
   });
 
+  it("rejects a lone surrogate before measuring embedded JSON bytes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-embedded-surrogate-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "embedded-surrogate.json");
+    writeFileSync(path, '{"records":[{"value":"\\ud800"}]}');
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    const entry = session.registerPath(path);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate",
+      records_pointer: "/records",
+      record_pointer: "/value",
+      parse_json: true,
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_JSON");
+    expect(env.extraction).toBeUndefined();
+  });
+
   it.each(["distinct", "group_by"] as const)(
     "rejects a lone surrogate in the emitted %s pointer name",
     (field) => {

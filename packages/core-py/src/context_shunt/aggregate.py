@@ -114,6 +114,10 @@ def aggregate_snapshot(
         if selector.get("parse_json"):
             if not isinstance(record, str):
                 raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
+            if any("\ud800" <= char <= "\udfff" for char in record):
+                # A lone surrogate is neither valid UTF-8 nor valid embedded JSON text.
+                # Reject before strict byte accounting attempts to encode it.
+                raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False)
             parsed_bytes += len(record.encode("utf-8"))
             if parsed_bytes > limits.max_source_bytes:
                 raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)

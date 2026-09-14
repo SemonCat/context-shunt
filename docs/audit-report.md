@@ -349,6 +349,14 @@ proof.
   regressions cover 1.1, 1.2, and 1.3 behavior; the six added cases bring the final
   canonical matrix to 2,573 passing cases.
 
+  The following P0–P2 pass found two valid evidence/parser P2s. Embedded JSON aggregation
+  now rejects a lone surrogate before UTF-8 byte accounting in both ports, closing an
+  internal-exception/parity gap. Generated evidence commands retain only the literal
+  `$CONTEXT_SHUNT_OPENCLAW_ROOT` variable reference; the operator's absolute checkout path
+  is absent from JSON and Markdown artifacts. Direct tests cover both boundaries, and the
+  real run is repeated against the resulting clean commit rather than reusing prior lane
+  output.
+
 ## Residual blockers
 
 1. **One host-side proposal remains unimplemented by design:**

@@ -314,7 +314,8 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         f"Acceptance: **{'PASS' if report['acceptance']['passed'] else 'FAIL'}**.",
         "",
-        "Exact command:",
+        "Exact command (first export `CONTEXT_SHUNT_OPENCLAW_ROOT` to the existing clean "
+        "OpenClaw checkout; its local value is intentionally not retained):",
         "",
         "```sh",
         report["command"],
@@ -451,7 +452,7 @@ def main() -> None:
         "acceptance": {"passed": not errors, "errors": errors},
         "command": (
             "CONTEXT_SHUNT_LUNA_EVAL=1 "
-            f"CONTEXT_SHUNT_OPENCLAW_ROOT={host_root} "
+            'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT" '
             f"CONTEXT_SHUNT_OPENCLAW_ROUTE={route} "
             "CONTEXT_SHUNT_EVAL_PARENT_CONTEXT_CANARY=PRIVATE_PARENT_CONTEXT_CANARY_7f9070 "
             ".venv/bin/python evals/intent-reader-audit/real_run.py "
