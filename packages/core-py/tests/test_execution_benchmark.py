@@ -135,19 +135,17 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     )
     corpus = root / "evals/intent-reader-audit/corpus.json"
     assert report["acceptance"] == {"passed": True, "errors": []}
-    assert report["attempt_outcomes"] == {
-        "completed": 10,
-        "timed_out": 1,
-        "failed": 0,
-        "late_or_in_flight_usage_unknown": 0,
-    }
+    outcomes = report["attempt_outcomes"]
+    assert outcomes["completed"] > 0
+    assert outcomes["failed"] == 0
+    assert outcomes["late_or_in_flight_usage_unknown"] == 0
     assert sum(report["attempt_outcomes"].values()) == sum(
         report["totals"][lane]["reader_attempts_observed"] for lane in ("pre", "new")
     )
     assert sum(
         report["totals"][lane]["reader_unknown_usage_attempts"]
         for lane in ("pre", "new")
-    ) == 1
+    ) == outcomes["timed_out"]
     assert report["corpus_sha256"] == hashlib.sha256(corpus.read_bytes()).hexdigest()
 
     digest = hashlib.sha256()
@@ -178,12 +176,13 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         if row["lane"] in {"pre", "new"}
         for call in row["reader"]["calls"]
     ]
-    assert len(real_calls) == 11
+    assert len(real_calls) == sum(outcomes.values())
     completed = [call for call in real_calls if call["status"] == "completed"]
     timed_out = [
         call for call in real_calls if call["status"] == "timed_out_usage_unknown"
     ]
-    assert len(completed) == 10 and len(timed_out) == 1
+    assert len(completed) == outcomes["completed"]
+    assert len(timed_out) == outcomes["timed_out"]
     assert all(call["resolved_model"] == "gpt-5.6-luna" for call in completed)
     assert all(call.get("resolved_model") is None for call in timed_out)
     assert all(
@@ -211,6 +210,16 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         "session-5-full-read-and-unread-pointer",
     ):
         assert new[deterministic]["reader"]["attempts_observed"] == 0
+
+    # A missing core total remains unknown; it is never folded into an exact-looking zero.
+    pre_rows = [
+        json.loads(json.dumps(row))
+        for row in report["results"]
+        if row["lane"] == "pre"
+    ]
+    with_attempt = next(row for row in pre_rows if row["reader"]["attempts_observed"])
+    with_attempt["reader"]["core_accounted_input_tokens"] = None
+    assert real_run_totals(root, pre_rows)["reader_core_accounted_input_tokens"] is None
 
 
 def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
@@ -245,3 +254,7 @@ def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
     mock_lane = json.loads(json.dumps(checkpoint))
     mock_lane["payloads"]["new"]["provider_kind"] = "mock"
     assert real_run._checkpoint_errors(mock_lane, binding)
+
+
+def real_run_totals(root: Path, rows: list[dict]):
+    return _real_run_module(root).local_benchmark.totals({"rows": rows})

@@ -187,13 +187,12 @@ transport, execution mode, or execution owner before an answer can be published.
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 79.954 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 2/2 | 9 (8/1) | 6,118/2,388/19,200 lower bound | 215,415 | 89,838.607 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/141/0 | 5,132 | 27,675.680 | 1 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 7 (7/0) | 5,222/1,547/15,360 | 145,991 | 57,778.780 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/143/0 | 5,132 | 29,772.595 | 1 |
 
-The accepted run started eleven real attempts. Ten completed with reported usage and
-resolved Luna identity; one PRE attempt reached its 45-second transport deadline and is
-retained as unknown usage/identity with no answer published. No attempt failed or remained
-late/in flight when the lane closed. Missing usage remains unknown; no token field is
+The accepted run started nine real attempts, all of which completed with reported usage
+and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
+the lane closed. Missing usage would remain unknown; no token field is
 derived from payload bytes or a completion ratio.
 Main-context token estimates remain separately labeled byte/4 estimates in the JSON.
 Wall time is reported per independently launched lane, including initialization, and is
