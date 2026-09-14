@@ -1006,18 +1006,27 @@ describe("cancellation and deadlines", () => {
     const slow: any = {
       async complete() {
         clock.advance(61000);
+        const identity = { provider: "openai", model: READER_MODEL };
         return {
           text: answerJson("max_retries is three [c1]", [
             { id: "c1", line_start: 2, line_end: 2, quote: "max_retries" },
           ]),
-          model: READER_MODEL,
-          usage: { inputTokens: 0, outputTokens: 0, estimated: true },
+          requested: identity,
+          resolved: identity,
+          reported: identity,
+          providerConfirmsGeneration: true,
+          usage: { inputTokens: 1, outputTokens: 1, method: "exact" },
+          fallbackUsed: false,
         };
       },
     };
-    const env = await new Reader(registry, slow, undefined, clock).answer("sess", request(entry));
-    expect(env.answer).toBe("");
-    expect(env.coverage.complete).toBe(false);
+    const result = await new Reader(registry, slow, undefined, clock)
+      .answerDetailed("sess", request(entry));
+    expect(result.envelope.answer).toBe("");
+    expect(result.envelope.coverage.complete).toBe(false);
+    expect(result.cost.attemptsStarted).toBe(1);
+    expect(result.cost.attemptsUsageComplete).toBe(1);
+    expect(result.envelope.provenance?.usage_complete).toBe(true);
   });
 });
 

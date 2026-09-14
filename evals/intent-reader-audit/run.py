@@ -159,10 +159,10 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
         # These are fixture-returned Usage fields. Missing reports remain unknown;
         # the totals are lower bounds and never reconstructed from a ratio.
         "reader_input_tokens_reported_lower_bound": (
-            sum(call["reported_input_tokens"] for call in reported) if calls else None
+            sum(call["reported_input_tokens"] for call in reported) if reported else None
         ),
         "reader_output_tokens_reported_lower_bound": (
-            sum(call["reported_output_tokens"] for call in reported) if calls else None
+            sum(call["reported_output_tokens"] for call in reported) if reported else None
         ),
         "reader_cache_tokens_reported_lower_bound": (
             sum(call["reported_cache_tokens"] for call in cache_reported)

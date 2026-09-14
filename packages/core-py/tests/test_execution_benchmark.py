@@ -221,6 +221,42 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     with_attempt["reader"]["core_accounted_input_tokens"] = None
     assert real_run_totals(root, pre_rows)["reader_core_accounted_input_tokens"] is None
 
+    # Physical calls with no provider usage are unknown, never an exact-looking sum([])=0.
+    for row in pre_rows:
+        for call in row["reader"]["calls"]:
+            call["reported_input_tokens"] = None
+            call["reported_output_tokens"] = None
+    unknown = real_run_totals(root, pre_rows)
+    assert unknown["reader_input_tokens_reported_lower_bound"] is None
+    assert unknown["reader_output_tokens_reported_lower_bound"] is None
+
+
+def test_real_luna_checkout_binding_refuses_uncommitted_source(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "intent-reader-eval@example.invalid"],
+        cwd=checkout,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Intent Reader Eval"], cwd=checkout, check=True)
+    source = checkout / "runtime.py"
+    source.write_text("BOUND = True\n")
+    subprocess.run(["git", "add", "runtime.py"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=checkout, check=True)
+
+    identity = real_run._checkout_identity(checkout, "fixture")
+    assert identity["clean"] is True
+    assert len(identity["commit"]) == 40
+    assert len(identity["git_tree"]) == 40
+
+    source.write_text("BOUND = False\n")
+    with pytest.raises(SystemExit, match="fixture checkout is not clean"):
+        real_run._checkout_identity(checkout, "fixture")
+
 
 def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
     root = Path(__file__).resolve().parents[3]
@@ -231,10 +267,14 @@ def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
         "model": "gpt-5.6-luna",
         "corpus_sha256": "a" * 64,
         "worktree_head": "b" * 40,
+        "worktree_git_tree": "c" * 40,
+        "worktree_checkout_clean": True,
         "working_tree_relevant_files": ["one"],
-        "working_tree_relevant_files_sha256": "c" * 64,
-        "pre_git_tree": "d" * 40,
-        "host_git_commit": "e" * 40,
+        "working_tree_relevant_files_sha256": "d" * 64,
+        "pre_git_tree": "e" * 40,
+        "host_git_commit": "f" * 40,
+        "host_git_tree": "0" * 40,
+        "host_checkout_clean": True,
     }
     payloads = {
         lane: {"provider_kind": "live", "rows": [{} for _ in range(5)]}

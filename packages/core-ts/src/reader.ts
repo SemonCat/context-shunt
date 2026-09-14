@@ -686,9 +686,9 @@ export class Reader {
    *
    * `attemptsStarted` is not always zero: a request can complete its model calls and then
    * fail at PUBLISH, and reporting no attempts there would contradict the cost the same
-   * envelope carries. `usageComplete` stays unconditionally `false` here - a failure path
-   * never certifies its own cost as fully measured - but `attemptsUsageComplete` still
-   * carries the real count of attempts that *did* report usage before the failure.
+   * envelope carries. Failure describes publication, not accounting quality: when every
+   * started attempt did report usage, `usageComplete` remains true even though no model
+   * output was published. `attemptsUsageComplete` carries the exact count.
    */
   private failureProvenance(
     err: ShuntError,
@@ -706,7 +706,7 @@ export class Reader {
       attributionConfidence: "none",
       attributionPolicy: this.policy,
       attemptsStarted,
-      usageComplete: false,
+      usageComplete: attemptsUsageComplete === attemptsStarted,
       attemptsUsageComplete,
       citationsMechanicallyVerified: true,
       requested: targetIdentity(providerTargetOf(this.provider)),

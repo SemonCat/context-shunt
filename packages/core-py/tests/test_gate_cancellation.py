@@ -282,6 +282,8 @@ def test_a_deadline_after_the_call_still_accounts_for_what_the_provider_was_paid
     assert result.cost.output_tokens == 1
     assert result.cost.method is TokenMethod.EXACT
     assert result.provenance.attempts_started == 1
+    assert result.provenance.attempts_usage_complete == 1
+    assert result.provenance.usage_complete is True
 
 
 def test_a_missed_deadline_returns_without_waiting_for_the_late_call():

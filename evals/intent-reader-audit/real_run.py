@@ -25,7 +25,7 @@ BASELINE = "1686db6"
 MODEL = "gpt-5.6-luna"
 DEFAULT_ROUTE = "sub2api-openai/gpt-5.6-luna"
 LANES = ("legacy_compactor", "pre", "new")
-CHECKPOINT_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v1"
+CHECKPOINT_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v2"
 RELEVANT_FILES = (
     "evals/bridges/openclaw_inhost.py",
     "evals/bridges/openclaw_inhost_server.mts",
@@ -54,19 +54,43 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
+    """Bind an evaluation checkout to its complete committed tree or refuse it.
+
+    A hand-maintained file list cannot prove which transitive modules a Python or host
+    runtime imported.  The commit plus full Git tree covers every tracked file, while the
+    porcelain check refuses tracked modifications and untracked files before any provider
+    call is started.  Ignored runtime caches and installed dependencies are not source
+    inputs owned by either checkout.
+    """
+    if _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
+        raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
+    return {
+        "commit": _git(root, "rev-parse", "HEAD"),
+        "git_tree": _git(root, "rev-parse", "HEAD^{tree}"),
+        "clean": True,
+    }
+
+
 def _binding(host_root: Path, route: str) -> dict[str, Any]:
+    worktree = _checkout_identity(ROOT, "context-shunt")
+    host = _checkout_identity(host_root, "OpenClaw host")
     return {
         "provider_kind": "live",
         "route": route,
         "model": MODEL,
         "corpus_sha256": hashlib.sha256(CORPUS.read_bytes()).hexdigest(),
-        "worktree_head": _git(ROOT, "rev-parse", "HEAD"),
+        "worktree_head": worktree["commit"],
+        "worktree_git_tree": worktree["git_tree"],
+        "worktree_checkout_clean": worktree["clean"],
         "working_tree_relevant_files": list(RELEVANT_FILES),
         "working_tree_relevant_files_sha256": local_benchmark.digest_files(
             ROOT, list(RELEVANT_FILES)
         ),
         "pre_git_tree": _git(ROOT, "rev-parse", f"{BASELINE}^{{tree}}"),
-        "host_git_commit": _git(host_root, "rev-parse", "HEAD"),
+        "host_git_commit": host["commit"],
+        "host_git_tree": host["git_tree"],
+        "host_checkout_clean": host["clean"],
     }
 
 
@@ -390,8 +414,12 @@ def main() -> None:
         "host": {
             "kind": "openclaw_source_checkout",
             "git_commit": evidence_binding["host_git_commit"],
+            "git_tree": evidence_binding["host_git_tree"],
+            "checkout_clean_at_start": evidence_binding["host_checkout_clean"],
         },
         "implementation": {
+            "worktree_git_tree": evidence_binding["worktree_git_tree"],
+            "checkout_clean_at_start": evidence_binding["worktree_checkout_clean"],
             "working_tree_relevant_files": evidence_binding[
                 "working_tree_relevant_files"
             ],

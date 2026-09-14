@@ -1673,11 +1673,10 @@ class Reader:
 
         ``attempts_started`` is not always zero: a request can complete its model calls
         and then fail at PUBLISH, and reporting no attempts there would contradict the
-        cost the same envelope carries. ``usage_complete`` stays unconditionally ``False``
-        here - a failure path never certifies its own cost as fully measured - but
-        ``attempts_usage_complete`` still carries the real count of attempts that *did*
-        report usage before the failure, so the caller can see how much of the attempted
-        spend is accounted for rather than only that some of it might not be.
+        cost the same envelope carries. ``attempts_usage_complete`` carries the real count
+        of attempts that reported usage before the failure. Failure describes publication,
+        not accounting quality: when every started attempt did report usage, the boolean
+        remains true even though no model output was published.
         """
         return Provenance(
             derived=False,
@@ -1690,7 +1689,7 @@ class Reader:
             attribution_confidence=Confidence.NONE,
             attribution_policy=self._policy,
             attempts_started=attempts_started,
-            usage_complete=False,
+            usage_complete=attempts_usage_complete == attempts_started,
             attempts_usage_complete=attempts_usage_complete,
             requested=_target_of(self._provider).identity(),
         )
