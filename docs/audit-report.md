@@ -187,9 +187,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 82.251 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/2,299/15,360 | 180,834 | 78,571.919 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 34,011.778 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 81.420 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 13,852/2,785/11,520 | 180,834 | 89,800.475 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 29,958.103 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -200,7 +200,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`fa8097d49c838362e07d93cfcf355c98abfcf37a`, PRE as commit `1686db6` with tree
+`8365194dacb67750823303be97161aa26091c07d`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -229,9 +229,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 1,020 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,021 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
-- **TypeScript core suite:** 814 passed across 19 files (`npm --prefix packages/core-ts
+- **TypeScript core suite:** 815 passed across 19 files (`npm --prefix packages/core-ts
   test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
   exercised by the canonical capability gate below.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
@@ -244,7 +244,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,589 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,591 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -253,7 +253,7 @@ proof.
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
   running them confirms the audit changes did not regress an existing invariant. Machine
-  report: `reports/verify-20260914T115511Z-678873000-15880.json`.
+  report: `reports/verify-20260914T121703Z-212167000-62918.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -367,6 +367,13 @@ proof.
   version-bound. Direct red tests cover each case, and the artifacts are again regenerated
   only after the fixes are committed cleanly. The fourteen new cross-port parser/cursor
   cases bring the final canonical matrix to 2,589 passing cases.
+
+  The following explicit P0–P2 pass found one valid provenance P2: although the cache
+  contract says a hit starts no provider attempt, schema and direct guards accepted
+  `cache_reused: true` with a nonzero attempt count. Commit `8365194` binds that invariant
+  in the canonical schema and both runtime guards, with cross-port schema and guard
+  regressions. The deterministic and real artifacts were regenerated against the clean
+  fix commit; the expanded canonical matrix passes 2,591 cases.
 
 ## Residual blockers
 

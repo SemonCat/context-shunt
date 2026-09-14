@@ -6,9 +6,9 @@ Resolved route required and observed on every completed call: `sub2api-openai/gp
 
 | Lane | Correct | Citations valid/applicable | Coverage complete/total | Calls (reported/unknown) | Provider tokens in/out/cache* | Role bytes | Transport bytes in/out | Lane wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| legacy_compactor | 3/5 | 0/0 | 0/0 | 0 (0/0) | unknown/unknown/unknown | unknown | unknown/unknown | 82.251 | 0 |
-| pre | 3/5 | 3/3 | 5/17 | 8 (8/0) | 10012/2299/15360 | 180834 | 183042/8625 | 78571.919 | 0 |
-| new | 5/5 | 2/2 | 7/18 | 2 (2/0) | 1280/140/0 | 5132 | 5564/1340 | 34011.778 | 1 |
+| legacy_compactor | 3/5 | 0/0 | 0/0 | 0 (0/0) | unknown/unknown/unknown | unknown | unknown/unknown | 81.420 | 0 |
+| pre | 3/5 | 3/3 | 5/17 | 8 (8/0) | 13852/2785/11520 | 180834 | 183042/8178 | 89800.475 | 0 |
+| new | 5/5 | 2/2 | 7/18 | 2 (2/0) | 1280/140/0 | 5132 | 5564/1340 | 29958.103 | 1 |
 
 \* Token values are provider-reported lower bounds only. Missing input/output or cache usage remains `unknown`; no count is reconstructed from bytes or a completion ratio. Main-context byte/token estimates are separate in the JSON evidence.
 
