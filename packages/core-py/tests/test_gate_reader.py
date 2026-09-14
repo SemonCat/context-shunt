@@ -69,6 +69,23 @@ def test_missing_question_makes_zero_model_calls(tmp_path):
     assert env["status"] == "error" and env["code"] == "INVALID_REQUEST"
 
 
+def test_reader_rejects_valid_non_read_operation_before_cache_key_fields(tmp_path):
+    registry, entry, luna, reader = _fixture(tmp_path)
+    request = {
+        "schema_version": "1.3",
+        "request_id": "req_inspect_at_reader",
+        "operation": "inspect",
+        "source_id": entry.source_id,
+        "snapshot_id": entry.snapshot.snapshot_id,
+        "selector": {"kind": "lines", "start": 1, "end": 1},
+        "budgets": {"max_result_bytes": 1024, "max_scan_lines": 10},
+    }
+    env = reader.answer("sess", request).envelope
+    assert luna.call_count == 0
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "OPERATION_NOT_ACCEPTED_HERE"
+
+
 @pytest.mark.parametrize("question", ["", "   ", "\n\t "])
 def test_blank_question_makes_zero_model_calls(question, tmp_path):
     registry, entry, luna, reader = _fixture(tmp_path)

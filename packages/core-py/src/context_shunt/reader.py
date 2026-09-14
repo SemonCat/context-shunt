@@ -91,7 +91,7 @@ from .provider import (
     normalize_usage,
 )
 from .registry import SourceRegistry
-from .schema import validate_request
+from .schema import READ_OPERATIONS, validate_request
 
 #: ``INVALID_MODEL_OUTPUT`` details eligible for the one-shot format retry: a shape or
 #: claims/citations *relationship* failure, never a content judgement. Retrying
@@ -582,7 +582,7 @@ class Reader:
         self, session_id: str, raw: dict[str, Any], deadline: Deadline
     ) -> str:
         """Validate and re-authorize every handle before looking up cached content."""
-        request = validate_request(raw)
+        request = validate_request(raw, operations=READ_OPERATIONS)
         assert_no_secret(request["question"].encode("utf-8"), "QUESTION")
         deadline.check("RESOLVE")
         for source in request["sources"]:
@@ -695,7 +695,7 @@ class Reader:
         accounting_id: str | None,
         spent: _CostSink,
     ) -> ReaderResult:
-        request = validate_request(request)
+        request = validate_request(request, operations=READ_OPERATIONS)
         question = request["question"]
         assert_no_secret(question.encode("utf-8"), "QUESTION")
 
