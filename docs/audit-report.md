@@ -239,7 +239,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,557 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,560 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -304,8 +304,7 @@ proof.
   and still rejects every other checkout change; the mandatory guards in both ports reject
   a usage-completeness boolean/count contradiction or a measured count above attempts; and
   the 1.3 schema requires aggregate counters/segments only with aggregate mode and forbids
-  those shapes in other modes. The artifact was regenerated against the new clean Git tree,
-  and the expanded final unit matrix executes 2,557 cases across all 17 passing gates.
+  those shapes in other modes. The artifact was regenerated against the new clean Git tree.
 
   The subsequent pass found three valid P2s, fixed in `37f5359`: the OpenClaw bridge now
   carries one absolute deadline across first-call startup, server-lock contention,
@@ -314,6 +313,11 @@ proof.
   requires every published semantic answer to have verified citations rather than treating
   a missing citation set as inapplicable. Red tests cover slow startup, a contended writer,
   pipe backpressure, partial provider usage fields, and a citationless semantic answer.
+  Those bridge tests bring the canonical final matrix to 2,560 cases across all 17 passing
+  gates. Its first expanded run also exposed a pre-existing scheduler race in one
+  multi-chunk Python test: a shared reply list could attach valid fixture citations to the
+  wrong concurrently executing source. Commit `9972bbd` makes the fixture select its reply
+  from the chunk payload; the reader gate and the repeated full matrix are clean.
 
 ## Residual blockers
 
