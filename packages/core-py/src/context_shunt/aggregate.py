@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Any
 
 from .errors import ShuntError
@@ -14,7 +13,6 @@ from .snapshot import Snapshot, canonical_json, json_depth_and_nodes, resolve_po
 _MAX_RETURNED_VALUES = 200
 _MAX_RETURNED_GROUPS = 200
 _MAX_SCALAR_BYTES = 512
-_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MISSING = object()
 _MISSING_OUTPUT = {"missing": True}
 
@@ -31,14 +29,6 @@ def _optional_pointer(value: Any, pointer: str) -> Any:
 def _scalar(value: Any) -> Any:
     if value is _MISSING or value is None or isinstance(value, (str, bool)):
         return value
-    if isinstance(value, int):
-        if abs(value) <= _MAX_SAFE_INTEGER:
-            return value
-        raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
-    if isinstance(value, float):
-        if math.isfinite(value) and value.is_integer() and abs(value) <= _MAX_SAFE_INTEGER:
-            return int(value)
-        raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
     raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
 
@@ -129,7 +119,7 @@ def aggregate_snapshot(
             if candidate is _MISSING:
                 continue
             if "equals" in filter_spec:
-                if not (candidate is None or isinstance(candidate, (str, int, float, bool))):
+                if not (candidate is None or isinstance(candidate, (str, bool))):
                     continue
                 candidate = _scalar(candidate)
                 if (

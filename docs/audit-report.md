@@ -131,10 +131,11 @@ on Python code-point versus JavaScript UTF-16 ordering. The cross-runtime regres
 `U+E000` and `U+1F600`, whose relative order exposed the mismatch.
 
 The first post-fix verification then found one more valid P2: unrestricted JSON numbers can
-lose integer precision in JavaScript and silently merge distinct/group keys. Aggregate
-filter/distinct/group numeric values now share an explicit exact domain of safe integers
-(`[-(2^53-1), 2^53-1]`) in the request contract and both runtimes; fractional or larger
-numeric keys are refused rather than rounded, with strings available for exact identifiers.
+lose integer precision in JavaScript and silently merge distinct/group keys. A later pass
+caught that an apparently integral runtime value may itself come from a rounded fractional
+lexeme. Aggregate filter/distinct/group numeric identities are therefore rejected in the
+request contract and both runtimes; callers encode the original numeric lexeme as a string.
+This is the only provably exact boundary once host parsing may already have occurred.
 
 The next post-fix verification found a final boundedness P2: `filter.equals` accepted an
 unbounded string and reserialized it per scanned record. The request contract now caps it
@@ -157,9 +158,9 @@ attempts, and `ModelResponse.usage` it returns.
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 86.572 | 0/0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 240.098 | 14/19.418 |
-| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 210.471 | 4/5.199 |
+| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 81.264 | 0/0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 234.995 | 14/18.287 |
+| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 239.593 | 4/5.738 |
 
 \* Provider token values are copied from the fixture's returned usage. The fixture's
 explicit tariff is bytes/4, but the harness does not derive a "reported" total after the
@@ -168,8 +169,8 @@ lower bound, never scaled by a completion ratio. Main-context tokens alone are e
 estimated from observed serialized bytes. Harness elapsed time is measured independently
 on each run and recorded in the artifact; configured and observed mock delay are separate
 fields, with no arithmetic controlled-time substitute. In this frozen local run NEW took
-210.471 ms versus PRE's 240.098 ms. That one controlled-fixture observation is reported as
-measured, but is not presented as proof of a production wall-time gain.
+239.593 ms versus PRE's 234.995 ms. That one controlled-fixture observation is reported as
+measured and shows no wall-time win; it is not presented as production latency evidence.
 
 Correctness is evaluated from actual emitted answers and aggregate extractions. In this
 run NEW satisfies all five independent expectations; PRE and legacy each satisfy three.
@@ -197,9 +198,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 985 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+- **Python core:** 988 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
   pytest -q`).
-- **TypeScript/adapter suite:** 955 passed, 10 skipped across 23 files (`npx vitest run`);
+- **TypeScript/adapter suite:** 958 passed, 10 skipped across 23 files (`npx vitest run`);
   `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
   acceptance assertions passed. Its opt-in regression test also passed in the Python
@@ -211,7 +212,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 38.208ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,528 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,534 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -233,8 +234,10 @@ proof.
   contract plus executed lane evidence. The third produced the two cache-key/Unicode-order
   P2 findings above; both were reproduced and fixed. The first post-fix verification found
   the numeric-precision P2 above; it too was reproduced and fixed. The next verification
-  found the equality-string bound above; it was also reproduced and fixed. A final P0–P2
-  verification follows the closeout commit containing that fix.
+  found the equality-string bound above; it was also reproduced and fixed. The following
+  pass found the rounded-lexeme hole in the initial safe-integer remedy, which was closed by
+  rejecting numeric identities entirely. A final P0–P2 verification follows the closeout
+  commit containing that fix.
 
 ## Residual blockers
 

@@ -279,9 +279,10 @@ array expansion/record pointer and bounded embedded-JSON parsing cover minified 
 `result[*].values[*][1]` records without regular expressions or executable expressions.
 The selected record set must fit the caller scan budget; otherwise it refuses without a
 partial count. Returned keys are capped and explicitly marked incomplete while the scalar
-counts remain exact after a complete scan. Filter/distinct/group numeric values are limited
-to the shared exact integer range `[-(2^53-1), 2^53-1]`; larger identifiers and decimals
-must be JSON strings. Equality strings are limited to 512 characters by the contract and
+counts remain exact after a complete scan. Filter/distinct/group numeric identities must be
+JSON strings: a host parser may already have rounded a number before the core sees it, so
+accepting even an apparently safe integer cannot prove the original lexeme was integral.
+Equality strings are limited to 512 characters by the contract and
 512 serialized bytes at execution. Values outside those domains are refused rather than
 rounded. Canonical
 keys are ordered by UTF-8 bytes in both ports. A page is limited by both result bytes and

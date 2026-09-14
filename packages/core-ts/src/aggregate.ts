@@ -9,7 +9,7 @@ const MAX_RETURNED_GROUPS = 200;
 const MAX_SCALAR_BYTES = 512;
 const MISSING = Symbol("missing");
 const MISSING_OUTPUT = Object.freeze({ missing: true as const });
-type Scalar = string | number | boolean | null;
+type Scalar = string | boolean | null;
 type GroupValue = Scalar | typeof MISSING_OUTPUT;
 
 function optionalPointer(value: unknown, pointer: string): unknown | typeof MISSING {
@@ -23,12 +23,6 @@ function optionalPointer(value: unknown, pointer: string): unknown | typeof MISS
 
 function scalar(value: unknown): Scalar | typeof MISSING {
   if (value === MISSING) return MISSING;
-  if (typeof value === "number") {
-    if (!Number.isSafeInteger(value)) {
-      throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
-    }
-    return value;
-  }
   if (value === null || ["string", "boolean"].includes(typeof value)) {
     return value as string | boolean | null;
   }
@@ -150,7 +144,7 @@ export function aggregateSnapshot(
       const candidate = optionalPointer(record, filter.pointer);
       if (candidate === MISSING) continue;
       if (Object.prototype.hasOwnProperty.call(filter, "equals")) {
-        if (candidate !== null && !["string", "number", "boolean"].includes(typeof candidate)) {
+        if (candidate !== null && !["string", "boolean"].includes(typeof candidate)) {
           continue;
         }
         const normalizedCandidate = scalar(candidate);

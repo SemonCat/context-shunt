@@ -193,11 +193,14 @@ def test_aggregate_keys_use_cross_runtime_utf8_order(tmp_path):
 @pytest.mark.parametrize(
     "raw_records",
     [
+        '[{"value":1}]',
         '[{"value":9007199254740992},{"value":9007199254740993}]',
         '[{"value":1.5}]',
+        '[{"value":1e-400}]',
+        '[{"value":9007199254740991.1}]',
     ],
 )
-def test_aggregate_rejects_numbers_outside_cross_runtime_exact_domain(tmp_path, raw_records):
+def test_aggregate_rejects_numeric_keys_whose_original_lexeme_may_be_lost(tmp_path, raw_records):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "unsafe-number.json"
     path.write_text('{"records":' + raw_records + "}")

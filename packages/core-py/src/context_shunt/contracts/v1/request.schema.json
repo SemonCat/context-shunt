@@ -255,10 +255,9 @@
     },
     "jsonPointer": { "type": "string", "maxLength": 1024, "pattern": "^(/([^/~]|~[01])*)*$" },
     "scalar": {
-      "description": "An aggregate comparison scalar. Numbers are restricted to the cross-runtime exact integer range; use strings for larger numeric identifiers or decimal values.",
+      "description": "An exact aggregate comparison scalar. Numeric identities are excluded because a host JSON parser may already have rounded their lexemes; encode exact numbers as strings.",
       "oneOf": [
         { "type": "string", "maxLength": 512 },
-        { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
         { "type": "boolean" },
         { "type": "null" }
       ]

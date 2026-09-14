@@ -128,9 +128,12 @@ describe("structured deterministic aggregation", () => {
   });
 
   it.each([
+    '[{"value":1}]',
     '[{"value":9007199254740992},{"value":9007199254740993}]',
     '[{"value":1.5}]',
-  ])("rejects numbers outside the cross-runtime exact domain: %s", (rawRecords) => {
+    '[{"value":1e-400}]',
+    '[{"value":9007199254740991.1}]',
+  ])("rejects numeric keys whose original lexeme may be lost: %s", (rawRecords) => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-number-"));
     mkdirSync(join(dir, "ws"), { recursive: true });
     const path = join(dir, "ws", "unsafe-number.json");

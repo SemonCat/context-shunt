@@ -91,11 +91,11 @@ exact after a full scan; returned distinct values and group rows are capped at 2
 `values_complete`/`groups_complete` when high cardinality prevents publishing every key.
 Distinct values and group keys are ordered by the UTF-8 bytes of their canonical JSON in
 both ports, avoiding Python-code-point versus JavaScript-UTF-16 ordering drift. The
-shared exact numeric domain for filter/distinct/group values is integers from
-`-(2^53-1)` through `2^53-1`; fractional numbers and larger numeric identifiers are
-rejected with `INVALID_REQUEST`/`BAD_SELECTOR` rather than rounded. Callers use JSON strings
-when exact decimal or larger numeric identifiers are required. Count-only aggregation does
-not compare or key record values and is unaffected. Equality strings have a 512-character
+filter/distinct/group numeric identities are rejected with
+`INVALID_REQUEST`/`BAD_SELECTOR` rather than rounded; callers use the original JSON numeric
+lexeme as a string. This is necessary even for an apparently safe runtime integer because
+the host parser may already have rounded an exponent or fractional token to that value.
+Count-only aggregation does not compare or key record values and is unaffected. Equality strings have a 512-character
 contract limit and a 512-byte canonical execution limit; the expected key is serialized
 once before the bounded record scan. The
 canonical JSON result is still charged against per-result,
