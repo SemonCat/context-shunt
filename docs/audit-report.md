@@ -187,9 +187,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 81.420 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 13,852/2,785/11,520 | 180,834 | 89,800.475 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 29,958.103 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 84.964 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/2,535/15,360 | 180,834 | 87,430.266 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/108/0 | 5,132 | 28,520.647 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -200,7 +200,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`8365194dacb67750823303be97161aa26091c07d`, PRE as commit `1686db6` with tree
+`5ccc893d57297b240aecb271d772a54a8f5ed0db`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -229,7 +229,7 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 1,021 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,022 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
 - **TypeScript core suite:** 815 passed across 19 files (`npm --prefix packages/core-ts
   test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
@@ -374,6 +374,14 @@ proof.
   in the canonical schema and both runtime guards, with cross-port schema and guard
   regressions. The deterministic and real artifacts were regenerated against the clean
   fix commit; the expanded canonical matrix passes 2,591 cases.
+
+  The next explicit P0–P2 review found one valid evaluator-route P2: an operator could
+  select a different provider with the same Luna model suffix even though the evidence
+  contract names one qualifying route. Commit `5ccc893` now rejects every route except
+  `sub2api-openai/gpt-5.6-luna` before any lane can start. Its regression replaces the
+  worker with a tripwire and proves the alternate-provider input exits first. All five
+  real lanes were then executed again from that clean commit; no earlier live output was
+  reused.
 
 ## Residual blockers
 
