@@ -169,45 +169,45 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
   stashed out, new test confirmed to fail, then pass again after unstashing) — recorded
   per-commit in each commit message rather than re-run as one batch; see
   [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md#red-capable-verification).
-- **External review (`autoreview` skill):** not yet run as of this writing. Per the
-  standing constraint, only redacted/synthetic materials (this branch's diff and test
-  fixtures — no production data ever entered this repository) would be given to it. See
-  [Residual blockers](#residual-blockers).
+- **External review (`autoreview` skill):** run against this branch (`--mode branch --base
+  main`, engine `codex`/`gpt-5.6-sol`, `high` reasoning). Per the standing constraint, only
+  this branch's own diff was reviewed — no production data ever entered this repository,
+  so nothing beyond synthetic/redacted materials was exposed to the external reviewer.
+  TruffleHog pre-scan clean; result: `autoreview clean: no accepted/actionable findings
+  reported`, overall assessment "patch is correct (0.98)" — bounded contract, provenance,
+  and search-completeness updates with corresponding cross-language tests, no P0 defect at
+  the required reporting threshold.
 
 ## Residual blockers
 
-1. **`autoreview` skill has not yet been run against this branch.** Nothing blocks running
-   it — the branch contains no production content — but it had not completed as of this
-   report's last edit. Ruby should treat a clean `autoreview` pass as still pending unless
-   a later note in this section (or a follow-up commit) says otherwise.
-2. **Reader-lane acceptance gates remain `NOT_RUN`** (task correctness, semantic evidence
+1. **Reader-lane acceptance gates remain `NOT_RUN`** (task correctness, semantic evidence
    support, citation validity, net cost, bounded follow-up rate) — all require live model
    access this audit was not authorized to spend, and net cost additionally requires a
    price table this repository does not have. This is a measurement gap, not a finding
    against the change; closing it is a live-eval exercise for whoever holds reader-model
    budget, following `./scripts/verify eval luna`.
-3. **Two host-side proposals are unreviewed and unimplemented by design:**
+2. **Two host-side proposals are unreviewed and unimplemented by design:**
    [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md)
    (session 4's requery-correlation gap) and
    [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md)
    (cross-request reader-answer reuse, and a grouping/cardinality selector). Both need a
    human decision before any implementation is attempted; neither is on this branch as
    code.
-4. **One known, narrow, previously-documented residual** in the search-cap honesty fix
+3. **One known, narrow, previously-documented residual** in the search-cap honesty fix
    itself: the oversized-single-line byte-window search fallback always reports
    `complete: false` once it has emitted a window, even on the source's last line, because
    that flag conflates "more matches may exist" with "surrounding context was omitted." A
    caller relying on `complete` alone in that one narrow path may page one extra, empty
    time. Documented in [`docs/limitations.md`](limitations.md); not a false-completeness
    claim, just an imprecise one, and deliberately out of scope for this pass.
-5. **Schema-version note for host operators:** the new `SEARCH_MAX_MATCHES_EXHAUSTED`
+4. **Schema-version note for host operators:** the new `SEARCH_MAX_MATCHES_EXHAUSTED`
    failure detail was added without a `schema_version` bump (consistent with this
    project's convention for additive enum values). Any host validating envelopes against
    its own separately-pinned copy of `envelope.schema.json` will reject that value as
    unrecognized until it syncs its copy of the contract. This is worth a line in any
    host-facing changelog; it does not block this commit and does not require touching the
    live host to confirm.
-6. **This report does not itself constitute deployment authorization.** Per
+5. **This report does not itself constitute deployment authorization.** Per
    [`docs/acceptance.md`](acceptance.md#what-has-to-be-true-before-the-live-compactor-is-replaced),
    nothing in this branch authorizes replacing the incumbent compactor in production. Ruby
    owns live drift checks, session drain/restart approval, deployment, and canaries.
@@ -216,6 +216,9 @@ Raw report: `reports/shadow-ab-latest.json` (gitignored; corpus SHA-256
 
 - This report: `docs/audit-report.md` (this file).
 - Regression-corpus manifest: [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md).
+- Source-backed current-payload trace: [`docs/current-payload-trace.md`](current-payload-trace.md)
+  — what the actual constructed payload showed per session, traced from read-only
+  production evidence before any fix was written.
 - Fix commits: `97e5910`, `cd6f8d9`, `d02788d`, `cb298d6`, `ec33776` (branch
   `task/intent-driven-reader-audit`, all five plus the resume-after-cap follow-on).
   `git log --oneline main..task/intent-driven-reader-audit` lists exactly this set.

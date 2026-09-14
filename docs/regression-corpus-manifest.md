@@ -63,4 +63,6 @@ separately reviewable proposal documents rather than any installed change:
 This is not a claim that every possible inefficiency in the five sessions has been found;
 it is the closed set of findings this audit pursued to a tested fix or a written proposal.
 See [`audit-report.md`](audit-report.md) for the full account, the three-lane comparison,
-and residual blockers.
+and residual blockers, and [`current-payload-trace.md`](current-payload-trace.md) for the
+source-backed trace of each session's actual constructed payload that this manifest's
+fixtures were shaped from.
