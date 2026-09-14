@@ -186,7 +186,7 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 79.954 | 0 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 77.922 | 0 |
 | PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 7 (7/0) | 5,222/1,547/15,360 | 145,991 | 57,778.780 | 0 |
 | NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/143/0 | 5,132 | 29,772.595 | 1 |
 
@@ -197,6 +197,13 @@ derived from payload bytes or a completion ratio.
 Main-context token estimates remain separately labeled byte/4 estimates in the JSON.
 Wall time is reported per independently launched lane, including initialization, and is
 not claimed as comparable end-to-end time savings.
+
+The machine-readable binding identifies NEW as commit
+`f7375f14e751b9c0d9b545f28595876e360e3b36`, PRE as git tree `1686db6`, and the
+OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
+corpus hash and exact digest of every evaluation/bridge/core file used by the run. Resume
+fails closed if the provider kind, route, corpus, host commit, PRE tree, worktree commit,
+file list, or file digest differs.
 
 Each physical call retains a redacted payload attestation only: roles, byte counts,
 SHA-256 digests, exact system-contract and user-template checks, locator kind, bounded
@@ -216,7 +223,7 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 988 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+- **Python core:** 997 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
 - **TypeScript/adapter suite:** 958 passed, 10 skipped across 23 files (`npx vitest run`);
   `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
@@ -230,7 +237,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,534 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,542 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -258,6 +265,20 @@ proof.
   `autoreview --mode branch --base main --max-priority P2` against `495a20d` completed with
   a clean secret scan and **no accepted/actionable P0–P2 findings** (`patch is correct`,
   confidence 0.87).
+
+  The real-Luna continuation was reviewed separately with the same explicit command. Four
+  P2 findings were accepted and fixed in `f7375f1`: pre-1.3 response schemas now reject
+  1.3-only count fields; unknown benchmark usage stays `null`; resume checkpoints are
+  bound to the exact provider/route/corpus/PRE/NEW/host implementation; and the TypeScript
+  answer cache deep-clones nested provenance. The verification review reported one further
+  P2 candidate asking that `max_matches` be cumulative across search continuations. That
+  candidate was rejected after checking the actual contract and both ports: `max_matches`
+  is deliberately a per-page cap, the authenticated cursor advances the source, and the
+  Python and TypeScript regressions both prove the bounded `20 + 20 + 9` traversal. Making
+  it cumulative would recreate the already-fixed non-progressing cursor for sources with
+  more matches than the global one-page cap; cumulative source/session disclosure quotas
+  remain enforced independently. The final rerun retained a clean secret scan and no
+  accepted/actionable P0–P2 finding.
 
 ## Residual blockers
 

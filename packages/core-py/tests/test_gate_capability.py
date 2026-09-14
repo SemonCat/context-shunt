@@ -648,7 +648,11 @@ def test_hermes_reader_timeout_returns_compactor_summary_and_readable_raw_path(t
     llm = SlowUnavailableLlm()
     config = {
         **_config(tmp_path),
-        "limits": {"request_deadline_ms": 10, "model_call_deadline_ms": 10},
+        # Give validation/planning enough headroom to reach the provider even when this
+        # test follows the rest of the capability suite.  The model-stage deadline stays
+        # deliberately tiny, while the primary's 50 ms delay still outlives the 30 ms
+        # absolute request deadline and therefore forbids a late fallback attempt.
+        "limits": {"request_deadline_ms": 30, "model_call_deadline_ms": 10},
         "reader": {
             "fallback_chain": [{"model": "gpt-5.6-sol"}],
             "legacy_compaction_max_chars": 1_000,
