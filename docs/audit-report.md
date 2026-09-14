@@ -231,8 +231,8 @@ proof.
   production evidence before any fix was written.
 - Fix commits: `97e5910`, `cd6f8d9`, `d02788d`, `cb298d6`, `ec33776` (branch
   `task/intent-driven-reader-audit`, all five plus the resume-after-cap follow-on), followed
-  by the continuation implementation commit at branch HEAD. Use `git log --oneline main..HEAD`
-  for the authoritative set.
+  by continuation feature commit `7a96e7a` and its evidence closeout commits. Use
+  `git log --oneline main..HEAD` for the authoritative set.
 - Remaining host-side proposal: [`docs/host-proposal-recovery-correlation.md`](host-proposal-recovery-correlation.md).
 - Implemented reuse/aggregation record:
   [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md).
