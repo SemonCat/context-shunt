@@ -247,6 +247,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
 
     first_call["transport_input_bytes"] = None
     first_call["transport_output_bytes"] = None
+    real_run = _real_run_module(root)
     incomplete_transport = real_run._live_totals({"rows": pre_rows, "lane_elapsed_ms_observed": 1})
     assert incomplete_transport["transport_input_bytes_observed"] is None
     assert incomplete_transport["transport_output_bytes_observed"] is None

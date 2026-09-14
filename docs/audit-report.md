@@ -186,9 +186,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 89.593 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 2/2 | 8 (8/0) | 13,852/2,844/11,520 | 180,835 | 85,202.169 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/141/0 | 5,132 | 30,640.489 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 80.508 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 2/2 | 8 (8/0) | 6,172/2,588/19,200 | 180,834 | 84,311.104 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/141/0 | 5,132 | 38,424.311 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -199,7 +199,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`ca61ad296a8f14794d51f423c7a6a510fa225b8b`, PRE as commit `1686db6` with tree
+`1d9e75f7de51b7aa5d50f725279d5512fc9850d3`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -239,7 +239,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,555 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,557 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -296,6 +296,16 @@ proof.
   honesty under `inspect`, and the session-4/session-5 loss-accounting tests under
   `accounting`. The expanded matrix increased from 2,542 to 2,555 executed cases and all
   17 gates pass.
+
+  The following explicit P0–P2 pass found five more valid contract/evidence P2s, all fixed
+  in `1d9e75f`: input and output usage reports are aggregated independently; a transport
+  total is `null` unless every attempt has that measurement (with measured-attempt counts
+  retained separately); explicit resume permits only its exact dirty redacted checkpoint
+  and still rejects every other checkout change; the mandatory guards in both ports reject
+  a usage-completeness boolean/count contradiction or a measured count above attempts; and
+  the 1.3 schema requires aggregate counters/segments only with aggregate mode and forbids
+  those shapes in other modes. The artifact was regenerated against the new clean Git tree,
+  and the expanded final unit matrix executes 2,557 cases across all 17 passing gates.
 
 ## Residual blockers
 
