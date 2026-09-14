@@ -46,6 +46,15 @@ Usage completeness
 :class:`Usage` distinguishes *exact* provider-reported counts from a named deterministic
 estimate from *unknown*. ``None`` means "not reported" and must never be rendered as
 zero; ``usage_complete`` is true only when every started attempt came back with usage.
+
+``usage_complete`` alone answers "is anything missing?" but not "how much of it, and is
+that a rounding error or a third of the real cost?". A real production operation was
+observed with 7 attempts started and only 5 returning usage - ``usage_complete: false``
+was the only signal published, and the two uncounted attempts' real provider cost (tens
+of thousands of tokens, confirmed against the provider log) was silently folded into
+neither ``reader_input_tokens`` nor ``reader_output_tokens``. ``attempts_usage_complete``
+publishes the count the boolean was derived from, so a consumer can tell "1 of 7 unmeasured"
+from "6 of 7 unmeasured" instead of the same ``false`` for both.
 """
 
 from __future__ import annotations
@@ -190,6 +199,11 @@ class Provenance:
     attribution_policy: AttributionPolicy = AttributionPolicy.NOT_APPLICABLE
     attempts_started: int = 0
     usage_complete: bool = True
+    #: How many of ``attempts_started`` came back with provider-reported usage. Additive
+    #: alongside ``usage_complete``: the bool alone cannot distinguish "one attempt short"
+    #: from "nearly everything is unmeasured", and a consumer deciding whether to trust a
+    #: cost figure needs the magnitude, not just the fact that something is missing.
+    attempts_usage_complete: int = 0
     citations_mechanically_verified: bool = True
     requested: ModelIdentity = field(default_factory=ModelIdentity)
     resolved: ModelIdentity = field(default_factory=ModelIdentity)
@@ -213,6 +227,7 @@ class Provenance:
             "attribution_policy": self.attribution_policy.value,
             "attempts_started": self.attempts_started,
             "usage_complete": self.usage_complete,
+            "attempts_usage_complete": self.attempts_usage_complete,
             "citations_mechanically_verified": self.citations_mechanically_verified,
         }
         if self.requested.provider is not None:

@@ -229,6 +229,12 @@
           "description": "true only when every started attempt returned provider usage. false means at least one attempt's token usage is unknown - never zero.",
           "type": "boolean"
         },
+        "attempts_usage_complete": {
+          "description": "1.3: how many of attempts_started returned provider-reported usage. Additive to usage_complete: the boolean alone cannot distinguish one late/unmeasured attempt out of several from nearly all of them being unmeasured, and a caller deciding whether to trust reader_input_tokens/reader_output_tokens as complete needs that magnitude.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
         "citations_mechanically_verified": {
           "description": "true when every published citation was re-checked byte-for-byte against the named snapshot by the deterministic verifier.",
           "type": "boolean"

@@ -126,6 +126,14 @@ export interface Provenance {
   attributionPolicy: AttributionPolicy;
   attemptsStarted: number;
   usageComplete: boolean;
+  /**
+   * How many of `attemptsStarted` came back with provider-reported usage. Additive to
+   * `usageComplete`: the boolean alone cannot distinguish one late/unmeasured attempt out
+   * of several from nearly all of them being unmeasured, and a consumer deciding whether
+   * to trust a cost figure needs that magnitude, not just the fact that something is
+   * missing.
+   */
+  attemptsUsageComplete: number;
   citationsMechanicallyVerified: boolean;
   requested?: ModelIdentity;
   resolved?: ModelIdentity;
@@ -151,6 +159,7 @@ export interface ProvenanceShape {
   attribution_policy: AttributionPolicy;
   attempts_started: number;
   usage_complete: boolean;
+  attempts_usage_complete: number;
   citations_mechanically_verified: boolean;
   requested_provider?: string;
   requested_model?: string;
@@ -170,6 +179,7 @@ export function provenanceToShape(provenance: Provenance): ProvenanceShape {
     attribution_policy: provenance.attributionPolicy,
     attempts_started: provenance.attemptsStarted,
     usage_complete: provenance.usageComplete,
+    attempts_usage_complete: provenance.attemptsUsageComplete,
     citations_mechanically_verified: provenance.citationsMechanicallyVerified,
   };
   if (provenance.requested?.provider !== undefined) {
@@ -202,6 +212,7 @@ export function deterministicProvenance(
     attributionPolicy: "not_applicable",
     attemptsStarted: 0,
     usageComplete: true,
+    attemptsUsageComplete: 0,
     citationsMechanicallyVerified: label !== "legacy_compaction",
   };
 }

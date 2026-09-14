@@ -248,6 +248,63 @@ describe("reader gate", () => {
     expect(env.guidance).toBeUndefined();
   });
 
+  // 1.3: a real caller joined several literal alternatives with `|` inside `pattern`,
+  // expecting alternation. `pattern` has always been - and stays - a plain substring
+  // check, so that request silently returned NO_MATCH with zero reader calls. `patterns`
+  // is the additive fix: an explicit list of literals, OR-combined.
+  it("never splits a `|`-joined pattern into alternatives", async () => {
+    const { entry, luna, reader } = fixture(undefined, "policy_note: escalation applies after third monday delinquency\n");
+    const env = await reader.answer(
+      "sess",
+      request(entry, {
+        schema_version: "1.3",
+        sources: [
+          {
+            source_id: entry.sourceId,
+            snapshot_id: entry.snapshot.snapshotId,
+            selector: {
+              kind: "search",
+              pattern: "escalation applies after third monday delinquency|third Monday|auto suspend",
+              max_matches: 5,
+            },
+          },
+        ],
+      }),
+    );
+    expect(luna.callCount).toBe(0);
+    expect(env.code).toBe("NO_MATCH");
+  });
+
+  it("ORs several literals via `patterns` and finds the real hit", async () => {
+    const reply = answerJson("Yes [c1].", [
+      { id: "c1", line_start: 1, line_end: 1, quote: "policy_note: escalation applies after third monday delinquency" },
+    ]);
+    const { entry, luna, reader } = fixture(reply, "policy_note: escalation applies after third monday delinquency\n");
+    const env = await reader.answer(
+      "sess",
+      request(entry, {
+        schema_version: "1.3",
+        sources: [
+          {
+            source_id: entry.sourceId,
+            snapshot_id: entry.snapshot.snapshotId,
+            selector: {
+              kind: "search",
+              patterns: [
+                "escalation applies after third monday delinquency",
+                "third Monday",
+                "auto suspend",
+              ],
+              max_matches: 5,
+            },
+          },
+        ],
+      }),
+    );
+    expect(luna.callCount).toBe(1);
+    expect(env.code).toBe("ANSWERED");
+  });
+
   it("is partial when a chunk is omitted by budget", async () => {
     const body = Array.from({ length: 5000 }, (_, i) => `line ${i} value`).join("\n") + "\n";
     const registry = makeRegistry(tmp(), { sessionId: "sess" });

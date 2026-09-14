@@ -509,7 +509,11 @@ export class Reader {
     } catch (raw) {
       const err = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
       this.metrics.count("reader_error", { code: err.code });
-      const provenance = this.failureProvenance(err, spent.cost.attemptsStarted);
+      const provenance = this.failureProvenance(
+        err,
+        spent.cost.attemptsStarted,
+        spent.cost.attemptsUsageComplete,
+      );
       const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
         provenance,
         handlesValid: handlesSurvive(err),
@@ -539,6 +543,7 @@ export class Reader {
       attributionPolicy: "not_applicable",
       attemptsStarted: 0,
       usageComplete: true,
+      attemptsUsageComplete: 0,
       citationsMechanicallyVerified: true,
       requested: targetIdentity(providerTargetOf(this.provider)),
     };
@@ -549,9 +554,15 @@ export class Reader {
    *
    * `attemptsStarted` is not always zero: a request can complete its model calls and then
    * fail at PUBLISH, and reporting no attempts there would contradict the cost the same
-   * envelope carries.
+   * envelope carries. `usageComplete` stays unconditionally `false` here - a failure path
+   * never certifies its own cost as fully measured - but `attemptsUsageComplete` still
+   * carries the real count of attempts that *did* report usage before the failure.
    */
-  private failureProvenance(err: ShuntError, attemptsStarted = 0): Provenance {
+  private failureProvenance(
+    err: ShuntError,
+    attemptsStarted = 0,
+    attemptsUsageComplete = 0,
+  ): Provenance {
     const unknownAttribution =
       err.code === "MODEL_ERROR"
       || err.code === "INVALID_MODEL_OUTPUT"
@@ -564,6 +575,7 @@ export class Reader {
       attributionPolicy: this.policy,
       attemptsStarted,
       usageComplete: false,
+      attemptsUsageComplete,
       citationsMechanicallyVerified: true,
       requested: targetIdentity(providerTargetOf(this.provider)),
     };
@@ -775,7 +787,7 @@ export class Reader {
     )) {
       const category = outcomes.find((o) => o.calls)!.failedReason as "MODEL_ERROR" | "TIMEOUT";
       const failure = new ShuntError(category, "AVAILABILITY_EXHAUSTED");
-      const provenance = { ...this.failureProvenance(failure, totalCalls),
+      const provenance = { ...this.failureProvenance(failure, totalCalls, usageCompleteCalls),
         callIdentities, fallbackUsed, usageComplete: usageCompleteCalls === totalCalls };
       const envelope = errorEnvelope(requestId, failure, {
         ...(accountingId ? { accountingId } : {}), provenance, sources: handles, handlesValid: true,
@@ -797,6 +809,7 @@ export class Reader {
         attributionPolicy: this.policy,
         attemptsStarted: totalCalls,
         usageComplete: totalCalls > 0 && usageCompleteCalls === totalCalls,
+        attemptsUsageComplete: usageCompleteCalls,
         citationsMechanicallyVerified: true,
         requested,
         resolved,
@@ -836,7 +849,7 @@ export class Reader {
       const code = terminal.failureCode ?? "MODEL_ERROR";
       const failure = new ShuntError(code, terminal.failureDetail ?? undefined, false);
       const failed: Provenance = {
-        ...this.failureProvenance(failure, totalCalls),
+        ...this.failureProvenance(failure, totalCalls, usageCompleteCalls),
         attributionStatus: attribution.status,
         attributionConfidence: attribution.confidence,
         attributionPolicy: this.policy,
@@ -921,7 +934,7 @@ export class Reader {
       if (repaired.failureCode === "MODEL_ERROR" && repaired.failureDetail === "MODEL_SUBSTITUTED") {
         const failure = new ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", false);
         const failed: Provenance = {
-          ...this.failureProvenance(failure, totalCalls),
+          ...this.failureProvenance(failure, totalCalls, usageCompleteCalls),
           attributionStatus: attribution.status,
           attributionConfidence: attribution.confidence,
           requested,
@@ -948,7 +961,7 @@ export class Reader {
         const code = repaired.failureCode;
         const failure = new ShuntError(code, repaired.failureDetail ?? undefined, false);
         const failed: Provenance = {
-          ...this.failureProvenance(failure, totalCalls),
+          ...this.failureProvenance(failure, totalCalls, usageCompleteCalls),
           attributionStatus: attribution.status,
           attributionConfidence: attribution.confidence,
           requested,
@@ -972,7 +985,7 @@ export class Reader {
         // bounded cost is carried above.
         const failure = new ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", false);
         const failed: Provenance = {
-          ...this.failureProvenance(failure, totalCalls),
+          ...this.failureProvenance(failure, totalCalls, usageCompleteCalls),
           attributionStatus: attribution.status,
           attributionConfidence: attribution.confidence,
           requested,
@@ -1104,6 +1117,7 @@ export class Reader {
       attributionPolicy: totalCalls > 0 ? this.policy : "not_applicable",
       attemptsStarted: totalCalls,
       usageComplete: totalCalls > 0 && usageCompleteCalls === totalCalls,
+      attemptsUsageComplete: usageCompleteCalls,
       citationsMechanicallyVerified: true,
       requested,
       resolved,
@@ -2087,13 +2101,20 @@ function dropLastSentence(text: string): string {
 /**
  * Resolve a bounded literal search to the line range that actually matched. Only literal
  * patterns are accepted, so match time is linear and no supplied regex can be made to
- * backtrack.
+ * backtrack. ``patterns`` (1.3+) is the explicit, additive way to ask for an OR across
+ * several literal strings - a line matches if it contains any one of them. A single
+ * ``pattern`` is never split or parsed: a literal that happens to contain ``|`` (or any
+ * other OR/regex-looking character) matched only itself before this field existed and
+ * still matches only itself now.
  */
 function searchSelectorToLines(
   snapshot: Snapshot,
   selector: Record<string, unknown>,
 ): Record<string, unknown> {
-  const pattern = String(selector["pattern"] ?? "");
+  const rawPatterns = selector["patterns"];
+  const patterns = Array.isArray(rawPatterns)
+    ? rawPatterns.map((p) => String(p))
+    : [String(selector["pattern"] ?? "")];
   const limit = Number(selector["max_matches"] ?? 0);
   const hits: number[] = [];
   for (let ordinal = 1; ordinal <= snapshot.lineCount; ordinal += 1) {
@@ -2103,7 +2124,7 @@ function searchSelectorToLines(
     } catch {
       continue;
     }
-    if (line.includes(pattern)) {
+    if (patterns.some((p) => line.includes(p))) {
       hits.push(ordinal);
       if (hits.length >= limit) break;
     }

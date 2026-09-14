@@ -162,6 +162,7 @@ export function derivedProvenance(overrides: Partial<Provenance> = {}): Provenan
     attributionPolicy: "allow_unverified" as AttributionPolicy,
     attemptsStarted: 1,
     usageComplete: true,
+    attemptsUsageComplete: 1,
     citationsMechanicallyVerified: true,
     requested: identity,
     resolved: identity,

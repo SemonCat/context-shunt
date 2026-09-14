@@ -374,6 +374,10 @@ class _CostSink:
     def attempts(self) -> int:
         return self.cost.attempts_started
 
+    @property
+    def usage_complete_attempts(self) -> int:
+        return self.cost.attempts_usage_complete
+
     def record(self, cost: ReaderCost) -> ReaderCost:
         self.cost = cost
         return cost
@@ -533,7 +537,11 @@ class Reader:
                 else ShuntError("STORE_FAILED", "INTERNAL_ERROR")
             )
             self._metrics.count("reader_error", {"code": exc.code})
-            provenance = self._failure_provenance(exc, attempts_started=spent.attempts)
+            provenance = self._failure_provenance(
+                exc,
+                attempts_started=spent.attempts,
+                attempts_usage_complete=spent.usage_complete_attempts,
+            )
             result = ReaderResult(
                 envelope=E.error_envelope(
                     request_id,
@@ -798,10 +806,15 @@ class Reader:
             category = next(o.failed_reason for o in outcomes if o.calls)
             exc = ShuntError(category, "AVAILABILITY_EXHAUSTED")
             failed = replace(
-                self._failure_provenance(exc, attempts_started=total_calls),
+                self._failure_provenance(
+                    exc,
+                    attempts_started=total_calls,
+                    attempts_usage_complete=usage_complete_calls,
+                ),
                 call_identities=tuple(call_identities),
                 fallback_used=fallback_used,
                 usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
             )
             env = E.error_envelope(
                 request_id,
@@ -833,6 +846,7 @@ class Reader:
                 attribution_policy=self._policy,
                 attempts_started=total_calls,
                 usage_complete=bool(total_calls) and usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 citations_mechanically_verified=True,
                 requested=requested,
                 resolved=resolved,
@@ -880,6 +894,7 @@ class Reader:
                 attribution_policy=self._policy,
                 attempts_started=total_calls,
                 usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 citations_mechanically_verified=True,
                 requested=requested,
                 resolved=resolved,
@@ -991,10 +1006,15 @@ class Reader:
                 # different target (and potentially several physical calls).
                 failure = ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
                 failed = replace(
-                    self._failure_provenance(failure, attempts_started=total_calls),
+                    self._failure_provenance(
+                        failure,
+                        attempts_started=total_calls,
+                        attempts_usage_complete=usage_complete_calls,
+                    ),
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1019,10 +1039,15 @@ class Reader:
                 # never turned into a citation fallback merely because repair was active.
                 failure = ShuntError("MODEL_ERROR", "MODEL_SUBSTITUTED", retryable=False)
                 failed = replace(
-                    self._failure_provenance(failure, attempts_started=total_calls),
+                    self._failure_provenance(
+                        failure,
+                        attempts_started=total_calls,
+                        attempts_usage_complete=usage_complete_calls,
+                    ),
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1050,10 +1075,15 @@ class Reader:
                 detail = repaired.failure_detail
                 failure = ShuntError(code, detail, retryable=False)
                 failed = replace(
-                    self._failure_provenance(failure, attempts_started=total_calls),
+                    self._failure_provenance(
+                        failure,
+                        attempts_started=total_calls,
+                        attempts_usage_complete=usage_complete_calls,
+                    ),
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1076,10 +1106,15 @@ class Reader:
                 # attempt's own bounded cost is carried above.
                 failure = ShuntError("CITATION_INVALID", "NO_VALID_EVIDENCE", retryable=False)
                 failed = replace(
-                    self._failure_provenance(failure, attempts_started=total_calls),
+                    self._failure_provenance(
+                        failure,
+                        attempts_started=total_calls,
+                        attempts_usage_complete=usage_complete_calls,
+                    ),
                     call_identities=tuple(call_identities),
                     fallback_used=fallback_used,
                     usage_complete=usage_complete_calls == total_calls,
+                attempts_usage_complete=usage_complete_calls,
                 )
                 env = E.error_envelope(
                     request_id,
@@ -1216,6 +1251,7 @@ class Reader:
             attribution_policy=(self._policy if total_calls else AttributionPolicy.NOT_APPLICABLE),
             attempts_started=total_calls,
             usage_complete=bool(total_calls) and usage_complete_calls == total_calls,
+            attempts_usage_complete=usage_complete_calls,
             citations_mechanically_verified=True,
             requested=requested,
             resolved=resolved,
@@ -1505,12 +1541,22 @@ class Reader:
             requested=_target_of(self._provider).identity(),
         )
 
-    def _failure_provenance(self, exc: ShuntError, *, attempts_started: int = 0) -> Provenance:
+    def _failure_provenance(
+        self,
+        exc: ShuntError,
+        *,
+        attempts_started: int = 0,
+        attempts_usage_complete: int = 0,
+    ) -> Provenance:
         """Provenance for a request that published nothing.
 
         ``attempts_started`` is not always zero: a request can complete its model calls
         and then fail at PUBLISH, and reporting no attempts there would contradict the
-        cost the same envelope carries.
+        cost the same envelope carries. ``usage_complete`` stays unconditionally ``False``
+        here - a failure path never certifies its own cost as fully measured - but
+        ``attempts_usage_complete`` still carries the real count of attempts that *did*
+        report usage before the failure, so the caller can see how much of the attempted
+        spend is accounted for rather than only that some of it might not be.
         """
         return Provenance(
             derived=False,
@@ -1524,6 +1570,7 @@ class Reader:
             attribution_policy=self._policy,
             attempts_started=attempts_started,
             usage_complete=False,
+            attempts_usage_complete=attempts_usage_complete,
             requested=_target_of(self._provider).identity(),
         )
 
@@ -2003,6 +2050,7 @@ def _as_failure_provenance(provenance: Provenance) -> Provenance:
         attribution_policy=provenance.attribution_policy,
         attempts_started=provenance.attempts_started,
         usage_complete=provenance.usage_complete,
+        attempts_usage_complete=provenance.attempts_usage_complete,
         citations_mechanically_verified=provenance.citations_mechanically_verified,
         requested=provenance.requested,
         resolved=provenance.resolved,
@@ -2319,9 +2367,20 @@ def _search_selector_to_lines(snapshot, selector: dict[str, Any]) -> dict[str, A
     """Resolve a bounded literal search to the line range that actually matched.
 
     Only literal patterns are accepted, so match time is linear in the snapshot size and
-    no user-supplied regex can be made to backtrack.
+    no user-supplied regex can be made to backtrack. A caller who wants "any of several
+    exact strings" sends ``patterns`` (1.3+), a list ORed together with plain substring
+    matching on each - not a delimiter embedded in ``pattern``. A single ``pattern`` is
+    never split or parsed: a literal that happens to contain ``|`` (or any other character
+    that looks like OR/regex syntax) matched only itself before this field existed and
+    still matches only itself now. Production evidence for why this distinction matters:
+    a real caller sent ``pattern="merchant_auto_suspend|third monday|third Monday|auto
+    suspend"`` expecting an alternation and got a silent ``NO_MATCH`` with zero reader
+    calls, because the four-clause string is not a substring of any line. The fix is a new
+    field, not a smarter parse of the old one.
     """
-    pattern = selector["pattern"]
+    patterns = selector.get("patterns")
+    if patterns is None:
+        patterns = [selector["pattern"]]
     limit = int(selector["max_matches"])
     hits: list[int] = []
     for ordinal in range(1, snapshot.line_count + 1):
@@ -2329,7 +2388,7 @@ def _search_selector_to_lines(snapshot, selector: dict[str, Any]) -> dict[str, A
             line = snapshot.line_index.line_text(ordinal)
         except UnicodeDecodeError:
             continue
-        if pattern in line:
+        if any(p in line for p in patterns):
             hits.append(ordinal)
             if len(hits) >= limit:
                 break
