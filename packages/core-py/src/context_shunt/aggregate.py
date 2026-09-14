@@ -44,9 +44,16 @@ def aggregate_snapshot(
     limits: Limits,
 ) -> Extraction:
     """Aggregate in one bounded pass, including Loki-style nested JSON log records."""
-    if snapshot.media_type != "application/json" or snapshot.json_value is None:
-        raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
-    outer = resolve_pointer(snapshot.json_value, selector["records_pointer"])
+    root = snapshot.json_value
+    if root is None:
+        if snapshot.media_type != "text/plain":
+            raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
+        try:
+            root = json.loads(snapshot.data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
+        json_depth_and_nodes(root, limits)
+    outer = resolve_pointer(root, selector["records_pointer"])
     if not isinstance(outer, list):
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
@@ -122,9 +129,7 @@ def aggregate_snapshot(
     distinct_rows: list[dict[str, Any]] = []
     for path in distinct_paths:
         all_values = sorted(distinct[path].items())
-        values = [value for _, value in all_values if _output_scalar(value)][
-            :_MAX_RETURNED_VALUES
-        ]
+        values = [value for _, value in all_values if _output_scalar(value)][:_MAX_RETURNED_VALUES]
         distinct_rows.append(
             {
                 "path": path,

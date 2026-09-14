@@ -1,17 +1,24 @@
-# Five-workflow intent-reader benchmark
+# Five-workflow intent-reader execution benchmark
 
-Synthetic production-derived shapes; no production content or provider call. Token values are bytes/4 estimates, not billed tokens. Controlled wall time uses a fixed 25ms mock-provider latency per attempt plus 50 MB/s processing. `null` reader/cache tokens mean not applicable or not reported—never zero substituted for unknown.
+This benchmark executes identical synthetic production-derived content through the owned legacy compactor, PRE code isolated from commit `1686db6`, and the NEW working-tree ShuntSession. The provider is a deterministic grounded fixture; payload bytes, attempts, returned usage, and elapsed time are observed during execution.
 
-| Lane | Main tokens (est.) | Reader in/out reported | Reader in/out est. total | Provider cache | Attempts (usage complete) | Unknown/late | Requery bytes | Full-read bytes | Accuracy | Controlled wall ms |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| legacy_compactor | 24553 | null/null | null/null | null | 0 (0) | 0 | 23112 | 17601 | 0.400 | 18.043 |
-| pre | 18017 | 114567/2446 | 157826/3350 | null | 15 (11) | 4 | 23112 | 17601 | 0.800 | 405.123 |
-| new | 7888 | 25686/600 | 25686/600 | null | 4 (4) | 0 | 23112 | 0 | 1.000 | 119.332 |
+| Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Answer-cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| legacy_compactor | 3/5 | 64667 (16167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19912 | 17601 | 79.382 | 0.0/0.000 |
+| pre | 3/5 | 60271 (15068) | 145991/1098 | 19210/262/0 | 36499/276/0 | 7 (5/2) | 0 | 19912 | 17601 | 225.591 | 14.0/18.974 |
+| new | 5/5 | 43170 (10793) | 5132/332 | 1284/84/0 | 1284/84/0 | 2 (2/0) | 1 | 19912 | 0 | 259.438 | 4.0/4.700 |
 
-The legacy lane executes the golden-tested owned port of incumbent compactor v0.3.0. PRE parameters are frozen from branch `1686db6` and the sanitized pre-change trace; NEW parameters apply only the tested owned-reader capabilities: workflow 3's exact repeat is a scoped cache hit, workflows 2/3 use deterministic aggregation, and workflow 5 uses bounded selected retrieval. The replay is deterministic rather than a claim that either git tree or a provider was executed live. Workflow 4 remains unchanged because correlating Hermes requery calls is a host-owned gap; its 19,912 recovery bytes remain counted in every lane. The legacy/current full-read loss in workflow 5 is likewise included, rather than credited as a saving.
+\* Provider tokens are only values returned by the instrumented fixture. A deliberately missing usage report remains an unknown attempt, so each token total is a reported lower bound—not a completion-ratio estimate. The fixture uses bytes/4 as its explicit token tariff; these fields are copied from its actual `ModelResponse.usage`, not inferred afterward. Main-context tokens alone are estimated from observed bytes at bytes/4.
 
-Deterministic outputs do not need model citations, so citation validity is `null`, not a vacuous 100%. Reader attempts with incomplete usage retain both reported lower-bound and estimated-total fields in the JSON artifact.
+Correctness is computed from emitted answers/extractions against independently declared expectations in `corpus.json`. `Harness ms` is measured elapsed execution time; configured and observed mock delay are reported separately, with no arithmetic controlled-time substitute.
 
-Corpus SHA-256: `ad322d962eafd159d484965e20b8c24bf15c90dafc1f88b17ca26e9c25e0ba07`.
+## Red checks
+
+- `cache_bypass_changes_execution`: **PASS** — `{"bypassed_attempts": 2, "bypassed_cache_hits": 0, "name": "cache_bypass_changes_execution", "normal_attempts": 1, "normal_cache_hits": 1, "passed": true}`
+- `aggregation_bypass_changes_execution_and_correctness`: **PASS** — `{"bypassed_attempts": 6, "bypassed_correct": {"session-2-minified-loki-counts": false, "session-3-distinct-and-exact-repeat": false}, "name": "aggregation_bypass_changes_execution_and_correctness", "normal_attempts": 1, "normal_correct": {"session-2-minified-loki-counts": true, "session-3-distinct-and-exact-repeat": true}, "passed": true}`
+
+Workflow 4 retains 19,912 requery bytes in all lanes. Workflow 5 executes a 17,601-byte full read in legacy/PRE and bounded search in NEW. Those losses are measured operations, not assigned profile fields.
+
+Corpus SHA-256: `e732ae0bf0101de6a81073c5fc876f8d8518fca0e76d62ff3c39833e97a1fc7c`.
 
 Machine-readable evidence: [`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json).

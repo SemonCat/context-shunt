@@ -60,10 +60,19 @@ export function aggregateSnapshot(
   selector: AggregateSelector,
   opts: { maxResultBytes: number; maxWireBytes: number; maxRecords: number; limits: Limits },
 ): Extraction {
-  if (snapshot.jsonValue === undefined || snapshot.mediaType !== "application/json") {
-    throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+  let root = snapshot.jsonValue;
+  if (root === undefined) {
+    if (snapshot.mediaType !== "text/plain") {
+      throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+    }
+    try {
+      root = JSON.parse(Buffer.from(snapshot.data).toString("utf8"));
+    } catch {
+      throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
+    }
+    jsonDepthAndNodes(root, opts.limits);
   }
-  const outer = resolvePointer(snapshot.jsonValue, selector.records_pointer);
+  const outer = resolvePointer(root, selector.records_pointer);
   if (!Array.isArray(outer)) {
     throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
   }

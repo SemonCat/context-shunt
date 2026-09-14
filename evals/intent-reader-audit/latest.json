@@ -1,458 +1,1144 @@
 {
-  "baseline_commit": "1686db6",
-  "controlled_time": {
-    "mock_model_ms_per_attempt": 25.0,
-    "processing_bytes_per_ms": 50000.0
+  "acceptance": {
+    "errors": [],
+    "passed": true
   },
-  "corpus_sha256": "ad322d962eafd159d484965e20b8c24bf15c90dafc1f88b17ca26e9c25e0ba07",
+  "baseline_commit": "1686db6",
+  "candidate_new_variant": "normal",
+  "corpus_declares_lane_profiles": false,
+  "corpus_sha256": "e732ae0bf0101de6a81073c5fc876f8d8518fca0e76d62ff3c39833e97a1fc7c",
+  "execution": {
+    "legacy": "actual owned compact_tool_result route",
+    "new": "actual working-tree ShuntSession/Reader/inspect aggregate/cache routes",
+    "pre": "actual ShuntSession/Reader imported from isolated git archive 1686db6",
+    "provider": "deterministic grounded instrumented fixture",
+    "timing": "observed harness elapsed; fixture delay separately reported"
+  },
+  "implementation_sha256": {
+    "new_python_relevant_files": "288cacebb94c7eaa780fcc50099871e84a18897e4f3ff18e860a0f1cda7a3913",
+    "pre_git_tree": "bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da"
+  },
+  "red_checks": [
+    {
+      "bypassed_attempts": 2,
+      "bypassed_cache_hits": 0,
+      "name": "cache_bypass_changes_execution",
+      "normal_attempts": 1,
+      "normal_cache_hits": 1,
+      "passed": true
+    },
+    {
+      "bypassed_attempts": 6,
+      "bypassed_correct": {
+        "session-2-minified-loki-counts": false,
+        "session-3-distinct-and-exact-repeat": false
+      },
+      "name": "aggregation_bypass_changes_execution_and_correctness",
+      "normal_attempts": 1,
+      "normal_correct": {
+        "session-2-minified-loki-counts": true,
+        "session-3-distinct-and-exact-repeat": true
+      },
+      "passed": true
+    }
+  ],
   "results": [
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
+      "answer_cache_hits_observed": 0,
       "citation_validity": null,
-      "controlled_wall_ms": 1.202,
-      "correctness": 0.0,
-      "correctness_expectation": "Literal alternatives find the intended evidence without weakening path authorization.",
-      "coverage": "partial",
-      "full_read_bytes": 0,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "merchant_auto_suspend",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "third Monday",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_incumbent_compactor_port",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 6.722417,
       "lane": "legacy_compactor",
-      "main_context_bytes": 8426,
-      "main_context_tokens_estimated": 2107,
-      "measured_local_ms": 4.905737,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 3200,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 293,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "legacy-compact:0"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": null,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": null,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
+      ],
+      "variant": "normal",
       "workflow": "session-1-literal-or-safe-routing"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
+      "answer_cache_hits_observed": 0,
       "citation_validity": null,
-      "controlled_wall_ms": 1.138,
-      "correctness": 1.0,
-      "correctness_expectation": "Literal alternatives find the intended evidence without weakening path authorization.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "pre",
-      "main_context_bytes": 4604,
-      "main_context_tokens_estimated": 1151,
-      "measured_local_ms": 0.064611,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 3200,
-      "result_bytes": 980,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-1-literal-or-safe-routing"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 1.138,
-      "correctness": 1.0,
-      "correctness_expectation": "Literal alternatives find the intended evidence without weakening path authorization.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "new",
-      "main_context_bytes": 4604,
-      "main_context_tokens_estimated": 1151,
-      "measured_local_ms": 0.01409,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 3200,
-      "result_bytes": 980,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-1-literal-or-safe-routing"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 9.654,
-      "correctness": 0.0,
-      "correctness_expectation": "Count, distinct values, and groups cover the complete selected record set; partial output is not scored correct.",
-      "coverage": "partial",
-      "full_read_bytes": 0,
+      "correct": false,
+      "correctness_checks": [
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 4,
+              "checkout": 2
+            },
+            "matched_count": 6,
+            "source": 1
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 1
+        },
+        {
+          "expected": {
+            "distinct_count": 2,
+            "groups": {
+              "billing": 3,
+              "checkout": 1
+            },
+            "matched_count": 4,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 2
+        }
+      ],
+      "execution": "actual_incumbent_compactor_port",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 42.245766,
       "lane": "legacy_compactor",
-      "main_context_bytes": 15682,
-      "main_context_tokens_estimated": 3921,
-      "measured_local_ms": 40.309434,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 13671,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "legacy-compact:0",
+        "legacy-compact:1",
+        "legacy-compact:2"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": null,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": null,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
+        "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
+        "ff1f4499c2bcf3e2de01fbf9faf20a9bc23f8841254578dd8f9c868bb9e79729"
+      ],
+      "variant": "normal",
       "workflow": "session-2-minified-loki-counts"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 7,
-      "attempts_usage_complete": 5,
+      "answer_cache_hits_observed": 0,
       "citation_validity": null,
-      "controlled_wall_ms": 193.316,
-      "correctness": 0.5,
-      "correctness_expectation": "Count, distinct values, and groups cover the complete selected record set; partial output is not scored correct.",
-      "coverage": "partial",
-      "full_read_bytes": 0,
-      "lane": "pre",
-      "main_context_bytes": 5474,
-      "main_context_tokens_estimated": 1369,
-      "measured_local_ms": 0.087821,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": 106454,
-      "reader_input_tokens_reported": 76038,
-      "reader_output_tokens_estimated_total": 1825,
-      "reader_output_tokens_reported": 1303,
-      "reader_token_method": "bytes_div_4",
-      "requery_bytes": 0,
-      "result_bytes": 4200,
-      "unknown_or_late_attempts": 2,
-      "usage_complete": false,
-      "workflow": "session-2-minified-loki-counts"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 9.654,
-      "correctness": 1.0,
-      "correctness_expectation": "Count, distinct values, and groups cover the complete selected record set; partial output is not scored correct.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "new",
-      "main_context_bytes": 1894,
-      "main_context_tokens_estimated": 474,
-      "measured_local_ms": 0.01822,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 620,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-2-minified-loki-counts"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 4.669,
-      "correctness": 0.0,
-      "correctness_expectation": "The exact aggregate is complete and an identical authorized reader query reuses only its complete prior answer.",
-      "coverage": "partial",
-      "full_read_bytes": 0,
+      "correct": false,
+      "correctness_checks": [
+        {
+          "expected": "retry_limit: 7",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 3,
+              "checkout": 2
+            },
+            "matched_count": 5,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 2
+        }
+      ],
+      "execution": "actual_incumbent_compactor_port",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 21.161753,
       "lane": "legacy_compactor",
-      "main_context_bytes": 15680,
-      "main_context_tokens_estimated": 3920,
-      "measured_local_ms": 19.659197,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 12072,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "legacy-compact:0",
+        "legacy-compact:1",
+        "legacy-compact:2"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": null,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": null,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
+        "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
+        "b0b00a76cec0387a064570dcd7a3ad9d074e8092ab70f353e4853d22fcaeecd5"
+      ],
+      "variant": "normal",
       "workflow": "session-3-distinct-and-exact-repeat"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 8,
-      "attempts_usage_complete": 6,
+      "answer_cache_hits_observed": 0,
       "citation_validity": null,
-      "controlled_wall_ms": 208.901,
-      "correctness": 0.5,
-      "correctness_expectation": "The exact aggregate is complete and an identical authorized reader query reuses only its complete prior answer.",
-      "coverage": "partial",
-      "full_read_bytes": 0,
-      "lane": "pre",
-      "main_context_bytes": 5173,
-      "main_context_tokens_estimated": 1294,
-      "measured_local_ms": 0.05545,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": 51372,
-      "reader_input_tokens_reported": 38529,
-      "reader_output_tokens_estimated_total": 1525,
-      "reader_output_tokens_reported": 1143,
-      "reader_token_method": "bytes_div_4",
-      "requery_bytes": 0,
-      "result_bytes": 3900,
-      "unknown_or_late_attempts": 2,
-      "usage_complete": false,
-      "workflow": "session-3-distinct-and-exact-repeat"
-    },
-    {
-      "answer_cache_hits": 1,
-      "attempts_started": 4,
-      "attempts_usage_complete": 4,
-      "citation_validity": null,
-      "controlled_wall_ms": 106.772,
-      "correctness": 1.0,
-      "correctness_expectation": "The exact aggregate is complete and an identical authorized reader query reuses only its complete prior answer.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "new",
-      "main_context_bytes": 2723,
-      "main_context_tokens_estimated": 681,
-      "measured_local_ms": 0.01938,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": 25686,
-      "reader_input_tokens_reported": 25686,
-      "reader_output_tokens_estimated_total": 600,
-      "reader_output_tokens_reported": 600,
-      "reader_token_method": "bytes_div_4",
-      "requery_bytes": 0,
-      "result_bytes": 1450,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-3-distinct-and-exact-repeat"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 1.447,
-      "correctness": 1.0,
-      "correctness_expectation": "Recovery requery bytes remain charged because the owned core cannot correlate the host retry.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "answer_key: atlas",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "answer_key: beacon",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_incumbent_compactor_port",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 5.564204,
       "lane": "legacy_compactor",
-      "main_context_bytes": 30364,
-      "main_context_tokens_estimated": 7591,
-      "measured_local_ms": 4.438831,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 19912,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 20424,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "legacy-compact:0",
+        "legacy-compact:1",
+        "requery-passthrough:0",
+        "requery-passthrough:1"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": null,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": null,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 19912,
+      "source_sha256": [
+        "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
+        "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
+      ],
+      "variant": "normal",
       "workflow": "session-4-abandoned-pointer-requery"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
+      "answer_cache_hits_observed": 0,
       "citation_validity": null,
-      "controlled_wall_ms": 1.049,
-      "correctness": 1.0,
-      "correctness_expectation": "Recovery requery bytes remain charged because the owned core cannot correlate the host retry.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "pre",
-      "main_context_bytes": 20760,
-      "main_context_tokens_estimated": 5190,
-      "measured_local_ms": 0.042271,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 19912,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-4-abandoned-pointer-requery"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 1.049,
-      "correctness": 1.0,
-      "correctness_expectation": "Recovery requery bytes remain charged because the owned core cannot correlate the host retry.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
-      "lane": "new",
-      "main_context_bytes": 20760,
-      "main_context_tokens_estimated": 5190,
-      "measured_local_ms": 0.01281,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 19912,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
-      "workflow": "session-4-abandoned-pointer-requery"
-    },
-    {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 1.071,
-      "correctness": 1.0,
-      "correctness_expectation": "Needed evidence is returned through bounded selection without crediting or repeating a full-source read.",
-      "coverage": "complete",
-      "full_read_bytes": 17601,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "decision_status: approved",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_incumbent_compactor_port",
+      "full_read_bytes_observed": 17601,
+      "harness_elapsed_ms_observed": 3.687992,
       "lane": "legacy_compactor",
-      "main_context_bytes": 28053,
-      "main_context_tokens_estimated": 7014,
-      "measured_local_ms": 3.120996,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 0,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 18207,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "legacy-compact:0",
+        "legacy-compact:1",
+        "legacy-full-read"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": null,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": null,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
+        "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
+      ],
+      "variant": "normal",
       "workflow": "session-5-full-read-and-unread-pointer"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 0.719,
-      "correctness": 1.0,
-      "correctness_expectation": "Needed evidence is returned through bounded selection without crediting or repeating a full-source read.",
-      "coverage": "complete",
-      "full_read_bytes": 17601,
+      "answer_cache_hits_observed": 0,
+      "citation_validity": true,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "merchant_auto_suspend",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "third Monday",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 41.333596,
       "lane": "pre",
-      "main_context_bytes": 36050,
-      "main_context_tokens_estimated": 9013,
-      "measured_local_ms": 0.02402,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 17601,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 2510,
+      "mock_delay_ms_configured_total": 2.0,
+      "mock_delay_ms_observed_total": 3.047225,
+      "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "read"
+      ],
+      "reader": {
+        "attempts_observed": 1,
+        "attempts_usage_reported": 1,
+        "cache_tokens_reported_lower_bound": 0,
+        "calls": [
+          {
+            "call": 1,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 2597,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 3.047225,
+            "output_payload_bytes": 193,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 650,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 49,
+            "timeout_ms": 45000
+          }
+        ],
+        "core_accounted_cache_tokens": 0,
+        "core_accounted_input_tokens": 650,
+        "core_accounted_output_tokens": 49,
+        "core_reader_token_methods": [
+          "exact"
+        ],
+        "input_payload_bytes_observed": 2597,
+        "input_tokens_reported_lower_bound": 650,
+        "output_payload_bytes_observed": 193,
+        "output_tokens_reported_lower_bound": 49,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
+      ],
+      "variant": "normal",
+      "workflow": "session-1-literal-or-safe-routing"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": true,
+      "correct": false,
+      "correctness_checks": [
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 4,
+              "checkout": 2
+            },
+            "matched_count": 6,
+            "source": 1
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 1
+        },
+        {
+          "expected": {
+            "distinct_count": 2,
+            "groups": {
+              "billing": 3,
+              "checkout": 1
+            },
+            "matched_count": 4,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 2
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 54.189984,
+      "lane": "pre",
+      "main_context_bytes_observed": 6045,
+      "mock_delay_ms_configured_total": 8.0,
+      "mock_delay_ms_observed_total": 10.585331,
+      "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "spill:2",
+        "read"
+      ],
+      "reader": {
+        "attempts_observed": 4,
+        "attempts_usage_reported": 2,
+        "cache_tokens_reported_lower_bound": 0,
+        "calls": [
+          {
+            "call": 1,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 34581,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 2.268726,
+            "output_payload_bytes": 543,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 8646,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 136,
+            "timeout_ms": 45000
+          },
+          {
+            "call": 2,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 34581,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 3.259127,
+            "output_payload_bytes": 28,
+            "reported_cache_tokens": null,
+            "reported_input_tokens": null,
+            "reported_method": "unknown",
+            "reported_output_tokens": null,
+            "timeout_ms": 45000
+          },
+          {
+            "call": 3,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 34581,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 2.024033,
+            "output_payload_bytes": 28,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 8646,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 7,
+            "timeout_ms": 45000
+          },
+          {
+            "call": 4,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 34581,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 3.033445,
+            "output_payload_bytes": 28,
+            "reported_cache_tokens": null,
+            "reported_input_tokens": null,
+            "reported_method": "unknown",
+            "reported_output_tokens": null,
+            "timeout_ms": 45000
+          }
+        ],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": 34581,
+        "core_accounted_output_tokens": 157,
+        "core_reader_token_methods": [
+          "bytes_div_4"
+        ],
+        "input_payload_bytes_observed": 138324,
+        "input_tokens_reported_lower_bound": 17292,
+        "output_payload_bytes_observed": 627,
+        "output_tokens_reported_lower_bound": 143,
+        "unknown_usage_attempts": 2
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
+        "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
+        "ff1f4499c2bcf3e2de01fbf9faf20a9bc23f8841254578dd8f9c868bb9e79729"
+      ],
+      "variant": "normal",
+      "workflow": "session-2-minified-loki-counts"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": true,
+      "correct": false,
+      "correctness_checks": [
+        {
+          "expected": "retry_limit: 7",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 3,
+              "checkout": 2
+            },
+            "matched_count": 5,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": null,
+          "passed": false,
+          "source": 2
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 62.969655,
+      "lane": "pre",
+      "main_context_bytes_observed": 6111,
+      "mock_delay_ms_configured_total": 4.0,
+      "mock_delay_ms_observed_total": 5.341261,
+      "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "spill:2",
+        "read",
+        "read-repeat"
+      ],
+      "reader": {
+        "attempts_observed": 2,
+        "attempts_usage_reported": 2,
+        "cache_tokens_reported_lower_bound": 0,
+        "calls": [
+          {
+            "call": 1,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 2535,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 2.298446,
+            "output_payload_bytes": 139,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 634,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 35,
+            "timeout_ms": 45000
+          },
+          {
+            "call": 2,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 2535,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 3.042815,
+            "output_payload_bytes": 139,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 634,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 35,
+            "timeout_ms": 45000
+          }
+        ],
+        "core_accounted_cache_tokens": 0,
+        "core_accounted_input_tokens": 1268,
+        "core_accounted_output_tokens": 70,
+        "core_reader_token_methods": [
+          "exact"
+        ],
+        "input_payload_bytes_observed": 5070,
+        "input_tokens_reported_lower_bound": 1268,
+        "output_payload_bytes_observed": 278,
+        "output_tokens_reported_lower_bound": 70,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
+        "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
+        "b0b00a76cec0387a064570dcd7a3ad9d074e8092ab70f353e4853d22fcaeecd5"
+      ],
+      "variant": "normal",
+      "workflow": "session-3-distinct-and-exact-repeat"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": null,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "answer_key: atlas",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "answer_key: beacon",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 27.513556,
+      "lane": "pre",
+      "main_context_bytes_observed": 22306,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0,
+      "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "requery-passthrough:0",
+        "requery-passthrough:1"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": 0,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": 0,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 19912,
+      "source_sha256": [
+        "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
+        "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
+      ],
+      "variant": "normal",
+      "workflow": "session-4-abandoned-pointer-requery"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": null,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "decision_status: approved",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 17601,
+      "harness_elapsed_ms_observed": 39.584635,
+      "lane": "pre",
+      "main_context_bytes_observed": 23299,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0,
+      "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "inspect-full:0",
+        "inspect-full:1"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": 0,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": 0,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
+        "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
+      ],
+      "variant": "normal",
       "workflow": "session-5-full-read-and-unread-pointer"
     },
     {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "citation_validity": null,
-      "controlled_wall_ms": 0.719,
-      "correctness": 1.0,
-      "correctness_expectation": "Needed evidence is returned through bounded selection without crediting or repeating a full-source read.",
-      "coverage": "complete",
-      "full_read_bytes": 0,
+      "answer_cache_hits_observed": 0,
+      "citation_validity": true,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "merchant_auto_suspend",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "third Monday",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 50.773614,
       "lane": "new",
-      "main_context_bytes": 1568,
-      "main_context_tokens_estimated": 392,
-      "measured_local_ms": 0.01865,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "reader_token_method": "not_applicable",
-      "requery_bytes": 0,
-      "result_bytes": 720,
-      "unknown_or_late_attempts": 0,
-      "usage_complete": true,
+      "main_context_bytes_observed": 2510,
+      "mock_delay_ms_configured_total": 2.0,
+      "mock_delay_ms_observed_total": 2.542699,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "read"
+      ],
+      "reader": {
+        "attempts_observed": 1,
+        "attempts_usage_reported": 1,
+        "cache_tokens_reported_lower_bound": 0,
+        "calls": [
+          {
+            "call": 1,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 2597,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 2.542699,
+            "output_payload_bytes": 193,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 650,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 49,
+            "timeout_ms": 45000
+          }
+        ],
+        "core_accounted_cache_tokens": 0,
+        "core_accounted_input_tokens": 650,
+        "core_accounted_output_tokens": 49,
+        "core_reader_token_methods": [
+          "exact"
+        ],
+        "input_payload_bytes_observed": 2597,
+        "input_tokens_reported_lower_bound": 650,
+        "output_payload_bytes_observed": 193,
+        "output_tokens_reported_lower_bound": 49,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "20e68a84a628bd54f5d61b18fca4f9e79135390c7d1a2cf8c7b73c9c088f4c84"
+      ],
+      "variant": "normal",
+      "workflow": "session-1-literal-or-safe-routing"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": null,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 4,
+              "checkout": 2
+            },
+            "matched_count": 6,
+            "source": 1
+          },
+          "kind": "exact_aggregate",
+          "observed": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 4,
+              "checkout": 2
+            },
+            "matched_count": 6,
+            "source": 1
+          },
+          "passed": true,
+          "source": 1
+        },
+        {
+          "expected": {
+            "distinct_count": 2,
+            "groups": {
+              "billing": 3,
+              "checkout": 1
+            },
+            "matched_count": 4,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": {
+            "distinct_count": 2,
+            "groups": {
+              "billing": 3,
+              "checkout": 1
+            },
+            "matched_count": 4,
+            "source": 2
+          },
+          "passed": true,
+          "source": 2
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 62.789013,
+      "lane": "new",
+      "main_context_bytes_observed": 6899,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "spill:2",
+        "aggregate:1",
+        "aggregate:2"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": 0,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": 0,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "10f59c273aa695bf3031d05d4c03bcf03247be1c06dcf951f97bcdbdb86ff384",
+        "61612003ab099e317c6f950e293879d3fb5a03679456b976441ee21ba8672923",
+        "ff1f4499c2bcf3e2de01fbf9faf20a9bc23f8841254578dd8f9c868bb9e79729"
+      ],
+      "variant": "normal",
+      "workflow": "session-2-minified-loki-counts"
+    },
+    {
+      "answer_cache_hits_observed": 1,
+      "citation_validity": true,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "retry_limit: 7",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 3,
+              "checkout": 2
+            },
+            "matched_count": 5,
+            "source": 2
+          },
+          "kind": "exact_aggregate",
+          "observed": {
+            "distinct_count": 3,
+            "groups": {
+              "billing": 3,
+              "checkout": 2
+            },
+            "matched_count": 5,
+            "source": 2
+          },
+          "passed": true,
+          "source": 2
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 68.526809,
+      "lane": "new",
+      "main_context_bytes_observed": 7767,
+      "mock_delay_ms_configured_total": 2.0,
+      "mock_delay_ms_observed_total": 2.157235,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "spill:2",
+        "aggregate:2",
+        "read",
+        "read-repeat"
+      ],
+      "reader": {
+        "attempts_observed": 1,
+        "attempts_usage_reported": 1,
+        "cache_tokens_reported_lower_bound": 0,
+        "calls": [
+          {
+            "call": 1,
+            "configured_mock_delay_ms": 2.0,
+            "input_payload_bytes": 2535,
+            "max_output_tokens": 2048,
+            "observed_mock_call_ms": 2.157235,
+            "output_payload_bytes": 139,
+            "reported_cache_tokens": 0,
+            "reported_input_tokens": 634,
+            "reported_method": "exact_fixture_report",
+            "reported_output_tokens": 35,
+            "timeout_ms": 45000
+          }
+        ],
+        "core_accounted_cache_tokens": 0,
+        "core_accounted_input_tokens": 634,
+        "core_accounted_output_tokens": 35,
+        "core_reader_token_methods": [
+          "exact"
+        ],
+        "input_payload_bytes_observed": 2535,
+        "input_tokens_reported_lower_bound": 634,
+        "output_payload_bytes_observed": 139,
+        "output_tokens_reported_lower_bound": 35,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "98eecd43b738dcf728729d33611618fb00f25705356c08e2efb5095a5a3ffa2a",
+        "1a5e3579b2793b95e8c86d2d1170bb3c15705c6fc3cd4b7ca74dd080d4e91db2",
+        "b0b00a76cec0387a064570dcd7a3ad9d074e8092ab70f353e4853d22fcaeecd5"
+      ],
+      "variant": "normal",
+      "workflow": "session-3-distinct-and-exact-repeat"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": null,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "answer_key: atlas",
+          "kind": "evidence_contains",
+          "passed": true
+        },
+        {
+          "expected": "answer_key: beacon",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 40.614057,
+      "lane": "new",
+      "main_context_bytes_observed": 22306,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "requery-passthrough:0",
+        "requery-passthrough:1"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": 0,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": 0,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 19912,
+      "source_sha256": [
+        "38eb67fcd45552532523e56c371debee68393fb9ce6030aa1a5954fca9e09fba",
+        "d8e6f61a036bf983728f1d2190d41b997c795eb91fbb9a0711df1465c2b6c1e9"
+      ],
+      "variant": "normal",
+      "workflow": "session-4-abandoned-pointer-requery"
+    },
+    {
+      "answer_cache_hits_observed": 0,
+      "citation_validity": null,
+      "correct": true,
+      "correctness_checks": [
+        {
+          "expected": "decision_status: approved",
+          "kind": "evidence_contains",
+          "passed": true
+        }
+      ],
+      "execution": "actual_shunt_session",
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 36.734372,
+      "lane": "new",
+      "main_context_bytes_observed": 3688,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0,
+      "module_origin": "working_tree:packages/core-py/src/context_shunt/__init__.py",
+      "operation_trace": [
+        "spill:0",
+        "spill:1",
+        "inspect-selected"
+      ],
+      "reader": {
+        "attempts_observed": 0,
+        "attempts_usage_reported": 0,
+        "cache_tokens_reported_lower_bound": null,
+        "calls": [],
+        "core_accounted_cache_tokens": null,
+        "core_accounted_input_tokens": null,
+        "core_accounted_output_tokens": null,
+        "core_reader_token_methods": [],
+        "input_payload_bytes_observed": 0,
+        "input_tokens_reported_lower_bound": null,
+        "output_payload_bytes_observed": 0,
+        "output_tokens_reported_lower_bound": null,
+        "unknown_usage_attempts": 0
+      },
+      "requery_bytes_observed": 0,
+      "source_sha256": [
+        "2fa2f656e1579855e70b37f9c91499e00922c47c7ab13560573b1a2d2c48c9ac",
+        "0bc83b54146c204e0e56a7a63710ae1cf5beefdfecbdb9a1583c8a2f707e470a"
+      ],
+      "variant": "normal",
       "workflow": "session-5-full-read-and-unread-pointer"
     }
   ],
-  "schema": "context_shunt.intent_reader_benchmark.v1",
-  "token_method": "bytes_div_4",
+  "schema": "context_shunt.intent_reader_execution_benchmark.v2",
   "totals": {
     "legacy_compactor": {
-      "answer_cache_hits": 0,
-      "attempts_started": 0,
-      "attempts_usage_complete": 0,
-      "controlled_wall_ms": 18.043,
-      "full_read_bytes": 17601,
-      "main_context_bytes": 98205,
-      "main_context_tokens_estimated": 24553,
-      "mean_correctness": 0.4,
-      "measured_local_ms": 72.434195,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": null,
-      "reader_input_tokens_reported": null,
-      "reader_output_tokens_estimated_total": null,
-      "reader_output_tokens_reported": null,
-      "requery_bytes": 23112,
-      "unknown_or_late_attempts": 0
+      "answer_cache_hits_observed": 0,
+      "correctness_rate_observed": 0.6,
+      "full_read_bytes_observed": 17601,
+      "harness_elapsed_ms_observed": 79.382132,
+      "main_context_bytes_observed": 64667,
+      "main_context_tokens_estimated_bytes_div_4": 16167,
+      "mock_delay_ms_configured_total": 0.0,
+      "mock_delay_ms_observed_total": 0.0,
+      "reader_attempts_observed": 0,
+      "reader_attempts_usage_reported": 0,
+      "reader_cache_tokens_reported_lower_bound": null,
+      "reader_core_accounted_cache_tokens": null,
+      "reader_core_accounted_input_tokens": null,
+      "reader_core_accounted_output_tokens": null,
+      "reader_input_payload_bytes_observed": null,
+      "reader_input_tokens_reported_lower_bound": null,
+      "reader_output_payload_bytes_observed": null,
+      "reader_output_tokens_reported_lower_bound": null,
+      "reader_unknown_usage_attempts": 0,
+      "requery_bytes_observed": 19912,
+      "workflows_correct": 3,
+      "workflows_total": 5
     },
     "new": {
-      "answer_cache_hits": 1,
-      "attempts_started": 4,
-      "attempts_usage_complete": 4,
-      "controlled_wall_ms": 119.33200000000001,
-      "full_read_bytes": 0,
-      "main_context_bytes": 31549,
-      "main_context_tokens_estimated": 7888,
-      "mean_correctness": 1.0,
-      "measured_local_ms": 0.08315,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": 25686,
-      "reader_input_tokens_reported": 25686,
-      "reader_output_tokens_estimated_total": 600,
-      "reader_output_tokens_reported": 600,
-      "requery_bytes": 23112,
-      "unknown_or_late_attempts": 0
+      "answer_cache_hits_observed": 1,
+      "correctness_rate_observed": 1.0,
+      "full_read_bytes_observed": 0,
+      "harness_elapsed_ms_observed": 259.437865,
+      "main_context_bytes_observed": 43170,
+      "main_context_tokens_estimated_bytes_div_4": 10793,
+      "mock_delay_ms_configured_total": 4.0,
+      "mock_delay_ms_observed_total": 4.699934,
+      "reader_attempts_observed": 2,
+      "reader_attempts_usage_reported": 2,
+      "reader_cache_tokens_reported_lower_bound": 0,
+      "reader_core_accounted_cache_tokens": 0,
+      "reader_core_accounted_input_tokens": 1284,
+      "reader_core_accounted_output_tokens": 84,
+      "reader_input_payload_bytes_observed": 5132,
+      "reader_input_tokens_reported_lower_bound": 1284,
+      "reader_output_payload_bytes_observed": 332,
+      "reader_output_tokens_reported_lower_bound": 84,
+      "reader_unknown_usage_attempts": 0,
+      "requery_bytes_observed": 19912,
+      "workflows_correct": 5,
+      "workflows_total": 5
     },
     "pre": {
-      "answer_cache_hits": 0,
-      "attempts_started": 15,
-      "attempts_usage_complete": 11,
-      "controlled_wall_ms": 405.123,
-      "full_read_bytes": 17601,
-      "main_context_bytes": 72061,
-      "main_context_tokens_estimated": 18017,
-      "mean_correctness": 0.8,
-      "measured_local_ms": 0.274173,
-      "reader_cache_tokens": null,
-      "reader_input_tokens_estimated_total": 157826,
-      "reader_input_tokens_reported": 114567,
-      "reader_output_tokens_estimated_total": 3350,
-      "reader_output_tokens_reported": 2446,
-      "requery_bytes": 23112,
-      "unknown_or_late_attempts": 4
+      "answer_cache_hits_observed": 0,
+      "correctness_rate_observed": 0.6,
+      "full_read_bytes_observed": 17601,
+      "harness_elapsed_ms_observed": 225.591426,
+      "main_context_bytes_observed": 60271,
+      "main_context_tokens_estimated_bytes_div_4": 15068,
+      "mock_delay_ms_configured_total": 14.0,
+      "mock_delay_ms_observed_total": 18.973817,
+      "reader_attempts_observed": 7,
+      "reader_attempts_usage_reported": 5,
+      "reader_cache_tokens_reported_lower_bound": 0,
+      "reader_core_accounted_cache_tokens": 0,
+      "reader_core_accounted_input_tokens": 36499,
+      "reader_core_accounted_output_tokens": 276,
+      "reader_input_payload_bytes_observed": 145991,
+      "reader_input_tokens_reported_lower_bound": 19210,
+      "reader_output_payload_bytes_observed": 1098,
+      "reader_output_tokens_reported_lower_bound": 262,
+      "reader_unknown_usage_attempts": 2,
+      "requery_bytes_observed": 19912,
+      "workflows_correct": 3,
+      "workflows_total": 5
     }
   }
 }

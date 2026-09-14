@@ -94,4 +94,30 @@ describe("structured deterministic aggregation", () => {
     expect(result.distinct[0]).toMatchObject({ count: 205, values_complete: false });
     expect(result.distinct[0].values).toHaveLength(200);
   });
+
+  it("aggregates JSON captured through the real oversized tool-result route", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-spill-"));
+    const value = { data: { result: [{ values: [["0", JSON.stringify({
+      level: "error", trace_id: "trace-spill", service: "billing",
+    })]] }] }, padding: "x".repeat(17_000) };
+    const session = new ShuntSession(
+      "sess",
+      makeConfig(dir, { tool_result_capture: {
+        enabled: true, host_ordering_verified_locally: true,
+      } }),
+      makeCapability(true),
+      { provider: new UnavailableProvider("MUST_NOT_RUN") },
+    );
+    const outcome = session.postToolResult("spill-json", JSON.stringify(value));
+    expect(outcome?.action).toBe("spill");
+    const entry = session.registry.resolve("sess", outcome!.sourceId!);
+    expect(entry.snapshot.mediaType).toBe("text/plain");
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/data/result", expand_pointer: "/values",
+      record_pointer: "/1", parse_json: true, group_by: ["/service"],
+    }));
+    expect(JSON.parse(env.extraction!.segments[0]!.text)).toMatchObject({
+      matched_count: 1, group_count: 1,
+    });
+  });
 });
