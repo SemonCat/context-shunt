@@ -26,8 +26,9 @@ The fix scopes ``complete`` to what it can actually mean: the entire remaining s
 looked at for this needle, not merely that the caller's own cap was satisfied. Hitting the
 match cap now behaves exactly like hitting the scan or byte budget already did - it emits
 a continuation cursor and marks the page incomplete - so a caller who genuinely wants an
-exact total can keep paging (by raising `max_matches` on the next call) until the whole
-source has actually been scanned, entirely without invoking the reader.
+exact total can keep paging under the 1.3 per-page contract until the whole source has
+actually been scanned, entirely without invoking the reader. Versions 1.1 and 1.2 retain
+their original request-wide cap.
 """
 
 from __future__ import annotations
@@ -57,10 +58,15 @@ def _loki_shaped_source(total_lines: int = 3000, error_every: int = 60) -> tuple
 
 
 def _search_request(
-    pointer, *, max_matches: int, max_scan_lines: int = 20000, cursor: str | None = None
+    pointer,
+    *,
+    max_matches: int,
+    max_scan_lines: int = 20000,
+    cursor: str | None = None,
+    schema_version: str = EMITTED_SCHEMA_VERSION,
 ):
     request = {
-        "schema_version": EMITTED_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "request_id": "req_search",
         "operation": "inspect",
         "source_id": pointer["source_id"],
@@ -156,7 +162,7 @@ def test_a_caller_can_page_a_scan_budget_cutoff_to_the_true_total(tmp_path):
 
 
 def test_max_matches_is_a_resumable_per_page_cap(tmp_path):
-    """A capped cursor resets its page allowance and eventually exhausts the source."""
+    """A 1.3 capped cursor resets its page allowance and exhausts the source."""
     config = make_config(
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
@@ -186,6 +192,68 @@ def test_max_matches_is_a_resumable_per_page_cap(tmp_path):
     assert final["extraction"]["matches_found"] == 9
     assert final["extraction"]["complete"] is True
     assert true_count == 20 + 20 + 9
+
+
+@pytest.mark.parametrize("schema_version", ["1.1", "1.2"])
+def test_pre_1_3_cursor_preserves_cumulative_max_matches(tmp_path, schema_version):
+    """Legacy requests cannot gain a fresh cap by following a cursor."""
+    config = make_config(
+        tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
+    )
+    session = ShuntSession(
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
+        provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
+    )
+    body, _ = _loki_shaped_source()
+    pointer = _spilled_pointer(tmp_path, session, body)
+    first = session.inspect(
+        _search_request(pointer, max_matches=20, schema_version=schema_version)
+    )
+    assert first["extraction"]["matches_found"] == 20
+    assert first["extraction"]["complete"] is False
+    resumed = session.inspect(
+        _search_request(
+            pointer,
+            max_matches=20,
+            cursor=first["extraction"]["next_cursor"],
+            schema_version=schema_version,
+        )
+    )
+    assert resumed["code"] == "LIMIT_EXCEEDED"
+    assert resumed["failure_detail"] == "SEARCH_MAX_MATCHES_EXHAUSTED"
+    assert "extraction" not in resumed
+
+
+def test_search_cursor_cannot_change_request_version_mid_chain(tmp_path):
+    config = make_config(
+        tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
+    )
+    session = ShuntSession(
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
+        provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
+    )
+    body, _ = _loki_shaped_source()
+    pointer = _spilled_pointer(tmp_path, session, body)
+    first = session.inspect(
+        _search_request(
+            pointer, max_matches=200, max_scan_lines=1000, schema_version="1.2"
+        )
+    )
+    changed = session.inspect(
+        _search_request(
+            pointer,
+            max_matches=200,
+            max_scan_lines=1000,
+            cursor=first["extraction"]["next_cursor"],
+            schema_version="1.3",
+        )
+    )
+    assert changed["code"] == "INVALID_REQUEST"
+    assert changed["failure_detail"] == "BAD_CURSOR"
 
 
 def test_a_single_page_with_headroom_above_the_true_total_is_an_honest_exact_count(tmp_path):

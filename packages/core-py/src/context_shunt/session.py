@@ -766,6 +766,14 @@ class ShuntSession:
             if "cursor" in validated
             else {}
         )
+        cursor_version = state.get("schema_version")
+        if cursor_version is not None and cursor_version != validated["schema_version"]:
+            raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
+        effective_request_version = validated["schema_version"]
+        if cursor_version is None and int(state.get("matches", 0)) > 0:
+            # Cursors minted before the version was embedded used cumulative match state.
+            # Treat them conservatively even if presented on a 1.3 request.
+            effective_request_version = "1.2"
 
         allowance = self._store.disclosure_allowance(self._identity, source_id)
         requested_budget = int(budgets["max_result_bytes"])
@@ -813,6 +821,7 @@ class ShuntSession:
                 max_scan_lines=int(budgets["max_scan_lines"]),
                 max_wire_bytes=max_wire_bytes,
                 state=state,
+                request_version=effective_request_version,
             )
         )
         if extraction.stalled:
@@ -823,6 +832,10 @@ class ShuntSession:
                 # This unit cannot fit any envelope, whatever the allowance says. Calling it
                 # a disclosure problem would send the caller to a remedy that never works.
                 raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", retryable=False)
+            if extraction.stall_reason == "cap":
+                raise ShuntError(
+                    "LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", retryable=False
+                )
             if clipped_by_allowance:
                 return self._disclosure_exhausted(
                     request_id, operation_id, entry, selector, handles, allowance
@@ -831,9 +844,15 @@ class ShuntSession:
 
         if fallback is not None and not extraction.result_bytes:
             raise ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK")
+        next_cursor_state = extraction.next_cursor_state
+        if next_cursor_state is not None:
+            next_cursor_state = {
+                **next_cursor_state,
+                "schema_version": validated["schema_version"],
+            }
         next_cursor = (
-            encode_cursor(key, source_id, snapshot_id, selector, extraction.next_cursor_state)
-            if extraction.next_cursor_state is not None
+            encode_cursor(key, source_id, snapshot_id, selector, next_cursor_state)
+            if next_cursor_state is not None
             else None
         )
         coverage = E.Coverage(upstream_truncated=False, complete=extraction.complete)

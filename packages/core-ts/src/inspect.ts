@@ -90,6 +90,7 @@ export interface CursorState {
   line?: number;
   offset?: number;
   matches?: number;
+  schema_version?: string;
 }
 
 export interface Extraction {
@@ -115,7 +116,7 @@ export interface Extraction {
    * difference between "this unit is larger than any page" and "this unit is larger than
    * what is left of the disclosure allowance" - two refusals with different remedies.
    */
-  stallReason: "content" | "wire";
+  stallReason: "content" | "wire" | "cap";
 }
 
 function emptyExtraction(mode: Extraction["mode"]): Extraction {
@@ -235,6 +236,7 @@ export class Inspector {
       maxScanLines: number;
       maxWireBytes: number;
       state?: CursorState;
+      requestVersion?: string;
     },
   ): Extraction {
     const budget = Math.min(
@@ -255,7 +257,15 @@ export class Inspector {
       case "bytes":
         return this.bytes(data, selector, budget, wire, state);
       case "search":
-        return this.search(index, selector, budget, wire, scanBudget, state);
+        return this.search(
+          index,
+          selector,
+          budget,
+          wire,
+          scanBudget,
+          state,
+          (opts.requestVersion ?? "1.3") !== "1.3",
+        );
       default:
         throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
     }
@@ -533,6 +543,7 @@ export class Inspector {
     wireBudget: number,
     scanBudget: number,
     state: CursorState,
+    cumulativeMatches: boolean,
   ): Extraction {
     const needle = String(selector["needle"]);
     if (utf8Length(needle) > this.limits.inspectMaxNeedleBytes) {
@@ -550,10 +561,15 @@ export class Inspector {
     let used = 0;
     let wireUsed = 0;
     const startLine = ordinal;
-    // max_matches is a per-page output/work cap. A cursor advances the source line but
-    // resets this allowance, so every advertised continuation can make progress and a
-    // source with more than the one-page cap can still be exhausted boundedly.
-    const remainingMatches = maxMatches;
+    const already = cumulativeMatches ? Math.max(0, state.matches ?? 0) : 0;
+    const remainingMatches = maxMatches - already;
+    if (remainingMatches <= 0) {
+      // 1.1/1.2 defined max_matches over the full cursor chain. Do not grant an old
+      // cursor the fresh per-page allowance introduced by the 1.3 contract.
+      out.stalled = true;
+      out.stallReason = "cap";
+      return out;
+    }
 
     while (ordinal <= index.lineCount && out.linesScanned < scanBudget) {
       let line: string;
@@ -594,10 +610,16 @@ export class Inspector {
               budget,
               wireBudget,
               out.linesScanned,
+              already,
+              maxMatches,
+              cumulativeMatches,
             );
           }
           out.complete = false;
-          out.nextCursorState = { line: ordinal, matches: 0 };
+          out.nextCursorState = {
+            line: ordinal,
+            matches: cumulativeMatches ? already + (out.matchesFound ?? 0) : 0,
+          };
           out.resultBytes = used;
           // A first match too large for the page leaves the cursor where it was. Reporting
           // which budget bound it keeps "this match cannot ever fit" distinct from "the
@@ -632,11 +654,14 @@ export class Inspector {
       // the request's own cap was met; conflating the two would let a caller mistake
       // "found the first N" for "found all of them", which is exactly the "whole-source
       // count under partial coverage" claim this project refuses to make on the reader's
-      // side. A continuation cursor is offered either way, so a caller that wants the true
-      // total can keep paging (raising `max_matches` if needed) until the source is
-      // genuinely exhausted.
+      // side. Version 1.3 can keep paging with a fresh per-page allowance; older request
+      // versions retain their cumulative cap and must start a fresh larger request after
+      // that cap is spent.
       out.complete = false;
-      out.nextCursorState = { line: ordinal, matches: 0 };
+      out.nextCursorState = {
+        line: ordinal,
+        matches: cumulativeMatches ? already + (out.matchesFound ?? 0) : 0,
+      };
     }
     return out;
   }
@@ -645,6 +670,7 @@ export class Inspector {
   private searchMatchChunk(
     index: LineIndex, ordinal: number, needle: string,
     budget: number, wireBudget: number, linesScanned: number,
+    already: number, maxMatches: number, cumulativeMatches: boolean,
   ): Extraction {
     const match = findBytes(index.lineBytes(ordinal), new TextEncoder().encode(needle));
     if (match < 0) throw new ShuntError("STORE_FAILED", "SEARCH_INDEX_MISMATCH", false);
@@ -655,8 +681,11 @@ export class Inspector {
     // Later pages visit later hits; surrounding context is explicitly omitted and can be
     // requested with a byte selector. A window never covers the full matching line.
     out.complete = false;
-    out.nextCursorState = out.stalled ? { line: ordinal, matches: 0 }
-      : ordinal < index.lineCount ? { line: ordinal + 1, matches: 0 } : undefined;
+    out.nextCursorState = out.stalled
+      ? { line: ordinal, matches: cumulativeMatches ? already : 0 }
+      : ordinal < index.lineCount && (!cumulativeMatches || already + 1 < maxMatches)
+        ? { line: ordinal + 1, matches: cumulativeMatches ? already + 1 : 0 }
+        : undefined;
     return out;
   }
 

@@ -54,10 +54,10 @@ function lokiShapedSource(totalLines = 3000, errorEvery = 60): { body: string; t
 
 function searchRequest(
   pointer: { source_id: string; snapshot_id: string },
-  opts: { maxMatches: number; maxScanLines?: number; cursor?: string },
+  opts: { maxMatches: number; maxScanLines?: number; cursor?: string; schemaVersion?: string },
 ) {
   const request: Record<string, unknown> = {
-    schema_version: EMITTED_SCHEMA_VERSION,
+    schema_version: opts.schemaVersion ?? EMITTED_SCHEMA_VERSION,
     request_id: "req_search",
     operation: "inspect",
     source_id: pointer.source_id,
@@ -136,7 +136,7 @@ describe("a search capped by max_matches no longer claims the whole source was s
     expect(seen).toBe(trueCount);
   });
 
-  it("treats max_matches as a resumable per-page cap", () => {
+  it("treats max_matches as a resumable per-page cap for 1.3", () => {
     const session = newSession();
     const { body, trueCount } = lokiShapedSource();
     expect(trueCount).toBe(49);
@@ -158,6 +158,43 @@ describe("a search capped by max_matches no longer claims the whole source was s
     expect(final.extraction?.matches_found).toBe(9);
     expect(final.extraction?.complete).toBe(true);
     expect(20 + 20 + 9).toBe(trueCount);
+  });
+
+  it.each(["1.1", "1.2"])(
+    "preserves cumulative max_matches for a %s cursor",
+    (schemaVersion) => {
+      const session = newSession();
+      const { body } = lokiShapedSource();
+      const pointer = spilledPointer(session, body);
+      const first = session.inspect(searchRequest(pointer, { maxMatches: 20, schemaVersion }));
+      expect(first.extraction?.matches_found).toBe(20);
+      expect(first.extraction?.complete).toBe(false);
+      const resumed = session.inspect(searchRequest(pointer, {
+        maxMatches: 20,
+        cursor: first.extraction?.next_cursor as string,
+        schemaVersion,
+      }));
+      expect(resumed.code).toBe("LIMIT_EXCEEDED");
+      expect(resumed.failure_detail).toBe("SEARCH_MAX_MATCHES_EXHAUSTED");
+      expect(resumed.extraction).toBeUndefined();
+    },
+  );
+
+  it("binds a search cursor to the request version", () => {
+    const session = newSession();
+    const { body } = lokiShapedSource();
+    const pointer = spilledPointer(session, body);
+    const first = session.inspect(searchRequest(pointer, {
+      maxMatches: 200, maxScanLines: 1000, schemaVersion: "1.2",
+    }));
+    const changed = session.inspect(searchRequest(pointer, {
+      maxMatches: 200,
+      maxScanLines: 1000,
+      cursor: first.extraction?.next_cursor as string,
+      schemaVersion: "1.3",
+    }));
+    expect(changed.code).toBe("INVALID_REQUEST");
+    expect(changed.failure_detail).toBe("BAD_CURSOR");
   });
 
   it("reports an honest exact count in one page when the cap is never actually reached", () => {

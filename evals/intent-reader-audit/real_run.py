@@ -34,6 +34,7 @@ RELEVANT_FILES = (
     "evals/intent-reader-audit/run.py",
     "evals/intent-reader-audit/worker.py",
     "packages/core-py/src/context_shunt/aggregate.py",
+    "packages/core-py/src/context_shunt/inspect.py",
     "packages/core-py/src/context_shunt/limits.py",
     "packages/core-py/src/context_shunt/provider.py",
     "packages/core-py/src/context_shunt/reader.py",

@@ -218,6 +218,7 @@ class Inspector:
         max_scan_lines: int,
         max_wire_bytes: int,
         state: dict[str, Any] | None = None,
+        request_version: str = "1.3",
     ) -> Extraction:
         budget = min(
             max_result_bytes,
@@ -235,7 +236,15 @@ class Inspector:
         if kind == "bytes":
             return self._bytes(data, selector, budget, max_wire_bytes, state or {})
         if kind == "search":
-            return self._search(index, selector, budget, max_wire_bytes, scan_budget, state or {})
+            return self._search(
+                index,
+                selector,
+                budget,
+                max_wire_bytes,
+                scan_budget,
+                state or {},
+                cumulative_matches=request_version != "1.3",
+            )
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
     # -- lines -------------------------------------------------------------
@@ -509,6 +518,8 @@ class Inspector:
         wire_budget: int,
         scan_budget: int,
         state: dict[str, Any],
+        *,
+        cumulative_matches: bool,
     ) -> Extraction:
         needle = selector["needle"]
         if len(needle.encode("utf-8")) > self._limits.inspect_max_needle_bytes:
@@ -520,10 +531,15 @@ class Inspector:
         ordinal = max(1, int(state.get("line", 1)))
         used = 0
         wire_used = 0
-        # max_matches is a per-page output/work cap. A cursor advances the source line but
-        # resets this allowance, so every advertised continuation can make progress and a
-        # source with more than the global one-page cap can still be exhausted boundedly.
-        remaining_matches = max_matches
+        already = max(0, int(state.get("matches", 0))) if cumulative_matches else 0
+        remaining_matches = max_matches - already
+        if remaining_matches <= 0:
+            # Request versions through 1.2 defined max_matches across the whole cursor
+            # chain. Preserve that contract: a spent legacy cursor cannot receive a fresh
+            # allowance merely because the 1.3 contract made the cap per-page.
+            out.stalled = True
+            out.stall_reason = "cap"
+            return out
 
         while ordinal <= index.line_count and out.lines_scanned < scan_budget:
             try:
@@ -560,11 +576,16 @@ class Inspector:
                             budget=budget,
                             wire_budget=wire_budget,
                             lines_scanned=out.lines_scanned,
+                            already=already,
+                            max_matches=max_matches,
+                            cumulative_matches=cumulative_matches,
                         )
                     out.complete = False
                     out.next_cursor_state = {
                         "line": ordinal,
-                        "matches": 0,
+                        "matches": already + (out.matches_found or 0)
+                        if cumulative_matches
+                        else 0,
                     }
                     out.result_bytes = used
                     # A first match too large for the page leaves the cursor where it was.
@@ -597,12 +618,15 @@ class Inspector:
             # let a caller mistake "found the first N" for "found all of them", which is
             # exactly the "whole-source count under partial coverage" claim this project
             # refuses to make on the reader's side. A continuation cursor is offered either
-            # way, so a caller that wants the true total can keep paging (raising
-            # ``max_matches`` if needed) until the source is genuinely exhausted.
+            # way. Version 1.3 can keep paging with a fresh per-page allowance; older
+            # request versions retain their cumulative cap and must start a fresh larger
+            # request after that cap is spent.
             out.complete = False
             out.next_cursor_state = {
                 "line": ordinal,
-                "matches": 0,
+                "matches": already + (out.matches_found or 0)
+                if cumulative_matches
+                else 0,
             }
         return out
 
@@ -615,6 +639,9 @@ class Inspector:
         budget: int,
         wire_budget: int,
         lines_scanned: int,
+        already: int,
+        max_matches: int,
+        cumulative_matches: bool,
     ) -> Extraction:
         """Return a partial exact window; never claim full matching-line coverage."""
         match = index.line_bytes(ordinal).find(needle.encode("utf-8"))
@@ -635,10 +662,14 @@ class Inspector:
         # visits later matches; exact surrounding bytes remain available through inspect.
         out.complete = False
         out.next_cursor_state = (
-            {"line": ordinal, "matches": 0}
+            {"line": ordinal, "matches": already if cumulative_matches else 0}
             if out.stalled
-            else {"line": ordinal + 1, "matches": 0}
+            else {
+                "line": ordinal + 1,
+                "matches": already + 1 if cumulative_matches else 0,
+            }
             if ordinal < index.line_count
+            and (not cumulative_matches or already + 1 < max_matches)
             else None
         )
         return out

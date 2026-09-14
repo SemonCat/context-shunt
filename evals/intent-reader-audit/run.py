@@ -417,6 +417,7 @@ def main() -> None:
                 ROOT,
                 [
                     "packages/core-py/src/context_shunt/aggregate.py",
+                    "packages/core-py/src/context_shunt/inspect.py",
                     "packages/core-py/src/context_shunt/reader.py",
                     "packages/core-py/src/context_shunt/session.py",
                 ],

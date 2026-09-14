@@ -70,9 +70,10 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
    — indistinguishable from a genuine exact count. Fixed by scoping `complete` to what it
    can actually mean. A later P0–P2 review caught that the first fix's cursor carried a
    cumulative match count and therefore could not continue after reaching the per-request
-   cap. `max_matches` is now a per-page cap: the authenticated cursor advances the source
-   position and resets the page allowance, allowing bounded completion even beyond 200
-   total hits. Ruby rejected leaving the remaining owned-repo gaps as proposals, so both
+   cap. In schema 1.3, `max_matches` is now a per-page cap: the authenticated cursor advances
+   the source position and resets the page allowance, allowing bounded completion even
+   beyond 200 total hits. Schema 1.1/1.2 preserve their prior cumulative request cap. Ruby
+   rejected leaving the remaining owned-repo gaps as proposals, so both
    ports now also provide bounded JSON count/distinct/grouping and a 32-entry/256-KiB
    exact-query answer LRU. Cache lookup re-authorizes handles first and never stores
    partial results.
@@ -119,8 +120,8 @@ fields under the closed 1.2 label.
 A second explicit P0–P2 review found two more valid boundary defects, also corrected in both
 ports: aggregate group/distinct targets that resolve to objects or arrays now fail with
 `INVALID_REQUEST`/`BAD_SELECTOR` instead of being conflated with a missing field, and search
-cursors now treat `max_matches` as a fresh bounded per-page allowance so every advertised
-cursor can make progress. Its third candidate—that PRE was sent an unsupported 1.3 request—
+cursors under schema 1.3 treat `max_matches` as a fresh bounded per-page allowance so every
+advertised cursor can make progress. Its third candidate—that PRE was sent an unsupported 1.3 request—
 was rejected after checking both the archived contract and actual PRE execution: commit
 `1686db6` emits envelopes at 1.2 but its `SUPPORTED_REQUEST_VERSIONS` is
 `[1.0, 1.1, 1.2, 1.3]`, and all five PRE rows execute with that fact captured in the JSON
@@ -278,13 +279,12 @@ proof.
   1.3-only count fields; unknown benchmark usage stays `null`; evaluation evidence is
   bound to the exact provider/route/corpus/PRE/NEW/host implementation; and the TypeScript
   answer cache deep-clones nested provenance. The verification review reported one further
-  P2 candidate asking that `max_matches` be cumulative across search continuations. That
-  candidate was rejected after checking the actual contract and both ports: `max_matches`
-  is deliberately a per-page cap, the authenticated cursor advances the source, and the
-  Python and TypeScript regressions both prove the bounded `20 + 20 + 9` traversal. Making
-  it cumulative would recreate the already-fixed non-progressing cursor for sources with
-  more matches than the global one-page cap; cumulative source/session disclosure quotas
-  remain enforced independently.
+  P2 candidate asking that `max_matches` be cumulative across all search continuations.
+  That broad candidate was initially rejected because schema 1.3 deliberately defines a
+  per-page cap and the cross-port regressions prove bounded `20 + 20 + 9` traversal; source
+  and session disclosure quotas remain cumulative independently. A later review narrowed
+  the compatibility concern to still-accepted 1.1/1.2 requests, which was valid and is
+  corrected below.
 
   A final branch review against `3fa92b6` found three additional valid P2s. All are fixed
   in `ca61ad2`: reported input/output totals now remain `null` when attempts exist but none
@@ -335,15 +335,16 @@ proof.
   late attempts, and a per-answer verified citation ledger; the two added aggregate tests
   brought the canonical matrix to 2,563 passing cases.
 
-  The next P0–P2 pass found two more valid P2s and repeated the already-rejected search-cap
-  proposal. The evaluator no longer accepts any resume input: its per-lane JSON is an
+  The next P0–P2 pass found two more valid P2s and repeated the broad search-cap proposal.
+  The evaluator no longer accepts any resume input: its per-lane JSON is an
   output-only redacted artifact, so an editable file cannot stand in for fresh provider
   calls. Both ports also reject lone surrogates in emitted `distinct`/`group_by` pointer
-  names, closing the remaining canonical-output exception. The `max_matches` candidate was
-  rechecked and rejected for the same contract-backed reason above: it is an explicit
-  bounded per-page allowance with authenticated cursor progress and independent cumulative
-  disclosure quotas, as proved by the `20 + 20 + 9` cross-port regressions. The four new
-  pointer-name cases bring the final canonical matrix to 2,567 passing cases.
+  names, closing the remaining canonical-output exception. That pass's broad `max_matches`
+  form was rechecked against the 1.3 contract and rejected. The following review identified
+  the narrower backward-compatibility defect: the new per-page behavior had also reached
+  accepted 1.1/1.2 requests. Both ports now gate the reset to 1.3, preserve cumulative
+  match state for older cursors, and fail a spent legacy cursor explicitly rather than
+  granting more results. Cross-port regressions cover 1.1, 1.2, and 1.3 behavior.
 
 ## Residual blockers
 

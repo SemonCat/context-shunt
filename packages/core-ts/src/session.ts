@@ -638,6 +638,12 @@ export class ShuntSession {
       validated.cursor !== undefined
         ? decodeCursor(key, validated.cursor, sourceId, snapshotId, selector)
         : {};
+    if (state.schema_version !== undefined && state.schema_version !== validated.schema_version) {
+      throw new ShuntError("INVALID_REQUEST", "BAD_CURSOR", false);
+    }
+    const effectiveRequestVersion = state.schema_version === undefined && (state.matches ?? 0) > 0
+      ? "1.2"
+      : validated.schema_version;
 
     const allowance = this.store.disclosureAllowance(this.identity, sourceId);
     const remaining = Math.max(
@@ -686,6 +692,7 @@ export class ShuntSession {
             maxScanLines: validated.budgets.max_scan_lines,
             maxWireBytes,
             state,
+            requestVersion: effectiveRequestVersion,
           },
         );
     if (extraction.stalled) {
@@ -696,6 +703,9 @@ export class ShuntSession {
         // disclosure problem would send the caller to a remedy that never works.
         throw new ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", false);
       }
+      if (extraction.stallReason === "cap") {
+        throw new ShuntError("LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", false);
+      }
       if (clippedByAllowance) {
         return this.disclosureExhausted(
           requestId, operationId, entry, selector, handles, allowance,
@@ -705,10 +715,12 @@ export class ShuntSession {
     }
 
     if (fallback && !extraction.resultBytes) throw new ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK");
-    const nextCursor =
-      extraction.nextCursorState !== undefined
-        ? encodeCursor(key, sourceId, snapshotId, selector, extraction.nextCursorState)
-        : null;
+    const nextCursorState = extraction.nextCursorState === undefined
+      ? undefined
+      : { ...extraction.nextCursorState, schema_version: validated.schema_version };
+    const nextCursor = nextCursorState !== undefined
+      ? encodeCursor(key, sourceId, snapshotId, selector, nextCursorState)
+      : null;
     let coverage = new Coverage();
     coverage.upstreamTruncated = false;
     coverage.complete = extraction.complete;

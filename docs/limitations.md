@@ -179,10 +179,13 @@ character or envelope metadata can still fail; exhausted cumulative allowance re
 A `search` page that stops only because it hit its own requested `max_matches` — not
 because the remaining source ran out — reports `complete: false` with a continuation cursor,
 exactly like a byte- or scan-budget cutoff already did; it no longer claims a whole-source
-count under partial coverage. `max_matches` is a per-page cap: resuming the authenticated
-cursor resets that bounded allowance and continues from the next unscanned line, so even a
-source with more than 200 matches can be exhausted over multiple pages without raising the
-one-page cap. One narrower case is not yet covered by this fix: the oversized-single-line byte-window fallback
+count under partial coverage. For schema 1.3, `max_matches` is a per-page cap: resuming the
+authenticated cursor resets that bounded allowance and continues from the next unscanned
+line, so even a source with more than 200 matches can be exhausted over multiple pages
+without raising the one-page cap. Schema 1.1/1.2 requests retain their established
+request-wide cumulative cap; resuming after it is spent fails with
+`SEARCH_MAX_MATCHES_EXHAUSTED` instead of silently granting more matches. One narrower case
+is not yet covered by this fix: the oversized-single-line byte-window fallback
 above always reports `complete: false` once it has emitted a window, even on the source's
 last line, because that flag conflates "more matches may exist" with "surrounding context was
 omitted" — a caller relying on `complete` alone to know whether another cursor visit is
