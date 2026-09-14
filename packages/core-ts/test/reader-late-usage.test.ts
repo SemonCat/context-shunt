@@ -89,6 +89,22 @@ describe("provenance.attempts_usage_complete", () => {
     // The envelope may not invent its own count - it must match the underlying ledger.
     expect(provenance.attempts_started).toBe(result.cost.attemptsStarted);
     expect(provenance.attempts_usage_complete).toBe(result.cost.attemptsUsageComplete);
+
+    // The counter is not the whole honesty question: what does the ledger say this
+    // answer actually cost? The winner alone reported an exact 9/11, but one of the two
+    // started attempts is genuinely unmeasured - reporting the winner's 9/11 as `exact`
+    // would silently zero the failed attempt's real, unknown cost. The reader guards
+    // against exactly this by downgrading the whole total to a named byte estimate
+    // whenever any attempt is unmeasured.
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.method).not.toBe("exact");
+    // A downgraded estimate must still be a real number derived from measured bytes -
+    // not blanked out just because it is no longer exact.
+    expect(result.cost.inputTokens).toBeGreaterThan(0);
+    expect(result.cost.outputTokens).toBeGreaterThan(0);
+    // And it must not simply equal the winner's exact figures - if it did, the unmeasured
+    // failed attempt's prompt bytes would have been dropped from the total.
+    expect(result.cost.inputTokens === 9 && result.cost.outputTokens === 11).toBe(false);
   });
 
   it("reports the complete count explicitly when every attempt is measured", async () => {
@@ -102,6 +118,12 @@ describe("provenance.attempts_usage_complete", () => {
     expect(provenance.attempts_started).toBe(1);
     expect(provenance.attempts_usage_complete).toBe(1);
     expect(provenance.usage_complete).toBe(true);
+
+    // The control case: nothing is unmeasured, so the ledger is allowed to say `exact`
+    // and to carry the provider's own numbers rather than a byte estimate.
+    expect(result.cost.method).toBe("exact");
+    expect(result.cost.inputTokens).toBe(10);
+    expect(result.cost.outputTokens).toBe(5);
   });
 
   it("reports zero measured of several started when every attempt fails (shaped after acc_968992724b9a99d6)", async () => {
@@ -119,5 +141,11 @@ describe("provenance.attempts_usage_complete", () => {
     expect(provenance.attempts_started as number).toBeGreaterThanOrEqual(2);
     expect(provenance.attempts_usage_complete).toBe(0);
     expect(provenance.usage_complete).toBe(false);
+
+    // Nothing was ever measured, but calls were still made and billed - the honest
+    // report is a named estimate derived from the bytes actually sent, never a bare
+    // zero. A zero here would read as "this failure cost nothing", which is false.
+    expect(result.cost.method).toBe("bytes_div_4");
+    expect(result.cost.inputTokens).toBeGreaterThan(0);
   });
 });

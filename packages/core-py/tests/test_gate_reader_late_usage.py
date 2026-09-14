@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from context_shunt.limits import DEFAULT_LIMITS
+from context_shunt.provenance import TokenMethod
 from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
 from context_shunt.reader import Reader
 from context_shunt.snapshot import snapshot_bytes
@@ -102,6 +103,24 @@ def test_a_partially_measured_answer_reports_the_real_attempt_count(tmp_path):
     assert provenance["attempts_started"] == result.cost.attempts_started
     assert provenance["attempts_usage_complete"] == result.cost.attempts_usage_complete
 
+    # The counter is not the whole honesty question: what does the ledger actually say
+    # this answer cost? The winner alone reported an exact 9/11, but one of the two
+    # started attempts is genuinely unmeasured - a total that simply forwarded the
+    # winner's 9/11 and called it ``exact`` would be silently zeroing the failed
+    # attempt's real, unknown cost. `_reader_cost` guards against exactly this by
+    # downgrading the *whole* total to a named byte estimate whenever any attempt is
+    # unmeasured, so the mix is never reported as if it were the winner's number alone.
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.method is not TokenMethod.EXACT
+    # A downgraded estimate must still be a real number derived from measured bytes -
+    # not blanked out just because it is no longer exact. Zero would be indistinguishable
+    # from "nothing was spent", which is false: a prompt was sent and a reply was billed.
+    assert result.cost.input_tokens is not None and result.cost.input_tokens > 0
+    assert result.cost.output_tokens is not None and result.cost.output_tokens > 0
+    # And the estimate must not simply equal the winner's exact figures either - if it did,
+    # the unmeasured failed attempt's prompt bytes would have been dropped from the total.
+    assert result.cost.input_tokens != 9 or result.cost.output_tokens != 11
+
 
 def test_a_fully_measured_answer_still_reports_the_complete_count(tmp_path):
     """The control: when every attempt is measured, the new field says so explicitly.
@@ -142,6 +161,12 @@ def test_a_fully_measured_answer_still_reports_the_complete_count(tmp_path):
     assert provenance["attempts_usage_complete"] == 1
     assert provenance["usage_complete"] is True
 
+    # The control case: nothing is unmeasured, so the ledger is allowed to say `exact`
+    # and to carry the provider's own numbers rather than a byte estimate.
+    assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.input_tokens == 10
+    assert result.cost.output_tokens == 5
+
 
 def test_an_all_failed_request_reports_zero_measured_of_several_started(tmp_path):
     """Shaped after ``acc_968992724b9a99d6``: nothing answered, several attempts were made.
@@ -167,3 +192,9 @@ def test_an_all_failed_request_reports_zero_measured_of_several_started(tmp_path
     assert provenance["attempts_started"] >= 2
     assert provenance["attempts_usage_complete"] == 0
     assert provenance["usage_complete"] is False
+
+    # Nothing was ever measured, but calls were still made and billed - the honest report
+    # is a named estimate derived from the bytes actually sent, never a bare zero. A zero
+    # here would read as "this failure cost nothing", which is false.
+    assert result.cost.method is TokenMethod.BYTES_DIV_4
+    assert result.cost.input_tokens is not None and result.cost.input_tokens > 0
