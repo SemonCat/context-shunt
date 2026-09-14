@@ -382,6 +382,83 @@ def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
     assert "Ask the context-shunt reader a question" in envelope["guidance"]
 
 
+def test_public_inspect_tool_aggregates_a_captured_minified_loki_result(tmp_path):
+    """Regression for the live Hermes boundary: the public schema must admit aggregate."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    logs = [
+        {"level": "error", "trace_id": "tr-a", "service": "billing"},
+        {"level": "info", "trace_id": "tr-b", "service": "billing"},
+        {"level": "error", "trace_id": "tr-a", "service": "checkout"},
+        {"level": "error", "trace_id": "tr-c", "service": "billing"},
+        {"level": "error", "trace_id": None},
+        {"level": "error", "trace_id": "tr-d", "service": None},
+    ]
+    logs.extend(
+        {"level": "info", "trace_id": f"padding-{index}", "service": "padding"}
+        for index in range(700)
+    )
+    body = json.dumps(
+        {
+            "data": {
+                "result": [
+                    {
+                        "values": [
+                            [str(index), json.dumps(row, separators=(",", ":"))]
+                            for index, row in enumerate(logs)
+                        ]
+                    }
+                ]
+            }
+        },
+        separators=(",", ":"),
+    )
+    spilled = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result=body,
+            task_id="aggregate-public",
+            session_id="aggregate-public",
+        )
+    )
+    handle = spilled["sources"][0]
+    envelope = json.loads(
+        module.context_shunt_inspect(
+            source_id=handle["source_id"],
+            snapshot_id=handle["snapshot_id"],
+            selector={
+                "kind": "aggregate",
+                "records_pointer": "/data/result",
+                "expand_pointer": "/values",
+                "record_pointer": "/1",
+                "parse_json": True,
+                "filter": {"pointer": "/level", "equals": "error"},
+                "distinct": ["/trace_id"],
+                "group_by": ["/service"],
+            },
+            task_id="aggregate-public",
+            session_id="aggregate-public",
+        )
+    )
+    assert envelope["code"] == "EXTRACTED"
+    assert envelope["provenance"]["attempts_started"] == 0
+    result = json.loads(envelope["extraction"]["segments"][0]["text"])
+    assert result["matched_count"] == 5
+    assert result["records_scanned"] == len(logs)
+    assert result["distinct"][0]["count"] == 4
+    assert result["groups"] == [
+        {"key": ["billing"], "count": 2},
+        {"key": ["checkout"], "count": 1},
+        {"key": [None], "count": 1},
+        {"key": [{"missing": True}], "count": 1},
+    ]
+
+
 def test_gate_hook_is_registered_and_no_writer_tool_is(tmp_path):
     module = _load_adapter()
     ctx = FakeCtx(_config(tmp_path), llm=FakeLlm())
@@ -848,6 +925,21 @@ def test_registered_tool_schemas_are_strict_canonical_parameters():
         "selector": {"kind": "lines", "start": 1, "end": 2},
     }
     assert inspect.is_valid(valid_inspect)
+    assert inspect.is_valid(
+        {
+            **valid_inspect,
+            "selector": {
+                "kind": "aggregate",
+                "records_pointer": "/data/result",
+                "expand_pointer": "/values",
+                "record_pointer": "/1",
+                "parse_json": True,
+                "filter": {"pointer": "/level", "equals": "error"},
+                "distinct": ["/trace_id"],
+                "group_by": ["/service"],
+            },
+        }
+    )
     assert not inspect.is_valid({**valid_inspect, "unexpected": True})
     assert not inspect.is_valid(
         {

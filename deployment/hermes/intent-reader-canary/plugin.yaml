@@ -1,0 +1,8 @@
+name: context-shunt-intent-reader-canary
+version: "1.0.0"
+kind: standalone
+description: >-
+  One-shot, PID-bound synthetic production canary for the reviewed intent-reader
+  aggregation and exact-query cache. It registers no transform listener and disposes
+  its temporary fixture tool after writing a content-free receipt.
+provides_tools: []

@@ -942,7 +942,7 @@ def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
-    """Exact lines, bytes or literal-search hits from a handle. Zero model calls."""
+    """Exact bounded extraction or JSON aggregation from a handle. Zero model calls."""
     public_args, host_kwargs = _tool_invocation_args(
         args, kwargs, "context_shunt_inspect"
     )
@@ -1160,9 +1160,10 @@ READER_TOOL_SCHEMA = {
 INSPECT_TOOL_SCHEMA = {
     "name": "context_shunt_inspect",
     "description": (
-        "Return exact text from a snapshot you already hold: a line range, a byte range, or "
-        "literal-search hits. Deterministic - no model is involved, so the result is source "
-        "bytes rather than a summary. Each page is capped at 16 KiB and counts against a "
+        "Return exact text or bounded JSON aggregation from a snapshot you already hold: a "
+        "line range, byte range, literal-search hits, or deterministic count/distinct/grouping. "
+        "No model is involved, so the result is source evidence rather than a summary. Each "
+        "page is capped at 16 KiB and counts against a "
         "cumulative disclosure budget, so a large file cannot be paged into a full copy; a "
         "file small enough to fit that budget can be returned in full. For minified one-line "
         "sources, use literal search, then a 0-based half-open UTF-8 byte range; continue only "

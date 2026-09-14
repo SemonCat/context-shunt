@@ -6,7 +6,9 @@ import { ShuntError } from "../src/errors.js";
 import {
   DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION, statusCodePairs, legalPair,
 } from "../src/limits.js";
-import { envelopeValidator, requestValidator, validateRequest } from "../src/schema.js";
+import {
+  envelopeValidator, requestValidator, validateRequest, validateToolArgs,
+} from "../src/schema.js";
 import { fixtureDocs } from "./fixtures.js";
 
 describe("request fixtures", () => {
@@ -16,6 +18,36 @@ describe("request fixtures", () => {
   for (const { name, document } of fixtureDocs("request", "invalid")) {
     it(`rejects ${name}`, () => expect(requestValidator()(document)).toBe(false));
   }
+});
+
+describe("public tool arguments", () => {
+  it("accepts the bounded aggregate selector and rejects an over-wide grouping", () => {
+    const args = {
+      tool: "context_shunt_inspect",
+      source_id: "src_abcd",
+      snapshot_id: `sha256:${"a".repeat(64)}`,
+      selector: {
+        kind: "aggregate",
+        records_pointer: "/data/result",
+        expand_pointer: "/values",
+        record_pointer: "/1",
+        parse_json: true,
+        filter: { pointer: "/level", equals: "error" },
+        distinct: ["/trace_id"],
+        group_by: ["/service"],
+      },
+    };
+    expect(validateToolArgs(args)).toBe(args);
+
+    const invalid = structuredClone(args);
+    invalid.selector.group_by = ["/a", "/b", "/c", "/d", "/e"];
+    expect(() => validateToolArgs(invalid)).toThrowError(ShuntError);
+    try {
+      validateToolArgs(invalid);
+    } catch (err) {
+      expect((err as ShuntError).detail).toBe("TOOL_ARGS_VIOLATION");
+    }
+  });
 });
 
 describe("envelope fixtures", () => {

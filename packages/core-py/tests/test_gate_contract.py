@@ -15,7 +15,12 @@ from context_shunt.limits import (
     legal_pair,
     status_code_pairs,
 )
-from context_shunt.schema import envelope_validator, request_validator, validate_request
+from context_shunt.schema import (
+    envelope_validator,
+    request_validator,
+    validate_request,
+    validate_tool_args,
+)
 
 pytestmark = pytest.mark.gate_contract
 
@@ -38,6 +43,31 @@ def test_valid_requests_accepted(name, doc):
 @pytest.mark.parametrize("name,doc", list(_docs("request", "invalid")))
 def test_invalid_requests_rejected(name, doc):
     assert not request_validator().is_valid(doc), name
+
+
+def test_public_inspect_tool_accepts_bounded_aggregate_selector():
+    args = {
+        "tool": "context_shunt_inspect",
+        "source_id": "src_abcd",
+        "snapshot_id": "sha256:" + "a" * 64,
+        "selector": {
+            "kind": "aggregate",
+            "records_pointer": "/data/result",
+            "expand_pointer": "/values",
+            "record_pointer": "/1",
+            "parse_json": True,
+            "filter": {"pointer": "/level", "equals": "error"},
+            "distinct": ["/trace_id"],
+            "group_by": ["/service"],
+        },
+    }
+    assert validate_tool_args(args) == args
+
+    invalid = json.loads(json.dumps(args))
+    invalid["selector"]["group_by"] = ["/a", "/b", "/c", "/d", "/e"]
+    with pytest.raises(ShuntError) as exc_info:
+        validate_tool_args(invalid)
+    assert exc_info.value.detail == "TOOL_ARGS_VIOLATION"
 
 
 @pytest.mark.parametrize("name,doc", list(_docs("envelope", "valid")))
