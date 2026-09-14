@@ -168,6 +168,52 @@ describe("structured deterministic aggregation", () => {
     expect(env.extraction).toBeUndefined();
   });
 
+  it.each(["NaN", "Infinity", "-Infinity"])(
+    "rejects non-standard %s in text/plain JSON",
+    (constant) => {
+      const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-constant-"));
+      const session = new ShuntSession(
+        "sess",
+        makeConfig(dir, { tool_result_capture: {
+          enabled: true, host_ordering_verified_locally: true,
+        } }),
+        makeCapability(true),
+        { provider: new UnavailableProvider("MUST_NOT_RUN") },
+      );
+      const body = `{"records":[${constant}],"padding":"${"x".repeat(17_000)}"}`;
+      const outcome = session.postToolResult("spill-constant", body)!;
+      expect(outcome.action).toBe("spill");
+      const entry = session.registry.resolve("sess", outcome.sourceId!);
+      const env = session.inspect(request(entry, {
+        kind: "aggregate", records_pointer: "/records",
+      }));
+      expect(env.code).toBe("INVALID_REQUEST");
+      expect(env.failure_detail).toBe("BAD_JSON");
+    },
+  );
+
+  it.each(["NaN", "Infinity", "-Infinity"])(
+    "rejects non-standard %s in embedded JSON",
+    (constant) => {
+      const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-embedded-constant-"));
+      mkdirSync(join(dir, "ws"), { recursive: true });
+      const path = join(dir, "ws", "embedded-constant.json");
+      writeFileSync(path, JSON.stringify({ records: [{ value: constant }] }));
+      const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+        provider: new UnavailableProvider("MUST_NOT_RUN"),
+      });
+      const entry = session.registerPath(path);
+      const env = session.inspect(request(entry, {
+        kind: "aggregate",
+        records_pointer: "/records",
+        record_pointer: "/value",
+        parse_json: true,
+      }));
+      expect(env.code).toBe("INVALID_REQUEST");
+      expect(env.failure_detail).toBe("BAD_JSON");
+    },
+  );
+
   it.each(["distinct", "group_by"] as const)(
     "rejects a lone surrogate in the emitted %s pointer name",
     (field) => {

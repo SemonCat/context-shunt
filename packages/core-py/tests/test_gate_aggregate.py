@@ -244,6 +244,55 @@ def test_aggregate_rejects_lone_surrogate_before_embedded_json_byte_measurement(
     assert "extraction" not in env
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_aggregate_rejects_nonstandard_constants_in_text_plain_json(tmp_path, constant):
+    session = ShuntSession(
+        "sess",
+        make_config(
+            tmp_path,
+            tool_result_capture={"enabled": True, "host_ordering_verified_locally": True},
+        ),
+        make_capability(tool_result_capture=True),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    body = f'{{"records":[{constant}],"padding":"' + "x" * 17_000 + '"}'
+    outcome = session.post_tool_result("spill-constant", body)
+    assert outcome.action == "spill"
+    entry = session.registry.resolve("sess", outcome.source_id)
+    env = session.inspect(
+        _request(entry, {"kind": "aggregate", "records_pointer": "/records"})
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_JSON"
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_aggregate_rejects_nonstandard_constants_in_embedded_json(tmp_path, constant):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "embedded-constant.json"
+    path.write_text(json.dumps({"records": [{"value": constant}]}))
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "records_pointer": "/records",
+                "record_pointer": "/value",
+                "parse_json": True,
+            },
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_JSON"
+
+
 @pytest.mark.parametrize("field", ["distinct", "group_by"])
 def test_aggregate_rejects_lone_surrogate_in_emitted_pointer_name(tmp_path, field):
     (tmp_path / "ws").mkdir()

@@ -39,6 +39,7 @@ RELEVANT_FILES = (
     "packages/core-py/src/context_shunt/provider.py",
     "packages/core-py/src/context_shunt/reader.py",
     "packages/core-py/src/context_shunt/session.py",
+    "packages/core-py/src/context_shunt/snapshot.py",
     "packages/core-ts/src/aggregate.ts",
 )
 
@@ -95,6 +96,13 @@ def _binding(host_root: Path, route: str) -> dict[str, Any]:
         "host_git_tree": host["git_tree"],
         "host_checkout_clean": host["clean"],
     }
+
+
+def _assert_binding_unchanged(
+    expected: dict[str, Any], host_root: Path, route: str, stage: str
+) -> None:
+    if _binding(host_root, route) != expected:
+        raise SystemExit(f"NOT_RUN: checkout binding changed {stage}")
 
 
 def _calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -347,17 +355,18 @@ def main() -> None:
     current_package = ROOT / "packages" / "core-py" / "src"
     with TemporaryDirectory(prefix="context-shunt-real-pre-") as temporary:
         baseline_package = local_benchmark.extract_baseline(Path(temporary))
-        payloads = {
-            "legacy_compactor": local_benchmark.run_worker(
-                "legacy_compactor", current_package, provider_kind="live"
-            ),
-            "pre": local_benchmark.run_worker(
-                "pre", baseline_package, provider_kind="live"
-            ),
-            "new": local_benchmark.run_worker(
-                "new", current_package, provider_kind="live"
-            ),
-        }
+        payloads = {}
+        for lane, package in (
+            ("legacy_compactor", current_package),
+            ("pre", baseline_package),
+            ("new", current_package),
+        ):
+            _assert_binding_unchanged(
+                evidence_binding, host_root, route, f"before {lane} lane"
+            )
+            payloads[lane] = local_benchmark.run_worker(
+                lane, package, provider_kind="live"
+            )
         labels = {
             "legacy_compactor": "working_tree:packages/core-py/src/context_shunt/__init__.py",
             "pre": f"isolated_git_archive:{BASELINE}:packages/core-py/src/context_shunt/__init__.py",
@@ -370,6 +379,7 @@ def main() -> None:
         }
         for lane, payload in payloads.items():
             local_benchmark.normalize_origins(payload, labels[lane], roots[lane])
+    _assert_binding_unchanged(evidence_binding, host_root, route, "during live run")
     # This is a redacted output artifact only. No code path reads it back as real-provider
     # evidence; a fresh run must start from clean source trees and execute every lane.
     lane_evidence = {

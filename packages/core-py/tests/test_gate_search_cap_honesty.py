@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import pytest
 
+from context_shunt.inspect import encode_cursor
 from context_shunt.limits import EMITTED_SCHEMA_VERSION
 from context_shunt.provider import UnavailableProvider
 from context_shunt.session import ShuntSession
@@ -254,6 +255,44 @@ def test_search_cursor_cannot_change_request_version_mid_chain(tmp_path):
     )
     assert changed["code"] == "INVALID_REQUEST"
     assert changed["failure_detail"] == "BAD_CURSOR"
+
+
+def test_unversioned_zero_match_cursor_stays_on_legacy_semantics(tmp_path):
+    config = make_config(
+        tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
+    )
+    session = ShuntSession(
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
+        provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
+    )
+    body, _ = _loki_shaped_source()
+    pointer = _spilled_pointer(tmp_path, session, body)
+    selector = {"kind": "search", "needle": "ERROR", "max_matches": 20}
+    legacy_cursor = encode_cursor(
+        session._store.cursor_key(),
+        pointer["source_id"],
+        pointer["snapshot_id"],
+        selector,
+        {"line": 1, "matches": 0},
+    )
+    first = session.inspect(
+        _search_request(
+            pointer, max_matches=20, cursor=legacy_cursor, schema_version="1.3"
+        )
+    )
+    assert first["extraction"]["matches_found"] == 20
+    relabeled = session.inspect(
+        _search_request(
+            pointer,
+            max_matches=20,
+            cursor=first["extraction"]["next_cursor"],
+            schema_version="1.3",
+        )
+    )
+    assert relabeled["code"] == "INVALID_REQUEST"
+    assert relabeled["failure_detail"] == "BAD_CURSOR"
 
 
 def test_a_single_page_with_headroom_above_the_true_total_is_an_honest_exact_count(tmp_path):

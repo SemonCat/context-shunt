@@ -32,6 +32,10 @@ from .textindex import LineIndex
 _READ_CHUNK = 256 * 1024
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-standard JSON constant")
+
+
 @dataclass(frozen=True)
 class Snapshot:
     snapshot_id: str
@@ -136,7 +140,10 @@ def snapshot_bytes(
     json_value: Any | None = None
     if media_type == JSON_MEDIA_TYPE:
         try:
-            json_value = json.loads(text)
+            json_value = json.loads(
+                text,
+                parse_constant=_reject_json_constant,
+            )
         except (ValueError, RecursionError):
             raise ShuntError("UNSAFE_SOURCE", "INVALID_JSON") from None
         json_depth_and_nodes(json_value, limits)

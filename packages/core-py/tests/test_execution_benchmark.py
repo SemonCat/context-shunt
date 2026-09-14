@@ -303,6 +303,16 @@ def test_real_luna_has_no_resume_path_for_editable_lane_evidence() -> None:
     assert "_checkpoint_errors" not in source
 
 
+def test_real_luna_revalidates_checkout_binding_between_stages(monkeypatch) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    monkeypatch.setattr(real_run, "_binding", lambda *_args: {"tree": "changed"})
+    with pytest.raises(SystemExit, match="checkout binding changed before new lane"):
+        real_run._assert_binding_unchanged(
+            {"tree": "expected"}, Path("/redacted-host"), "provider/gpt-5.6-luna", "before new lane"
+        )
+
+
 def test_real_luna_acceptance_rejects_a_citationless_semantic_answer() -> None:
     root = Path(__file__).resolve().parents[3]
     real_run = _real_run_module(root)

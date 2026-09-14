@@ -641,9 +641,13 @@ export class ShuntSession {
     if (state.schema_version !== undefined && state.schema_version !== validated.schema_version) {
       throw new ShuntError("INVALID_REQUEST", "BAD_CURSOR", false);
     }
-    const effectiveRequestVersion = state.schema_version === undefined && (state.matches ?? 0) > 0
+    const isUnversionedCursor = validated.cursor !== undefined && state.schema_version === undefined;
+    const effectiveRequestVersion = isUnversionedCursor
       ? "1.2"
       : validated.schema_version;
+    const cursorChainVersion = isUnversionedCursor
+      ? "1.2"
+      : state.schema_version ?? validated.schema_version;
 
     const allowance = this.store.disclosureAllowance(this.identity, sourceId);
     const remaining = Math.max(
@@ -717,7 +721,7 @@ export class ShuntSession {
     if (fallback && !extraction.resultBytes) throw new ShuntError("LIMIT_EXCEEDED", "EMPTY_FALLBACK");
     const nextCursorState = extraction.nextCursorState === undefined
       ? undefined
-      : { ...extraction.nextCursorState, schema_version: validated.schema_version };
+      : { ...extraction.nextCursorState, schema_version: cursorChainVersion };
     const nextCursor = nextCursorState !== undefined
       ? encodeCursor(key, sourceId, snapshotId, selector, nextCursorState)
       : null;

@@ -4,9 +4,9 @@ This benchmark executes identical synthetic production-derived content through t
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Answer-cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| legacy_compactor | 3/5 | 64667 (16167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19912 | 17601 | 87.153 | 0.0/0.000 |
-| pre | 3/5 | 60271 (15068) | 145991/1098 | 19210/262/0 | 36499/276/unknown | 7 (5/2) | 0 | 19912 | 17601 | 230.912 | 14.0/18.754 |
-| new | 5/5 | 43170 (10793) | 5132/332 | 1284/84/0 | 1284/84/0 | 2 (2/0) | 1 | 19912 | 0 | 206.043 | 4.0/5.684 |
+| legacy_compactor | 3/5 | 64667 (16167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19912 | 17601 | 83.611 | 0.0/0.000 |
+| pre | 3/5 | 60271 (15068) | 145991/1098 | 19210/262/0 | 36499/276/unknown | 7 (5/2) | 0 | 19912 | 17601 | 235.678 | 14.0/18.630 |
+| new | 5/5 | 43170 (10793) | 5132/332 | 1284/84/0 | 1284/84/0 | 2 (2/0) | 1 | 19912 | 0 | 260.844 | 4.0/5.302 |
 
 \* Provider tokens are only values returned by the instrumented fixture. A deliberately missing usage report remains an unknown attempt, so each token total is a reported lower bound—not a completion-ratio estimate. The fixture uses bytes/4 as its explicit token tariff; these fields are copied from its actual `ModelResponse.usage`, not inferred afterward. Main-context tokens alone are estimated from observed bytes at bytes/4.
 

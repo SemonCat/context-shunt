@@ -358,6 +358,15 @@ proof.
   output. The two new cross-port cases bring the final canonical matrix to 2,575 passing
   cases.
 
+  The next P0–P2 pass found three more valid boundary P2s. Python now rejects non-standard
+  `NaN`/`Infinity` constants in both snapshot and embedded aggregate parsing, matching
+  JavaScript's strict JSON behavior. The real harness recomputes and compares complete
+  Shunt/host bindings before every lane and after execution, before writing evidence.
+  Finally, every unversioned cursor is conservatively retained on legacy cumulative-match
+  semantics even when it has observed zero matches; any continuation it emits remains
+  version-bound. Direct red tests cover each case, and the artifacts are again regenerated
+  only after the fixes are committed cleanly.
+
 ## Residual blockers
 
 1. **One host-side proposal remains unimplemented by design:**

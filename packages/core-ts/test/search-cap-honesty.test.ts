@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { ExtractionShape } from "../src/envelope.js";
+import { encodeCursor } from "../src/inspect.js";
 import { EMITTED_SCHEMA_VERSION } from "../src/limits.js";
 import { UnavailableProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
@@ -195,6 +196,29 @@ describe("a search capped by max_matches no longer claims the whole source was s
     }));
     expect(changed.code).toBe("INVALID_REQUEST");
     expect(changed.failure_detail).toBe("BAD_CURSOR");
+  });
+
+  it("keeps an unversioned zero-match cursor on legacy semantics", () => {
+    const session = newSession();
+    const { body } = lokiShapedSource();
+    const pointer = spilledPointer(session, body);
+    const selector = { kind: "search", needle: "ERROR", max_matches: 20 };
+    const store = (session as unknown as { store: { cursorKey(): Uint8Array } }).store;
+    const legacyCursor = encodeCursor(
+      store.cursorKey(), pointer.source_id, pointer.snapshot_id, selector,
+      { line: 1, matches: 0 },
+    );
+    const first = session.inspect(searchRequest(pointer, {
+      maxMatches: 20, cursor: legacyCursor, schemaVersion: "1.3",
+    }));
+    expect(first.extraction?.matches_found).toBe(20);
+    const relabeled = session.inspect(searchRequest(pointer, {
+      maxMatches: 20,
+      cursor: first.extraction?.next_cursor as string,
+      schemaVersion: "1.3",
+    }));
+    expect(relabeled.code).toBe("INVALID_REQUEST");
+    expect(relabeled.failure_detail).toBe("BAD_CURSOR");
   });
 
   it("reports an honest exact count in one page when the cap is never actually reached", () => {

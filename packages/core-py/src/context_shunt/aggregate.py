@@ -17,6 +17,10 @@ _MISSING = object()
 _MISSING_OUTPUT = {"missing": True}
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-standard JSON constant")
+
+
 def _optional_pointer(value: Any, pointer: str) -> Any:
     try:
         return resolve_pointer(value, pointer)
@@ -61,7 +65,9 @@ def aggregate_snapshot(
         if snapshot.media_type != "text/plain":
             raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
         try:
-            root = json.loads(snapshot.data.decode("utf-8"))
+            root = json.loads(
+                snapshot.data.decode("utf-8"), parse_constant=_reject_json_constant
+            )
         except (UnicodeDecodeError, ValueError, RecursionError):
             raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
         json_depth_and_nodes(root, limits)
@@ -122,7 +128,7 @@ def aggregate_snapshot(
             if parsed_bytes > limits.max_source_bytes:
                 raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
             try:
-                record = json.loads(record)
+                record = json.loads(record, parse_constant=_reject_json_constant)
             except (ValueError, RecursionError):
                 raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
             _, nodes = json_depth_and_nodes(record, limits)

@@ -770,10 +770,13 @@ class ShuntSession:
         if cursor_version is not None and cursor_version != validated["schema_version"]:
             raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
         effective_request_version = validated["schema_version"]
-        if cursor_version is None and int(state.get("matches", 0)) > 0:
+        cursor_chain_version = cursor_version or validated["schema_version"]
+        if "cursor" in validated and cursor_version is None:
             # Cursors minted before the version was embedded used cumulative match state.
-            # Treat them conservatively even if presented on a 1.3 request.
+            # Treat all of them conservatively, including a scan-budget cursor that has
+            # not encountered a match yet, and keep later cursors on that legacy chain.
             effective_request_version = "1.2"
+            cursor_chain_version = "1.2"
 
         allowance = self._store.disclosure_allowance(self._identity, source_id)
         requested_budget = int(budgets["max_result_bytes"])
@@ -848,7 +851,7 @@ class ShuntSession:
         if next_cursor_state is not None:
             next_cursor_state = {
                 **next_cursor_state,
-                "schema_version": validated["schema_version"],
+                "schema_version": cursor_chain_version,
             }
         next_cursor = (
             encode_cursor(key, source_id, snapshot_id, selector, next_cursor_state)

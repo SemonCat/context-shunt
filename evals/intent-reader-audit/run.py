@@ -420,6 +420,7 @@ def main() -> None:
                     "packages/core-py/src/context_shunt/inspect.py",
                     "packages/core-py/src/context_shunt/reader.py",
                     "packages/core-py/src/context_shunt/session.py",
+                    "packages/core-py/src/context_shunt/snapshot.py",
                 ],
             ),
         },
