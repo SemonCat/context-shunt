@@ -769,14 +769,23 @@ class ShuntSession:
         cursor_version = state.get("schema_version")
         if cursor_version is not None and cursor_version != validated["schema_version"]:
             raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
-        effective_request_version = validated["schema_version"]
-        cursor_chain_version = cursor_version or validated["schema_version"]
-        if "cursor" in validated and cursor_version is None:
+        legacy_search_semantics = selector["kind"] == "search" and (
+            state.get("search_matches_cumulative") is True
+        )
+        if (
+            selector["kind"] == "search"
+            and "cursor" in validated
+            and cursor_version is None
+        ):
             # Cursors minted before the version was embedded used cumulative match state.
-            # Treat all of them conservatively, including a scan-budget cursor that has
-            # not encountered a match yet, and keep later cursors on that legacy chain.
-            effective_request_version = "1.2"
-            cursor_chain_version = "1.2"
+            # Treat all of them conservatively, including a scan-budget cursor that has not
+            # encountered a match yet. Newly issued cursors bind to the current request
+            # version and carry a separate authenticated marker for the old match semantics,
+            # so the same request can continue using the opaque token it was given.
+            legacy_search_semantics = True
+        effective_request_version = (
+            "1.2" if legacy_search_semantics else validated["schema_version"]
+        )
 
         allowance = self._store.disclosure_allowance(self._identity, source_id)
         requested_budget = int(budgets["max_result_bytes"])
@@ -851,8 +860,10 @@ class ShuntSession:
         if next_cursor_state is not None:
             next_cursor_state = {
                 **next_cursor_state,
-                "schema_version": cursor_chain_version,
+                "schema_version": validated["schema_version"],
             }
+            if legacy_search_semantics:
+                next_cursor_state["search_matches_cumulative"] = True
         next_cursor = (
             encode_cursor(key, source_id, snapshot_id, selector, next_cursor_state)
             if next_cursor_state is not None

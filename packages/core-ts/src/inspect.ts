@@ -91,6 +91,7 @@ export interface CursorState {
   offset?: number;
   matches?: number;
   schema_version?: string;
+  search_matches_cumulative?: boolean;
 }
 
 export interface Extraction {

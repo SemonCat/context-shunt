@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import pytest
 
-from context_shunt.inspect import encode_cursor
+from context_shunt.inspect import decode_cursor, encode_cursor
 from context_shunt.limits import EMITTED_SCHEMA_VERSION
 from context_shunt.provider import UnavailableProvider
 from context_shunt.session import ShuntSession
@@ -279,20 +279,35 @@ def test_unversioned_zero_match_cursor_stays_on_legacy_semantics(tmp_path):
     )
     first = session.inspect(
         _search_request(
-            pointer, max_matches=20, cursor=legacy_cursor, schema_version="1.3"
+            pointer,
+            max_matches=20,
+            max_scan_lines=100,
+            cursor=legacy_cursor,
+            schema_version="1.3",
         )
     )
-    assert first["extraction"]["matches_found"] == 20
-    relabeled = session.inspect(
+    assert first["extraction"]["matches_found"] == 1
+    continued_state = decode_cursor(
+        session._store.cursor_key(),
+        first["extraction"]["next_cursor"],
+        pointer["source_id"],
+        pointer["snapshot_id"],
+        selector,
+    )
+    assert continued_state["schema_version"] == "1.3"
+    assert continued_state["search_matches_cumulative"] is True
+    assert continued_state["matches"] == 1
+    continued = session.inspect(
         _search_request(
             pointer,
             max_matches=20,
+            max_scan_lines=100,
             cursor=first["extraction"]["next_cursor"],
             schema_version="1.3",
         )
     )
-    assert relabeled["code"] == "INVALID_REQUEST"
-    assert relabeled["failure_detail"] == "BAD_CURSOR"
+    assert continued["code"] == "EXTRACTED"
+    assert continued["extraction"]["matches_found"] == 2
 
 
 def test_a_single_page_with_headroom_above_the_true_total_is_an_honest_exact_count(tmp_path):
