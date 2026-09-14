@@ -34,6 +34,7 @@ capture the source again.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import queue
 import re
@@ -590,7 +591,7 @@ class Reader:
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", retryable=False)
         deadline.check("RESOLVE")
         target = getattr(self._provider, "target", ProviderTarget(model="", provider=""))
-        return json.dumps(
+        material = json.dumps(
             {
                 "session": session_id,
                 "schema": request["schema_version"],
@@ -606,7 +607,8 @@ class Reader:
             },
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
     def _cache_get(
         self, key: str, request_id: str, accounting_id: str | None
@@ -664,7 +666,7 @@ class Reader:
         ):
             return
         stored = copy.deepcopy(envelope)
-        size = E.serialized_bytes(stored)
+        size = E.serialized_bytes(stored) + len(key.encode("utf-8"))
         max_bytes = 256 * 1024
         if size > max_bytes:
             return

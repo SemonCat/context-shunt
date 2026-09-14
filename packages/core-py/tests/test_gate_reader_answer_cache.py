@@ -197,3 +197,17 @@ def test_least_recently_used_answer_is_evicted_after_32_entries(tmp_path):
         )
     session.read(_request(entry, "req_again", question="What is retry_limit? variant 0"))
     assert provider.call_count == 34
+
+
+def test_cache_hashes_and_accounts_for_the_retained_query_key(tmp_path):
+    session, _provider, entry = _fixture(tmp_path)
+    question = "What is retry_limit? unique retained key"
+    session.read(_request(entry, "req_large_key", question=question))
+
+    cache = session._reader._answer_cache
+    assert len(cache) == 1
+    key, cached = next(iter(cache.items()))
+    assert len(key) == 64
+    assert question not in key
+    assert cached[3] == E.serialized_bytes(cached[0]) + len(key.encode("utf-8"))
+    assert session._reader._answer_cache_bytes == cached[3] <= 256 * 1024

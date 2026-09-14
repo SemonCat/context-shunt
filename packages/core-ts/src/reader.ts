@@ -26,6 +26,7 @@
  * next steps, so the caller retries or refines over the same snapshot instead of paying to
  * capture the source again.
  */
+import { createHash } from "node:crypto";
 import {
   type ReaderCost,
   estimateTokens as accountingTokens,
@@ -574,7 +575,7 @@ export class Reader {
       }
     }
     deadline.check("RESOLVE");
-    return stableJson({
+    const material = stableJson({
       session: sessionId,
       schema: request.schema_version,
       question: request.question,
@@ -587,6 +588,7 @@ export class Reader {
         attribution_policy: this.policy,
       },
     });
+    return createHash("sha256").update(material, "utf8").digest("hex");
   }
 
   private cacheGet(key: string, requestId: string, accountingId?: string): ReaderResult | undefined {
@@ -637,7 +639,7 @@ export class Reader {
       || result.provenance.fallbackUsed === true
     ) return;
     const copy = structuredClone(envelope);
-    const bytes = serializedBytes(copy);
+    const bytes = serializedBytes(copy) + utf8Length(key);
     if (bytes > ANSWER_CACHE_MAX_BYTES) return;
     const prior = this.answerCache.get(key);
     if (prior !== undefined) this.answerCacheBytes -= prior.bytes;

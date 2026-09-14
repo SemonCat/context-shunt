@@ -108,6 +108,25 @@ describe("structured deterministic aggregation", () => {
     },
   );
 
+  it("orders canonical aggregate keys by UTF-8 bytes across runtimes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-unicode-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "unicode-order.json");
+    writeFileSync(path, JSON.stringify({ records: [{ value: "\ue000" }, { value: "😀" }] }));
+    const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    const entry = session.registerPath(path);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/records",
+      distinct: ["/value"], group_by: ["/value"],
+    }));
+    const result = JSON.parse(env.extraction!.segments[0]!.text);
+    expect(result.distinct[0].values).toEqual(["\ue000", "😀"]);
+    expect(result.groups.map((row: { key: string[] }) => row.key))
+      .toEqual([["\ue000"], ["😀"]]);
+  });
+
   it("keeps exact cardinalities when bounded key samples are truncated", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-cardinality-"));
     mkdirSync(join(dir, "ws"), { recursive: true });

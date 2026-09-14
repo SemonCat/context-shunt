@@ -142,4 +142,22 @@ describe("scoped exact reader answer reuse", () => {
     await session.read(request(entry, "req_again", { question: "What is retry_limit? variant 0" }));
     expect(provider.callCount).toBe(34);
   });
+
+  it("hashes and accounts for the retained query key", async () => {
+    const { session, entry } = fixture();
+    const question = "What is retry_limit? unique retained key";
+    await session.read(request(entry, "req_large_key", { question }));
+
+    const reader = (session as unknown as { reader: {
+      answerCache: Map<string, { envelope: unknown; bytes: number }>;
+      answerCacheBytes: number;
+    } }).reader;
+    expect(reader.answerCache.size).toBe(1);
+    const [key, cached] = [...reader.answerCache.entries()][0]!;
+    expect(key).toHaveLength(64);
+    expect(key).not.toContain(question);
+    expect(cached.bytes).toBe(serializedBytes(cached.envelope) + Buffer.byteLength(key, "utf8"));
+    expect(reader.answerCacheBytes).toBe(cached.bytes);
+    expect(reader.answerCacheBytes).toBeLessThanOrEqual(256 * 1024);
+  });
 });

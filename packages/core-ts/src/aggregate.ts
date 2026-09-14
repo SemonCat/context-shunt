@@ -34,7 +34,7 @@ function scalarKey(value: Scalar): string {
 }
 
 function canonicalOrder(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 function outputScalar(value: GroupValue): boolean {

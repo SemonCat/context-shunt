@@ -123,6 +123,13 @@ was rejected after checking both the archived contract and actual PRE execution:
 `[1.0, 1.1, 1.2, 1.3]`, and all five PRE rows execute with that fact captured in the JSON
 artifact.
 
+The third explicit P0–P2 review found two further valid boundedness/determinism defects.
+Both are fixed and covered in both ports: the cache now retains a fixed SHA-256 query-key
+digest and includes those digest bytes in its 256-KiB serialized-material eviction total,
+and aggregate distinct/group keys sort by canonical JSON's UTF-8 bytes rather than relying
+on Python code-point versus JavaScript UTF-16 ordering. The cross-runtime regression uses
+`U+E000` and `U+1F600`, whose relative order exposed the mismatch.
+
 Closed error-code lists remain synchronized in both language cores and all contract copies.
 
 ## Three-lane comparison (synthetic corpus, local, read-only)
@@ -139,9 +146,9 @@ attempts, and `ModelResponse.usage` it returns.
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 80.558 | 0/0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 238.495 | 14/16.545 |
-| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 222.308 | 4/5.486 |
+| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 94.664 | 0/0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 255.823 | 14/17.104 |
+| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 217.660 | 4/5.175 |
 
 \* Provider token values are copied from the fixture's returned usage. The fixture's
 explicit tariff is bytes/4, but the harness does not derive a "reported" total after the
@@ -150,7 +157,7 @@ lower bound, never scaled by a completion ratio. Main-context tokens alone are e
 estimated from observed serialized bytes. Harness elapsed time is measured independently
 on each run and recorded in the artifact; configured and observed mock delay are separate
 fields, with no arithmetic controlled-time substitute. In this frozen local run NEW took
-222.308 ms versus PRE's 238.495 ms. That one controlled-fixture observation is reported as
+217.660 ms versus PRE's 255.823 ms. That one controlled-fixture observation is reported as
 measured, but is not presented as proof of a production wall-time gain.
 
 Correctness is evaluated from actual emitted answers and aggregate extractions. In this
@@ -179,9 +186,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 978 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+- **Python core:** 980 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
   pytest -q`).
-- **TypeScript/adapter suite:** 948 passed, 10 skipped across 23 files (`npx vitest run`);
+- **TypeScript/adapter suite:** 950 passed, 10 skipped across 23 files (`npx vitest run`);
   `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
   acceptance assertions passed. Its opt-in regression test also passed in the Python
@@ -190,10 +197,10 @@ proof.
   records one bounded answer-cache hit, exact structured results, zero unknown usage
   attempts, and the known requery loss. See the committed JSON/Markdown artifacts.
 - **`./scripts/verify shadow deterministic`:** PASS — `main_context_reduction` 0.9734
-  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 55.219ms
+  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 46.612ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,514 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,518 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -212,8 +219,9 @@ proof.
   `--max-priority P2`. The first produced five accepted findings, all fixed in `2d319a2`;
   the second produced three candidates, of which the two aggregate/cursor findings above
   were reproduced and fixed and the PRE-version claim was rejected using the archived
-  contract plus executed lane evidence. A final post-fix P0–P2 review is recorded in the
-  closeout commit after these fixes pass the full suites.
+  contract plus executed lane evidence. The third produced the two cache-key/Unicode-order
+  P2 findings above; both were reproduced and fixed. A final post-fix P0–P2 verification
+  follows the closeout commit containing these fixes.
 
 ## Residual blockers
 

@@ -163,6 +163,33 @@ def test_non_scalar_aggregate_targets_are_rejected_not_reported_missing(tmp_path
     assert "extraction" not in env
 
 
+def test_aggregate_keys_use_cross_runtime_utf8_order(tmp_path):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "unicode-order.json"
+    path.write_text(json.dumps({"records": [{"value": "\ue000"}, {"value": "😀"}]}))
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "records_pointer": "/records",
+                "distinct": ["/value"],
+                "group_by": ["/value"],
+            },
+        )
+    )
+    result = json.loads(env["extraction"]["segments"][0]["text"])
+    assert result["distinct"][0]["values"] == ["\ue000", "😀"]
+    assert [row["key"] for row in result["groups"]] == [["\ue000"], ["😀"]]
+
+
 def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "records.json"

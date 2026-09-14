@@ -136,7 +136,7 @@ def aggregate_snapshot(
 
     distinct_rows: list[dict[str, Any]] = []
     for path in distinct_paths:
-        all_values = sorted(distinct[path].items())
+        all_values = sorted(distinct[path].items(), key=lambda item: item[0].encode("utf-8"))
         values = [value for _, value in all_values if _output_scalar(value)][:_MAX_RETURNED_VALUES]
         distinct_rows.append(
             {
@@ -146,7 +146,7 @@ def aggregate_snapshot(
                 "values_complete": len(values) == len(all_values),
             }
         )
-    all_groups = sorted(groups.items())
+    all_groups = sorted(groups.items(), key=lambda item: item[0].encode("utf-8"))
     group_rows = [
         row for _, row in all_groups if all(_output_scalar(value) for value in row["key"])
     ][:_MAX_RETURNED_GROUPS]

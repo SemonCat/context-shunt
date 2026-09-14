@@ -38,9 +38,12 @@ must never be served to a request in a different one.
 
 **Implemented bounded behavior:**
 
-1. A session-local, process-local 32-entry/256-KiB LRU in `reader.py`/`reader.ts`, keyed on
-   the session, schema, exact question, ordered source/snapshot/selector set, budgets,
+1. A session-local, process-local 32-entry/256-KiB LRU in `reader.py`/`reader.ts`, keyed by
+   a fixed SHA-256 digest of the session, schema, exact question, ordered
+   source/snapshot/selector set, budgets,
    refined flag, fixed reader instruction, requested provider/model and attribution policy.
+   The retained digest bytes count toward the serialized-material byte bound; the full
+   question and selector material are not retained again as the map key.
    The owning reader/registry is bound to the complete trusted
    host/profile/principal/session/generation scope; entries never cross reader instances.
    Every source is re-resolved and snapshot-checked before lookup. It is populated only
@@ -86,7 +89,9 @@ operation refuses without a partial count. Embedded JSON shares the snapshot byt
 ceilings. Counts, distinct counts, group counts, and every published group's row count remain
 exact after a full scan; returned distinct values and group rows are capped at 200 and carry
 `values_complete`/`groups_complete` when high cardinality prevents publishing every key.
-The canonical JSON result is still charged against per-result,
+Distinct values and group keys are ordered by the UTF-8 bytes of their canonical JSON in
+both ports, avoiding Python-code-point versus JavaScript-UTF-16 ordering drift. The
+canonical JSON result is still charged against per-result,
 wire-envelope, per-source and per-session disclosure ceilings. It makes zero model calls.
 Missing grouping fields use the explicit JSON marker `{\"missing\":true}` so they cannot
 collapse into genuine `null` values; missing distinct fields are omitted from that field's

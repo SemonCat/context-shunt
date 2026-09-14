@@ -249,9 +249,11 @@ The response is always `partial/LEGACY_COMPACTED`, `result_kind: legacy_compacti
 Citation generation gets at most one bounded repair attempt per request, using fixed safe verifier feedback and already-authorized chunks. The same deadline, input/output budgets, provenance checks, and usage ledger apply. A repair that still fails quote-to-snapshot verification uses mandatory legacy compaction; no answer with unmatched citation quotes is published. This mechanical check does not prove the answer's prose. Genuine valid empty answers remain `NO_MATCH`.
 
 A fully covered `ANSWERED`/`NO_MATCH` model result is eligible for exact reuse inside the
-same live session. The 32-entry/256-KiB LRU key binds schema, exact question, ordered
+same live session. The 32-entry/256-KiB LRU uses a fixed SHA-256 digest of material that
+binds schema, exact question, ordered
 source/snapshot/selector set, budgets, refined flag, fixed reader instruction, requested
-provider/model and attribution policy. Its `Reader`/registry instance is itself bound to
+provider/model and attribution policy; the retained digest bytes are included in the
+serialized-material eviction total. Its `Reader`/registry instance is itself bound to
 the full trusted host/profile/principal/session/generation identity, so entries are never
 shared across security scopes. Every handle is authorized and snapshot-checked
 before lookup. Partial, timeout, failed, fallback and zero-model results are never cached.
