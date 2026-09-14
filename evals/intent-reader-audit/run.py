@@ -119,6 +119,17 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
         call for call in reported if call.get("reported_cache_tokens") is not None
     ]
     main_bytes = sum(row["main_context_bytes_observed"] for row in rows)
+
+    def core_total(field: str) -> int | None:
+        values = [
+            row["reader"][field]
+            for row in rows
+            if row["reader"]["attempts_observed"] > 0
+        ]
+        if not values or any(value is None for value in values):
+            return None
+        return sum(values)
+
     return {
         "workflows_correct": sum(bool(row["correct"]) for row in rows),
         "workflows_total": len(rows),
@@ -158,21 +169,9 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
             if cache_reported
             else None
         ),
-        "reader_core_accounted_input_tokens": sum(
-            row["reader"]["core_accounted_input_tokens"] or 0 for row in rows
-        )
-        if calls
-        else None,
-        "reader_core_accounted_output_tokens": sum(
-            row["reader"]["core_accounted_output_tokens"] or 0 for row in rows
-        )
-        if calls
-        else None,
-        "reader_core_accounted_cache_tokens": sum(
-            row["reader"]["core_accounted_cache_tokens"] or 0 for row in rows
-        )
-        if calls
-        else None,
+        "reader_core_accounted_input_tokens": core_total("core_accounted_input_tokens"),
+        "reader_core_accounted_output_tokens": core_total("core_accounted_output_tokens"),
+        "reader_core_accounted_cache_tokens": core_total("core_accounted_cache_tokens"),
         "answer_cache_hits_observed": sum(
             row["answer_cache_hits_observed"] for row in rows
         ),

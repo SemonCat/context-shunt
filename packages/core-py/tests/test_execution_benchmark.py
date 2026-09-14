@@ -21,6 +21,15 @@ def _worker_module(root: Path):
     return module
 
 
+def _real_run_module(root: Path):
+    path = root / "evals/intent-reader-audit/real_run.py"
+    spec = importlib.util.spec_from_file_location("intent_reader_audit_real_run", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.benchmark
 def test_intent_reader_benchmark_executes_pinned_pre_and_working_new(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[3]
@@ -202,3 +211,37 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         "session-5-full-read-and-unread-pointer",
     ):
         assert new[deterministic]["reader"]["attempts_observed"] == 0
+
+
+def test_real_luna_resume_rejects_stale_or_non_live_lane_evidence() -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    binding = {
+        "provider_kind": "live",
+        "route": "provider/gpt-5.6-luna",
+        "model": "gpt-5.6-luna",
+        "corpus_sha256": "a" * 64,
+        "worktree_head": "b" * 40,
+        "working_tree_relevant_files": ["one"],
+        "working_tree_relevant_files_sha256": "c" * 64,
+        "pre_git_tree": "d" * 40,
+        "host_git_commit": "e" * 40,
+    }
+    payloads = {
+        lane: {"provider_kind": "live", "rows": [{} for _ in range(5)]}
+        for lane in real_run.LANES
+    }
+    checkpoint = {
+        "schema": real_run.CHECKPOINT_SCHEMA,
+        "binding": binding,
+        "payloads": payloads,
+    }
+    assert real_run._checkpoint_errors(checkpoint, binding) == []
+
+    stale = json.loads(json.dumps(checkpoint))
+    stale["binding"]["corpus_sha256"] = "f" * 64
+    assert real_run._checkpoint_errors(stale, binding)
+
+    mock_lane = json.loads(json.dumps(checkpoint))
+    mock_lane["payloads"]["new"]["provider_kind"] = "mock"
+    assert real_run._checkpoint_errors(mock_lane, binding)

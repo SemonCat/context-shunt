@@ -77,6 +77,10 @@
           { "required": ["cache_reused"] }
         ] } },
         "extraction": { "allOf": [
+          { "not": { "anyOf": [
+            { "required": ["records_scanned"] },
+            { "required": ["records_matched"] }
+          ] } },
           { "properties": { "mode": { "not": { "const": "aggregate" } } } },
           { "properties": { "segments": { "items": { "properties": {
             "kind": { "not": { "const": "aggregate" } }

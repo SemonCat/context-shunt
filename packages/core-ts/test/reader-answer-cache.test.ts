@@ -58,6 +58,31 @@ describe("scoped exact reader answer reuse", () => {
     });
   });
 
+  it("does not retain mutable nested provenance from a result or cache hit", async () => {
+    const { session, provider, entry } = fixture();
+    const reader = (session as unknown as { reader: {
+      answerDetailed: (sessionId: string, request: object) => Promise<{
+        provenance: { requested: { model?: string }; callIdentities?: Array<{
+          requested: { model?: string };
+        }> };
+      }>;
+    } }).reader;
+    const first = await reader.answerDetailed("sess", request(entry, "req_first"));
+    first.provenance.requested.model = "mutated-after-store";
+    if (first.provenance.callIdentities?.[0]) {
+      first.provenance.callIdentities[0].requested.model = "mutated-after-store";
+    }
+
+    const second = await reader.answerDetailed("sess", request(entry, "req_second"));
+    expect(provider.callCount).toBe(1);
+    expect(second.provenance.requested.model).toBe("gpt-5.6-luna");
+    second.provenance.requested.model = "mutated-cache-hit";
+
+    const third = await reader.answerDetailed("sess", request(entry, "req_third"));
+    expect(provider.callCount).toBe(1);
+    expect(third.provenance.requested.model).toBe("gpt-5.6-luna");
+  });
+
   it("keeps query, selector, budget, model, snapshot, and authorization boundaries outside the hit", async () => {
     const { session, provider, entry } = fixture();
     await session.read(request(entry, "req_first"));

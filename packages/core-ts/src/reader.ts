@@ -596,7 +596,9 @@ export class Reader {
     if (cached === undefined) return undefined;
     this.answerCache.delete(key);
     this.answerCache.set(key, cached);
-    const { fallbackUsed: _fallbackUsed, ...cachedProvenance } = cached.provenance;
+    const { fallbackUsed: _fallbackUsed, ...cachedProvenance } = structuredClone(
+      cached.provenance,
+    );
     const provenance: Provenance = {
       ...cachedProvenance,
       attemptsStarted: 0,
@@ -646,7 +648,7 @@ export class Reader {
     this.answerCache.delete(key);
     this.answerCache.set(key, {
       envelope: copy,
-      provenance: { ...result.provenance, callIdentities: [...(result.provenance.callIdentities ?? [])] },
+      provenance: structuredClone(result.provenance),
       bytes,
       sourceIds: [...result.sourceIds],
     });

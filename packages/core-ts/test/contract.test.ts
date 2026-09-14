@@ -61,6 +61,19 @@ describe("envelope fixtures", () => {
     expect(envelopeValidator()(doc)).toBe(true);
     expect(EMITTED_SCHEMA_VERSION).toBe("1.3");
   });
+
+  it("requires envelope 1.3 for aggregate scan counters", () => {
+    const doc = structuredClone(
+      fixtureDocs("envelope", "valid")
+        .find((f) => f.name === "v11_ok_extracted.json")?.document,
+    ) as Record<string, any>;
+    doc["extraction"]["records_scanned"] = 4;
+    doc["extraction"]["records_matched"] = 2;
+    expect(envelopeValidator()(doc)).toBe(false);
+    doc["schema_version"] = "1.3";
+    doc["provenance"]["attempts_usage_complete"] = 0;
+    expect(envelopeValidator()(doc)).toBe(true);
+  });
 });
 
 describe("contract invariants", () => {

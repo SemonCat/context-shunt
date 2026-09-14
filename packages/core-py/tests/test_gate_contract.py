@@ -81,6 +81,17 @@ def test_new_provenance_fields_require_envelope_1_3():
     assert EMITTED_SCHEMA_VERSION == "1.3"
 
 
+def test_aggregate_scan_counters_require_envelope_1_3():
+    doc = next(d for n, d in _docs("envelope", "valid") if n == "v11_ok_extracted.json")
+    doc = json.loads(json.dumps(doc))
+    doc["extraction"]["records_scanned"] = 4
+    doc["extraction"]["records_matched"] = 2
+    assert not envelope_validator().is_valid(doc)
+    doc["schema_version"] = "1.3"
+    doc["provenance"]["attempts_usage_complete"] = 0
+    assert envelope_validator().is_valid(doc)
+
+
 def test_propose_patch_is_rejected_as_unsupported_operation():
     doc = next(d for n, d in _docs("request", "valid") if n == "minimal.json")
     with pytest.raises(ShuntError) as exc:

@@ -25,6 +25,20 @@ BASELINE = "1686db6"
 MODEL = "gpt-5.6-luna"
 DEFAULT_ROUTE = "sub2api-openai/gpt-5.6-luna"
 LANES = ("legacy_compactor", "pre", "new")
+CHECKPOINT_SCHEMA = "context_shunt.intent_reader_real_luna_lanes.v1"
+RELEVANT_FILES = (
+    "evals/bridges/openclaw_inhost.py",
+    "evals/bridges/openclaw_inhost_server.mts",
+    "evals/intent-reader-audit/corpus.json",
+    "evals/intent-reader-audit/real_run.py",
+    "evals/intent-reader-audit/run.py",
+    "evals/intent-reader-audit/worker.py",
+    "packages/core-py/src/context_shunt/aggregate.py",
+    "packages/core-py/src/context_shunt/limits.py",
+    "packages/core-py/src/context_shunt/provider.py",
+    "packages/core-py/src/context_shunt/reader.py",
+    "packages/core-py/src/context_shunt/session.py",
+)
 
 sys.path.insert(0, str(HERE))
 import run as local_benchmark  # noqa: E402
@@ -38,6 +52,45 @@ def _git(root: Path, *args: str) -> str:
         text=True,
         timeout=30,
     ).stdout.strip()
+
+
+def _binding(host_root: Path, route: str) -> dict[str, Any]:
+    return {
+        "provider_kind": "live",
+        "route": route,
+        "model": MODEL,
+        "corpus_sha256": hashlib.sha256(CORPUS.read_bytes()).hexdigest(),
+        "worktree_head": _git(ROOT, "rev-parse", "HEAD"),
+        "working_tree_relevant_files": list(RELEVANT_FILES),
+        "working_tree_relevant_files_sha256": local_benchmark.digest_files(
+            ROOT, list(RELEVANT_FILES)
+        ),
+        "pre_git_tree": _git(ROOT, "rev-parse", f"{BASELINE}^{{tree}}"),
+        "host_git_commit": _git(host_root, "rev-parse", "HEAD"),
+    }
+
+
+def _checkpoint_errors(
+    checkpoint: Any, expected_binding: dict[str, Any]
+) -> list[str]:
+    if not isinstance(checkpoint, dict):
+        return ["checkpoint is not an object"]
+    if checkpoint.get("schema") != CHECKPOINT_SCHEMA:
+        return ["checkpoint schema mismatch"]
+    errors = []
+    if checkpoint.get("binding") != expected_binding:
+        errors.append("checkpoint binding does not match current corpus/route/host/code")
+    payloads = checkpoint.get("payloads")
+    if not isinstance(payloads, dict) or set(payloads) != set(LANES):
+        errors.append("checkpoint lane set is invalid")
+        return errors
+    for lane in LANES:
+        payload = payloads.get(lane)
+        if not isinstance(payload, dict) or payload.get("provider_kind") != "live":
+            errors.append(f"checkpoint {lane} lane is not live-provider evidence")
+        elif len(payload.get("rows", [])) != 5:
+            errors.append(f"checkpoint {lane} lane does not contain five workflows")
+    return errors
 
 
 def _calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -253,10 +306,16 @@ def main() -> None:
     route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE", DEFAULT_ROUTE)
     if "/" not in route or route.split("/", 1)[1] != MODEL:
         raise SystemExit("NOT_RUN: configured route is not gpt-5.6-luna")
+    current_binding = _binding(host_root, route)
 
     lane_checkpoint = HERE / "real-luna-lanes-latest.json"
     if args.resume_lanes:
-        payloads = json.loads(args.resume_lanes.read_text())
+        checkpoint = json.loads(args.resume_lanes.read_text())
+        checkpoint_errors = _checkpoint_errors(checkpoint, current_binding)
+        if checkpoint_errors:
+            raise SystemExit("NOT_RUN: " + "; ".join(checkpoint_errors))
+        payloads = checkpoint["payloads"]
+        evidence_binding = checkpoint["binding"]
     else:
         current_package = ROOT / "packages" / "core-py" / "src"
         with TemporaryDirectory(prefix="context-shunt-real-pre-") as temporary:
@@ -287,7 +346,13 @@ def main() -> None:
         # Written before any aggregate/report rendering. It contains the same redacted
         # rows as the final artifact and lets a presentation-only failure be repaired
         # without spending another real provider call.
-        lane_checkpoint.write_text(json.dumps(payloads, indent=2, sort_keys=True) + "\n")
+        evidence_binding = current_binding
+        checkpoint = {
+            "schema": CHECKPOINT_SCHEMA,
+            "binding": evidence_binding,
+            "payloads": payloads,
+        }
+        lane_checkpoint.write_text(json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
 
     corpus_raw = CORPUS.read_bytes()
     errors = _acceptance_errors(payloads, route)
@@ -309,18 +374,9 @@ def main() -> None:
             for lane in ("pre", "new")
         ),
     }
-    relevant_files = [
-        "evals/bridges/openclaw_inhost.py",
-        "evals/bridges/openclaw_inhost_server.mts",
-        "evals/intent-reader-audit/corpus.json",
-        "evals/intent-reader-audit/worker.py",
-        "packages/core-py/src/context_shunt/aggregate.py",
-        "packages/core-py/src/context_shunt/reader.py",
-        "packages/core-py/src/context_shunt/session.py",
-    ]
     report = {
         "schema": "context_shunt.intent_reader_real_luna.v1",
-        "evaluated_worktree_head": _git(ROOT, "rev-parse", "HEAD"),
+        "evaluated_worktree_head": evidence_binding["worktree_head"],
         "baseline_commit": BASELINE,
         "corpus_sha256": hashlib.sha256(corpus_raw).hexdigest(),
         "corpus_contains_production_content": False,
@@ -333,14 +389,16 @@ def main() -> None:
         },
         "host": {
             "kind": "openclaw_source_checkout",
-            "git_commit": _git(host_root, "rev-parse", "HEAD"),
+            "git_commit": evidence_binding["host_git_commit"],
         },
         "implementation": {
-            "working_tree_relevant_files": relevant_files,
-            "working_tree_relevant_files_sha256": local_benchmark.digest_files(
-                ROOT, relevant_files
-            ),
-            "pre_git_tree": _git(ROOT, "rev-parse", f"{BASELINE}^{{tree}}"),
+            "working_tree_relevant_files": evidence_binding[
+                "working_tree_relevant_files"
+            ],
+            "working_tree_relevant_files_sha256": evidence_binding[
+                "working_tree_relevant_files_sha256"
+            ],
+            "pre_git_tree": evidence_binding["pre_git_tree"],
         },
         "execution": {
             "legacy": "actual owned compact_tool_result route; no model applicable",
