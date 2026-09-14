@@ -73,6 +73,8 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
     "reader": ("gate_reader", [
         (CORE_TS, "test/reader-and-spill.test.ts"),
         (CORE_TS, "test/reader-answer-cache.test.ts"),
+        (CORE_TS, "test/reader-late-usage.test.ts"),
+        (CORE_TS, "test/reader-payload-scope.test.ts"),
     ]),
     "citations": ("gate_citations", [(CORE_TS, "test/citations.test.ts")]),
     "no-raw-leak": ("gate_no_raw_leak", [(CORE_TS, "test/reader-and-spill.test.ts")]),
@@ -94,9 +96,15 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
             (CORE_TS, "test/inspect.test.ts"),
             (CORE_TS, "test/automatic-extract.test.ts"),
             (CORE_TS, "test/aggregate.test.ts"),
+            (CORE_TS, "test/search-cap-honesty.test.ts"),
         ],
     ),
-    "accounting": ("gate_accounting", [(CORE_TS, "test/accounting.test.ts")]),
+    "accounting": ("gate_accounting", [
+        (CORE_TS, "test/accounting.test.ts"),
+        (CORE_TS, "test/session4-unread-pointer-requery.test.ts"),
+        (CORE_TS, "test/session5-full-coverage-inspect.test.ts"),
+        (CORE_TS, "test/session5-composite-scope-masking.test.ts"),
+    ]),
     # Python-only: the import boundary lives in the Python core, and the OpenClaw
     # capability report says so rather than implying a TypeScript twin exists.
     "artifact-import": ("gate_artifact_import", []),

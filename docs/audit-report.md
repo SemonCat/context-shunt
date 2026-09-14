@@ -239,7 +239,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,542 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,555 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -289,6 +289,13 @@ proof.
   attempt returned usage, even if a later publication deadline prevents the answer from
   shipping. Direct regressions cover all three cases, and changing the bound implementation
   made the prior Luna artifact fail its digest check until the real run was repeated.
+
+  The next verification pass found one more valid P2 in the verification surface itself:
+  six new TypeScript regression files were not registered in the canonical unit gates.
+  `scripts/verify` now runs late-usage and payload-scope tests under `reader`, search-cap
+  honesty under `inspect`, and the session-4/session-5 loss-accounting tests under
+  `accounting`. The expanded matrix increased from 2,542 to 2,555 executed cases and all
+  17 gates pass.
 
 ## Residual blockers
 
