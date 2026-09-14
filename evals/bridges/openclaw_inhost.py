@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -63,6 +64,12 @@ DEFAULT_ROUTE = "sub2api-openai/gpt-5.6-luna"
 #: Loading the host's config and model catalogue costs tens of seconds, once. The server is
 #: spawned on the first call and kept, rather than paying that per call.
 STARTUP_TIMEOUT_S = 180.0
+
+# The core applies tighter per-request limits before reaching this bridge. These outer
+# bounds keep the separately callable evaluation transport narrow and fail closed.
+MAX_ROLE_CONTENT_BYTES = 262_144
+MAX_OUTPUT_TOKENS = 2_048
+MAX_TIMEOUT_MS = 60_000
 
 #: Populated with one entry per call so a benchmark can report real latency. Never holds a
 #: prompt, a completion, or any source text - only timings.
@@ -147,8 +154,27 @@ class _Server:
             raise BridgeError(
                 f"could not start the in-host server ({type(exc).__name__})"
             ) from None
-        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
         self._next_id = 0
+        self._startup_messages: queue.Queue[
+            tuple[dict[str, Any] | None, int]
+        ] = queue.Queue()
+        self._pending: dict[
+            int, queue.Queue[tuple[dict[str, Any] | None, int]]
+        ] = {}
+        self._reader = threading.Thread(
+            target=self._read_stdout,
+            name="context-shunt-openclaw-protocol",
+            daemon=True,
+        )
+        self._reader.start()
+        self._stderr_reader = threading.Thread(
+            target=self._drain_stderr,
+            name="context-shunt-openclaw-stderr",
+            daemon=True,
+        )
+        self._stderr_reader.start()
         self.identity: dict[str, Any] = {}
         ready = self._read_json(
             deadline=time.monotonic() + STARTUP_TIMEOUT_S, want_ready=True
@@ -158,6 +184,48 @@ class _Server:
         identity = ready.get("identity")
         self.identity = identity if isinstance(identity, dict) else {}
 
+    def _read_stdout(self) -> None:
+        """Parse host output without letting a blocking ``readline`` defeat deadlines."""
+        stdout = self._process.stdout
+        assert stdout is not None
+        for line in stdout:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                message = (value, len(line.encode("utf-8")))
+                request_id = value.get("id")
+                if isinstance(request_id, int) and not isinstance(request_id, bool):
+                    with self._pending_lock:
+                        recipient = self._pending.get(request_id)
+                    # A result after its caller's deadline is intentionally discarded.
+                    # The caller has already recorded that started attempt with unknown
+                    # usage; publishing this response into another request would be worse.
+                    if recipient is not None:
+                        try:
+                            recipient.put_nowait(message)
+                        except queue.Full:
+                            pass
+                else:
+                    self._startup_messages.put(message)
+        self._startup_messages.put((None, 0))
+        with self._pending_lock:
+            recipients = tuple(self._pending.values())
+        for recipient in recipients:
+            try:
+                recipient.put_nowait((None, 0))
+            except queue.Full:
+                pass
+
+    def _drain_stderr(self) -> None:
+        """Prevent host diagnostics filling the pipe; retain and publish none of them."""
+        stderr = self._process.stderr
+        if stderr is None:
+            return
+        for _line in stderr:
+            pass
+
     def _read_json(
         self, *, deadline: float, want_ready: bool = False
     ) -> dict[str, Any]:
@@ -166,39 +234,35 @@ class _Server:
         The host prints config warnings and plugin traces to the same stream, so a line is
         located by parsing it rather than by assuming stdout carries only the protocol.
         """
-        stdout = self._process.stdout
-        assert stdout is not None
         while True:
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError("in-host server exceeded the reader deadline")
-            line = stdout.readline()
-            if not line:
-                # The server exited. Its stderr is the only diagnosis available, and it
-                # can quote host configuration, so only a bounded tail crosses.
-                raise BridgeError(f"in-host server exited: {self._stderr_tail()}")
             try:
-                value = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(value, dict) and (not want_ready or "ready" in value):
+                value, wire_bytes = self._startup_messages.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError("in-host server exceeded the reader deadline") from None
+            if value is None:
+                # Host stderr can contain configuration and credential diagnostics. Only
+                # process state crosses this boundary.
+                raise BridgeError(
+                    f"in-host server exited (status {self._process.poll()})"
+                )
+            if not want_ready or "ready" in value:
+                value["_transport_response_bytes"] = wire_bytes
                 return value
-
-    def _stderr_tail(self, limit: int = 300) -> str:
-        stderr = self._process.stderr
-        if stderr is None:
-            return "no stderr"
-        try:
-            return stderr.read()[-limit:].replace("\n", " ").strip() or "no stderr"
-        except OSError:
-            return "no stderr"
 
     def complete(
         self, *, system: str, user: str, max_output_tokens: int, timeout_ms: int
     ) -> dict:
-        """One request/response exchange. Serialized: the protocol is a single stream."""
-        with self._lock:
+        """One multiplexed request/response exchange, correlated by protocol id."""
+        deadline = time.monotonic() + max(0.001, timeout_ms / 1000.0)
+        responses: queue.Queue[tuple[dict[str, Any] | None, int]] = queue.Queue(maxsize=1)
+        with self._write_lock:
             self._next_id += 1
             request_id = self._next_id
+            with self._pending_lock:
+                self._pending[request_id] = responses
             stdin = self._process.stdin
             assert stdin is not None
             payload = json.dumps(
@@ -211,18 +275,33 @@ class _Server:
                     "timeout_ms": timeout_ms,
                 }
             )
-            deadline = time.monotonic() + max(1.0, timeout_ms / 1000.0)
             try:
                 stdin.write(payload + "\n")
                 stdin.flush()
             except OSError:
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+                raise BridgeError("in-host server closed its input") from None
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("in-host server exceeded the reader deadline")
+            try:
+                result, wire_bytes = responses.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError("in-host server exceeded the reader deadline") from None
+            if result is None:
                 raise BridgeError(
-                    f"in-host server closed its input: {self._stderr_tail()}"
-                ) from None
-            while True:
-                result = self._read_json(deadline=deadline)
-                if result.get("id") == request_id:
-                    return result
+                    f"in-host server exited (status {self._process.poll()})"
+                )
+            result["_transport_response_bytes"] = wire_bytes
+            result["_transport_request_bytes"] = len(
+                (payload + "\n").encode("utf-8")
+            )
+            return result
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
 
     def close(self) -> None:
         """Stop the server. A daemon-like child must not outlive the run that spawned it."""
@@ -276,6 +355,22 @@ def complete(
     timeout_ms: int,
 ) -> dict:
     """Run one reader call through the host and return the bridge mapping."""
+    if not isinstance(system, str) or not isinstance(user, str):
+        raise BridgeError("reader roles must be strings")
+    if len(system.encode("utf-8")) + len(user.encode("utf-8")) > MAX_ROLE_CONTENT_BYTES:
+        raise BridgeError("reader role content exceeds the bridge input bound")
+    if (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or not 0 < max_output_tokens <= MAX_OUTPUT_TOKENS
+    ):
+        raise BridgeError("reader output cap is outside the bridge bound")
+    if (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or not 0 < timeout_ms <= MAX_TIMEOUT_MS
+    ):
+        raise BridgeError("reader deadline is outside the bridge bound")
     route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE") or DEFAULT_ROUTE
     if provider:
         route = f"{provider}/{model}"
@@ -307,9 +402,34 @@ def complete(
     if not isinstance(text, str):
         raise BridgeError("host returned no output text")
 
+    expected_provider, expected_model = route.split("/", 1)
+    execution = result.get("execution")
+    owner = execution.get("owner") if isinstance(execution, dict) else None
+    if (
+        result.get("requested_route") != route
+        or result.get("resolved_provider") != expected_provider
+        or result.get("resolved_model") != expected_model
+        or result.get("transport") != "runtime.llm.complete/isolated-agent-runtime"
+        or not isinstance(execution, dict)
+        or execution.get("mode") != "isolated-agent-runtime"
+        or not isinstance(owner, dict)
+        or owner.get("kind") not in {"cli", "harness"}
+        or not isinstance(owner.get("id"), str)
+        or not owner.get("id")
+    ):
+        # Missing identity is not a weaker success: it is how a substitution could be
+        # mislabeled Luna. Refuse the answer before HostBridgeProvider can publish it.
+        raise BridgeError("host response failed route or execution attestation")
+
     LATENCIES_MS.append(elapsed_ms)
 
-    mapping: dict[str, Any] = {"text": text}
+    mapping: dict[str, Any] = {
+        "text": text,
+        "route_attested": True,
+        "execution_mode": execution["mode"],
+        "execution_owner_kind": owner["kind"],
+        "execution_owner_id": owner["id"],
+    }
     # The host's post-policy selection. Not a provider confirmation of what generated the
     # tokens, so `reported_*` and `provider_confirms_generation` are deliberately absent
     # and the envelope's attribution comes back `resolved` - the honest ceiling here.
@@ -317,6 +437,14 @@ def complete(
         value = result.get(key)
         if isinstance(value, str) and value:
             mapping[key] = value
+    for source_key, target_key in (
+        ("elapsed_ms", "host_elapsed_ms"),
+        ("_transport_request_bytes", "transport_input_bytes"),
+        ("_transport_response_bytes", "transport_output_bytes"),
+    ):
+        value = result.get(source_key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            mapping[target_key] = value
     mapping.update(_usage(result.get("usage")))
     return mapping
 

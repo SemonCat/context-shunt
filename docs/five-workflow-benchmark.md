@@ -4,9 +4,9 @@ This benchmark executes identical synthetic production-derived content through t
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Answer-cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| legacy_compactor | 3/5 | 64667 (16167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19912 | 17601 | 81.264 | 0.0/0.000 |
-| pre | 3/5 | 60271 (15068) | 145991/1098 | 19210/262/0 | 36499/276/0 | 7 (5/2) | 0 | 19912 | 17601 | 234.995 | 14.0/18.287 |
-| new | 5/5 | 43170 (10793) | 5132/332 | 1284/84/0 | 1284/84/0 | 2 (2/0) | 1 | 19912 | 0 | 239.593 | 4.0/5.738 |
+| legacy_compactor | 3/5 | 64667 (16167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19912 | 17601 | 83.357 | 0.0/0.000 |
+| pre | 3/5 | 60271 (15068) | 145991/1098 | 19210/262/0 | 36499/276/0 | 7 (5/2) | 0 | 19912 | 17601 | 233.024 | 14.0/18.006 |
+| new | 5/5 | 43170 (10793) | 5132/332 | 1284/84/0 | 1284/84/0 | 2 (2/0) | 1 | 19912 | 0 | 204.424 | 4.0/5.981 |
 
 \* Provider tokens are only values returned by the instrumented fixture. A deliberately missing usage report remains an unknown attempt, so each token total is a reported lower bound—not a completion-ratio estimate. The fixture uses bytes/4 as its explicit token tariff; these fields are copied from its actual `ModelResponse.usage`, not inferred afterward. Main-context tokens alone are estimated from observed bytes at bytes/4.
 
@@ -19,6 +19,6 @@ Correctness is computed from emitted answers/extractions against independently d
 
 Workflow 4 retains 19,912 requery bytes in all lanes. Workflow 5 executes a 17,601-byte full read in legacy/PRE and bounded search in NEW. Those losses are measured operations, not assigned profile fields.
 
-Corpus SHA-256: `e732ae0bf0101de6a81073c5fc876f8d8518fca0e76d62ff3c39833e97a1fc7c`.
+Corpus SHA-256: `0e5ba0c6ccd20c9f777f72c07b815903496527d7995cb9ebe78a5501755f5039`.
 
 Machine-readable evidence: [`evals/intent-reader-audit/latest.json`](../evals/intent-reader-audit/latest.json).

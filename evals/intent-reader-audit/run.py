@@ -45,10 +45,14 @@ def git_output(*args: str) -> str:
 
 
 def run_worker(
-    lane: str, package_root: Path, variant: str = "normal"
+    lane: str,
+    package_root: Path,
+    variant: str = "normal",
+    *,
+    provider_kind: str = "mock",
 ) -> dict[str, Any]:
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(package_root)
+    env["PYTHONPATH"] = os.pathsep.join((str(package_root), str(ROOT / "evals")))
     completed = subprocess.run(
         [
             sys.executable,
@@ -59,11 +63,14 @@ def run_worker(
             str(CORPUS),
             "--variant",
             variant,
+            "--provider-kind",
+            provider_kind,
         ],
         cwd=ROOT,
         env=env,
         capture_output=True,
         text=True,
+        timeout=900 if provider_kind == "live" else 120,
     )
     if completed.returncode:
         raise RuntimeError(f"{lane}/{variant} worker failed:\n{completed.stderr}")
@@ -108,6 +115,9 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
     rows = payload["rows"]
     calls = [call for row in rows for call in row["reader"]["calls"]]
     reported = [call for call in calls if call["reported_input_tokens"] is not None]
+    cache_reported = [
+        call for call in reported if call.get("reported_cache_tokens") is not None
+    ]
     main_bytes = sum(row["main_context_bytes_observed"] for row in rows)
     return {
         "workflows_correct": sum(bool(row["correct"]) for row in rows),
@@ -120,10 +130,20 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
         "reader_attempts_usage_reported": len(reported),
         "reader_unknown_usage_attempts": len(calls) - len(reported),
         "reader_input_payload_bytes_observed": (
-            sum(call["input_payload_bytes"] for call in calls) if calls else None
+            sum(
+                call.get(
+                    "input_payload_bytes",
+                    call.get("payload", {}).get("role_content_bytes", 0),
+                )
+                for call in calls
+            )
+            if calls
+            else None
         ),
         "reader_output_payload_bytes_observed": (
-            sum(call["output_payload_bytes"] for call in calls) if calls else None
+            sum(call.get("output_payload_bytes", 0) for call in calls)
+            if calls
+            else None
         ),
         # These are fixture-returned Usage fields. Missing reports remain unknown;
         # the totals are lower bounds and never reconstructed from a ratio.
@@ -134,7 +154,9 @@ def totals(payload: dict[str, Any]) -> dict[str, Any]:
             sum(call["reported_output_tokens"] for call in reported) if calls else None
         ),
         "reader_cache_tokens_reported_lower_bound": (
-            sum(call["reported_cache_tokens"] for call in reported) if calls else None
+            sum(call["reported_cache_tokens"] for call in cache_reported)
+            if cache_reported
+            else None
         ),
         "reader_core_accounted_input_tokens": sum(
             row["reader"]["core_accounted_input_tokens"] or 0 for row in rows

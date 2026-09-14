@@ -90,6 +90,12 @@ for line in sys.stdin:
         "text": %(text)r,
         "resolved_provider": "stub-provider",
         "resolved_model": "%(model)s",
+        "requested_route": "stub-provider/%(model)s",
+        "transport": "runtime.llm.complete/isolated-agent-runtime",
+        "execution": {
+            "mode": "isolated-agent-runtime",
+            "owner": {"kind": "harness", "id": "stub"},
+        },
         "usage": %(usage)s,
     }
     print(json.dumps(reply), flush=True)
@@ -106,6 +112,47 @@ for line in sys.stdin:
     print(json.dumps({"id": request["id"], "ok": False, "error_kind": "AUTH_FAILED"}), flush=True)
 """
 
+_WRONG_ROUTE_SERVER = """
+import json, sys
+print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({
+        "id": request["id"], "ok": True, "text": "{}",
+        "requested_route": "stub-provider/%(model)s",
+        "transport": "runtime.llm.complete/isolated-agent-runtime",
+        "resolved_provider": "stub-provider", "resolved_model": "not-luna",
+        "execution": {"mode": "isolated-agent-runtime", "owner": {"kind": "harness", "id": "stub"}},
+    }), flush=True)
+"""
+
+_SLOW_SERVER = """
+import json, sys, time
+print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    time.sleep(1)
+"""
+
+_OUT_OF_ORDER_SERVER = """
+import json, sys
+print(json.dumps({"ready": True, "identity": {"transport": "stub"}}), flush=True)
+requests = []
+for line in sys.stdin:
+    requests.append(json.loads(line))
+    if len(requests) < 2:
+        continue
+    for request in reversed(requests):
+        print(json.dumps({
+            "id": request["id"], "ok": True, "text": "{}",
+            "requested_route": "stub-provider/%(model)s",
+            "transport": "runtime.llm.complete/isolated-agent-runtime",
+            "resolved_provider": "stub-provider", "resolved_model": "%(model)s",
+            "execution": {"mode": "isolated-agent-runtime", "owner": {"kind": "harness", "id": "stub"}},
+        }), flush=True)
+    requests.clear()
+"""
+
 
 @pytest.fixture
 def inhost(tmp_path, monkeypatch):
@@ -117,6 +164,9 @@ def inhost(tmp_path, monkeypatch):
         script.write_text(server % {"model": READER_MODEL, "text": text, "usage": usage})
         received = tmp_path / "received.jsonl"
         monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROOT", str(tmp_path))
+        monkeypatch.setenv(
+            "CONTEXT_SHUNT_OPENCLAW_ROUTE", f"stub-provider/{READER_MODEL}"
+        )
         monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_TSX", sys.executable)
         # `argv[1]` of the stub is where it writes what it was asked. The bridge passes
         # only the server path, so the record path rides on the environment.
@@ -239,6 +289,74 @@ def test_a_host_refusal_carries_no_prompt_text(inhost):
     message = str(raised.value)
     assert "AUTH_FAILED" in message
     assert "CANARY" not in message
+
+
+def test_the_in_host_route_fails_closed_on_model_substitution(inhost):
+    module, _ = inhost(server=_WRONG_ROUTE_SERVER)
+    with pytest.raises(module.BridgeError, match="route or execution attestation"):
+        module.complete(
+            system="s",
+            user="u",
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=30000,
+        )
+
+
+def test_the_protocol_readline_cannot_outlive_the_call_deadline(inhost):
+    module, _ = inhost(server=_SLOW_SERVER)
+    started = __import__("time").monotonic()
+    with pytest.raises(TimeoutError):
+        module.complete(
+            system="s",
+            user="u",
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=20,
+        )
+    assert __import__("time").monotonic() - started < 0.5
+
+
+def test_the_protocol_multiplexes_concurrent_chunks_by_request_id(inhost):
+    from concurrent.futures import ThreadPoolExecutor
+
+    module, _ = inhost(server=_OUT_OF_ORDER_SERVER)
+
+    def invoke(value: str):
+        return module.complete(
+            system="s",
+            user=value,
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=1000,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(invoke, ("first", "second")))
+    assert len(results) == 2
+    assert all(result["route_attested"] is True for result in results)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("max_output_tokens", 2049), ("timeout_ms", 60001)),
+)
+def test_the_in_host_route_refuses_transport_bounds_before_starting(inhost, field, value):
+    module, _ = inhost()
+    kwargs = {
+        "system": "s",
+        "user": "u",
+        "provider": "",
+        "model": READER_MODEL,
+        "max_output_tokens": 2048,
+        "timeout_ms": 30000,
+    }
+    kwargs[field] = value
+    with pytest.raises(module.BridgeError, match="outside the bridge bound"):
+        module.complete(**kwargs)
 
 
 def test_the_reader_drives_the_in_host_route_end_to_end(tmp_path, inhost):
@@ -369,6 +487,7 @@ def test_the_in_host_server_uses_the_shipped_isolated_runtime_path():
         "maxTokens: req.max_output_tokens",
         "systemPrompt: req.system",
         'messages: [{ role: "user", content: req.user }]',
+        "void handle(line)",
     ):
         assert needle in server
     for needle in (

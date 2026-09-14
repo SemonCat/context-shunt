@@ -110,8 +110,8 @@ function errorChain(error: unknown): string[] {
   return chain;
 }
 
-for await (const line of rl) {
-  if (!line.trim()) continue;
+async function handle(line: string): Promise<void> {
+  if (!line.trim()) return;
   let req: {
     id: number;
     system: string;
@@ -122,7 +122,7 @@ for await (const line of rl) {
   try {
     req = JSON.parse(line);
   } catch {
-    continue;
+    return;
   }
   const started = Date.now();
   try {
@@ -161,4 +161,11 @@ for await (const line of rl) {
       }) + "\n",
     );
   }
+}
+
+for await (const line of rl) {
+  // The reader deliberately plans more than one bounded chunk at a time. Keep those
+  // physical calls concurrent, as the production adapter/runtime is, and let the request
+  // id correlate out-of-order responses on the Python side.
+  void handle(line);
 }

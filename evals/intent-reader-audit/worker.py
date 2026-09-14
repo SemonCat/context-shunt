@@ -19,7 +19,13 @@ from context_shunt.capability import CapabilityReport, supported
 from context_shunt.config import load as load_config
 from context_shunt.legacy_compact import compact_tool_result
 from context_shunt.limits import EMITTED_SCHEMA_VERSION, SUPPORTED_REQUEST_VERSIONS
-from context_shunt.provider import ModelResponse, ProviderTarget
+from context_shunt.provider import (
+    READER_SYSTEM_PROMPT,
+    HostBridgeProvider,
+    ModelResponse,
+    ProviderTarget,
+    build_user_message,
+)
 from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
 from context_shunt.session import ShuntSession
 
@@ -176,6 +182,164 @@ class InstrumentedProvider:
         )
 
 
+class InstrumentedLiveProvider:
+    """Real bridge provider retaining only bounded, non-reversible call evidence."""
+
+    def __init__(self) -> None:
+        if __import__("os").environ.get("CONTEXT_SHUNT_LUNA_EVAL") != "1":
+            raise RuntimeError("live provider requires CONTEXT_SHUNT_LUNA_EVAL=1")
+        from bridges import openclaw_inhost
+
+        self._bridge = openclaw_inhost
+        self._provider = HostBridgeProvider(self._call, model=MODEL)
+        self.calls: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._next_call = 0
+
+    @property
+    def target(self) -> ProviderTarget:
+        return self._provider.target
+
+    def complete(self, **kwargs: Any) -> ModelResponse:
+        return self._provider.complete(**kwargs)
+
+    @staticmethod
+    def _sha(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _payload_attestation(
+        self, system: str, user: str, max_output_tokens: int, timeout_ms: int
+    ) -> dict[str, Any]:
+        found = EXCERPT_RE.fullmatch(user.split("\n\nQUESTION: ", 1)[0])
+        question_parts = user.split("\n\nQUESTION: ", 1)
+        exact_shape = found is not None and len(question_parts) == 2
+        locator: dict[str, Any] | None = None
+        excerpt = question = ""
+        if exact_shape and found is not None:
+            try:
+                locator = json.loads(found.group(1))
+            except (TypeError, ValueError):
+                exact_shape = False
+            excerpt = found.group(2)
+            question = question_parts[1]
+        reconstructed = bool(
+            exact_shape
+            and locator is not None
+            and build_user_message(question, excerpt, locator) == user
+        )
+        parent_canary = __import__("os").environ.get(
+            "CONTEXT_SHUNT_EVAL_PARENT_CONTEXT_CANARY",
+            "PRIVATE_PARENT_CONTEXT_CANARY_DO_NOT_SEND",
+        )
+        role_bytes = len(system.encode("utf-8")) + len(user.encode("utf-8"))
+        return {
+            "roles": ["system", "user"],
+            "system_bytes": len(system.encode("utf-8")),
+            "user_bytes": len(user.encode("utf-8")),
+            "role_content_bytes": role_bytes,
+            "system_sha256": self._sha(system),
+            "user_sha256": self._sha(user),
+            "system_is_exact_reader_contract": system == READER_SYSTEM_PROMPT,
+            "user_is_exact_reader_template": reconstructed,
+            "user_sections": ["locator", "source_excerpt", "question"]
+            if reconstructed
+            else [],
+            "locator_kind": locator.get("kind")
+            if isinstance(locator, dict) and isinstance(locator.get("kind"), str)
+            else None,
+            "source_excerpt_bytes": len(excerpt.encode("utf-8"))
+            if reconstructed
+            else None,
+            "source_excerpt_sha256": self._sha(excerpt) if reconstructed else None,
+            "question_bytes": len(question.encode("utf-8")) if reconstructed else None,
+            "question_sha256": self._sha(question) if reconstructed else None,
+            "parent_context_canary_absent": bool(parent_canary)
+            and parent_canary not in system
+            and parent_canary not in user,
+            "max_output_tokens": max_output_tokens,
+            "timeout_ms": timeout_ms,
+        }
+
+    def _call(
+        self,
+        *,
+        system: str,
+        user: str,
+        provider: str,
+        model: str,
+        max_output_tokens: int,
+        timeout_ms: int,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._next_call += 1
+            call_number = self._next_call
+            record = {
+                "call": call_number,
+                "status": "in_flight_usage_unknown",
+                "payload": self._payload_attestation(
+                    system, user, max_output_tokens, timeout_ms
+                ),
+                "reported_input_tokens": None,
+                "reported_output_tokens": None,
+                "reported_cache_tokens": None,
+                "reported_method": "unknown",
+                "requested_provider": provider or None,
+                "requested_model": model,
+                "requested_route": __import__("os").environ.get(
+                    "CONTEXT_SHUNT_OPENCLAW_ROUTE"
+                ),
+            }
+            self.calls.append(record)
+        started = time.perf_counter()
+        try:
+            result = self._bridge.complete(
+                system=system,
+                user=user,
+                provider=provider,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                timeout_ms=timeout_ms,
+            )
+        except TimeoutError:
+            record.update(
+                status="timed_out_usage_unknown",
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 6),
+            )
+            raise
+        except Exception as exc:
+            record.update(
+                status="failed_usage_unknown",
+                failure_kind=type(exc).__name__[:64],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 6),
+            )
+            raise
+        record.update(
+            status="completed",
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 6),
+            output_payload_bytes=len(result["text"].encode("utf-8")),
+            output_sha256=self._sha(result["text"]),
+            transport_input_bytes=result.get("transport_input_bytes"),
+            transport_output_bytes=result.get("transport_output_bytes"),
+            host_elapsed_ms=result.get("host_elapsed_ms"),
+            resolved_provider=result.get("resolved_provider"),
+            resolved_model=result.get("resolved_model"),
+            route_attested=result.get("route_attested") is True,
+            execution_mode=result.get("execution_mode"),
+            execution_owner_kind=result.get("execution_owner_kind"),
+            execution_owner_id=result.get("execution_owner_id"),
+            reported_input_tokens=result.get("input_tokens"),
+            reported_output_tokens=result.get("output_tokens"),
+            reported_cache_tokens=result.get("cache_tokens"),
+            reported_method="provider_report"
+            if result.get("usage_exact") is True
+            else "unknown",
+        )
+        return result
+
+    def shutdown(self) -> None:
+        self._bridge.shutdown()
+
+
 def capability() -> CapabilityReport:
     return CapabilityReport(
         adapter="benchmark",
@@ -189,7 +353,7 @@ def capability() -> CapabilityReport:
 
 
 def make_session(
-    root: Path, workflow_id: str, provider: InstrumentedProvider
+    root: Path, workflow_id: str, provider: Any
 ) -> ShuntSession:
     workspace = root / "ws"
     workspace.mkdir(parents=True)
@@ -275,7 +439,10 @@ def normalized_aggregate(env: dict[str, Any], source: int) -> dict[str, Any] | N
 
 
 def evaluate(
-    expected: dict[str, Any], evidence: list[str], aggregates: list[dict[str, Any]]
+    expected: dict[str, Any],
+    evidence: list[str],
+    aggregates: list[dict[str, Any]],
+    answers: list[str] | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
     checks: list[dict[str, Any]] = []
     joined = "\n".join(evidence)
@@ -285,6 +452,15 @@ def evaluate(
                 "kind": "evidence_contains",
                 "expected": needle,
                 "passed": needle in joined,
+            }
+        )
+    joined_answers = "\n".join(answers or [])
+    for pattern in expected.get("answer_matches", []):
+        checks.append(
+            {
+                "kind": "answer_matches",
+                "expected_regex": pattern,
+                "passed": re.search(pattern, joined_answers, re.IGNORECASE) is not None,
             }
         )
     by_source = {row["source"]: row for row in aggregates}
@@ -303,10 +479,18 @@ def evaluate(
 
 
 def summarize_reader(
-    provider: InstrumentedProvider, stats: dict[str, Any]
+    provider: Any, stats: dict[str, Any]
 ) -> dict[str, Any]:
     calls = sorted(provider.calls, key=lambda call: call["call"])
-    reported = [call for call in calls if call["reported_input_tokens"] is not None]
+    reported = [
+        call
+        for call in calls
+        if call.get("reported_input_tokens") is not None
+        and call.get("reported_output_tokens") is not None
+    ]
+    cache_reported = [
+        call for call in reported if call.get("reported_cache_tokens") is not None
+    ]
     totals = stats["stats"]["totals"]
     methods = sorted(
         {
@@ -320,10 +504,11 @@ def summarize_reader(
         "attempts_usage_reported": len(reported),
         "unknown_usage_attempts": len(calls) - len(reported),
         "input_payload_bytes_observed": sum(
-            call["input_payload_bytes"] for call in calls
+            call.get("input_payload_bytes", call.get("payload", {}).get("role_content_bytes", 0))
+            for call in calls
         ),
         "output_payload_bytes_observed": sum(
-            call["output_payload_bytes"] for call in calls
+            call.get("output_payload_bytes", 0) for call in calls
         ),
         "input_tokens_reported_lower_bound": (
             sum(call["reported_input_tokens"] for call in reported)
@@ -336,27 +521,36 @@ def summarize_reader(
             else None
         ),
         "cache_tokens_reported_lower_bound": (
-            sum(call["reported_cache_tokens"] for call in reported)
-            if reported
+            sum(call["reported_cache_tokens"] for call in cache_reported)
+            if cache_reported
             else None
         ),
         "core_accounted_input_tokens": totals["reader_input_tokens"],
         "core_accounted_output_tokens": totals["reader_output_tokens"],
         "core_accounted_cache_tokens": totals["reader_cache_tokens"],
         "core_reader_token_methods": methods,
+        "attempt_statuses": {
+            status: sum(1 for call in calls if call.get("status", "completed") == status)
+            for status in sorted({call.get("status", "completed") for call in calls})
+        },
         "calls": calls,
     }
 
 
-def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str, Any]:
-    provider = InstrumentedProvider(
-        workflow.get("reader", {}).get("unknown_usage_calls", [])
+def execute_shunt(
+    workflow: dict[str, Any], lane: str, variant: str, provider_kind: str
+) -> dict[str, Any]:
+    provider = (
+        InstrumentedLiveProvider()
+        if provider_kind == "live"
+        else InstrumentedProvider(workflow.get("reader", {}).get("unknown_usage_calls", []))
     )
     started = time.perf_counter()
     with TemporaryDirectory(prefix=f"shunt-bench-{lane}-") as temporary:
         session = make_session(Path(temporary), workflow["id"], provider)
         main_outputs: list[Any] = []
         evidence: list[str] = []
+        answers: list[str] = []
         aggregates: list[dict[str, Any]] = []
         trace: list[str] = []
         entries = []
@@ -378,6 +572,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
             env = session.read(request)
             main_outputs.append(env)
             evidence.append(env.get("answer", ""))
+            answers.append(env.get("answer", ""))
             trace.append("read")
             if workflow["reader"].get("repeat"):
                 if variant == "no-cache" and lane == "new":
@@ -387,6 +582,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
                 repeated = session.read(request)
                 main_outputs.append(repeated)
                 evidence.append(repeated.get("answer", ""))
+                answers.append(repeated.get("answer", ""))
                 trace.append("read-repeat")
 
         if workflow.get("aggregate_sources"):
@@ -409,6 +605,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
                     first = session.read(request)
                     main_outputs.append(first)
                     evidence.append(first.get("answer", ""))
+                    answers.append(first.get("answer", ""))
                     trace.append("read")
                     if variant == "no-cache":
                         session._reader._answer_cache.clear()
@@ -417,6 +614,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
                     second = session.read(request)
                     main_outputs.append(second)
                     evidence.append(second.get("answer", ""))
+                    answers.append(second.get("answer", ""))
                     trace.append("read-repeat")
             elif lane == "new":
                 fallback_spec = dict(workflow["reader"])
@@ -431,6 +629,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
                 )
                 main_outputs.append(env)
                 evidence.append(env.get("answer", ""))
+                answers.append(env.get("answer", ""))
                 trace.append("read-instead-of-aggregate")
 
         full_read_bytes = 0
@@ -506,7 +705,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
                 "page_size": 8,
             }
         )
-        correct, checks = evaluate(workflow["expected"], evidence, aggregates)
+        correct, checks = evaluate(workflow["expected"], evidence, aggregates, answers)
         cache_hits = sum(
             1
             for value in main_outputs
@@ -518,6 +717,18 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
             for value in main_outputs
             if isinstance(value, dict)
             for citation in value.get("citations", [])
+        ]
+        coverage = [
+            {
+                "status": value.get("status"),
+                "code": value.get("code"),
+                "complete": value.get("coverage", {}).get("complete"),
+                "omission_reasons": value.get("coverage", {}).get(
+                    "omission_reasons", []
+                ),
+            }
+            for value in main_outputs
+            if isinstance(value, dict) and "coverage" in value
         ]
         elapsed_ms = (time.perf_counter() - started) * 1000
         return {
@@ -543,10 +754,13 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
             "correct": correct,
             "correctness_checks": checks,
             "citation_validity": all(citation_values) if citation_values else None,
+            "coverage_observed": coverage,
             "harness_elapsed_ms_observed": round(elapsed_ms, 6),
-            "mock_delay_ms_configured_total": len(provider.calls) * MOCK_DELAY_MS,
+            "mock_delay_ms_configured_total": (
+                len(provider.calls) * MOCK_DELAY_MS if provider_kind == "mock" else 0.0
+            ),
             "mock_delay_ms_observed_total": round(
-                sum(call["observed_mock_call_ms"] for call in provider.calls), 6
+                sum(call.get("observed_mock_call_ms", 0.0) for call in provider.calls), 6
             ),
         }
 
@@ -621,19 +835,38 @@ def main() -> None:
     parser.add_argument(
         "--variant", choices=("normal", "no-cache", "no-aggregation"), default="normal"
     )
+    parser.add_argument("--provider-kind", choices=("mock", "live"), default="mock")
     args = parser.parse_args()
     corpus = json.loads(args.corpus.read_text())
-    rows = [
-        execute_legacy(workflow)
-        if args.lane == "legacy_compactor"
-        else execute_shunt(workflow, args.lane, args.variant)
-        for workflow in corpus["workflows"]
-    ]
-    print(
-        json.dumps(
-            {"lane": args.lane, "variant": args.variant, "rows": rows}, sort_keys=True
+    started = time.perf_counter()
+    try:
+        rows = [
+            execute_legacy(workflow)
+            if args.lane == "legacy_compactor"
+            else execute_shunt(
+                workflow, args.lane, args.variant, args.provider_kind
+            )
+            for workflow in corpus["workflows"]
+        ]
+        print(
+            json.dumps(
+                {
+                    "lane": args.lane,
+                    "variant": args.variant,
+                    "provider_kind": args.provider_kind,
+                    "lane_elapsed_ms_observed": round(
+                        (time.perf_counter() - started) * 1000, 6
+                    ),
+                    "rows": rows,
+                },
+                sort_keys=True,
+            )
         )
-    )
+    finally:
+        if args.provider_kind == "live" and args.lane != "legacy_compactor":
+            from bridges import openclaw_inhost
+
+            openclaw_inhost.shutdown()
 
 
 if __name__ == "__main__":

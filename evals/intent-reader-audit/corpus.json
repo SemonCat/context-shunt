@@ -54,7 +54,7 @@
       "reader": {"source": 0, "question": "What is retry_limit?", "patterns": ["retry_limit"], "max_chunks": 2, "repeat": true, "unknown_usage_calls": []},
       "aggregate_sources": [2],
       "expected": {
-        "evidence_contains": ["retry_limit: 7"],
+        "answer_matches": ["\\bretry_limit\\s*(?::|=|\\bis\\b)\\s*7\\b"],
         "aggregates": [{"source": 2, "matched_count": 5, "distinct_count": 3, "groups": {"billing": 3, "checkout": 2}}]
       }
     },
