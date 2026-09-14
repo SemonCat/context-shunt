@@ -187,9 +187,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 94.238 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 6,172/3,059/19,200 | 180,834 | 92,071.412 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/165/0 | 5,132 | 31,057.633 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 82.251 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/2,299/15,360 | 180,834 | 78,571.919 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 34,011.778 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -200,7 +200,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`b155296577249ed9aa479072db3e3ac18b93ce32`, PRE as commit `1686db6` with tree
+`fa8097d49c838362e07d93cfcf355c98abfcf37a`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of

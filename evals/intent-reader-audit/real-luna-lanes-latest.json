@@ -21,17 +21,18 @@
       "packages/core-py/src/context_shunt/provider.py",
       "packages/core-py/src/context_shunt/reader.py",
       "packages/core-py/src/context_shunt/session.py",
+      "packages/core-py/src/context_shunt/snapshot.py",
       "packages/core-ts/src/aggregate.ts"
     ],
-    "working_tree_relevant_files_sha256": "eb60a53bf53f4efcb5c47ce577993a94e33ed503d7c0ee0306d1be130bd0ab78",
+    "working_tree_relevant_files_sha256": "3afa7f2f2d71d6c0f292bfb3ce440694116296ae267a7d189d30bb26559ecad2",
     "worktree_checkout_clean": true,
-    "worktree_git_tree": "6e60598b90585efbb5a8b2879763f4c6e0a4b911",
-    "worktree_head": "b155296577249ed9aa479072db3e3ac18b93ce32"
+    "worktree_git_tree": "d9b7f22357a0a09dbcb651efaf31afa706c0b56e",
+    "worktree_head": "fa8097d49c838362e07d93cfcf355c98abfcf37a"
   },
   "payloads": {
     "legacy_compactor": {
       "lane": "legacy_compactor",
-      "lane_elapsed_ms_observed": 94.238184,
+      "lane_elapsed_ms_observed": 82.251496,
       "provider_kind": "live",
       "rows": [
         {
@@ -54,7 +55,7 @@
           ],
           "execution": "actual_incumbent_compactor_port",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 7.070811,
+          "harness_elapsed_ms_observed": 7.085392,
           "lane": "legacy_compactor",
           "main_context_bytes_observed": 293,
           "mock_delay_ms_configured_total": 0.0,
@@ -126,7 +127,7 @@
           ],
           "execution": "actual_incumbent_compactor_port",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 52.305961,
+          "harness_elapsed_ms_observed": 44.835716,
           "lane": "legacy_compactor",
           "main_context_bytes_observed": 13671,
           "mock_delay_ms_configured_total": 0.0,
@@ -194,7 +195,7 @@
           ],
           "execution": "actual_incumbent_compactor_port",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 23.871444,
+          "harness_elapsed_ms_observed": 21.501697,
           "lane": "legacy_compactor",
           "main_context_bytes_observed": 12072,
           "mock_delay_ms_configured_total": 0.0,
@@ -250,7 +251,7 @@
           ],
           "execution": "actual_incumbent_compactor_port",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 6.339713,
+          "harness_elapsed_ms_observed": 5.18692,
           "lane": "legacy_compactor",
           "main_context_bytes_observed": 20424,
           "mock_delay_ms_configured_total": 0.0,
@@ -301,7 +302,7 @@
           ],
           "execution": "actual_incumbent_compactor_port",
           "full_read_bytes_observed": 17601,
-          "harness_elapsed_ms_observed": 4.535142,
+          "harness_elapsed_ms_observed": 3.562781,
           "lane": "legacy_compactor",
           "main_context_bytes_observed": 18207,
           "mock_delay_ms_configured_total": 0.0,
@@ -341,7 +342,7 @@
     },
     "new": {
       "lane": "new",
-      "lane_elapsed_ms_observed": 31057.63304,
+      "lane_elapsed_ms_observed": 34011.777521,
       "provider_kind": "live",
       "rows": [
         {
@@ -383,7 +384,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 26945.735452,
+          "harness_elapsed_ms_observed": 29845.257745,
           "lane": "new",
           "main_context_bytes_observed": 2457,
           "mock_delay_ms_configured_total": 0.0,
@@ -403,11 +404,11 @@
             "calls": [
               {
                 "call": 1,
-                "elapsed_ms": 26907.903756,
+                "elapsed_ms": 29797.586637,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 21088,
+                "host_elapsed_ms": 22281,
                 "output_payload_bytes": 196,
                 "output_sha256": "07c34d732f21828960eba862e6990c8820f6a0f79a63e53884e98ad9c884c2c7",
                 "payload": {
@@ -439,7 +440,7 @@
                 "reported_cache_tokens": 0,
                 "reported_input_tokens": 643,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 113,
+                "reported_output_tokens": 88,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -448,19 +449,19 @@
                 "route_attested": true,
                 "status": "completed",
                 "transport_input_bytes": 2813,
-                "transport_output_bytes": 705
+                "transport_output_bytes": 704
               }
             ],
             "core_accounted_cache_tokens": 0,
             "core_accounted_input_tokens": 643,
-            "core_accounted_output_tokens": 113,
+            "core_accounted_output_tokens": 88,
             "core_reader_token_methods": [
               "exact"
             ],
             "input_payload_bytes_observed": 2597,
             "input_tokens_reported_lower_bound": 643,
             "output_payload_bytes_observed": 196,
-            "output_tokens_reported_lower_bound": 113,
+            "output_tokens_reported_lower_bound": 88,
             "unknown_usage_attempts": 0
           },
           "requery_bytes_observed": 0,
@@ -574,7 +575,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 56.982806,
+          "harness_elapsed_ms_observed": 65.464793,
           "lane": "new",
           "main_context_bytes_observed": 6899,
           "mock_delay_ms_configured_total": 0.0,
@@ -697,7 +698,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 3979.382594,
+          "harness_elapsed_ms_observed": 4014.216135,
           "lane": "new",
           "main_context_bytes_observed": 7661,
           "mock_delay_ms_configured_total": 0.0,
@@ -721,11 +722,11 @@
             "calls": [
               {
                 "call": 1,
-                "elapsed_ms": 3920.432876,
+                "elapsed_ms": 3951.742127,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 3919,
+                "host_elapsed_ms": 3951,
                 "output_payload_bytes": 142,
                 "output_sha256": "659dee7beb867c978a42fb96d5711fe62b62a3a8dfdeaad95f37373c343fd259",
                 "payload": {
@@ -848,7 +849,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 22.428968,
+          "harness_elapsed_ms_observed": 26.332392,
           "lane": "new",
           "main_context_bytes_observed": 22306,
           "mock_delay_ms_configured_total": 0.0,
@@ -926,7 +927,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 29.795093,
+          "harness_elapsed_ms_observed": 32.406283,
           "lane": "new",
           "main_context_bytes_observed": 3688,
           "mock_delay_ms_configured_total": 0.0,
@@ -968,7 +969,7 @@
     },
     "pre": {
       "lane": "pre",
-      "lane_elapsed_ms_observed": 92071.411911,
+      "lane_elapsed_ms_observed": 78571.918839,
       "provider_kind": "live",
       "rows": [
         {
@@ -1010,7 +1011,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 28565.825157,
+          "harness_elapsed_ms_observed": 30767.514623,
           "lane": "pre",
           "main_context_bytes_observed": 2457,
           "mock_delay_ms_configured_total": 0.0,
@@ -1030,11 +1031,11 @@
             "calls": [
               {
                 "call": 1,
-                "elapsed_ms": 28523.532901,
+                "elapsed_ms": 30718.901224,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 22307,
+                "host_elapsed_ms": 23637,
                 "output_payload_bytes": 196,
                 "output_sha256": "07c34d732f21828960eba862e6990c8820f6a0f79a63e53884e98ad9c884c2c7",
                 "payload": {
@@ -1066,7 +1067,7 @@
                 "reported_cache_tokens": 0,
                 "reported_input_tokens": 643,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 89,
+                "reported_output_tokens": 56,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1080,14 +1081,14 @@
             ],
             "core_accounted_cache_tokens": 0,
             "core_accounted_input_tokens": 643,
-            "core_accounted_output_tokens": 89,
+            "core_accounted_output_tokens": 56,
             "core_reader_token_methods": [
               "exact"
             ],
             "input_payload_bytes_observed": 2597,
             "input_tokens_reported_lower_bound": 643,
             "output_payload_bytes_observed": 196,
-            "output_tokens_reported_lower_bound": 89,
+            "output_tokens_reported_lower_bound": 56,
             "unknown_usage_attempts": 0
           },
           "requery_bytes_observed": 0,
@@ -1179,9 +1180,9 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 57043.772085,
+          "harness_elapsed_ms_observed": 41559.3602,
           "lane": "pre",
-          "main_context_bytes_observed": 7360,
+          "main_context_bytes_observed": 6350,
           "mock_delay_ms_configured_total": 0.0,
           "mock_delay_ms_observed_total": 0.0,
           "module_origin": "isolated_git_archive:1686db6:packages/core-py/src/context_shunt/__init__.py",
@@ -1197,17 +1198,17 @@
             },
             "attempts_observed": 5,
             "attempts_usage_reported": 5,
-            "cache_tokens_reported_lower_bound": 19200,
+            "cache_tokens_reported_lower_bound": 15360,
             "calls": [
               {
                 "call": 1,
-                "elapsed_ms": 29733.800883,
+                "elapsed_ms": 18407.520079,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 29732,
-                "output_payload_bytes": 1255,
-                "output_sha256": "1418ba4be9ae48d0fef7e55632eeef06a3871e65191ea598ff514cdafd3c9cdc",
+                "host_elapsed_ms": 18405,
+                "output_payload_bytes": 1310,
+                "output_sha256": "f51106ffefefb38af4b6a1b02a186b0876d7444e48feecfeaddce2bcd17747c2",
                 "payload": {
                   "locator_kind": "lines",
                   "max_output_tokens": 2048,
@@ -1234,10 +1235,10 @@
                   ],
                   "user_sha256": "fe5e63ea2732816421dfea91634a987bb06fa30705d8e1a461ac326a60995882"
                 },
-                "reported_cache_tokens": 3840,
-                "reported_input_tokens": 896,
+                "reported_cache_tokens": 0,
+                "reported_input_tokens": 4736,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 1289,
+                "reported_output_tokens": 875,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1246,15 +1247,15 @@
                 "route_attested": true,
                 "status": "completed",
                 "transport_input_bytes": 35036,
-                "transport_output_bytes": 2236
+                "transport_output_bytes": 2284
               },
               {
                 "call": 2,
-                "elapsed_ms": 3391.565273,
+                "elapsed_ms": 3414.958732,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 2938,
+                "host_elapsed_ms": 2932,
                 "output_payload_bytes": 28,
                 "output_sha256": "74017fb7cbb163eb8837c4e5e710e67ac2c1121824d3ea601b5bc834ec8665fd",
                 "payload": {
@@ -1286,7 +1287,7 @@
                 "reported_cache_tokens": 3840,
                 "reported_input_tokens": 803,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 82,
+                "reported_output_tokens": 32,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1295,15 +1296,15 @@
                 "route_attested": true,
                 "status": "completed",
                 "transport_input_bytes": 34797,
-                "transport_output_bytes": 519
+                "transport_output_bytes": 506
               },
               {
                 "call": 3,
-                "elapsed_ms": 2790.959334,
+                "elapsed_ms": 2700.031508,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 2790,
+                "host_elapsed_ms": 2699,
                 "output_payload_bytes": 28,
                 "output_sha256": "74017fb7cbb163eb8837c4e5e710e67ac2c1121824d3ea601b5bc834ec8665fd",
                 "payload": {
@@ -1335,7 +1336,7 @@
                 "reported_cache_tokens": 3840,
                 "reported_input_tokens": 803,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 77,
+                "reported_output_tokens": 68,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1348,11 +1349,11 @@
               },
               {
                 "call": 4,
-                "elapsed_ms": 1829.639786,
+                "elapsed_ms": 1939.383429,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 1829,
+                "host_elapsed_ms": 1939,
                 "output_payload_bytes": 28,
                 "output_sha256": "74017fb7cbb163eb8837c4e5e710e67ac2c1121824d3ea601b5bc834ec8665fd",
                 "payload": {
@@ -1384,7 +1385,7 @@
                 "reported_cache_tokens": 3840,
                 "reported_input_tokens": 803,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 27,
+                "reported_output_tokens": 29,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1397,13 +1398,13 @@
               },
               {
                 "call": 5,
-                "elapsed_ms": 27249.79086,
+                "elapsed_ms": 23092.782852,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 27249,
-                "output_payload_bytes": 1429,
-                "output_sha256": "cdf4644f4662edffe1b62cf423ab4465758d6a20fbaeb807c1b6eb4f3626851c",
+                "host_elapsed_ms": 23091,
+                "output_payload_bytes": 1767,
+                "output_sha256": "02f70601c2a986035e29130b1c76443411a720563acc05ed4d68609dfac3b467",
                 "payload": {
                   "locator_kind": "lines",
                   "max_output_tokens": 2048,
@@ -1420,7 +1421,7 @@
                   "system_bytes": 2396,
                   "system_is_exact_reader_contract": true,
                   "system_sha256": "d0d654e21183bc4edecc4a99707e406fd6e45112e6fb4ee0d0ce41143dc2c8db",
-                  "timeout_ms": 30261,
+                  "timeout_ms": 41586,
                   "user_bytes": 32447,
                   "user_is_exact_reader_template": true,
                   "user_sections": [
@@ -1433,7 +1434,7 @@
                 "reported_cache_tokens": 3840,
                 "reported_input_tokens": 950,
                 "reported_method": "provider_report",
-                "reported_output_tokens": 1391,
+                "reported_output_tokens": 1135,
                 "requested_model": "gpt-5.6-luna",
                 "requested_provider": null,
                 "requested_route": "sub2api-openai/gpt-5.6-luna",
@@ -1442,29 +1443,29 @@
                 "route_attested": true,
                 "status": "completed",
                 "transport_input_bytes": 35300,
-                "transport_output_bytes": 2377
+                "transport_output_bytes": 2860
               }
             ],
-            "core_accounted_cache_tokens": 19200,
-            "core_accounted_input_tokens": 4255,
-            "core_accounted_output_tokens": 2866,
+            "core_accounted_cache_tokens": 15360,
+            "core_accounted_input_tokens": 8095,
+            "core_accounted_output_tokens": 2139,
             "core_reader_token_methods": [
               "exact"
             ],
             "input_payload_bytes_observed": 173167,
-            "input_tokens_reported_lower_bound": 4255,
-            "output_payload_bytes_observed": 2768,
-            "output_tokens_reported_lower_bound": 2866,
+            "input_tokens_reported_lower_bound": 8095,
+            "output_payload_bytes_observed": 3161,
+            "output_tokens_reported_lower_bound": 2139,
             "unknown_usage_attempts": 0
           },
           "requery_bytes_observed": 0,
           "semantic_answer_evidence": [
             {
-              "answer_bytes": 195,
-              "answer_sha256": "7a9fe77bb7d38bfc69151660c4d64a8f8adf44220454bbb40a411141231ed0e3",
+              "answer_bytes": 124,
+              "answer_sha256": "c7016ad81358e1fa5235da96717a5d2b7664eee490bb3c012b9160de01c93f24",
               "cache_reused": false,
               "citations_all_verified": true,
-              "citations_published": 6,
+              "citations_published": 3,
               "matches_prior_uncached_answer": null
             }
           ],
@@ -1546,7 +1547,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 6379.020856,
+          "harness_elapsed_ms_observed": 6157.404937,
           "lane": "pre",
           "main_context_bytes_observed": 6005,
           "mock_delay_ms_configured_total": 0.0,
@@ -1569,11 +1570,11 @@
             "calls": [
               {
                 "call": 1,
-                "elapsed_ms": 2571.702391,
+                "elapsed_ms": 3228.551207,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 2571,
+                "host_elapsed_ms": 3228,
                 "output_payload_bytes": 142,
                 "output_sha256": "659dee7beb867c978a42fb96d5711fe62b62a3a8dfdeaad95f37373c343fd259",
                 "payload": {
@@ -1618,11 +1619,11 @@
               },
               {
                 "call": 2,
-                "elapsed_ms": 3746.05406,
+                "elapsed_ms": 2865.36355,
                 "execution_mode": "isolated-agent-runtime",
                 "execution_owner_id": "openclaw",
                 "execution_owner_kind": "harness",
-                "host_elapsed_ms": 3746,
+                "host_elapsed_ms": 2864,
                 "output_payload_bytes": 142,
                 "output_sha256": "659dee7beb867c978a42fb96d5711fe62b62a3a8dfdeaad95f37373c343fd259",
                 "payload": {
@@ -1745,7 +1746,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 0,
-          "harness_elapsed_ms_observed": 23.945755,
+          "harness_elapsed_ms_observed": 24.789655,
           "lane": "pre",
           "main_context_bytes_observed": 22306,
           "mock_delay_ms_configured_total": 0.0,
@@ -1829,7 +1830,7 @@
           ],
           "execution": "actual_shunt_session",
           "full_read_bytes_observed": 17601,
-          "harness_elapsed_ms_observed": 34.583488,
+          "harness_elapsed_ms_observed": 34.996053,
           "lane": "pre",
           "main_context_bytes_observed": 23299,
           "mock_delay_ms_configured_total": 0.0,
