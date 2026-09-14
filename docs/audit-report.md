@@ -186,9 +186,9 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 85.761 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/3,004/15,360 | 180,834 | 91,472.118 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/140/0 | 5,132 | 33,220.270 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 80.229 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 10,012/2,629/15,360 | 180,834 | 87,453.328 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/143/0 | 5,132 | 31,970.606 | 1 |
 
 The accepted run started ten real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
@@ -199,7 +199,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`37f5359302adfb780d47f797ce1b1b3e7a519b9e`, PRE as commit `1686db6` with tree
+`f4e928d4cd87055a905934a24df39325e81066ed`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -213,8 +213,11 @@ deadline/output cap, resolved identity/execution, call status and reported usage
 call contained exactly the reader system role plus a user role reconstructible from only
 locator, selected source excerpt and question. A synthetic parent-context canary was absent
 from all calls; prompt, source, question, answer, quote, host stderr and credentials are
-not retained. NEW's minified-Loki aggregation and bounded-search workflows made no model
-call. The real evidence and exact reproduction command are in
+not retained. Each semantic answer instead has a redacted SHA-256/byte/citation record;
+every answer independently satisfies its expectation, every citation verifies, and NEW's
+cached repeat digest exactly matches its earlier uncached verified answer. NEW's
+minified-Loki aggregation and bounded-search workflows made no model call. The real
+evidence and exact reproduction command are in
 [`docs/five-workflow-real-luna.md`](five-workflow-real-luna.md) and
 [`evals/intent-reader-audit/real-luna-latest.json`](../evals/intent-reader-audit/real-luna-latest.json).
 
