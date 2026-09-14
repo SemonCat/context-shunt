@@ -187,11 +187,11 @@ transport, execution mode, or execution owner before an answer can be published.
 
 | Lane | Correct | Verified citations | Real attempts (usage reported/unknown) | Provider tokens in/out/cache | Role bytes | Wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 90.089 | 0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 8 (8/0) | 6,172/3,037/19,200 | 180,834 | 89,491.759 | 0 |
-| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/144/0 | 5,132 | 30,380.515 | 1 |
+| Incumbent legacy compactor | 3/5 | N/A | 0 | unknown | N/A | 79.326 | 0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 3/3 | 7 (7/0) | 9,062/1,773/11,520 | 145,991 | 70,727.096 | 0 |
+| NEW implementation | 5/5 | 2/2 | 2 (2/0) | 1,280/108/0 | 5,132 | 32,196.596 | 1 |
 
-The accepted run started ten real attempts, all of which completed with reported usage
+The accepted run started nine real attempts, all of which completed with reported usage
 and resolved Luna identity. No attempt timed out, failed, or remained late/in flight when
 the lane closed. Missing usage would remain unknown; no token field is
 derived from payload bytes or a completion ratio.
@@ -200,7 +200,7 @@ Wall time is reported per independently launched lane, including initialization,
 not claimed as comparable end-to-end time savings.
 
 The machine-readable binding identifies NEW as commit
-`113776abb4cfdb8e305995f81576d914ace834af`, PRE as commit `1686db6` with tree
+`e98c34a26214e152c82993f7f7189099a9c91704`, PRE as commit `1686db6` with tree
 `bbc1b43f9f1959e1ae0b9a82d0658dfaa11d16da`, and the
 OpenClaw host as commit `f695db5fde256be60e1d6d76960a81842e400299`. It also binds the
 corpus hash, complete committed Git tree for both source checkouts, and an exact digest of
@@ -229,7 +229,7 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 1,022 passed, 19 skipped (`.venv/bin/python -m
+- **Python core:** 1,023 passed, 19 skipped (`.venv/bin/python -m
   pytest -q`).
 - **TypeScript core suite:** 815 passed across 19 files (`npm --prefix packages/core-ts
   test`); `npm --prefix packages/core-ts run typecheck` clean. Adapter coverage is also
@@ -244,7 +244,7 @@ proof.
   (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 44.865ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,591 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,592 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -253,7 +253,7 @@ proof.
   (probe/I/O/model/request deadlines, no late publication), and `capability` (missing/unsafe
   host seams disable only the affected mode). The gate definitions were not weakened;
   running them confirms the audit changes did not regress an existing invariant. Machine
-  report: `reports/verify-20260914T125157Z-237501000-67692.json`.
+  report: `reports/verify-20260914T131123Z-074082000-25969.json`.
 - The original regression fixes were verified red-capable at the time they were made
   (recorded per commit), the execution harness has explicit cache/aggregation sabotage
   modes that fail acceptance, and every accepted review finding has a direct regression
@@ -382,6 +382,15 @@ proof.
   worker with a tripwire and proves the alternate-provider input exits first. All five
   real lanes were then executed again from that clean commit; no earlier live output was
   reused.
+
+  The next explicit P0–P2 pass returned one Python reader-operation candidate. Direct code
+  inspection and execution rejected it as a behavior defect: `validate_request` already
+  defaults to `READ_OPERATIONS`, so a valid `inspect`/`stats` document is rejected before
+  the cache-key path indexes read-only fields. Commit `e98c34a` nevertheless makes that
+  existing restriction explicit at both reader validation sites and adds a public-boundary
+  regression proving `OPERATION_NOT_ACCEPTED_HERE` with zero provider calls. This is
+  coverage/clarity, not a claimed functional fix. The real lanes were executed one final
+  time from that clean commit.
 
   The following explicit P0–P2 review returned two candidates. The cursor candidate was
   valid: a 1.3 request resuming a pre-versioned cursor received a new cursor tagged 1.2,
