@@ -140,6 +140,29 @@ def test_empty_expansions_still_consume_the_outer_scan_budget(tmp_path):
     assert "extraction" not in env
 
 
+@pytest.mark.parametrize("field", ["distinct", "group_by"])
+def test_non_scalar_aggregate_targets_are_rejected_not_reported_missing(tmp_path, field):
+    (tmp_path / "ws").mkdir()
+    path = tmp_path / "ws" / "object-value.json"
+    path.write_text(json.dumps({"records": [{"value": {"nested": 1}}, {}]}))
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "records_pointer": "/records", field: ["/value"]},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
 def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "records.json"

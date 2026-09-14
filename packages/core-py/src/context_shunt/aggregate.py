@@ -27,7 +27,9 @@ def _optional_pointer(value: Any, pointer: str) -> Any:
 
 
 def _scalar(value: Any) -> Any:
-    return value if value is None or isinstance(value, (str, int, float, bool)) else _MISSING
+    if value is _MISSING or value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
 
 def _output_scalar(value: Any) -> bool:

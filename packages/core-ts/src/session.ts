@@ -696,14 +696,6 @@ export class ShuntSession {
         // disclosure problem would send the caller to a remedy that never works.
         throw new ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", false);
       }
-      if (extraction.stallReason === "cap") {
-        // The resumed search's own `max_matches` was already fully spent by a prior page,
-        // before a single further line was looked at. This is not a byte or wire budget
-        // problem - raising UNIT_OVER_PAGE_BUDGET here would send the caller to raise the
-        // wrong limit. The only way to keep paging toward a true total is a fresh request
-        // with a larger `max_matches`.
-        throw new ShuntError("LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", false);
-      }
       if (clippedByAllowance) {
         return this.disclosureExhausted(
           requestId, operationId, entry, selector, handles, allowance,

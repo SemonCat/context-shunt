@@ -115,7 +115,7 @@ export interface Extraction {
    * difference between "this unit is larger than any page" and "this unit is larger than
    * what is left of the disclosure allowance" - two refusals with different remedies.
    */
-  stallReason: "content" | "wire" | "cap";
+  stallReason: "content" | "wire";
 }
 
 function emptyExtraction(mode: Extraction["mode"]): Extraction {
@@ -547,27 +547,13 @@ export class Inspector {
     out.matchesFound = 0;
 
     let ordinal = Math.max(1, state.line ?? 1);
-    const already = Math.max(0, state.matches ?? 0);
     let used = 0;
     let wireUsed = 0;
     const startLine = ordinal;
-    const remainingMatches = maxMatches - already;
-    if (remainingMatches <= 0) {
-      // Only reachable by resuming a cursor whose prior page already encoded
-      // `matches === maxMatches` (the schema requires `max_matches >= 1`, so a fresh
-      // request can never start here). Returning the default extraction here - as this
-      // branch did before this fix - would report `complete: true` after looking at zero
-      // further lines: the exact "found the first N, claim that is all of them" falsehood
-      // the cap-cursor fix below already refuses to make, just relocated one page later.
-      // `maxMatches` is bound into the cursor's selector (see `canonicalSelector`), so
-      // resuming this cursor unchanged can never make progress either - the caller must
-      // issue a fresh request with a larger `max_matches`. Mark this a stall so the
-      // session layer raises a clear, actionable error instead of silently claiming
-      // completeness or handing back a cursor that loops forever if followed as-is.
-      out.stalled = true;
-      out.stallReason = "cap";
-      return out;
-    }
+    // max_matches is a per-page output/work cap. A cursor advances the source line but
+    // resets this allowance, so every advertised continuation can make progress and a
+    // source with more than the one-page cap can still be exhausted boundedly.
+    const remainingMatches = maxMatches;
 
     while (ordinal <= index.lineCount && out.linesScanned < scanBudget) {
       let line: string;
@@ -605,15 +591,13 @@ export class Inspector {
               index,
               ordinal,
               needle,
-              already,
               budget,
               wireBudget,
-              maxMatches,
               out.linesScanned,
             );
           }
           out.complete = false;
-          out.nextCursorState = { line: ordinal, matches: already + (out.matchesFound ?? 0) };
+          out.nextCursorState = { line: ordinal, matches: 0 };
           out.resultBytes = used;
           // A first match too large for the page leaves the cursor where it was. Reporting
           // which budget bound it keeps "this match cannot ever fit" distinct from "the
@@ -652,15 +636,15 @@ export class Inspector {
       // total can keep paging (raising `max_matches` if needed) until the source is
       // genuinely exhausted.
       out.complete = false;
-      out.nextCursorState = { line: ordinal, matches: already + (out.matchesFound ?? 0) };
+      out.nextCursorState = { line: ordinal, matches: 0 };
     }
     return out;
   }
 
   /** Return a partial exact window; never claim full matching-line coverage. */
   private searchMatchChunk(
-    index: LineIndex, ordinal: number, needle: string, already: number,
-    budget: number, wireBudget: number, maxMatches: number, linesScanned: number,
+    index: LineIndex, ordinal: number, needle: string,
+    budget: number, wireBudget: number, linesScanned: number,
   ): Extraction {
     const match = findBytes(index.lineBytes(ordinal), new TextEncoder().encode(needle));
     if (match < 0) throw new ShuntError("STORE_FAILED", "SEARCH_INDEX_MISMATCH", false);
@@ -671,9 +655,8 @@ export class Inspector {
     // Later pages visit later hits; surrounding context is explicitly omitted and can be
     // requested with a byte selector. A window never covers the full matching line.
     out.complete = false;
-    out.nextCursorState = out.stalled ? { line: ordinal, matches: already }
-      : ordinal < index.lineCount && already + 1 < maxMatches
-        ? { line: ordinal + 1, matches: already + 1 } : undefined;
+    out.nextCursorState = out.stalled ? { line: ordinal, matches: 0 }
+      : ordinal < index.lineCount ? { line: ordinal + 1, matches: 0 } : undefined;
     return out;
   }
 

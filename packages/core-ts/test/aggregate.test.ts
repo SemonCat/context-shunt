@@ -88,6 +88,26 @@ describe("structured deterministic aggregation", () => {
     expect(env.extraction).toBeUndefined();
   });
 
+  it.each(["distinct", "group_by"])(
+    "rejects a non-scalar %s target rather than reporting it as missing",
+    (field) => {
+      const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-object-"));
+      mkdirSync(join(dir, "ws"), { recursive: true });
+      const path = join(dir, "ws", "object-value.json");
+      writeFileSync(path, JSON.stringify({ records: [{ value: { nested: 1 } }, {}] }));
+      const session = new ShuntSession("sess", makeConfig(dir), makeCapability(), {
+        provider: new UnavailableProvider("MUST_NOT_RUN"),
+      });
+      const entry = session.registerPath(path);
+      const env = session.inspect(request(entry, {
+        kind: "aggregate", records_pointer: "/records", [field]: ["/value"],
+      }));
+      expect(env.code).toBe("INVALID_REQUEST");
+      expect(env.failure_detail).toBe("BAD_SELECTOR");
+      expect(env.extraction).toBeUndefined();
+    },
+  );
+
   it("keeps exact cardinalities when bounded key samples are truncated", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-cardinality-"));
     mkdirSync(join(dir, "ws"), { recursive: true });

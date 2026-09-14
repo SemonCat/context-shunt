@@ -518,26 +518,12 @@ class Inspector:
         out = Extraction(mode="search", matches_found=0)
 
         ordinal = max(1, int(state.get("line", 1)))
-        already = max(0, int(state.get("matches", 0)))
         used = 0
         wire_used = 0
-        remaining_matches = max_matches - already
-        if remaining_matches <= 0:
-            # Only reachable by resuming a cursor whose prior page already encoded
-            # ``matches == max_matches`` (the schema requires ``max_matches >= 1``, so a
-            # fresh request can never start here). Returning the default ``Extraction``
-            # here - as this branch did before this fix - would report ``complete: True``
-            # after looking at zero further lines: the exact "found the first N, claim
-            # that is all of them" falsehood the cap-cursor fix below already refuses to
-            # make, just relocated one page later. ``max_matches`` is bound into the
-            # cursor's selector (see ``canonical_selector``), so resuming this cursor
-            # unchanged can never make progress either - the caller must issue a fresh
-            # request with a larger ``max_matches``. Mark this a stall so the session
-            # layer raises a clear, actionable error instead of silently claiming
-            # completeness or handing back a cursor that loops forever if followed as-is.
-            out.stalled = True
-            out.stall_reason = "cap"
-            return out
+        # max_matches is a per-page output/work cap. A cursor advances the source line but
+        # resets this allowance, so every advertised continuation can make progress and a
+        # source with more than the global one-page cap can still be exhausted boundedly.
+        remaining_matches = max_matches
 
         while ordinal <= index.line_count and out.lines_scanned < scan_budget:
             try:
@@ -571,16 +557,14 @@ class Inspector:
                             index,
                             ordinal=ordinal,
                             needle=needle,
-                            already=already,
                             budget=budget,
                             wire_budget=wire_budget,
-                            max_matches=max_matches,
                             lines_scanned=out.lines_scanned,
                         )
                     out.complete = False
                     out.next_cursor_state = {
                         "line": ordinal,
-                        "matches": already + (out.matches_found or 0),
+                        "matches": 0,
                     }
                     out.result_bytes = used
                     # A first match too large for the page leaves the cursor where it was.
@@ -618,7 +602,7 @@ class Inspector:
             out.complete = False
             out.next_cursor_state = {
                 "line": ordinal,
-                "matches": already + (out.matches_found or 0),
+                "matches": 0,
             }
         return out
 
@@ -628,10 +612,8 @@ class Inspector:
         *,
         ordinal: int,
         needle: str,
-        already: int,
         budget: int,
         wire_budget: int,
-        max_matches: int,
         lines_scanned: int,
     ) -> Extraction:
         """Return a partial exact window; never claim full matching-line coverage."""
@@ -653,10 +635,10 @@ class Inspector:
         # visits later matches; exact surrounding bytes remain available through inspect.
         out.complete = False
         out.next_cursor_state = (
-            {"line": ordinal, "matches": already}
+            {"line": ordinal, "matches": 0}
             if out.stalled
-            else {"line": ordinal + 1, "matches": already + 1}
-            if ordinal < index.line_count and already + 1 < max_matches
+            else {"line": ordinal + 1, "matches": 0}
+            if ordinal < index.line_count
             else None
         )
         return out

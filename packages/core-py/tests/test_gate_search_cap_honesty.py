@@ -56,7 +56,9 @@ def _loki_shaped_source(total_lines: int = 3000, error_every: int = 60) -> tuple
     return "\n".join(lines) + "\n", true_count
 
 
-def _search_request(pointer, *, max_matches: int, max_scan_lines: int = 20000, cursor: str | None = None):
+def _search_request(
+    pointer, *, max_matches: int, max_scan_lines: int = 20000, cursor: str | None = None
+):
     request = {
         "schema_version": EMITTED_SCHEMA_VERSION,
         "request_id": "req_search",
@@ -82,7 +84,9 @@ def test_a_search_capped_by_max_matches_no_longer_claims_the_whole_source_was_se
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
     body, true_count = _loki_shaped_source()
@@ -123,7 +127,9 @@ def test_a_caller_can_page_a_scan_budget_cutoff_to_the_true_total(tmp_path):
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
     body, true_count = _loki_shaped_source()
@@ -149,29 +155,15 @@ def test_a_caller_can_page_a_scan_budget_cutoff_to_the_true_total(tmp_path):
     assert seen == true_count
 
 
-def test_resuming_a_cursor_whose_cap_is_already_spent_raises_instead_of_lying(tmp_path):
-    """A cursor bound to a fully-spent ``max_matches`` must not report false completeness.
-
-    Found by the reviewer on the honest cap-cursor fix above: the fix makes a capped page
-    emit ``complete: false`` plus a cursor encoding ``matches: max_matches``. But the cursor
-    is bound to its selector (``max_matches`` included), so a caller who resumes it exactly
-    as instructed hands ``max_matches`` straight back unchanged, and the resumed call starts
-    with ``already == max_matches`` - the cap is spent before a single further line is
-    looked at. Before this test, that early-out path returned the bare default
-    ``Extraction`` (``complete: True``, no cursor) after scanning nothing: the identical
-    "found the first N, claim that's all of them" falsehood the fix above closes, simply
-    relocated one request later, and reachable only because that fix now emits the cursor
-    that leads here. The honest answer is neither a silent ``complete: true`` nor a cursor
-    that would loop forever if followed unchanged: raise a clear, distinct error naming
-    exactly what a caller must do differently (reissue with a larger ``max_matches``),
-    matching how this file already refuses to guess when a single match cannot fit any page
-    at all.
-    """
+def test_max_matches_is_a_resumable_per_page_cap(tmp_path):
+    """A capped cursor resets its page allowance and eventually exhausts the source."""
     config = make_config(
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
     body, true_count = _loki_shaped_source()
@@ -186,12 +178,14 @@ def test_resuming_a_cursor_whose_cap_is_already_spent_raises_instead_of_lying(tm
     assert cursor is not None
 
     resumed = session.inspect(_search_request(pointer, max_matches=20, cursor=cursor))
-    # Must not silently claim completeness, and must not be routed through the legacy
-    # heuristic-compaction fallback either - this is exactly solvable deterministically by
-    # raising max_matches, so it must say that plainly rather than approximate an answer.
-    assert "extraction" not in resumed
-    assert resumed["code"] == "LIMIT_EXCEEDED"
-    assert resumed["failure_detail"] == "SEARCH_MAX_MATCHES_EXHAUSTED"
+    assert resumed["extraction"]["matches_found"] == 20
+    assert resumed["extraction"]["complete"] is False
+    final = session.inspect(
+        _search_request(pointer, max_matches=20, cursor=resumed["extraction"]["next_cursor"])
+    )
+    assert final["extraction"]["matches_found"] == 9
+    assert final["extraction"]["complete"] is True
+    assert true_count == 20 + 20 + 9
 
 
 def test_a_single_page_with_headroom_above_the_true_total_is_an_honest_exact_count(tmp_path):
@@ -200,7 +194,9 @@ def test_a_single_page_with_headroom_above_the_true_total_is_an_honest_exact_cou
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
     body, true_count = _loki_shaped_source()

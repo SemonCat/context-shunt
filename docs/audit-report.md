@@ -65,13 +65,11 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
    a `search` page that stopped only because it hit its own `max_matches` cap reported
    `complete: true` with no continuation cursor even when most of the source went unscanned
    — indistinguishable from a genuine exact count. Fixed by scoping `complete` to what it
-   can actually mean. A second, subtler instance of the identical falsehood was then found
-   one page later: because a cursor is bound to the selector that produced it (`max_matches`
-   included), resuming a capped cursor exactly as instructed handed the exhausted cap
-   straight back and silently re-triggered the same bug via a different code path. Fixed by
-   raising a distinct `LIMIT_EXCEEDED`/`SEARCH_MAX_MATCHES_EXHAUSTED` error naming the exact
-   remedy (reissue with a larger `max_matches`), deliberately *not* routed through legacy
-   compaction. Ruby rejected leaving the remaining owned-repo gaps as proposals, so both
+   can actually mean. A later P0–P2 review caught that the first fix's cursor carried a
+   cumulative match count and therefore could not continue after reaching the per-request
+   cap. `max_matches` is now a per-page cap: the authenticated cursor advances the source
+   position and resets the page allowance, allowing bounded completion even beyond 200
+   total hits. Ruby rejected leaving the remaining owned-repo gaps as proposals, so both
    ports now also provide bounded JSON count/distinct/grouping and a 32-entry/256-KiB
    exact-query answer LRU. Cache lookup re-authorizes handles first and never stores
    partial results.
@@ -95,8 +93,8 @@ sanitized regression-corpus manifest this audit's Milestone-1 requirement calls 
 
 The findings were closed as owned-repo, additive, backward-compatible changes:
 new optional envelope fields (`provenance.attempts_usage_complete`), a new optional
-selector field (`patterns`), a corrected `complete`/cursor semantics for a pre-existing
-selector, one new closed-enum failure detail (`SEARCH_MAX_MATCHES_EXHAUSTED`), scoped
+selector field (`patterns`), corrected `complete`/page-cursor semantics for a pre-existing
+selector, scoped
 exact-query answer reuse, and schema-1.3 `inspect.selector.kind="aggregate"`. Aggregate
 supports bounded count/distinct/grouping over validated JSON arrays, optional array
 expansion and embedded-JSON parsing for Loki/minified shapes, and no regex/expression
@@ -107,7 +105,7 @@ No sprawling host refactor was attempted. Only session-4 recovery-call correlati
 a host-side proposal; the reuse and aggregation features are implemented in both owned
 language cores and are not installed on the live host.
 
-The final P0–P2 review reproduced four additional boundary defects and they were corrected
+The first explicit P0–P2 review reproduced four additional boundary defects and they were corrected
 in both ports: fallback-produced answers are not admitted to the cache; a cache hit is
 rechecked against the serialized envelope cap after request/accounting metadata changes;
 outer elements (including empty Loki expansions) consume the aggregate scan budget; and
@@ -115,13 +113,17 @@ outer elements (including empty Loki expansions) consume the aggregate scan budg
 version finding resulted in a real 1.3 emitted envelope contract instead of placing new
 fields under the closed 1.2 label.
 
-Reaching each new error code onto the wire correctly required three independent closed
-lists to move together in both language cores: the wire-scrubbing allowlist
-(`SAFE_FAILURE_DETAILS`), the fallback-eligibility set (`CAPACITY_FAILURE_DETAILS` —
-deliberately left unchanged for `SEARCH_MAX_MATCHES_EXHAUSTED`, since that failure is
-exactly and cheaply resolvable by the caller and routing it through legacy compaction
-would trade an exact count for a sampled approximation), and the `failure_detail` enum in
-all three copies of `contracts/v1/envelope.schema.json` (root, `core-ts`, `core-py`).
+A second explicit P0–P2 review found two more valid boundary defects, also corrected in both
+ports: aggregate group/distinct targets that resolve to objects or arrays now fail with
+`INVALID_REQUEST`/`BAD_SELECTOR` instead of being conflated with a missing field, and search
+cursors now treat `max_matches` as a fresh bounded per-page allowance so every advertised
+cursor can make progress. Its third candidate—that PRE was sent an unsupported 1.3 request—
+was rejected after checking both the archived contract and actual PRE execution: commit
+`1686db6` emits envelopes at 1.2 but its `SUPPORTED_REQUEST_VERSIONS` is
+`[1.0, 1.1, 1.2, 1.3]`, and all five PRE rows execute with that fact captured in the JSON
+artifact.
+
+Closed error-code lists remain synchronized in both language cores and all contract copies.
 
 ## Three-lane comparison (synthetic corpus, local, read-only)
 
@@ -137,9 +139,9 @@ attempts, and `ModelResponse.usage` it returns.
 
 | Lane | Correct | Main bytes (tokens est.) | Reader payload in/out bytes | Provider tokens in/out/cache* | Core accounted in/out/cache | Attempts (reported/unknown) | Cache hits | Requery | Full read | Harness ms | Mock delay configured/observed ms |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 79.341 | 0/0 |
-| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 251.008 | 14/19.064 |
-| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 230.160 | 4/4.444 |
+| Incumbent legacy compactor | 3/5 | 64,667 (16,167) | unknown/unknown | unknown/unknown/unknown | unknown/unknown/unknown | 0 (0/0) | 0 | 19,912 | 17,601 | 80.558 | 0/0 |
+| PRE-change Shunt (`1686db6`) | 3/5 | 60,271 (15,068) | 145,991/1,098 | 19,210/262/0 lower bound | 36,499/276/0 | 7 (5/2) | 0 | 19,912 | 17,601 | 238.495 | 14/16.545 |
+| NEW implementation | 5/5 | 43,170 (10,793) | 5,132/332 | 1,284/84/0 | 1,284/84/0 | 2 (2/0) | 1 | 19,912 | 0 | 222.308 | 4/5.486 |
 
 \* Provider token values are copied from the fixture's returned usage. The fixture's
 explicit tariff is bytes/4, but the harness does not derive a "reported" total after the
@@ -148,7 +150,7 @@ lower bound, never scaled by a completion ratio. Main-context tokens alone are e
 estimated from observed serialized bytes. Harness elapsed time is measured independently
 on each run and recorded in the artifact; configured and observed mock delay are separate
 fields, with no arithmetic controlled-time substitute. In this frozen local run NEW took
-230.160 ms versus PRE's 251.008 ms. That one controlled-fixture observation is reported as
+222.308 ms versus PRE's 238.495 ms. That one controlled-fixture observation is reported as
 measured, but is not presented as proof of a production wall-time gain.
 
 Correctness is evaluated from actual emitted answers and aggregate extractions. In this
@@ -177,9 +179,9 @@ proof.
 
 ## Test and review results
 
-- **Python core:** 976 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
+- **Python core:** 978 passed, 19 skipped (`packages/core-py`, `.venv/bin/python -m
   pytest -q`).
-- **TypeScript/adapter suite:** 946 passed, 10 skipped across 23 files (`npx vitest run`);
+- **TypeScript/adapter suite:** 948 passed, 10 skipped across 23 files (`npx vitest run`);
   `npx tsc --noEmit -p packages/core-ts/tsconfig.json` clean.
 - **Five-workflow execution benchmark:** all 15 lane/workflow rows executed and the
   acceptance assertions passed. Its opt-in regression test also passed in the Python
@@ -188,10 +190,10 @@ proof.
   records one bounded answer-cache hit, exact structured results, zero unknown usage
   attempts, and the known requery loss. See the committed JSON/Markdown artifacts.
 - **`./scripts/verify shadow deterministic`:** PASS — `main_context_reduction` 0.9734
-  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 37.593ms
+  (≥0.6), `no_evidence_regression_vs_raw` 1.0 (≥1.0), `bounded_latency` 55.219ms
   (≤2000ms). This is supplementary, not the new-feature benchmark.
 - **`./scripts/verify benchmark core`:** PASS, 13 cases, no live provider required.
-- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,510 cases, 0
+- **`./scripts/verify unit all`:** PASS — all 17 deterministic gates, 2,514 cases, 0
   failed/not_run/expected_unsupported. This is the audit's output-cap/security/injection/
   forbidden-source invariant coverage: `no-raw-leak` (sentinel fault injection across
   capture, provider, verifier, serialization, retry/fallback, logging, metrics, and guard
@@ -206,9 +208,12 @@ proof.
   per-commit in each commit message rather than re-run as one batch; see
   [`docs/regression-corpus-manifest.md`](regression-corpus-manifest.md#red-capable-verification).
 - **External review (`autoreview` skill):** the prior P0-only result was discarded because
-  it did not inspect P1/P2 findings. A fresh branch-wide review is run after the corrected
-  execution evidence is committed, explicitly with `--max-priority P2`; its accepted
-  findings and verification are recorded in the final follow-up commit.
+  it did not inspect P1/P2 findings. Two branch-wide reviews were then run explicitly with
+  `--max-priority P2`. The first produced five accepted findings, all fixed in `2d319a2`;
+  the second produced three candidates, of which the two aggregate/cursor findings above
+  were reproduced and fixed and the PRE-version claim was rejected using the archived
+  contract plus executed lane evidence. A final post-fix P0–P2 review is recorded in the
+  closeout commit after these fixes pass the full suites.
 
 ## Residual blockers
 
@@ -233,7 +238,7 @@ proof.
    caller relying on `complete` alone in that one narrow path may page one extra, empty
    time. Documented in [`docs/limitations.md`](limitations.md); not a false-completeness
    claim, just an imprecise one, and deliberately out of scope for this pass.
-4. **Schema-version note for host operators:** the final P0–P2 review correctly found that
+4. **Schema-version note for host operators:** the first explicit P0–P2 review correctly found that
    emitting new provenance/aggregate fields while still labelling the envelope 1.2 would
    break a consumer pinned to the closed 1.2 schema. The owned cores now emit envelope 1.3;
    1.0–1.2 envelope schemas remain closed, and pre-1.3 requests cannot select `patterns` or

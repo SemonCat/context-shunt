@@ -18,7 +18,7 @@ import context_shunt
 from context_shunt.capability import CapabilityReport, supported
 from context_shunt.config import load as load_config
 from context_shunt.legacy_compact import compact_tool_result
-from context_shunt.limits import EMITTED_SCHEMA_VERSION
+from context_shunt.limits import EMITTED_SCHEMA_VERSION, SUPPORTED_REQUEST_VERSIONS
 from context_shunt.provider import ModelResponse, ProviderTarget
 from context_shunt.provenance import ModelIdentity, TokenMethod, Usage
 from context_shunt.session import ShuntSession
@@ -528,6 +528,7 @@ def execute_shunt(workflow: dict[str, Any], lane: str, variant: str) -> dict[str
             "operation_trace": trace,
             "module_origin": str(Path(context_shunt.__file__).resolve()),
             "core_emitted_envelope_version": EMITTED_SCHEMA_VERSION,
+            "core_supported_request_versions": sorted(SUPPORTED_REQUEST_VERSIONS),
             "source_sha256": [
                 hashlib.sha256(source.encode()).hexdigest() for source in sources
             ],
@@ -579,6 +580,7 @@ def execute_legacy(workflow: dict[str, Any]) -> dict[str, Any]:
         "operation_trace": trace,
         "module_origin": str(Path(context_shunt.__file__).resolve()),
         "core_emitted_envelope_version": None,
+        "core_supported_request_versions": None,
         "source_sha256": [
             hashlib.sha256(source.encode()).hexdigest() for source in sources
         ],

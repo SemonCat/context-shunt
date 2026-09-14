@@ -22,10 +22,11 @@ function optionalPointer(value: unknown, pointer: string): unknown | typeof MISS
 }
 
 function scalar(value: unknown): Scalar | typeof MISSING {
+  if (value === MISSING) return MISSING;
   if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
     return value as string | number | boolean | null;
   }
-  return MISSING;
+  throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
 }
 
 function scalarKey(value: Scalar): string {

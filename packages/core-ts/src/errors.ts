@@ -103,14 +103,6 @@ export const SAFE_FAILURE_DETAILS = new Set(["ACCOUNTING_FAILED", "AMBIGUOUS_RES
 export function safeFailureDetail(detail?: string): string {
   return detail === undefined ? "UNSPECIFIED" : SAFE_FAILURE_DETAILS.has(detail) ? detail : "OTHER";
 }
-// Deliberately does NOT include SEARCH_MAX_MATCHES_EXHAUSTED: that failure is not a "this
-// cannot be served deterministically" capacity wall like the others here - it is a resumed
-// cursor whose own max_matches the caller already fully spent, and the exact remedy is a
-// fresh deterministic search with a larger max_matches. Classing it as a capacity failure
-// would route it into the legacy heuristic compaction fallback, silently trading an exact,
-// cheaply-resumable deterministic count for a partial, sampled approximation - a strictly
-// worse answer to a problem the caller could otherwise solve exactly, still at zero reader
-// cost.
 export const CAPACITY_FAILURE_DETAILS = new Set(["STORE_ENTRY_QUOTA", "STORE_BYTE_QUOTA", "UNIT_OVER_WIRE_BUDGET", "UNIT_OVER_PAGE_BUDGET", "NO_ENVELOPE_HEADROOM", "ANSWER_OVER_CAP", "ANSWER_OVER_ENVELOPE", "INTERNAL_ERROR"]);
 export function fallbackAllowed(code: string, detail?: string): boolean {
   if (["MODEL_SUBSTITUTED", "BLOB_CONTENT_MISMATCH", "SNAPSHOT_MISMATCH", "UNKNOWN_HANDLE"].includes(detail ?? "")) return false;
