@@ -95,7 +95,9 @@ shared exact numeric domain for filter/distinct/group values is integers from
 `-(2^53-1)` through `2^53-1`; fractional numbers and larger numeric identifiers are
 rejected with `INVALID_REQUEST`/`BAD_SELECTOR` rather than rounded. Callers use JSON strings
 when exact decimal or larger numeric identifiers are required. Count-only aggregation does
-not compare or key record values and is unaffected. The
+not compare or key record values and is unaffected. Equality strings have a 512-character
+contract limit and a 512-byte canonical execution limit; the expected key is serialized
+once before the bounded record scan. The
 canonical JSON result is still charged against per-result,
 wire-envelope, per-source and per-session disclosure ceilings. It makes zero model calls.
 Missing grouping fields use the explicit JSON marker `{\"missing\":true}` so they cannot

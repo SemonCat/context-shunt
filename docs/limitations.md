@@ -194,7 +194,8 @@ the cross-runtime exact range `[-(2^53-1), 2^53-1]`. Fractional numbers and larg
 identifiers return `INVALID_REQUEST`/`BAD_SELECTOR`; encode them as JSON strings when exact
 identity is required. This prevents JavaScript number rounding from silently merging keys
 that Python would keep distinct. Count-only aggregation does not key record values and is
-unaffected.
+unaffected. `filter.equals` strings are limited to 512 contract characters and 512
+serialized bytes; use a narrower stable identifier rather than a larger equality literal.
 
 ## An answer may lose evidence to fit the envelope
 

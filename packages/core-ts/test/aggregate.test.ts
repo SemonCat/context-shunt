@@ -147,6 +147,20 @@ describe("structured deterministic aggregation", () => {
     expect(env.extraction).toBeUndefined();
   });
 
+  it.each([
+    [513, "SCHEMA_VIOLATION"],
+    [511, "BAD_SELECTOR"],
+  ] as const)("rejects an oversized equality filter before scanning records: %i", (length, detail) => {
+    const { session, entry } = setup();
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/data/result",
+      filter: { pointer: "/value", equals: "x".repeat(length) },
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe(detail);
+    expect(env.extraction).toBeUndefined();
+  });
+
   it("keeps exact cardinalities when bounded key samples are truncated", () => {
     const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-cardinality-"));
     mkdirSync(join(dir, "ws"), { recursive: true });

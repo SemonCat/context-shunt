@@ -42,12 +42,6 @@ def _scalar(value: Any) -> Any:
     raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
 
-def _normalize_filter_number(value: Any) -> Any:
-    return (
-        _scalar(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value
-    )
-
-
 def _output_scalar(value: Any) -> bool:
     return len(canonical_json(value).encode("utf-8")) <= _MAX_SCALAR_BYTES
 
@@ -101,6 +95,13 @@ def aggregate_snapshot(
     matched = 0
     parsed_bytes = 0
     parsed_nodes = 0
+    filter_spec = selector.get("filter")
+    filter_expected_key: str | None = None
+    if filter_spec is not None and "equals" in filter_spec:
+        expected = _scalar(filter_spec["equals"])
+        if not _output_scalar(expected):
+            raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
+        filter_expected_key = canonical_json(expected)
 
     for raw in records:
         record = (
@@ -123,15 +124,18 @@ def aggregate_snapshot(
             if parsed_nodes > limits.json_max_nodes:
                 raise ShuntError("LIMIT_EXCEEDED", "JSON_TOO_MANY_NODES", retryable=False)
 
-        filter_spec = selector.get("filter")
         if filter_spec is not None:
             candidate = _optional_pointer(record, filter_spec["pointer"])
             if candidate is _MISSING:
                 continue
             if "equals" in filter_spec:
-                candidate = _normalize_filter_number(candidate)
-                expected = _normalize_filter_number(filter_spec["equals"])
-                if canonical_json(candidate) != canonical_json(expected):
+                if not (candidate is None or isinstance(candidate, (str, int, float, bool))):
+                    continue
+                candidate = _scalar(candidate)
+                if (
+                    not _output_scalar(candidate)
+                    or canonical_json(candidate) != filter_expected_key
+                ):
                     continue
             elif not isinstance(candidate, str) or filter_spec["contains"] not in candidate:
                 continue

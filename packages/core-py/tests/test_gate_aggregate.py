@@ -219,6 +219,24 @@ def test_aggregate_rejects_numbers_outside_cross_runtime_exact_domain(tmp_path, 
     assert "extraction" not in env
 
 
+@pytest.mark.parametrize(("length", "detail"), [(513, "SCHEMA_VIOLATION"), (511, "BAD_SELECTOR")])
+def test_aggregate_rejects_oversize_equality_filter_before_scan(tmp_path, length, detail):
+    session, entry = _setup(tmp_path)
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "records_pointer": "/data/result",
+                "filter": {"pointer": "/value", "equals": "x" * length},
+            },
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == detail
+    assert "extraction" not in env
+
+
 def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     (tmp_path / "ws").mkdir()
     path = tmp_path / "ws" / "records.json"

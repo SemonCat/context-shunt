@@ -257,7 +257,7 @@
     "scalar": {
       "description": "An aggregate comparison scalar. Numbers are restricted to the cross-runtime exact integer range; use strings for larger numeric identifiers or decimal values.",
       "oneOf": [
-        { "type": "string" },
+        { "type": "string", "maxLength": 512 },
         { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
         { "type": "boolean" },
         { "type": "null" }
