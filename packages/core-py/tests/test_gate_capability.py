@@ -102,6 +102,7 @@ class FakeCtx:
         self.registered_tools: list[str] = []
         self.registered_toolsets: list[str] = []
         self.registered_handlers: dict[str, object] = {}
+        self.registered_schemas: dict[str, dict] = {}
         self.messages: list[str] = []
         self._with_tools = with_tools
         self.logger = self
@@ -133,6 +134,7 @@ class FakeCtx:
         self.registered_tools.append(name)
         self.registered_toolsets.append(toolset)
         self.registered_handlers[name] = handler
+        self.registered_schemas[name] = schema
 
     def info(self, msg, *args):
         self.messages.append(msg % args if args else msg)
@@ -379,7 +381,86 @@ def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
     envelope = json.loads(out)
     assert envelope["code"] == "SPILLED"
     assert oversized not in out
-    assert "Ask the context-shunt reader a question" in envelope["guidance"]
+    assert "context_shunt_read direct arguments" in envelope["guidance"]
+
+
+def _guidance_json(guidance: str, label: str):
+    start = guidance.index(label) + len(label)
+    return json.JSONDecoder().raw_decode(guidance[start:])[0]
+
+
+def test_spilled_pointer_guidance_drives_registered_reader_and_inspect(tmp_path):
+    """An actual oversized Hermes result carries executable direct/deferred handoffs."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    llm = FakeLlm()
+    ctx = FakeCtx(config, llm=llm)
+    module.register(ctx)
+    payload = "max_retries = 3\n" + "synthetic playbook line\n" * 2000
+
+    pointer = json.loads(
+        module.transform_tool_result(
+            tool_name="read_file",
+            result=payload,
+            task_id="handoff",
+            session_id="handoff",
+        )
+    )
+    assert pointer["code"] == "SPILLED"
+    assert pointer["answer"] == "" and pointer["citations"] == []
+    assert payload not in json.dumps(pointer)
+    guidance = pointer["guidance"]
+    handle = {key: pointer["pointer"][key] for key in ("source_id", "snapshot_id")}
+
+    read_args = _guidance_json(guidance, "context_shunt_read direct arguments: ")
+    read_search = _guidance_json(guidance, "reader tool_search arguments: ")
+    read_describe = _guidance_json(guidance, "reader tool_describe arguments: ")
+    read_call = _guidance_json(guidance, "reader tool_call arguments: ")
+    inspect_args = _guidance_json(guidance, "context_shunt_inspect direct arguments: ")
+    inspect_search = _guidance_json(guidance, "inspect tool_search arguments: ")
+    inspect_describe = _guidance_json(guidance, "inspect tool_describe arguments: ")
+    inspect_call = _guidance_json(guidance, "inspect tool_call arguments: ")
+
+    assert read_args["handles"] == [handle]
+    assert read_args["question"] == "<REPLACE_WITH_YOUR_SPECIFIC_QUESTION>"
+    assert read_search == {"query": "context_shunt_read", "limit": 5}
+    assert read_describe == {"name": "context_shunt_read"}
+    assert read_call == {"name": "context_shunt_read", "arguments": read_args}
+    assert inspect_args["source_id"] == handle["source_id"]
+    assert inspect_args["snapshot_id"] == handle["snapshot_id"]
+    assert inspect_search == {"query": "context_shunt_inspect", "limit": 5}
+    assert inspect_describe == {"name": "context_shunt_inspect"}
+    assert inspect_call == {"name": "context_shunt_inspect", "arguments": inspect_args}
+    assert guidance.index("consume this existing pointer") < guidance.index(
+        "re-reading or searching the original source"
+    )
+
+    for name, args in (
+        ("context_shunt_read", read_args),
+        ("context_shunt_inspect", inspect_args),
+    ):
+        Draft202012Validator(ctx.registered_schemas[name]["parameters"]).validate(args)
+
+    read_args["question"] = "What is the retry ceiling?"
+    answered = json.loads(
+        ctx.registered_handlers["context_shunt_read"](
+            read_args, task_id="handoff", session_id="handoff"
+        )
+    )
+    assert answered["code"] == "ANSWERED"
+    assert answered["citations"] and llm.calls
+
+    inspected = json.loads(
+        ctx.registered_handlers["context_shunt_inspect"](
+            inspect_args, task_id="handoff", session_id="handoff"
+        )
+    )
+    assert inspected["code"] == "EXTRACTED"
+    assert "max_retries = 3" in inspected["extraction"]["segments"][0]["text"]
 
 
 def test_public_inspect_tool_aggregates_a_captured_minified_loki_result(tmp_path):
@@ -1045,10 +1126,7 @@ def test_inspect_recovers_an_oversized_single_line_tool_result_through_the_real_
     second = json.loads(module.context_shunt_inspect(**request))
     assert second["code"] == "EXTRACTED"
     assert second["extraction"]["result_bytes"] > 0
-    assert (
-        second["extraction"]["segments"][0]["start"]
-        == first["extraction"]["segments"][0]["end"]
-    )
+    assert second["extraction"]["segments"][0]["start"] == first["extraction"]["segments"][0]["end"]
 
     searched = json.loads(
         module.context_shunt_inspect(
@@ -1683,7 +1761,8 @@ def test_handler_owned_invalid_arguments_are_accounted_exactly_once(tmp_path):
     # host-owned event cannot appear in plugin accounting; the strict schema makes the
     # ownership boundary testable instead of claiming otherwise.
     stats_schema = next(
-        schema["parameters"] for schema, _handler, _mode in module.TOOLS
+        schema["parameters"]
+        for schema, _handler, _mode in module.TOOLS
         if schema["name"] == "context_shunt_stats"
     )
     assert not Draft202012Validator(stats_schema).is_valid({"page": "1"})

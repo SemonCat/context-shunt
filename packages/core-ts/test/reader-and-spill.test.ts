@@ -33,6 +33,7 @@ import {
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
 import { SpillEngine } from "../src/spill.js";
+import { validateToolArgs } from "../src/schema.js";
 import { ScopeIdentity, SnapshotStore } from "../src/store.js";
 import { ShuntSession } from "../src/session.js";
 import { conformance } from "./fixtures.js";
@@ -754,6 +755,30 @@ function generate(spec: any): unknown {
   }
 }
 
+function guidanceJson(guidance: string, label: string): Record<string, unknown> {
+  const start = guidance.indexOf(label);
+  if (start < 0) throw new Error(`missing guidance label: ${label}`);
+  const tail = guidance.slice(start + label.length);
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < tail.length; index += 1) {
+    const char = tail[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}" && --depth === 0) {
+      return JSON.parse(tail.slice(0, index + 1)) as Record<string, unknown>;
+    }
+  }
+  throw new Error(`unterminated guidance JSON after: ${label}`);
+}
+
 describe("tool-result-capture spill conformance", () => {
   const spillCases = conformance("spill-cases.json");
 
@@ -803,6 +828,43 @@ describe("tool-result-capture spill conformance", () => {
     const env = enforce(outcome.envelope);
     expect(serializedBytes(env)).toBeLessThanOrEqual(L.maxEnvelopeBytes);
     expect(env.pointer!.bytes).toBe(4_000_000);
+  });
+
+  it("puts the exact captured handle into schema-valid reader and inspect handoffs", () => {
+    const engine = new SpillEngine(makeRegistry(tmp(), { sessionId: "sess" }), undefined, true);
+    const outcome = engine.evaluate(
+      "sess",
+      "req_handoff",
+      `max_retries = 3\n${"synthetic playbook line\n".repeat(2000)}`,
+    );
+    expect(outcome.action).toBe("spill");
+    const guidance = outcome.envelope!.guidance!;
+    const handle = {
+      source_id: outcome.envelope!.pointer!.source_id,
+      snapshot_id: outcome.envelope!.pointer!.snapshot_id,
+    };
+    const readArgs = guidanceJson(guidance, "context_shunt_read direct arguments: ");
+    const inspectArgs = guidanceJson(guidance, "context_shunt_inspect direct arguments: ");
+    const readCall = guidanceJson(guidance, "reader tool_call arguments: ");
+    const inspectCall = guidanceJson(guidance, "inspect tool_call arguments: ");
+
+    expect(readArgs).toMatchObject({
+      question: "<REPLACE_WITH_YOUR_SPECIFIC_QUESTION>",
+      handles: [handle],
+    });
+    expect(inspectArgs).toMatchObject({
+      ...handle,
+      selector: { kind: "lines", start: 1, end: 40 },
+      max_result_bytes: 16384,
+    });
+    expect(readCall).toEqual({ name: "context_shunt_read", arguments: readArgs });
+    expect(inspectCall).toEqual({ name: "context_shunt_inspect", arguments: inspectArgs });
+    expect(() => validateToolArgs({ tool: "context_shunt_read", ...readArgs })).not.toThrow();
+    expect(() => validateToolArgs({ tool: "context_shunt_inspect", ...inspectArgs })).not.toThrow();
+    expect(guidance.indexOf("consume this existing pointer")).toBeLessThan(
+      guidance.indexOf("re-reading or searching the original source"),
+    );
+    expect(serializedBytes(enforce(outcome.envelope))).toBeLessThanOrEqual(L.maxEnvelopeBytes);
   });
 
   it("spills strings, objects and arrays alike", () => {

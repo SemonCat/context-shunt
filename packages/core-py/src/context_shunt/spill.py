@@ -156,6 +156,26 @@ class SpillEngine:
             "expires_at": E.iso_expiry(entry.expires_at_epoch),
             "internal": True,
         }
+        question_placeholder = "<REPLACE_WITH_YOUR_SPECIFIC_QUESTION>"
+        read_args = {
+            "question": question_placeholder,
+            "handles": [
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                }
+            ],
+        }
+        inspect_args = {
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "lines", "start": 1, "end": 40},
+            "max_result_bytes": 16384,
+        }
+
+        def compact_json(value: Any) -> str:
+            return json.dumps(value, separators=(",", ":"))
+
         env = E.build(
             request_id=request_id,
             status="ok",
@@ -175,9 +195,27 @@ class SpillEngine:
             result_kind=ResultKind.POINTER,
             provenance=deterministic(ProvenanceLabel.POINTER_ONLY),
             guidance=(
-                "The tool result was too large for this conversation and was moved out of it. "
-                "Ask the context-shunt reader a question about this pointer for a cited answer, "
-                "or use context_shunt_inspect for exact lines."
+                "The tool result was too large and was moved out of this conversation. "
+                "First consume this existing pointer; do not recover the spilled content by "
+                "re-reading or searching the original source. Ask with context_shunt_read "
+                f"direct arguments: {compact_json(read_args)}. Replace only "
+                f"{question_placeholder} with your specific question; copy both IDs exactly. "
+                "If deferred, use reader tool_search arguments: "
+                f"{compact_json({'query': 'context_shunt_read', 'limit': 5})}; reader "
+                "tool_describe arguments: "
+                f"{compact_json({'name': 'context_shunt_read'})}; then reader tool_call "
+                "arguments: "
+                f"{compact_json({'name': 'context_shunt_read', 'arguments': read_args})}. "
+                "For precise bounded lines instead, use context_shunt_inspect direct "
+                f"arguments: {compact_json(inspect_args)}. If deferred, use inspect "
+                "tool_search arguments: "
+                f"{compact_json({'query': 'context_shunt_inspect', 'limit': 5})}; inspect "
+                "tool_describe arguments: "
+                f"{compact_json({'name': 'context_shunt_inspect'})}; then inspect tool_call "
+                "arguments: "
+                f"{compact_json({'name': 'context_shunt_inspect', 'arguments': inspect_args})}. "
+                "Legitimate bounded source searches remain available afterward if more "
+                "navigation is needed."
             ),
         )
         return SpillOutcome(

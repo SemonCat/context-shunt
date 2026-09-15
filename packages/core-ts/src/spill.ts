@@ -151,6 +151,17 @@ export class SpillEngine {
     const expiresAt = isoExpiry(entry.expiresAtEpoch);
     const coverage = new Coverage();
     coverage.upstreamTruncated = upstreamTruncated;
+    const questionPlaceholder = "<REPLACE_WITH_YOUR_SPECIFIC_QUESTION>";
+    const readArgs = {
+      question: questionPlaceholder,
+      handles: [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId }],
+    };
+    const inspectArgs = {
+      source_id: entry.sourceId,
+      snapshot_id: entry.snapshot.snapshotId,
+      selector: { kind: "lines", start: 1, end: 40 },
+      max_result_bytes: 16384,
+    };
     let envelope: Envelope;
     try {
       envelope = buildEnvelope({
@@ -179,9 +190,25 @@ export class SpillEngine {
         provenance: deterministicProvenance("pointer_only"),
         ...(accountingId !== undefined ? { accountingId } : {}),
         guidance:
-          "The tool result was too large for this conversation and was moved out of it. " +
-          "Ask the context-shunt reader a question about this pointer for a cited answer, " +
-          "or use context_shunt_inspect for exact lines.",
+          "The tool result was too large and was moved out of this conversation. " +
+          "First consume this existing pointer; do not recover the spilled content by " +
+          "re-reading or searching the original source. Ask with context_shunt_read " +
+          `direct arguments: ${JSON.stringify(readArgs)}. Replace only ` +
+          `${questionPlaceholder} with your specific question; copy both IDs exactly. ` +
+          "If deferred, use reader tool_search arguments: " +
+          `${JSON.stringify({ query: "context_shunt_read", limit: 5 })}; reader ` +
+          "tool_describe arguments: " +
+          `${JSON.stringify({ name: "context_shunt_read" })}; then reader tool_call ` +
+          `arguments: ${JSON.stringify({ name: "context_shunt_read", arguments: readArgs })}. ` +
+          "For precise bounded lines instead, use context_shunt_inspect direct " +
+          `arguments: ${JSON.stringify(inspectArgs)}. If deferred, use inspect ` +
+          "tool_search arguments: " +
+          `${JSON.stringify({ query: "context_shunt_inspect", limit: 5 })}; inspect ` +
+          "tool_describe arguments: " +
+          `${JSON.stringify({ name: "context_shunt_inspect" })}; then inspect tool_call ` +
+          `arguments: ${JSON.stringify({ name: "context_shunt_inspect", arguments: inspectArgs })}. ` +
+          "Legitimate bounded source searches remain available afterward if more " +
+          "navigation is needed.",
       });
     } catch (err) {
       const safe = isShuntError(err)
