@@ -98,8 +98,10 @@ request. OpenClaw's command-scoped resolver materializes model-provider secret r
 only into the in-memory config before dispatch; the bridge never inspects or returns their
 values. Its supported pricing resolver supplies only numeric USD rates and a non-secret
 pricing fingerprint. The SQLite reservation transaction is shared across concurrent and
-resumed calls, counts every retry, never refunds an uncertain attempt, and refuses unknown
-pricing or bounds. It forwards the host's `usage` block, which makes the token half of the provider
+resumed calls, counts every retry, retains the full hold for every uncertain attempt, and
+settles only completed exact-usage calls to a conservative upper cost at the worst verified
+prompt/output rates. It refuses unknown pricing or bounds. It forwards the host's `usage`
+block, which makes the token half of the provider
 benchmark measurable. The CLI route stays non-production-equivalent, and both routes'
 claims and gaps are fields the release attestation records verbatim.
 

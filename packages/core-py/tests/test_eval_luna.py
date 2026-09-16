@@ -169,7 +169,7 @@ def _effective_provider_config() -> dict[str, Any]:
         "max_citations": EVAL_LIMITS.max_citations,
         "max_claims_per_answer": EVAL_LIMITS.max_claims_per_answer,
         "cumulative_usd_ceiling": "2",
-        "usd_reservation_policy": "pre_dispatch_upper_bound_never_refunded_v1",
+        "usd_reservation_policy": "pre_dispatch_reserve_exact_usage_upper_settlement_v2",
         "default_attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED.value,
     }
 

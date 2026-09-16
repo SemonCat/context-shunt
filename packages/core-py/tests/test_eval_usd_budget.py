@@ -94,7 +94,7 @@ def test_concurrent_reservations_are_serialized_under_the_cap(tmp_path):
     assert Decimal(summary["reserved_usd"]) <= Decimal("2")
 
 
-def test_unsettled_reservation_survives_resume_and_is_not_refunded(tmp_path):
+def test_unsettled_reservation_survives_resume_and_keeps_its_full_hold(tmp_path):
     from bridges._usd_budget import UsdBudgetLedger
 
     path = tmp_path / "budget.sqlite3"
@@ -105,6 +105,115 @@ def test_unsettled_reservation_survives_resume_and_is_not_refunded(tmp_path):
     assert summary["reservations"] == 1
     assert summary["statuses"] == {"reserved": 1}
     assert summary["reserved_usd"] == format(reservation.reserved_usd, "f")
+
+
+def test_completed_exact_usage_settles_to_a_conservative_upper_cost(tmp_path):
+    from bridges._usd_budget import UsdBudgetLedger
+
+    ledger = UsdBudgetLedger(tmp_path / "budget.sqlite3", _pricing())
+    reservation = ledger.reserve(input_token_upper_bound=10_000, max_output_tokens=512)
+    held = reservation.reserved_usd
+    ledger.record_result(
+        reservation,
+        status="completed",
+        reported_input_tokens=1_000,
+        reported_output_tokens=20,
+    )
+    summary = ledger.summary()
+    # Prompt usage is still charged at the worst verified bucket (2x input), and output
+    # at the worst verified output rate: 1000*2 + 20*6 micro-dollars.
+    assert summary["accounted_usd"] == "0.00212"
+    assert Decimal(summary["accounted_usd"]) < held
+    assert summary["active_or_unknown_reserved_usd"] == "0"
+    assert summary["settled_usage_upper_usd"] == "0.00212"
+
+
+def test_unknown_usage_never_releases_the_reservation(tmp_path):
+    from bridges._usd_budget import UsdBudgetLedger
+
+    ledger = UsdBudgetLedger(tmp_path / "budget.sqlite3", _pricing())
+    reservation = ledger.reserve(input_token_upper_bound=10_000, max_output_tokens=512)
+    ledger.record_result(reservation, status="usage_unknown")
+    summary = ledger.summary()
+    assert summary["accounted_usd"] == format(reservation.reserved_usd, "f")
+    assert summary["active_or_unknown_reserved_usd"] == format(
+        reservation.reserved_usd, "f"
+    )
+
+
+def test_completed_usage_cannot_settle_above_its_reserved_bounds(tmp_path):
+    from bridges._usd_budget import BudgetError, UsdBudgetLedger
+
+    ledger = UsdBudgetLedger(tmp_path / "budget.sqlite3", _pricing())
+    reservation = ledger.reserve(input_token_upper_bound=10, max_output_tokens=10)
+    with pytest.raises(BudgetError, match="exceeded"):
+        ledger.record_result(
+            reservation,
+            status="completed",
+            reported_input_tokens=11,
+            reported_output_tokens=1,
+        )
+    summary = ledger.summary()
+    assert summary["statuses"] == {"reserved": 1}
+    assert summary["accounted_usd"] == format(reservation.reserved_usd, "f")
+
+
+def test_v1_completed_rows_migrate_to_safe_settlement_but_unknown_rows_do_not(
+    tmp_path,
+):
+    import sqlite3
+
+    from bridges._usd_budget import UsdBudgetLedger
+
+    path = tmp_path / "budget.sqlite3"
+    legacy = UsdBudgetLedger(path, _pricing())
+    completed = legacy.reserve(input_token_upper_bound=10_000, max_output_tokens=512)
+    unknown = legacy.reserve(input_token_upper_bound=2_000, max_output_tokens=64)
+    # Recreate the exact v1 state without fabricating pricing or route metadata.
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE reservations SET status='completed', reported_input_tokens=1000, "
+            "reported_output_tokens=20 WHERE reservation_id=?",
+            (completed.reservation_id,),
+        )
+        connection.execute(
+            "UPDATE reservations SET status='usage_unknown' WHERE reservation_id=?",
+            (unknown.reservation_id,),
+        )
+        connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
+        connection.execute(
+            "UPDATE metadata SET value='pre_dispatch_upper_bound_never_refunded_v1' "
+            "WHERE key='reservation_policy'"
+        )
+        connection.execute("ALTER TABLE reservations RENAME TO reservations_v2")
+        connection.execute(
+            """CREATE TABLE reservations (
+                reservation_id TEXT PRIMARY KEY,
+                created_unix_ms INTEGER NOT NULL,
+                input_token_upper_bound INTEGER NOT NULL,
+                output_token_upper_bound INTEGER NOT NULL,
+                reserved_nano_usd INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                reported_input_tokens INTEGER,
+                reported_output_tokens INTEGER
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO reservations
+               SELECT reservation_id, created_unix_ms, input_token_upper_bound,
+                      output_token_upper_bound, reserved_nano_usd, status,
+                      reported_input_tokens, reported_output_tokens
+               FROM reservations_v2"""
+        )
+        connection.execute("DROP TABLE reservations_v2")
+
+    migrated = UsdBudgetLedger(path, _pricing()).summary()
+    assert migrated["schema_version"] == "2"
+    assert migrated["statuses"] == {"completed": 1, "usage_unknown": 1}
+    assert migrated["settled_usage_upper_usd"] == "0.00212"
+    assert migrated["active_or_unknown_reserved_usd"] == format(
+        unknown.reserved_usd, "f"
+    )
 
 
 def test_pricing_change_on_an_existing_ledger_fails_closed(tmp_path):

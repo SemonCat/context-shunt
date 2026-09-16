@@ -288,8 +288,10 @@ The budget database must be reused across every eval, retry, benchmark, and resu
 that shares the authorized USD 2 total. The bridge reads the route's USD-per-million prices
 through OpenClaw's supported `resolveModelCostConfig`, binds the ledger to its pricing
 fingerprint, and atomically reserves a conservative input/output upper bound before each
-physical dispatch. Reservations are never refunded after timeouts, failures, or crashes;
-unknown/zero pricing, missing bounds, a changed fingerprint, or an unaffordable request
+physical dispatch. Timeouts, failures, crashes, and missing usage retain their full holds.
+A completed call with exact input and output usage settles to a conservative upper cost
+using the worst verified prompt and output rates. Unknown/zero pricing, missing bounds, a
+changed fingerprint, or an unaffordable request
 fails before dispatch. A token cap remains an input to this calculation, not a substitute
 for the dollar ceiling.
 

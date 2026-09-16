@@ -46,7 +46,8 @@ Environment:
     CONTEXT_SHUNT_LUNA_BUDGET_DB     durable SQLite reservation ledger (required whenever
                                      CONTEXT_SHUNT_LUNA_EVAL=1). Every physical call
                                      reserves against the fixed cumulative USD 2 ceiling
-                                     before provider dispatch; reservations are not refunded.
+                                     before provider dispatch; only completed calls with
+                                     exact usage settle to a verified worst-rate upper cost.
 """
 
 from __future__ import annotations
