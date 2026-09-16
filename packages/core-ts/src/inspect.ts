@@ -194,6 +194,10 @@ export function decodeCursor(
   } catch {
     return bad();
   }
+  // Node's decoder is intentionally permissive and accepts alternate spellings whose
+  // unused final bits decode identically. Cursors are opaque authenticated tokens, so
+  // require the canonical spelling we issue before checking the MAC.
+  if (base64UrlNoPad(raw) !== token.slice(CURSOR_PREFIX.length)) bad();
   if (raw.length <= MAC_BYTES) bad();
   const payload = raw.subarray(0, raw.length - MAC_BYTES);
   const mac = raw.subarray(raw.length - MAC_BYTES);

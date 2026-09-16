@@ -59,12 +59,14 @@ eligible oversized tool result          oversized local read
 ```
 
 The Hermes hook currently receives oversized **string** results; structured/multimodal
-blocks pass through. It cannot restore content a producer already truncated. Hook ordering
-was inspected on one Hermes 0.21.1 host, not proven for every installation. That host does
+blocks pass through. It cannot restore content a producer already truncated. Exact Hermes
+0.21.3 source and the running image were inspected on 2026-09-16. The unmodified host does
 not forward its session tool scope to `transform_tool_result`, so current invocations cannot
-prove pointer consumability and take the no-handle legacy-compaction path. A future host seam
-must forward an immutable per-invocation capability descriptor; the adapter never widens the
-caller's tool scope or treats global registration as proof. Capture remains off by default.
+prove pointer consumability and take the no-handle legacy-compaction path. A source-located
+host proposal and exact-image probe show the required immutable per-invocation descriptor,
+but that third-party change is not made by this repository. The adapter never widens the
+caller's tool scope or treats global registration as proof. Capture remains off by default
+and requires separate ordering and consumer-scope operator attestations.
 Unsafe sources remain explicit refusals, and raw results are never returned as fallback.
 See the [capability evidence](docs/capability-matrix.md) and [cutover procedure](docs/acceptance.md#tool_result_capture-cutover-on-hermes).
 

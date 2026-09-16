@@ -21,7 +21,7 @@ modes each host actually supports and why the optional `tool_result_capture` mod
 | --- | --- |
 | Python (Hermes adapter) | 3.11 or newer |
 | Node (OpenClaw adapter) | **22.22.3 or newer** — the store uses `node:sqlite`, and this is also OpenClaw's own floor |
-| Hermes | compatibility verified against `hermes-agent` 0.18.2, with plugin hooks enabled. The `tool_result_capture` hook-ordering finding is a separate, dated verification against one live 0.21.1 host — see [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) — not a claim about 0.18.2 or about every 0.21.1 install |
+| Hermes | ordinary plugin compatibility verified against `hermes-agent` 0.18.2. The production host is 0.21.3; exact source/image verification on 2026-09-16 found that unmodified 0.21.3 lacks invocation-scoped consumer delivery for `tool_result_capture`. The source-located proposal passes the isolated exact-image probe, but this repository does not apply the third-party change. See [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not). |
 | OpenClaw | compatibility verified against `openclaw` 2026.9.3, with native plugins enabled |
 | Reader model | a host model bridge; `gpt-5.6-luna` is the default and is configurable |
 

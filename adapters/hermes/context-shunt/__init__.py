@@ -57,8 +57,9 @@ Capture, inspect and stats do not depend on the reader and stay fully usable eit
 The optional oversized-tool-result capture mode (``tool_result_capture``, formerly
 documented under the internal name ``suma_post_tool``) is wired but not claimed
 unconditionally. ``transform_tool_result`` is registered when the capability probe reports
-the mode supported, which additionally requires an explicit operator attestation
-(``tool_result_capture.host_ordering_verified_locally: true``) - see
+the mode supported, which additionally requires two explicit operator attestations
+(``tool_result_capture.host_ordering_verified_locally: true`` and
+``host_consumer_scope_verified_locally: true``) - see
 ``_tool_result_capture_mode`` for exactly what was and was not verified, and
 docs/capability-matrix.md for the dated evidence. Even when wired, the handler never
 depends on the host's fail-open behavior: ``_apply_transform_tool_result_hook`` still runs
@@ -85,6 +86,7 @@ from __future__ import annotations
 import inspect
 import json
 import sys
+from collections.abc import Mapping
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
@@ -342,8 +344,8 @@ def _tool_result_capture_mode() -> ModeCapability:
     (``CAPTURE_AFTER_TRUNCATION``), and the host wraps the hook dispatch in try/except, so
     a raising handler leaves the original result in place (``HOST_FAIL_OPEN``).
 
-    Direct, read-only inspection of one operator's own live Hermes 0.21.1 host on
-    2026-09-09 (cited in ``docs/capability-matrix.md``) found the CAPTURE_AFTER_TRUNCATION
+    Direct, read-only inspection of one operator's own live Hermes 0.21.3 host on
+    2026-09-16 (cited in ``docs/capability-matrix.md``) found the CAPTURE_AFTER_TRUNCATION
     reason no longer holds at that dispatch layer: ``handle_function_call`` calls
     ``_execute_tool``, emits ``post_tool_call``, and only then calls
     ``_apply_transform_tool_result_hook`` - with no truncation call visible between execute
@@ -357,26 +359,35 @@ def _tool_result_capture_mode() -> ModeCapability:
 
     So: unsupported by default (``ORDERING_UNPROVEN`` - a narrower, honest reason than the
     stale ``CAPTURE_AFTER_TRUNCATION`` claim), *unless* the deployment sets
-    ``tool_result_capture.host_ordering_verified_locally: true`` in its own config - an
-    explicit operator attestation this code does not and cannot prove for itself.
+    ``tool_result_capture.host_ordering_verified_locally: true`` and
+    ``host_consumer_scope_verified_locally: true`` in its own config - explicit operator
+    attestations this code does not and cannot prove for itself.
     """
-    attested = bool(
+    ordering_attested = bool(
         _config is not None
         and _config.tool_result_capture.host_ordering_verified_locally
+    )
+    consumer_scope_attested = bool(
+        _config is not None
+        and _config.tool_result_capture.host_consumer_scope_verified_locally
     )
     fail_open_evidence = (
         "hermes-agent model_tools.py: _apply_transform_tool_result_hook runs inside "
         "try/except and the original result survives a raising handler (fail-open); "
         "this adapter's own hook handler never raises regardless"
     )
-    if attested:
+    if ordering_attested and consumer_scope_attested:
         return supported(
             "tool_result_capture",
             evidence=(
                 "operator attestation: tool_result_capture.host_ordering_verified_locally="
                 "true - this adapter does not independently verify the installed host's "
                 "hook ordering; the operator has",
-                "read-only inspection of one live Hermes 0.21.1 host (2026-09-09) found "
+                "operator attestation: host_consumer_scope_verified_locally=true - the "
+                "installed host forwards a fresh invocation-scoped direct/deferred tool "
+                "descriptor to transform_tool_result; absent or incomplete descriptors "
+                "remain no-handle legacy compaction",
+                "read-only inspection of live Hermes 0.21.3 (2026-09-16) found "
                 "handle_function_call -> _execute_tool -> _emit(post_tool_call) -> "
                 "_apply_transform_tool_result_hook, no truncation call visible between "
                 "execute and the hook at that dispatch layer (docs/capability-matrix.md); "
@@ -388,14 +399,18 @@ def _tool_result_capture_mode() -> ModeCapability:
                 fail_open_evidence,
             ),
         )
+    reasons = []
+    if not ordering_attested:
+        reasons.append(DisabledReason.ORDERING_UNPROVEN)
+    if not consumer_scope_attested:
+        reasons.append(DisabledReason.CONSUMER_SCOPE_UNPROVEN)
     return unsupported(
         "tool_result_capture",
-        DisabledReason.ORDERING_UNPROVEN,
+        *reasons,
         evidence=(
-            "no operator attestation (tool_result_capture.host_ordering_verified_locally "
-            "is false or unset): this adapter ships generically and has no reproducible, "
-            "version-independent proof of the installed host's capture-before-truncation "
-            "ordering for every Hermes version it might run against",
+            "missing operator attestation for capture ordering and/or immutable "
+            "invocation-scoped consumer capability: enabled=true alone never registers "
+            "the transform hook",
             fail_open_evidence,
         ),
     )
@@ -709,14 +724,14 @@ def transform_tool_result(
     """Replace an eligible oversized result with a bounded consumable representation.
 
     Registered only when the capability probe reports ``tool_result_capture`` supported -
-    which requires an explicit operator attestation (see ``_tool_result_capture_mode``),
+    which requires both explicit operator attestations (see ``_tool_result_capture_mode``),
     never assumed. Runs at Hermes' ``transform_tool_result`` hook: after the tool executed
     and after ``post_tool_call`` fired, before the result enters context.
 
     Two-step by design, not by choice: the host does not forward the conversation's
     ``user_task`` to this hook at all (verified against the same live host this adapter's
-    ordering evidence comes from), so there is no question here to answer with. This
-    When caller reachability is proven, this handler captures and points;
+    ordering evidence comes from), so there is no question here to answer with. When
+    caller reachability is proven, this handler captures and points;
     ``context_shunt_read`` - which does carry an explicit question - answers it afterward,
     exactly like the artifact-import boundary's own capture-then-ask shape. Without that
     proof, it publishes bounded deterministic compaction and retains no pointer payload.
@@ -725,7 +740,7 @@ def transform_tool_result(
     explicitly eligible results reach measurement. For these candidates, never raises,
     and never returns ``None`` for an internal failure after measurement as oversized:
     Hermes wraps this dispatch in try/except and lets a raising handler's *original, raw*
-    result through unchanged (host-level fail-open, confirmed at 0.21.1 too) - this handler
+    result through unchanged (host-level fail-open, confirmed at 0.21.3) - this handler
     must never depend on that safety net. The size check below is done directly, before
     touching the session, specifically so an internal failure on a small, ineligible result
     can cheaply return ``None`` (nothing was ever at risk of leaking), while a genuinely
@@ -821,16 +836,17 @@ def transform_tool_result(
 def _consumer_route(raw: Any) -> str | None:
     """Return a proven direct/deferred route from bounded host-supplied facts.
 
-    Current Hermes does not pass this descriptor to ``transform_tool_result``. That
-    absence deliberately returns ``None``: the adapter cannot reconstruct a restricted
-    session's toolsets from process-global registration without risking a scope bypass.
-    A future host may pass the session-scoped pre-assembly facts directly.
+    Unmodified Hermes 0.21.3 does not pass this descriptor to
+    ``transform_tool_result``. That absence deliberately returns ``None``: the adapter
+    cannot reconstruct a restricted session's toolsets from process-global registration
+    without risking a scope bypass. The exact source-located host proposal passes the
+    session-scoped pre-assembly facts directly; the adapter still validates their shape.
     """
-    if not isinstance(raw, dict) or set(raw) - {"direct_tools", "deferred_tools"}:
+    if not isinstance(raw, Mapping) or set(raw) - {"direct_tools", "deferred_tools"}:
         return None
 
     def names(value: Any) -> frozenset[str] | None:
-        if not isinstance(value, list) or len(value) > 128:
+        if not isinstance(value, (list, tuple)) or len(value) > 128:
             return None
         normalized = []
         for item in value:

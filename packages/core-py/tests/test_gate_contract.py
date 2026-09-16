@@ -324,13 +324,19 @@ def test_tool_result_capture_host_ordering_attestation_field(tmp_path):
     config = load_config(
         {
             "workspace_roots": [str(workspace)],
-            "tool_result_capture": {"enabled": True, "host_ordering_verified_locally": True},
+            "tool_result_capture": {
+                "enabled": True,
+                "host_ordering_verified_locally": True,
+                "host_consumer_scope_verified_locally": True,
+            },
         },
         default_spill_dir=tmp_path / "cache",
     )
     assert config.tool_result_capture.host_ordering_verified_locally is True
+    assert config.tool_result_capture.host_consumer_scope_verified_locally is True
     # Default is false: an operator attestation is never assumed.
     default_config = load_config(
         {"workspace_roots": [str(workspace)]}, default_spill_dir=tmp_path / "cache"
     )
     assert default_config.tool_result_capture.host_ordering_verified_locally is False
+    assert default_config.tool_result_capture.host_consumer_scope_verified_locally is False

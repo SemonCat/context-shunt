@@ -31,13 +31,12 @@ available on the current checkout; consult the most recent verification output.
 
 ## Intentionally unavailable
 
-- `tool_result_capture` (formerly `suma_post_tool`) is unsupported on OpenClaw, which does
-  not expose the required complete-capture and safe-replacement seam. On Hermes it is wired
-  and has been directly verified against one live 0.21.1 host, but stays unsupported by
-  default pending an explicit operator attestation — see `docs/capability-matrix.md`. The
-  core engine exists behind the capability gate either way, and there is no automated,
-  checkout-based post-tool integration gate yet, so that finding is `NOT_RUN` as a
-  reproducible test.
+- `tool_result_capture` (formerly `suma_post_tool`) is unsupported on OpenClaw. On Hermes,
+  exact 0.21.3 source/image verification found a missing invocation-scope handoff at the
+  transform hook. The owned adapter requires two attestations and still fails closed per
+  invocation. A source-located host proposal plus automated exact-host probe now exist;
+  unmodified 0.21.3 is the red control, while the read-only mounted proposal passes. The
+  third-party host change remains outside this repository.
 - `artifact_import` is unsupported on OpenClaw: the TypeScript core has no import
   boundary. That is a repository gap rather than a host limitation, so closing it needs no
   host change.

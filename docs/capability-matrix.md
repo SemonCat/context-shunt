@@ -26,7 +26,7 @@ integration result. An upgrade is unverified until the gate is rerun and reviewe
 | `session_lifecycle` — handles survive a per-turn boundary, revoked on a real one | **supported** | **supported** | on |
 | `reader_task_config` — reader appears in host model configuration | **supported** | n/a (plugin config schema) | on |
 | `artifact_import` — adopt an oversized tool-result artifact a producer already persisted | **supported** | **unsupported** (`IMPORT_UNIMPLEMENTED`) | off |
-| `tool_result_capture` — oversized tool/MCP result capture + pointer (formerly named `suma_post_tool` internally; see [below](#the-suma_post_tool-name-is-retired)) | **unsupported by default**; **supported** with an explicit operator attestation — [see below](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) | **unsupported**; effective replacement unproven; pass-through | off |
+| `tool_result_capture` — oversized tool/MCP result capture + pointer (formerly named `suma_post_tool` internally; see [below](#the-suma_post_tool-name-is-retired)) | **unsupported by default**; candidate support requires the 0.21.3 host seam, exact-host probe, and both operator attestations — [see below](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not) | **unsupported**; effective replacement unproven; pass-through | off |
 | `legacy_compaction` — deterministic reader-failure fallback, ported from the incumbent compactor | n/a (core behavior, not a capability-gated mode; see [below](#legacy-compaction-fallback)) | n/a | on |
 | writer / `propose_patch` | **not implemented** | **not implemented** | refused at load |
 
@@ -119,76 +119,68 @@ Both host-integration gates assert this directly: a handle captured before the p
 must still answer a refined question after it, and a real boundary must make it
 `SOURCE_EXPIRED`.
 
-## `tool_result_capture` on Hermes 0.21.1: what changed, and what did not
+<a id="tool_result_capture-on-hermes-021-what-changed-and-what-did-not"></a>
+## `tool_result_capture` on Hermes 0.21.3: exact host boundary
 
-The mode needs two guarantees at once:
+The mode needs three guarantees at once:
 
 1. **Complete capture before truncation** — the adapter must see the whole result before
-   the host shortens it, or a captured pointer would silently describe a truncated payload.
-2. **Safe replacement before persistence and context insertion** — the pointer must take
-   the raw result's place before it can reach the transcript or the model.
+   the host shortens it.
+2. **Safe replacement before context insertion** — the pointer must replace the raw result
+   before the transcript/model consumes it.
+3. **Invocation-scoped consumer delivery** — the hook must receive an immutable snapshot
+   proving that this caller, not merely the process-global registry, can consume read and
+   inspect directly or through the scoped deferred bridge.
 
-Prior revisions of this document reported both guarantees unmet on Hermes, citing
-`hermes-agent` 0.18.2 documentation: `transform_tool_result`'s `result` argument is "the
-tool's raw result string, post-truncation and post-ANSI-strip" (`CAPTURE_AFTER_TRUNCATION`),
-and the host wraps the hook dispatch in `try/except` so a raising handler leaves the
-original result in place (`HOST_FAIL_OPEN`).
+Read-only inspection of the running image
+`context-shunt/hermes:5492046470eb-v2026.9.14` (Hermes `0.21.3`) on 2026-09-16 found that
+the first two dispatch-layer conditions hold: `model_tools.py` executes the tool, emits
+`post_tool_call`, then calls `_apply_transform_tool_result_hook`, with no intervening
+truncation. The hook remains fail-open, so the owned handler never raises. Individual tools
+can still self-truncate before returning; the ordering attestation remains operator-owned.
 
-**Direct, read-only inspection of one operator's own live Hermes 0.21.1 host, 2026-09-09**
-(`ssh`, `sudo docker exec hermes sed -n ... model_tools.py`; the exact commands and output
-are recorded in the implementation history, not reproduced here since they name a live
-internal host) found `CAPTURE_AFTER_TRUNCATION` no longer holds at the dispatch layer that
-matters:
+The same source inspection found the missing seam precisely:
 
-```
-handle_function_call():
-    result = _execute_tool(...)
-    _emit(result, ...)                          # fires post_tool_call
-    return _apply_transform_tool_result_hook(function_name, function_args, result,
-                                              duration_ms, ids)
-```
+- `agent/agent_init.py:1061-1066` produces the final model-visible tool names.
+- `agent/tool_executor.py:1536-1551` copies those names and passes them, plus enabled and
+  disabled toolsets, to `handle_function_call`.
+- `model_tools.py:858-909` preserves those values across normal and deferred `tool_call`
+  dispatch.
+- `model_tools.py:834-848,941-945` drops them when invoking `transform_tool_result`.
+- `tools/tool_search.py:524-530` already exposes the scoped pre-assembly deferred universe.
 
-`_apply_transform_tool_result_hook`'s own docstring: *"Runs after `post_tool_call` and
-before the result enters context. Fail-open; first string return wins."* No truncation call
-is visible between `_execute_tool` returning and the hook running, at that dispatch layer.
-`_apply_transform_tool_result_hook` also does **not** forward `user_task` — confirmed by the
-same reading — so **there is no question available at this hook under any circumstance**;
-requirement #2's "capture, then ask" design is not a choice, it is the only shape this host
-surface permits.
+No official plugin hook supplies equivalent scope: session-start, pre-LLM, pre-tool and
+post-tool hooks omit the final visible/deferred set. Reconstructing it from global tool
+registration would widen a restricted cron/terminal invocation, so the adapter refuses to
+do that.
 
-`HOST_FAIL_OPEN` is unchanged and unconditional: the hook dispatch is still wrapped in
-`try/except`, and a raising handler still yields the *original* result. This adapter's own
-`transform_tool_result` handler is written to never raise regardless (see
-`adapters/hermes/context-shunt/__init__.py`), so this reason no longer gates the mode either
-way — but it is exactly why the handler is that defensive.
+[`docs/host-proposals/hermes-0.21.3-consumer-capabilities.patch`](host-proposals/hermes-0.21.3-consumer-capabilities.patch)
+is an exact, source-located proposal, not a vendored or live-host edit. It snapshots direct
+names as an immutable tuple and derives deferred names with the host's own scoped function;
+absence/error narrows to no descriptor. The standard-library probe
+[`evals/hermes-host-contract/probe.py`](../evals/hermes-host-contract/probe.py) runs inside
+the exact image without network or providers:
 
-**What this finding is not**: a reproducible, version-independent proof about every Hermes
-installation this adapter might run against. It is evidence about one running instance,
-read once, by the operator who runs it. In particular: `_execute_tool`'s internals were not
-audited — an individual registry tool could self-truncate its own output before returning,
-which would mean the "complete" half of guarantee 1 does not hold for that tool's results
-even though the dispatch-layer ordering does. Nothing here changes `HOST_VERSION_UNVERIFIED`-
-style caution about upgrades, and there is still no `scripts/verify integration hermes
---mode post-tool`-equivalent automated gate re-deriving this on every run (see
-[Gate status](#gate-status)).
+- unmodified 0.21.3: direct and deferred callers both receive
+  `LEGACY_COMPACTED` (`EXPECTED_MISSING_SEAM`);
+- the same image with only the proposed `model_tools.py` mounted read-only: direct and
+  deferred calls receive `SPILLED`, direct read returns `ANSWERED`, direct and deferred
+  inspect return `EXTRACTED`, a per-turn end preserves the handle, finalization returns
+  `SOURCE_EXPIRED`, and terminal-only/partial-direct callers still receive no-handle
+  `LEGACY_COMPACTED`.
 
-So: **`tool_result_capture` stays `unsupported` (`ORDERING_UNPROVEN`) by default.** It
-becomes `supported` only when a deployment sets
-`tool_result_capture.host_ordering_verified_locally: true` — an explicit **operator
-attestation**, never inferred or assumed, that the operator personally verified their own
-installed host's ordering. See [`configuration.md`](configuration.md) and the
-[cutover plan](acceptance.md#tool_result_capture-cutover-on-hermes) for what setting it
-means and what it does not prove.
+So `tool_result_capture` remains unsupported by default. Registration requires both
+`host_ordering_verified_locally: true` and
+`host_consumer_scope_verified_locally: true`; `enabled: true` or the old ordering
+attestation alone registers no transform hook. Even after registration, every individual
+invocation still fails closed to bounded no-handle compaction when its descriptor is absent
+or incomplete.
 
-| Reason (default, no attestation) | Evidence |
+| Reason (default, missing attestation) | Evidence |
 | --- | --- |
-| `ORDERING_UNPROVEN` | This adapter ships generically and has no reproducible, version-independent proof of the installed host's capture-before-truncation ordering for every Hermes version it might run against. |
-| `HOST_FAIL_OPEN` | `hermes-agent` `model_tools.py`: `_apply_transform_tool_result_hook` runs inside `try/except` and the original result survives a raising handler. This adapter's own hook handler never raises regardless, so this is recorded as context, not as a blocker. |
-
-A controlled MCP producer wrapper that captures and spills before the host's fallback would
-still strengthen this further (it would not depend on any per-tool self-truncation
-assumption), but building one means changing how the host produces MCP results, which is
-out of scope for a plugin and remains [future work](#future-work-stated-plainly).
+| `ORDERING_UNPROVEN` | No version-independent proof covers every installed host or per-tool self-truncation path. |
+| `CONSUMER_SCOPE_UNPROVEN` | Unmodified Hermes 0.21.3 drops the available invocation scope before the transform hook. The exact-image control reproduces this. |
+| `HOST_FAIL_OPEN` | The host preserves the original result if a transform handler raises. The adapter therefore converts every owned oversized failure to a bounded envelope and never relies on host fail-open. |
 
 ### Hermes authoritative skill boundary
 
@@ -257,8 +249,10 @@ bounded `SPILL_FAILED` or `LIMIT_EXCEEDED` envelope and never the raw payload.
 
 So the engine is not the host blocker. Keep those facts separate when reading a report: the
 deterministic gate has an executable implementation regardless of whether any given host
-enables the mode. OpenClaw does not enable the engine on its unproven middleware seam. On Hermes it is off by default and requires an explicit operator attestation
-to turn on — see [above](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
+enables the mode. OpenClaw does not enable the engine on its unproven middleware seam. On
+Hermes it is off by default and requires the 0.21.3 host seam plus both explicit operator
+attestations to turn on — see
+[above](#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 Whether the gate passed a particular checkout comes from that run's result either way.
 
 ## Legacy-compaction fallback
@@ -296,7 +290,7 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 | `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
-| `integration <host> --mode post-tool` | `expected_unsupported` on OpenClaw (retired effective-replacement seam) and on Hermes without an operator attestation — no environment enables it by default, and it does not block a release. There is no automated gate that re-derives the operator-attested 0.21.1 ordering finding on Hermes; that finding was a one-time, dated, read-only inspection of one live host, recorded in `docs/capability-matrix.md`, not a reproducible checkout-based gate. Setting `host_ordering_verified_locally: true` is an operator decision this gate does not and cannot verify |
+| `integration <host> --mode post-tool` | OpenClaw remains `expected_unsupported`. Hermes is a required exact-host gate: `NOT_RUN` without its checkout/interpreter, `FAIL` on unmodified 0.21.3 because invocation scope is missing, and `PASS` only when the source-located proposal is present and the probe proves direct/deferred consumption, restricted fallback, lifecycle, no full-raw publication, and accounting correlation. The two operator attestations remain deployment decisions; the probe does not set them in production. |
 | `shadow deterministic` | implemented — four-lane A/B over a fixed synthetic corpus; reports main-context reduction, evidence regression against the raw baseline, and model-free latency for real |
 | `shadow reader` | `expected_unsupported` (printed `N/A`) — task correctness, semantic evidence support, mechanical citation validity and follow-up rate are scored by `eval luna`, which owns the fixed corpus, thresholds and runs-per-item; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
@@ -350,11 +344,9 @@ is deployable and unproven at production equivalence — not that it is better.
 - A controlled MCP producer wrapper for Hermes that would make `tool_result_capture`
   provably supportable there without depending on an unaudited per-tool
   self-truncation assumption or an operator attestation.
-- A reproducible, checkout-based `integration hermes --mode post-tool` gate that
-  re-derives the 0.21.1 dispatch-ordering finding automatically (against
-  `CONTEXT_SHUNT_HERMES_ROOT`) on every run, the way `integration hermes --mode local`
-  already does for the other modes, so this table's Hermes evidence stops depending on a
-  one-time manual reading.
+- Upstream acceptance of the source-located Hermes 0.21.3 consumer-capability proposal,
+  followed by rerunning `integration hermes --mode post-tool` against the exact candidate
+  host version. This repository does not patch or vendor the host.
 - The optional writer contract (`operation: propose_patch`). It is refused today; a future
   version needs its own schema version, write scopes, conflict checks and acceptance.
 - A host that lets a plugin observe the provider's own report of which model generated the

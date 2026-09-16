@@ -144,6 +144,11 @@
             "default": false,
             "description": "Deprecated compatibility field; ignored by OpenClaw. It cannot prove effective model-visible replacement."
           },
+          "host_consumer_scope_verified_locally": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deprecated compatibility field; ignored by OpenClaw. It cannot prove invocation-scoped consumer delivery."
+          },
           "read_only_tools": {
             "type": "array",
             "maxItems": 100,
@@ -165,6 +170,10 @@
             "default": false
           },
           "host_ordering_verified_locally": {
+            "type": "boolean",
+            "default": false
+          },
+          "host_consumer_scope_verified_locally": {
             "type": "boolean",
             "default": false
           }

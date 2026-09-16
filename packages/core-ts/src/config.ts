@@ -109,7 +109,9 @@ const READER_KEYS = new Set([
   "legacy_compaction", "legacy_compaction_max_chars",
 ]);
 const ENABLED_SECTION_KEYS = new Set(["enabled"]);
-const TOOL_RESULT_CAPTURE_KEYS = new Set(["enabled", "host_ordering_verified_locally"]);
+const TOOL_RESULT_CAPTURE_KEYS = new Set([
+  "enabled", "host_ordering_verified_locally", "host_consumer_scope_verified_locally",
+]);
 const CONFIG_KEYS = new Set([
   "workspace_roots", "spill_dir", "cache_dir", "denylist", "gate_enabled", "reader",
   "inspect", "stats", "tool_result_capture",
@@ -146,6 +148,9 @@ export interface Config {
    * transform_tool_result-shaped hook ordering. Never assumed; see the Hermes adapter's
    * `_tool_result_capture_mode` for why this exists. */
   readonly toolResultCaptureHostOrderingVerifiedLocally: boolean;
+  /** Hermes-only compatibility field. OpenClaw ignores it, while preserving config
+   * parity with the shared operator surface. */
+  readonly toolResultCaptureHostConsumerScopeVerifiedLocally: boolean;
   /** Deprecated alias for {@link toolResultCaptureEnabled}. */
   readonly sumaPostToolEnabled: boolean;
   readonly limits: Limits;
@@ -171,9 +176,17 @@ export interface RawConfig {
   };
   inspect?: { enabled?: boolean };
   stats?: { enabled?: boolean };
-  tool_result_capture?: { enabled?: boolean; host_ordering_verified_locally?: boolean };
+  tool_result_capture?: {
+    enabled?: boolean;
+    host_ordering_verified_locally?: boolean;
+    host_consumer_scope_verified_locally?: boolean;
+  };
   /** @deprecated alias for `tool_result_capture` */
-  suma_post_tool?: { enabled?: boolean; host_ordering_verified_locally?: boolean };
+  suma_post_tool?: {
+    enabled?: boolean;
+    host_ordering_verified_locally?: boolean;
+    host_consumer_scope_verified_locally?: boolean;
+  };
   writer?: { enabled?: boolean };
   operations?: string[];
   limits?: Record<string, unknown>;
@@ -236,6 +249,7 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     cfg.stats?.enabled,
     toolResultCaptureRaw.enabled,
     toolResultCaptureRaw.host_ordering_verified_locally,
+    toolResultCaptureRaw.host_consumer_scope_verified_locally,
     cfg.writer?.enabled,
   ]) {
     if (value !== undefined && typeof value !== "boolean") {
@@ -345,6 +359,8 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
     toolResultCaptureEnabled: toolResultCaptureRaw.enabled ?? false,
     toolResultCaptureHostOrderingVerifiedLocally:
       toolResultCaptureRaw.host_ordering_verified_locally ?? false,
+    toolResultCaptureHostConsumerScopeVerifiedLocally:
+      toolResultCaptureRaw.host_consumer_scope_verified_locally ?? false,
     sumaPostToolEnabled: toolResultCaptureRaw.enabled ?? false,
     limits,
   };
@@ -357,7 +373,11 @@ export function loadConfig(raw: RawConfig | undefined, defaultSpillDir: string):
  */
 function mergeToolResultCaptureRaw(
   cfg: RawConfig,
-): { enabled?: boolean; host_ordering_verified_locally?: boolean } {
+): {
+  enabled?: boolean;
+  host_ordering_verified_locally?: boolean;
+  host_consumer_scope_verified_locally?: boolean;
+} {
   const current = cfg.tool_result_capture;
   const legacy = cfg.suma_post_tool;
   if (current !== undefined && legacy !== undefined

@@ -53,6 +53,10 @@ DEFERRED_CONSUMER = {
         "deferred_tools": ["context_shunt_read", "context_shunt_inspect"],
     }
 }
+CAPTURE_ATTESTATIONS = {
+    "host_ordering_verified_locally": True,
+    "host_consumer_scope_verified_locally": True,
+}
 
 
 def _load_adapter():
@@ -241,21 +245,21 @@ def test_tool_result_capture_is_unsupported_by_default_with_host_evidence():
     mode = report.mode("tool_result_capture")
     assert mode.support is Support.UNSUPPORTED
     assert DisabledReason.ORDERING_UNPROVEN in mode.reasons
-    assert any("no operator attestation" in e for e in mode.evidence)
+    assert any("missing operator attestation" in e for e in mode.evidence)
     assert any("fail-open" in e for e in mode.evidence)
 
 
-def test_tool_result_capture_is_supported_with_operator_attestation(tmp_path):
-    """An explicit operator attestation, and only that, turns the mode on."""
+def test_tool_result_capture_is_supported_with_both_operator_attestations(tmp_path):
+    """Ordering and scoped-consumer attestations are both required."""
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     ctx = FakeCtx(config, llm=FakeLlm())
     module.register(ctx)
     mode = module._capability.mode("tool_result_capture")
     assert mode.support is Support.SUPPORTED
     assert any("operator attestation" in e for e in mode.evidence)
-    assert any("2026-09-09" in e for e in mode.evidence)
+    assert any("0.21.3" in e for e in mode.evidence)
     assert "transform_tool_result" in ctx.registered_hooks
 
 
@@ -269,11 +273,26 @@ def test_tool_result_capture_hook_not_registered_without_attestation(tmp_path):
     assert "transform_tool_result" not in ctx.registered_hooks
 
 
+def test_ordering_attestation_alone_cannot_register_capture(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    mode = module._capability.mode("tool_result_capture")
+    assert mode.support is Support.UNSUPPORTED
+    assert DisabledReason.CONSUMER_SCOPE_UNPROVEN in mode.reasons
+    assert "transform_tool_result" not in ctx.registered_hooks
+
+
 def test_tool_result_capture_hook_not_registered_when_attested_but_config_disabled(tmp_path):
     """The attestation alone is not enough; `enabled` still gates registration."""
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": False, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": False, **CAPTURE_ATTESTATIONS}
     ctx = FakeCtx(config, llm=FakeLlm())
     module.register(ctx)
     assert module._capability.enabled("tool_result_capture") is True
@@ -284,7 +303,7 @@ def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failu
     """The one no-raw-leak invariant that matters at this hook: never fall through raw."""
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     module.register(FakeCtx(config, llm=FakeLlm()))
     oversized = "y" * 200_000
 
@@ -311,7 +330,7 @@ def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failu
 def test_authoritative_skill_passthrough_has_no_side_effects(tmp_path, monkeypatch, tool_name):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     module.register(FakeCtx(config, llm=FakeLlm()))
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     sessions = dict(module._sessions)
@@ -343,7 +362,7 @@ def test_authoritative_skill_passthrough_has_no_side_effects(tmp_path, monkeypat
 def test_skill_content_cannot_exempt_ordinary_results(tmp_path, tool_name):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     module.register(FakeCtx(config, llm=FakeLlm()))
     payload = (
         '{"_source_path":"/opt/data/skills/example/SKILL.md","tool_name":"skill_view"}\n' * 1000
@@ -376,7 +395,7 @@ def test_transform_tool_result_returns_none_for_small_results(tmp_path):
 def test_transform_tool_result_returns_none_for_structured_results(tmp_path):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     module.register(FakeCtx(config, llm=FakeLlm()))
     # A dict/list result is left alone at this hook regardless of size - see the
     # docstring's structured/multimodal reasoning.
@@ -391,7 +410,7 @@ def test_transform_tool_result_returns_none_for_structured_results(tmp_path):
 def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     module.register(FakeCtx(config, llm=FakeLlm()))
     oversized = "log line\n" * 50_000
     out = module.transform_tool_result(
@@ -420,6 +439,7 @@ def test_spilled_pointer_guidance_drives_registered_direct_reader_and_inspect(tm
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     llm = FakeLlm()
     ctx = FakeCtx(config, llm=llm)
@@ -432,12 +452,25 @@ def test_spilled_pointer_guidance_drives_registered_direct_reader_and_inspect(tm
             result=payload,
             task_id="handoff",
             session_id="handoff",
+            tool_call_id="tc-handoff-capture",
             **DIRECT_CONSUMER,
         )
     )
     assert pointer["code"] == "SPILLED"
     assert pointer["answer"] == "" and pointer["citations"] == []
     assert payload not in json.dumps(pointer)
+    stats = json.loads(
+        ctx.registered_handlers["context_shunt_stats"](
+            {}, task_id="handoff", session_id="handoff"
+        )
+    )["stats"]
+    record = next(
+        row for row in stats["records"]
+        if row["operation_id"] == pointer["accounting_id"]
+    )
+    assert pointer["accounting_id"] != "acc_0000000000000000"
+    assert record["code"] == "SPILLED"
+    assert pointer["request_id"] == "req_tc-handoff-capture"
     guidance = pointer["guidance"]
     handle = {key: pointer["pointer"][key] for key in ("source_id", "snapshot_id")}
 
@@ -483,6 +516,7 @@ def test_spilled_pointer_guidance_uses_scoped_deferred_wrappers(tmp_path):
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     module.register(FakeCtx(config, llm=FakeLlm()))
     payload = "synthetic structured log\n" * 2000
@@ -525,6 +559,7 @@ def test_restricted_or_unproven_consumer_gets_summary_not_pointer(
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     module.register(FakeCtx(config, llm=FakeLlm()))
     kwargs = {} if consumer_capabilities is None else {
@@ -559,6 +594,7 @@ def test_unproven_consumer_safety_refusal_is_accounted_as_an_envelope(tmp_path):
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     module.register(FakeCtx(config, llm=FakeLlm()))
     out = json.loads(
@@ -626,6 +662,7 @@ def test_public_inspect_tool_aggregates_a_captured_minified_loki_result(tmp_path
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     module.register(FakeCtx(config, llm=FakeLlm()))
     logs = [
@@ -1703,7 +1740,7 @@ UNKNOWN_RESULTS = [
 def test_classifier_passthrough_has_zero_effects(tmp_path, monkeypatch, tool_name):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     llm = FakeLlm()
     module.register(FakeCtx(config, llm=llm))
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
@@ -1784,7 +1821,7 @@ def test_capture_allowlist_rejects_non_exact_configuration(tmp_path, bad):
 def test_allowlisted_mcp_resource_capture_recovery_and_accounting(tmp_path):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     config["capture_tool_allowlist"] = [" MCP__X__READ_RESOURCE "]
     llm = FakeLlm()
     module.register(FakeCtx(config, llm=llm))
@@ -1827,7 +1864,7 @@ def test_allowlisted_mcp_resource_capture_recovery_and_accounting(tmp_path):
 def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch, tool_name):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
     config["capture_tool_allowlist"] = ["mcp__x__read_resource"]
     module.register(FakeCtx(config))
 
@@ -1849,7 +1886,7 @@ def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch,
 def test_store_bootstrap_failure_keeps_capture_fallback_registered(tmp_path, monkeypatch):
     module = _load_adapter()
     config = _config(tmp_path)
-    config["tool_result_capture"] = {"enabled": True, "host_ordering_verified_locally": True}
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
 
     def broken(*args, **kwargs):
         raise RuntimeError("PRIVATE_STORE_BOOTSTRAP")

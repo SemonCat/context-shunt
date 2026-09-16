@@ -1349,7 +1349,12 @@ class ShuntSession:
                 bytes_measured=len(result.encode("utf-8")),
             )
         if outcome.envelope is not None:
-            envelope = enforce_or_fixed(outcome.envelope, self.config.limits)
+            # SpillEngine constructs the content envelope before this session owns an
+            # accounting operation. Replace the schema-valid placeholder before guard
+            # publication so the pointer and its ledger record are actually correlatable.
+            candidate = dict(outcome.envelope)
+            candidate["accounting_id"] = operation_id
+            envelope = enforce_or_fixed(candidate, self.config.limits)
             pointer_delivered = (
                 outcome.action == "spill"
                 and envelope.get("code") == "SPILLED"

@@ -182,6 +182,13 @@ def decode_cursor(
         raw = base64.urlsafe_b64decode(body + padding)
     except (ValueError, TypeError):
         raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False) from None
+    # Python's decoder accepts non-canonical final characters whose unused low bits are
+    # ignored. That makes a visibly edited token decode to the authenticated bytes. Require
+    # the one encoding we issue so every textual mutation is rejected, not merely every
+    # decoded-byte mutation.
+    canonical = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(body, canonical):
+        raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
     if len(raw) <= _MAC_BYTES:
         raise ShuntError("INVALID_REQUEST", "BAD_CURSOR", retryable=False)
     payload, mac = raw[:-_MAC_BYTES], raw[-_MAC_BYTES:]

@@ -12,14 +12,17 @@ Both live canaries were retired on 2026-09-10. This repair does not re-enable He
 The pre-read gate passes unknown/unclassifiable calls and searches unchanged; it only blocks
 positively established large unbounded reads on allowed sources.
 
-This adapter registers up to four read-only tools, no writer, and — only with an explicit
-operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) — one
+This adapter registers up to four read-only tools, no writer, and — only with both explicit
+operator attestations (`tool_result_capture.host_ordering_verified_locally: true` and
+`tool_result_capture.host_consumer_scope_verified_locally: true`) — one
 `transform_tool_result` hook. The hook emits a pointer only when its invocation includes a
 scoped consumer descriptor proving direct read+inspect access or the complete deferred-tool
 bridge plus deferred read+inspect access. The currently inspected Hermes host does not pass
-that descriptor, so eligible oversized results receive bounded no-handle legacy compaction
-instead of an unusable pointer. The adapter never infers session reachability from global
-tool registration and never widens tool privileges. See
+that descriptor. The source-located 0.21.3 proposal and exact-image probe demonstrate it,
+but this repository does not patch the third-party host. Without it, eligible oversized
+results receive bounded no-handle legacy compaction instead of an unusable pointer. The
+adapter never infers session reachability from global tool registration and never widens
+tool privileges. See
 [`docs/acceptance.md`](../../docs/acceptance.md#tool_result_capture-cutover-on-hermes) for
 the cutover plan.
 
@@ -35,11 +38,14 @@ capability probe supports the mode; registering a permanently-refusing surface i
 the model would be worse than not offering it. This host supports the mode because the
 import needs no interception ordering at all — it is not post-tool interception, and
 `tool_result_capture` (formerly `suma_post_tool`) is a separate mode, off by default and
-supported only with an explicit operator attestation — see
+candidate-supported only with the 0.21.3 host seam and both explicit operator attestations — see
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 
 Run `./scripts/verify integration hermes --mode local` against a real host checkout to
-check the wiring; without one it reports `NOT_RUN`, never a pass.
+check the ordinary wiring. Run `./scripts/verify integration hermes --mode post-tool`
+against a host source tree with the proposal applied to prove direct/deferred delivery,
+restricted fallback, pointer consumption, accounting, and retention. Without the required
+checkout/interpreter either required gate reports `NOT_RUN`, never a pass.
 
 Tool registration follows host capability. `reader.enabled: false` controls execution and
 returns a bounded refusal without calling a model; it does not require the adapter to hide

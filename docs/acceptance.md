@@ -14,11 +14,11 @@ every *required* gate passed, 1 means failure or an empty/unimplemented gate, an
 never counted as pass. Non-content reports are written under gitignored `reports/`.
 
 A fourth status, printed as `N/A` and reported as `expected_unsupported`, is for a gate
-that is disabled **by design** and will not run in any environment: the oversized post-tool
-mode, on host-source evidence in [Capability matrix](capability-matrix.md), and the shadow
-reader lane, which `eval luna` owns. It does not block, and it is counted and reported
-separately from `NOT_RUN`. Collapsing the two made `release all` incapable of exiting 0
-anywhere, because it waited on gates that were never coming.
+that is disabled **by design** and will not run in any environment: OpenClaw's retired
+oversized post-tool mode and the shadow reader lane, which `eval luna` owns. Hermes
+post-tool capture is different: its exact-host probe is required and blocks until the
+host seam exists. `expected_unsupported` does not block and is reported separately from
+`NOT_RUN`.
 
 The two words are not interchangeable, and this document uses each for one thing only:
 
@@ -64,7 +64,8 @@ cores where applicable.
 | `./scripts/verify integration hermes --mode local` | Exercises the real Hermes checkout: hook ordering, three registered tools, model bridge/auxiliary precedence, attribution ceiling, and session lifecycle. `NOT_RUN` without both Hermes environment variables. |
 | `./scripts/verify integration openclaw --mode local` | Exercises the real OpenClaw checkout: hook/model runtime, three tools, source facts used by lifecycle/accounting, and host loader. `NOT_RUN` without the checkout variable. |
 | `./scripts/verify integration <host> --mode unsupported` | Deterministically proves post-tool mode stays disabled and safe capabilities remain usable. |
-| `./scripts/verify integration <host> --mode post-tool` | `expected_unsupported` (printed `N/A`) on both current hosts because the required complete-capture/safe-replacement seam does not exist. Not `NOT_RUN`: no checkout or credential changes the answer. |
+| `./scripts/verify integration hermes --mode post-tool` | Required exact-host probe. `NOT_RUN` without the Hermes checkout/interpreter, `FAIL` when the host omits invocation-scoped consumer delivery, and `PASS` only after direct/deferred consumption, restricted fallback, lifecycle, raw-boundary and accounting assertions pass. |
+| `./scripts/verify integration openclaw --mode post-tool` | `expected_unsupported` (`N/A`): automatic capture remains retired. |
 
 Mock adapter tests prove adapter behavior, not a live host. A host version change requires
 the local gate to be rerun and reviewed.
@@ -216,11 +217,12 @@ today only one of them is live:
 | System | State today | State after cutover |
 | --- | --- | --- |
 | `oversize-tool-result-compactor` (incumbent, v0.3.0, `author: Edison`) | live; the only `transform_tool_result` listener; fail-open at the host level if it raises | disabled |
-| context-shunt `tool_result_capture` | implemented, registered only with an explicit attestation, currently off | enabled and attested |
+| Hermes invocation-scope delivery | absent in unmodified 0.21.3 | source-located proposal accepted in the exact candidate host and exact-host probe passes |
+| context-shunt `tool_result_capture` | implemented, registered only with two explicit attestations, currently off | enabled and both attestations set |
 
 Both hook the same `transform_tool_result` name. Hermes' `_apply_transform_tool_result_hook`
-takes the **first string return across every registered listener** (verified in the same
-0.21.1 reading behind `capability-matrix.md`'s evidence) — so running both at once is not
+takes the **first string return across every registered listener** (verified in the exact
+0.21.3 reading behind `capability-matrix.md`'s evidence) — so running both at once is not
 "defense in depth", it is undefined precedence between two different bounded outputs for
 the same oversized result. They must be switched atomically, not run in parallel and not
 left with a gap between disabling one and enabling the other.
@@ -242,10 +244,13 @@ step 1 below is a precondition-check, not a suggestion.
 
 #### Precondition checks (run before touching any config)
 
-1. `./scripts/verify unit` passes on the commit being deployed (deterministic gates need no
-   host).
+1. `./scripts/verify unit all`, the language contracts/types/build, packaging, and
+   `./scripts/verify integration hermes --mode post-tool` pass on the exact candidate.
+   The post-tool gate must run against the exact Hermes source/interpreter; a synthetic
+   adapter stub is not a substitute.
 2. The operator has personally reviewed [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
-   — the attestation below is *their* claim, not this adapter's.
+   and the host proposal's upgrade/rollback risk — both attestations below are *their*
+   claims, not this adapter's.
 3. Legacy compaction is mandatory regardless of the deprecated config key, so a
    reader failure on a captured handle degrades to a bounded summary rather than a bare
    pointer with no further recourse.
@@ -271,6 +276,7 @@ plugins:
         tool_result_capture:
           enabled: true
           host_ordering_verified_locally: true   # <-- the operator's own attestation
+          host_consumer_scope_verified_locally: true  # exact candidate probe passed
         reader:
           legacy_compaction: false               # deprecated no-op; fallback remains mandatory
 ```
@@ -291,22 +297,28 @@ Two things this repository verified and two it did not, stated plainly:
 
 #### Verification after cutover
 
-1. `context_shunt_stats` (or the equivalent request) shows new `read`/`capture` operation
-   records after an oversized tool call, not zero.
+1. Run an isolated canary session with direct Shunt consumers, one with the full deferred
+   bridge, and a terminal-only session. The first two must receive and consume `SPILLED`;
+   terminal-only must receive `LEGACY_COMPACTED` with no pointer or retained handle.
 2. Deliberately trigger one oversized MCP/tool result and confirm the main model's context
    receives a bounded pointer envelope (`code: SPILLED`, `result_kind: pointer`) rather than
    the raw result — this is the one invariant this entire change exists to guarantee, so it
    is worth checking by hand once, not only trusting the deterministic gates.
-3. `capability_report()` shows `tool_result_capture` as `supported`, with evidence citing
-   the operator attestation.
-4. The incumbent's own artifact directory (`~/.hermes/tool-result-artifacts` by default)
+3. `context_shunt_stats` shows the pointer's non-placeholder `accounting_id` as the matching
+   spill operation, then shows read/inspect operations. A per-turn end preserves the handle;
+   finalize/reset revokes it.
+4. `capability_report()` shows `tool_result_capture` as `supported`, with evidence citing
+   both operator attestations.
+5. The incumbent's own artifact directory (`~/.hermes/tool-result-artifacts` by default)
    stops receiving new entries.
 
 #### Rollback
 
-Revert the config change (or the environment variable) in one deploy. No data migration is
-needed either direction: context-shunt's captured handles and the incumbent's artifact
-files are independent stores that were never sharing state.
+In one rollback, disable context-shunt capture, re-enable the incumbent, and restore the
+previous Hermes image if the invocation-scope proposal was packaged as a host image change.
+Do not leave both transform listeners active. No data migration is needed either direction:
+context-shunt's captured handles and the incumbent's artifact files are independent stores
+that were never sharing state.
 
 ## Benchmarks
 

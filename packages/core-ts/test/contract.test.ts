@@ -276,20 +276,26 @@ describe("tool_result_capture / suma_post_tool config migration", () => {
     }
   });
 
-  it("defaults the host-ordering attestation to false", () => {
+  it("defaults both Hermes host attestations to false", () => {
     const config = loadConfig(roots as never, "/tmp/context-shunt-cache");
     expect(config.toolResultCaptureHostOrderingVerifiedLocally).toBe(false);
+    expect(config.toolResultCaptureHostConsumerScopeVerifiedLocally).toBe(false);
   });
 
-  it("carries an explicit host-ordering attestation through", () => {
+  it("carries explicit Hermes host attestations through", () => {
     const config = loadConfig(
       {
         ...roots,
-        tool_result_capture: { enabled: true, host_ordering_verified_locally: true },
+        tool_result_capture: {
+          enabled: true,
+          host_ordering_verified_locally: true,
+          host_consumer_scope_verified_locally: true,
+        },
       } as never,
       "/tmp/context-shunt-cache",
     );
     expect(config.toolResultCaptureHostOrderingVerifiedLocally).toBe(true);
+    expect(config.toolResultCaptureHostConsumerScopeVerifiedLocally).toBe(true);
   });
 });
 

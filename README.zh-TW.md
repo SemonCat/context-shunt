@@ -27,9 +27,9 @@ Hermes 攔截 `read_file`、`search_files` 與 `terminal`；OpenClaw 涵蓋
 ### Hermes 工具結果：先擷取，再提問
 
 `tool_result_capture` 在 `transform_tool_result` 攔截符合條件的過大 MCP／工具結果，
-此時結果尚未進入主模型上下文。它將收到的完整內容保存為不可變更的
-artifact，以有大小上限的不透明 handle／pointer 和 metadata 取代原結果。
-擷取過程**不呼叫模型**，也不產生啟發式摘要。
+此時結果尚未進入主模型上下文。只有當該次呼叫的能力描述證明可直接或透過完整 deferred
+bridge 使用 read 與 inspect 時，才保存不可變更的 artifact 並回傳有界 pointer；否則回傳
+沒有 handle 的有界決定性舊版壓縮，也不保留只有 pointer 才能讀取的內容。此步驟**不呼叫模型**。
 
 這個 hook **收不到使用者的問題**。閱讀是另一個步驟：主模型必須呼叫
 `context_shunt_read`，傳入明確問題與 artifact handle。部署範例的 reader
@@ -54,9 +54,12 @@ artifact，以有大小上限的不透明 handle／pointer 和 metadata 取代�
 ```
 
 Hermes hook 目前擷取過大的**字串**結果；結構化／多模態區塊直接放行。它無法還原 producer
-事先截掉的內容。Hook 順序僅在一台 Hermes 0.21.1 host 上確認過，其他安裝環境仍需驗證。
-新部署必須自行確認順序，並同時設定 `tool_result_capture.enabled: true` 與
-`tool_result_capture.host_ordering_verified_locally: true`。符合條件的過大結果若擷取失敗，
+事先截掉的內容。2026-09-16 已檢查實際 Hermes 0.21.3 映像與原始碼；未修改的 host 不會把
+該次呼叫的工具範圍傳給 `transform_tool_result`，所以只能回傳沒有 handle 的有界舊版壓縮。
+本 repo 提供精確定位的 host 提案與同映像測試，但不修改第三方程式。新部署必須自行確認
+順序與每次呼叫的 consumer scope，並同時設定 `tool_result_capture.enabled: true`、
+`tool_result_capture.host_ordering_verified_locally: true` 與
+`tool_result_capture.host_consumer_scope_verified_locally: true`。符合條件的過大結果若擷取失敗，
 若故障屬於 Shunt，adapter 必須回傳舊版有界決定性壓縮；不安全來源仍明確拒絕，絕不回傳完整原文作為備援。
 詳見[能力證據](docs/capability-matrix.md)與[切換程序](docs/acceptance.md#tool_result_capture-cutover-on-hermes)。
 

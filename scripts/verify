@@ -25,6 +25,10 @@ They are now reported as ``EXPECTED_UNSUPPORTED``, which is printed, counted and
 to the report separately, and does not block. Every other absent prerequisite still
 blocks, so ``release all`` exits 0 exactly when every required gate passed.
 
+Hermes post-tool capture is now a required, exact-host probe because the owned adapter has
+a fail-closed invocation-scope contract and a source-located 0.21.3 host proposal. OpenClaw
+capture remains retired and therefore ``EXPECTED_UNSUPPORTED``.
+
 The ``shadow`` suite is deliberately split the same way. ``shadow deterministic`` runs
 from the repository and reports the two gates that can be measured without a provider;
 ``shadow reader`` needs a live reader bridge and reports ``NOT_RUN`` without one, so the
@@ -318,10 +322,20 @@ def _openclaw_prereq() -> tuple[bool, str]:
     root = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROOT", "")
     if not root or not Path(root).is_dir():
         return False, "set CONTEXT_SHUNT_OPENCLAW_ROOT to an OpenClaw checkout"
-    if not (Path(root) / "package.json").exists():
+    manifest = Path(root) / "package.json"
+    if not manifest.exists():
         return (
             False,
             "CONTEXT_SHUNT_OPENCLAW_ROOT does not look like an OpenClaw checkout",
+        )
+    try:
+        package_name = json.loads(manifest.read_text()).get("name")
+    except (OSError, ValueError, TypeError):
+        package_name = None
+    if package_name != "openclaw":
+        return (
+            False,
+            "CONTEXT_SHUNT_OPENCLAW_ROOT package name is not 'openclaw'",
         )
     return True, ""
 
@@ -451,22 +465,72 @@ def run_integration(host: str, mode: str) -> list[GateResult]:
         ]
 
     if mode == "post-tool":
-        # Local host-runner tests do not prove the effective model-input replacement.
         # OpenClaw's retired seam cannot be certified merely because a checkout exists.
-        reason = (
-            "effective model-visible replacement unproven; OpenClaw capture is retired"
-            if host == "openclaw"
-            else "capture ordering requires a deployment-specific Hermes attestation"
+        if host == "openclaw":
+            reason = "effective model-visible replacement unproven; OpenClaw capture is retired"
+            return [
+                GateResult(
+                    "integration",
+                    gate,
+                    STATUS_EXPECTED_UNSUPPORTED,
+                    0,
+                    reason + "; run --mode unsupported instead",
+                    time.monotonic() - started,
+                    [f"EXPECTED_UNSUPPORTED {gate}: {reason}"],
+                )
+            ]
+
+        ok, why = _hermes_prereq()
+        if not ok:
+            return [
+                GateResult(
+                    "integration",
+                    gate,
+                    "not_run",
+                    0,
+                    f"prerequisite missing: {why}",
+                    time.monotonic() - started,
+                    [f"NOT_RUN {gate}: {why}"],
+                )
+            ]
+
+        interpreter = os.environ["CONTEXT_SHUNT_HERMES_PYTHON"]
+        env = {
+            **os.environ,
+            "HERMES_ROOT": os.environ["CONTEXT_SHUNT_HERMES_ROOT"],
+            "SHUNT_CORE": str(ROOT / "packages" / "core-py" / "src"),
+            "SHUNT_ADAPTER": str(ROOT / "adapters" / "hermes" / "context-shunt"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        probe = ROOT / "evals" / "hermes-host-contract" / "probe.py"
+        proc = subprocess.run(
+            [interpreter, str(probe), "--expect", "ready"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
         )
+        output = proc.stdout.strip().splitlines()
+        try:
+            summary = json.loads(output[-1]) if output else {}
+        except ValueError:
+            summary = {}
+        passed = proc.returncode == 0 and summary.get("status") == "PASS"
+        detail = "" if passed else _tail(proc.stderr or proc.stdout, lines=8)
+        status = "pass" if passed else "fail"
         return [
             GateResult(
                 "integration",
                 gate,
-                STATUS_EXPECTED_UNSUPPORTED,
-                0,
-                reason + "; run --mode unsupported instead",
+                status,
+                1 if passed else 0,
+                detail,
                 time.monotonic() - started,
-                [f"EXPECTED_UNSUPPORTED {gate}: {reason}"],
+                [
+                    "python  exact Hermes post-tool host contract: "
+                    f"{status} ({1 if passed else 0} cases)"
+                ],
             )
         ]
 

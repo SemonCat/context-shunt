@@ -6,8 +6,9 @@ Rules that matter more than the rest:
   flag and quietly ignoring it would turn a missing feature into a hidden one.
 * ``tool_result_capture.enabled`` defaults to ``false`` and, even when set, only takes
   effect if the adapter's capability probe reports the mode supported - which additionally
-  requires ``host_ordering_verified_locally``, an explicit operator attestation this code
-  does not and cannot prove for itself. The deprecated ``suma_post_tool`` key is still
+  requires both ``host_ordering_verified_locally`` and
+  ``host_consumer_scope_verified_locally``, explicit operator attestations this code does
+  not and cannot prove for itself. The deprecated ``suma_post_tool`` key is still
   accepted as an alias; setting both to disagreeing values is refused rather than guessed.
 * ``artifact_import`` defaults to disabled with no roots. Enabling it needs at least one
   explicit import root *and* an explicitly allowlisted manifest schema: an artifact
@@ -95,7 +96,11 @@ _READER_KEYS = {
 }
 _ARTIFACT_IMPORT_KEYS = {"enabled", "roots", "accepted_manifest_schemas"}
 _ENABLED_SECTION_KEYS = {"enabled"}
-_TOOL_RESULT_CAPTURE_KEYS = {"enabled", "host_ordering_verified_locally"}
+_TOOL_RESULT_CAPTURE_KEYS = {
+    "enabled",
+    "host_ordering_verified_locally",
+    "host_consumer_scope_verified_locally",
+}
 _MAX_FALLBACK_ENTRIES = 4
 _MAX_MODEL_REF_BYTES = 128
 
@@ -109,15 +114,17 @@ class ToolResultCaptureConfig:
     docs/capability-matrix.md) - but that is evidence about one running instance, not a
     reproducible, version-independent proof this adapter can make about every host it might
     be installed against. `enabled` alone is therefore never enough to turn the mode on:
-    the capability probe additionally requires `host_ordering_verified_locally`, an
-    explicit **operator attestation** (this code does not and cannot prove it for itself)
-    that the operator personally confirmed the ordering on their own installed host.
+    the capability probe additionally requires `host_ordering_verified_locally` and
+    `host_consumer_scope_verified_locally`, explicit **operator attestations** (this code
+    does not and cannot prove them for itself) that the operator personally confirmed the
+    ordering and invocation-scoped consumer descriptor on their own installed host.
     Without both, the mode is reported unsupported and stays off regardless of what a
     config file requests - the same discipline every other mode in this project follows.
     """
 
     enabled: bool = False
     host_ordering_verified_locally: bool = False
+    host_consumer_scope_verified_locally: bool = False
 
 
 #: Deprecated alias kept for existing imports. `suma_post_tool` was never a product name,
@@ -256,6 +263,7 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
         (raw.get("stats") or {}).get("enabled"),
         tool_result_capture_raw.get("enabled"),
         tool_result_capture_raw.get("host_ordering_verified_locally"),
+        tool_result_capture_raw.get("host_consumer_scope_verified_locally"),
         import_raw.get("enabled"),
         (raw.get("writer") or {}).get("enabled"),
     ):
@@ -309,6 +317,9 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
             enabled=tool_result_capture_raw.get("enabled", False),
             host_ordering_verified_locally=tool_result_capture_raw.get(
                 "host_ordering_verified_locally", False
+            ),
+            host_consumer_scope_verified_locally=tool_result_capture_raw.get(
+                "host_consumer_scope_verified_locally", False
             ),
         ),
         artifact_import=artifact_import,

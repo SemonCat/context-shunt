@@ -91,11 +91,12 @@ plugins:
           enabled: true
 
         # Optional oversized-tool-result capture. Off (unsupported) by default: turning it
-        # on requires an explicit operator attestation that you personally verified your
-        # own installed host's transform_tool_result capture-before-truncation ordering -
+        # on requires explicit operator attestations that you personally verified your
+        # own installed host's transform_tool_result capture-before-truncation ordering
+        # and immutable invocation-scoped consumer descriptor delivery -
         # see docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not
         # and docs/acceptance.md#tool_result_capture-cutover-on-hermes before setting this.
-        # `enabled: true` alone changes nothing without the attestation below.
+        # `enabled: true` alone changes nothing without both attestations below.
         # Hermes-only exact capture additions; empty by default. Verify this identity
         # is the intended protocol utility, not a server-native namesake. Protected
         # catalogs/prompts/control tools cannot be opted in. No wildcard matching.
@@ -104,6 +105,7 @@ plugins:
         tool_result_capture:
           enabled: false
           # host_ordering_verified_locally: true
+          # host_consumer_scope_verified_locally: true
 
         # Deprecated alias for tool_result_capture, still accepted so an older config file
         # keeps working unchanged. Do not set both to disagreeing values.

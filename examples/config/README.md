@@ -29,7 +29,7 @@ adding fake keys to either plugin `config` block.
 | `reader.legacy_compaction_max_chars` | `16000` | 1000–60000. Character budget before the envelope's own byte cap applies in both cores. |
 | `inspect.enabled` | `true` | Deterministic exact extraction: zero model calls, 16 KiB per page, cumulative disclosure ceiling. |
 | `stats.enabled` | `true` | Read-only session accounting. |
-| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw automatic capture is unsupported, even when requested. On Hermes, additionally requires `host_ordering_verified_locally: true` (an operator attestation) to activate — `enabled: true` alone does not. |
+| `tool_result_capture.enabled` | `false` | Optional oversized-tool-result capture request. OpenClaw automatic capture is unsupported, even when requested. On Hermes, additionally requires both `host_ordering_verified_locally: true` and `host_consumer_scope_verified_locally: true` (operator attestations) to activate — `enabled: true` alone does not. |
 | `artifact_import.enabled` | `false` | Adopt an oversized tool-result artifact an external producer already persisted. Supported on Hermes; the OpenClaw core has no import boundary and reports the mode unsupported. |
 | `artifact_import.roots` | `[]` | Allowlist of canonical directories an artifact and its manifest may live under. Separate from `workspace_roots`, and refused if a root contains the private cache. |
 | `artifact_import.accepted_manifest_schemas` | `[]` | Allowlist of producer manifest schemas. A manifest declaring a schema outside it is refused even when a translation profile for that schema exists. |

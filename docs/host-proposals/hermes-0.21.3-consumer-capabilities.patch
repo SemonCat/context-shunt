@@ -1,0 +1,93 @@
+diff --git a/model_tools.py b/model_tools.py
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -16,6 +16,7 @@
+ import logging
+ import threading
+ import time
++from types import MappingProxyType
+ from typing import Dict, Any, List, Optional, Tuple
+ 
+ from tools.registry import CHECK_FN_CACHE_BYPASS, check_fn_cache_scope, discover_builtin_tools, registry, tool_error
+@@ -829,10 +830,44 @@
+         from hermes_cli.middleware import run_tool_execution_middleware
+         return run_tool_execution_middleware(function_name, function_args, _dispatch, original_args=original_args,
+                                              **ids.hook_kwargs())
+ 
++
++def _invocation_consumer_capabilities(enabled_tools, enabled_toolsets, disabled_toolsets):
++    """Immutable model-visible/direct and scoped-deferred tools for this invocation.
+ 
++    ``enabled_tools`` is a copied snapshot of ``agent.valid_tool_names``. Never infer an
++    unrestricted surface when it is absent: direct calls outside an agent run have no
++    model-visible consumer proof and must fail closed in transform hooks.
++    """
++    if enabled_tools is None:
++        return None
++    direct = frozenset(
++        name.strip().lower() for name in enabled_tools
++        if isinstance(name, str) and name.strip()
++    )
++    deferred = frozenset()
++    bridges = {"tool_search", "tool_describe", "tool_call"}
++    if bridges <= direct:
++        try:
++            from tools.tool_search import scoped_deferrable_names
++            raw_defs = get_tool_definitions(
++                enabled_toolsets=enabled_toolsets,
++                disabled_toolsets=disabled_toolsets,
++                quiet_mode=True,
++                skip_tool_search_assembly=True,
++            )
++            deferred = scoped_deferrable_names(raw_defs)
++        except Exception:
++            # Missing deferred proof must narrow capability, never widen it.
++            deferred = frozenset()
++    return MappingProxyType({
++        "direct_tools": tuple(sorted(direct)),
++        "deferred_tools": tuple(sorted(deferred)),
++    })
++
++
+ def _apply_transform_tool_result_hook(function_name: str, function_args: Dict[str, Any], result: Any, duration_ms: int,
+-                                      ids: _CallIds) -> Any:
++                                      ids: _CallIds, consumer_capabilities=None) -> Any:
+     """transform_tool_result: plugins may replace the final result string.
+ 
+     Runs after post_tool_call and before the result enters context. Fail-open;
+@@ -842,9 +877,14 @@
+         from hermes_cli.lifecycle import has_hook, invoke_hook
+         if has_hook("transform_tool_result"):
+             status, error_type, error_message = _tool_result_observer_fields(function_name, result)
++            capability_kwargs = (
++                {"consumer_capabilities": consumer_capabilities}
++                if consumer_capabilities is not None else {}
++            )
+             hook_results = invoke_hook("transform_tool_result", tool_name=function_name, args=function_args,
+                                        result=result, **ids.hook_kwargs(), duration_ms=duration_ms,
+-                                       status=status, error_type=error_type, error_message=error_message)
++                                       status=status, error_type=error_type, error_message=error_message,
++                                       **capability_kwargs)
+             return next((r for r in hook_results if isinstance(r, str)), result)
+     except Exception as _hook_err:
+         logger.debug("transform_tool_result hook error: %s", _hook_err)
+@@ -878,6 +918,9 @@
+     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+     ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
+     start = time.monotonic()
++    consumer_capabilities = _invocation_consumer_capabilities(
++        enabled_tools, enabled_toolsets, disabled_toolsets
++    )
+ 
+     def _emit(result: Any, **extra: Any) -> Any:
+         """Emit post_tool_call with this call's identity fields; returns *result*."""
+@@ -942,7 +985,8 @@
+                                enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
+         duration_ms = _elapsed_ms(start)
+         _emit(result, duration_ms=duration_ms)
+-        return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
++        return _apply_transform_tool_result_hook(
++            function_name, function_args, result, duration_ms, ids, consumer_capabilities)
+ 
+     except Exception as e:
+         error_msg = f"Error executing {function_name}: {str(e)}"
