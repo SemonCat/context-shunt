@@ -541,6 +541,12 @@ class ShuntSession:
             "coverage, an exact count, or citation evidence. Use the retained handles "
             "with context_shunt_inspect for exact bounded evidence."
         )
+        if result.envelope.get("failure_detail") == "REQUEST_OVER_TOKEN_CAP":
+            guidance += (
+                " Retrying the same full-source request would repeat the token-cap "
+                "failure; keep these handles and use deterministic inspect "
+                "search/aggregate, or narrow the selector and question for one refined read."
+            )
         legacy_compaction = {
             "deterministic": True,
             "source_id": entry.source_id,
@@ -1294,6 +1300,7 @@ class ShuntSession:
         *,
         internal_source_id: str | None = None,
         upstream_truncated: bool = False,
+        consumer_route: str = "both",
     ):
         """Capture-then-pointer for one complete tool result.
 
@@ -1315,6 +1322,7 @@ class ShuntSession:
                 result,
                 internal_source_id=internal_source_id,
                 upstream_truncated=upstream_truncated,
+                consumer_route=consumer_route,
             )
         except Exception as raw_exc:
             if (
@@ -1385,6 +1393,56 @@ class ShuntSession:
             )
         self._metrics.count("tool_result_capture_outcome", {"result": outcome.action})
         return outcome
+
+    def compact_tool_result_without_consumer(
+        self, request_id: str, result: str, *, upstream_truncated: bool = False
+    ) -> dict[str, Any]:
+        """Publish and account bounded navigation when no pointer consumer is proven.
+
+        No snapshot is retained and no handle is minted. This is intentionally separate
+        from :meth:`post_tool_result`: capturing first and hiding the resulting pointer
+        would leave misleading pointer accounting and inaccessible retained bytes.
+        """
+        data = result.encode("utf-8")
+        operation_id = new_operation_id()
+        env = compact_failure(
+            request_id,
+            data,
+            ShuntError("SPILL_FAILED", "CONSUMER_UNAVAILABLE", retryable=False),
+            limits=self.config.limits,
+            hard_chars=self.config.reader.legacy_compaction_max_chars,
+        )
+        env["accounting_id"] = operation_id
+        if env.get("code") == "LEGACY_COMPACTED":
+            env["guidance"] = (
+                "Deterministic incumbent compaction because this invocation did not prove "
+                "that the caller can reach the direct or scoped deferred Shunt consumers. "
+                "No reusable handle or raw payload was retained. Treat the summary only as "
+                "bounded navigation, never as an exact count or complete answer."
+            )
+        published = enforce_or_fixed(env, self.config.limits)
+        baseline = (
+            Baseline.host_truncated(len(data), limits=self.config.limits)
+            if upstream_truncated
+            else Baseline.withheld_payload(len(data), limits=self.config.limits)
+        )
+        self._record(
+            operation_id=operation_id,
+            kind=OperationKind.SPILL,
+            envelope=published,
+            baseline=baseline,
+            baseline_credited=True,
+            reader=ReaderCost.none(),
+            boundary=(
+                DeliveryBoundary.EXTRACTION
+                if published.get("code") == "LEGACY_COMPACTED"
+                else DeliveryBoundary.ENVELOPE
+            ),
+        )
+        self._metrics.count(
+            "tool_result_capture_outcome", {"result": "legacy_compaction_no_consumer"}
+        )
+        return published
 
     # -- accounting --------------------------------------------------------
     def reject_tool_call(

@@ -327,6 +327,28 @@ def error_envelope(
         if snapshot_mismatch
         else recovery_for(exc.code, handles_valid=handles_valid)
     )
+    detail_guidance = {
+        "BAD_SELECTOR": (
+            "Keep the same retained handle and retry with exactly one documented selector. "
+            "Use aggregate for bounded exact JSON counts, search for literal navigation, "
+            "or lines/bytes for exact evidence; do not recapture the source."
+        ),
+        "POINTER_NOT_FOUND": (
+            "Keep the same retained handle. Correct the RFC 6901 JSON pointer (escape '~' "
+            "as '~0' and '/' as '~1'), or use bounded search/lines to locate it; do not "
+            "recapture the source."
+        ),
+        "UTF8_RANGE_BOUNDARY": (
+            "Keep the same retained handle and adjust the 0-based half-open byte range so "
+            "both offsets fall on UTF-8 character boundaries. A bounded literal search can "
+            "locate a safe window without a source re-read."
+        ),
+        "REQUEST_OVER_TOKEN_CAP": (
+            "Keep the retained handles. Use deterministic inspect search/aggregate for exact "
+            "work, or narrow the selector/question before a refined read; do not recapture "
+            "or retry the same full-source request."
+        ),
+    }.get(exc.detail or "")
     return build(
         request_id=request_id,
         status=status,
@@ -339,6 +361,8 @@ def error_envelope(
             if invalid_snapshot
             else "The source_id exists, but the snapshot_id does not match its immutable snapshot. Reuse the exact source_id/snapshot_id pair from the original pointer; do not repair or guess the hash. Recapture only if that exact original pair is expired or the source was intentionally refreshed."
             if snapshot_mismatch
+            else detail_guidance
+            if detail_guidance
             else "Check the tool argument schema and retry with corrected arguments."
             if exc.code == "INVALID_REQUEST"
             else None

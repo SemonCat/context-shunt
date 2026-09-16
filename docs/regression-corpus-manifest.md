@@ -80,6 +80,24 @@ One gap remains outside an in-repo core fix and is a separately reviewable host 
 [`docs/proposal-deterministic-aggregation-and-reuse.md`](proposal-deterministic-aggregation-and-reuse.md)
 is retained as the implementation/design record, not as an unimplemented proposal.
 
+## 2026-09-16 bounded rollback continuation
+
+[`evals/production-regressions/corpus.json`](../evals/production-regressions/corpus.json)
+records all 18 technical outcome classes from the bounded rollback metadata as synthetic
+rows with no production source prose. It separately records request/tool/operation identity,
+exact-query reuse versus genuinely new queries, legitimate deterministic inspection after a
+reader failure, incomplete usage accounting, and main-context versus total-token metrics.
+The initial 53 accounting spills versus 52 transcript spills remains explicitly unresolved;
+the later 53-transcript-spill snapshot has a different cutoff and is not used as a count
+adjustment. Only three raw sources/artifacts survived retention, so the fixture makes no
+exact raw-replay claim and truthfully marks expired payloads unavailable.
+
+The offline synthetic replay is the marked test
+`packages/core-py/tests/test_production_regression_corpus.py`; it reads only the committed
+synthetic JSON. The private raw corpus, case index, and remote backup are neither imported
+nor required. Exact raw replay remains possible only for separately retained sources under
+the offline operator boundary and is not claimed by this repository.
+
 ## What this manifest is not
 
 This is not a claim that every possible inefficiency in the five sessions has been found;

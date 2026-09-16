@@ -1,0 +1,69 @@
+{
+  "schema": "context_shunt.synthetic_production_regressions.v1",
+  "provenance": {
+    "source": "synthetic_from_bounded_2026-09-16_metadata",
+    "contains_source_prose": false,
+    "exact_raw_replay_claimed": false,
+    "raw_payload_default": "unavailable"
+  },
+  "observed_outcome_classes": [
+    {"id":"answered-complete","tool":"context_shunt_read","status":"ok","code":"ANSWERED","failure_detail":null,"complete":true,"omissions":[],"label":"model_generated_answer","usage_complete":true,"citations_verified":true},
+    {"id":"answered-partial-timeout","tool":"context_shunt_read","status":"partial","code":"ANSWERED","failure_detail":null,"complete":false,"omissions":["TIMEOUT"],"label":"model_generated_answer","usage_complete":false,"citations_verified":true},
+    {"id":"answered-partial-budget-timeout","tool":"context_shunt_read","status":"partial","code":"ANSWERED","failure_detail":null,"complete":false,"omissions":["BUDGET_EXCEEDED","TIMEOUT"],"label":"model_generated_answer","usage_complete":false,"citations_verified":true},
+    {"id":"no-match-complete-model","tool":"context_shunt_read","status":"ok","code":"NO_MATCH","failure_detail":null,"complete":true,"omissions":[],"label":"model_generated_answer","usage_complete":true,"citations_verified":true},
+    {"id":"no-match-complete-no-output","tool":"context_shunt_read","status":"ok","code":"NO_MATCH","failure_detail":null,"complete":true,"omissions":[],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"no-match-partial-timeout","tool":"context_shunt_read","status":"partial","code":"NO_MATCH","failure_detail":null,"complete":false,"omissions":["TIMEOUT"],"label":"model_generated_answer","usage_complete":false,"citations_verified":true},
+    {"id":"legacy-availability-timeout","tool":"context_shunt_read","status":"partial","code":"LEGACY_COMPACTED","failure_detail":"AVAILABILITY_EXHAUSTED","complete":false,"omissions":["TIMEOUT","UNKNOWN_REMAINDER"],"label":"legacy_compaction","usage_complete":false,"citations_verified":false},
+    {"id":"legacy-model-call","tool":"context_shunt_read","status":"partial","code":"LEGACY_COMPACTED","failure_detail":"MODEL_CALL","complete":false,"omissions":["UNKNOWN_REMAINDER"],"label":"legacy_compaction","usage_complete":false,"citations_verified":false},
+    {"id":"legacy-model-call-timeout","tool":"context_shunt_read","status":"partial","code":"LEGACY_COMPACTED","failure_detail":"MODEL_CALL","complete":false,"omissions":["TIMEOUT","UNKNOWN_REMAINDER"],"label":"legacy_compaction","usage_complete":false,"citations_verified":false},
+    {"id":"legacy-no-valid-evidence","tool":"context_shunt_read","status":"partial","code":"LEGACY_COMPACTED","failure_detail":"NO_VALID_EVIDENCE","complete":false,"omissions":["UNKNOWN_REMAINDER"],"label":"legacy_compaction","usage_complete":true,"citations_verified":false},
+    {"id":"inspect-complete","tool":"context_shunt_inspect","status":"ok","code":"EXTRACTED","failure_detail":null,"complete":true,"omissions":[],"label":"deterministic_extraction","usage_complete":true,"citations_verified":true},
+    {"id":"inspect-partial","tool":"context_shunt_inspect","status":"partial","code":"EXTRACTED","failure_detail":null,"complete":false,"omissions":["UNKNOWN_REMAINDER"],"label":"deterministic_extraction","usage_complete":true,"citations_verified":true},
+    {"id":"inspect-bad-selector","tool":"context_shunt_inspect","status":"error","code":"INVALID_REQUEST","failure_detail":"BAD_SELECTOR","complete":false,"omissions":[],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"inspect-pointer-not-found","tool":"context_shunt_inspect","status":"error","code":"INVALID_REQUEST","failure_detail":"POINTER_NOT_FOUND","complete":false,"omissions":[],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"inspect-utf8-boundary","tool":"context_shunt_inspect","status":"error","code":"INVALID_REQUEST","failure_detail":"UTF8_RANGE_BOUNDARY","complete":false,"omissions":[],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"request-token-cap","tool":"context_shunt_read","status":"error","code":"LIMIT_EXCEEDED","failure_detail":"REQUEST_OVER_TOKEN_CAP","complete":false,"omissions":[],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"request-token-cap-after-budget","tool":"context_shunt_read","status":"error","code":"LIMIT_EXCEEDED","failure_detail":"REQUEST_OVER_TOKEN_CAP","complete":false,"omissions":["BUDGET_EXCEEDED"],"label":"no_model_output","usage_complete":true,"citations_verified":true},
+    {"id":"deferred-direct-unavailable","tool":"host_dispatch","status":"error","code":"TOOL_UNAVAILABLE","failure_detail":"DIRECT_CALL_NOT_REGISTERED","complete":false,"omissions":[],"label":"host_boundary","usage_complete":true,"citations_verified":false}
+  ],
+  "correlation": {
+    "synthetic_identity": {
+      "tool_call_id": "tc_synthetic_001",
+      "request_id": "req_tc_synthetic_001",
+      "operation_id": "acc_1111111111111111"
+    },
+    "transcript_representations": ["direct_envelope", "json_string", "host_error_wrapper"],
+    "join_by_identity_not_count": true
+  },
+  "reuse_cases": [
+    {"id":"same-handle-exact-query","same_snapshot":true,"same_question":true,"cache_reused":true,"new_provider_attempts":0},
+    {"id":"same-handle-new-query","same_snapshot":true,"same_question":false,"cache_reused":false,"new_provider_attempts":"allowed"},
+    {"id":"deterministic-after-reader-failure","same_snapshot":true,"operation":"inspect","legitimate_recovery":true,"new_provider_attempts":0},
+    {"id":"producer-requery","same_snapshot":"host_signal_required","cache_reused":false,"correlation":"unknown_without_host_event"}
+  ],
+  "bookkeeping": {
+    "initial_cutoff": {"accounting_spills":53,"transcript_spills":52,"reconciled":false},
+    "newer_cutoff": {"accounting_events":131,"transcript_spills":53,"reconciled":false},
+    "cutoffs_are_distinct": true,
+    "count_adjustment_is_not_reconciliation": true,
+    "token_metrics": {
+      "main_context_tokens_saved_estimate": 706517,
+      "reader_input_tokens_reported": 1192376,
+      "reader_output_tokens_reported": 44265,
+      "reader_total_tokens_reported": 1236641,
+      "net_tokens_saved_estimate": -530124,
+      "attempts_started": 138,
+      "attempts_usage_complete": 119,
+      "usage_complete": false
+    }
+  },
+  "retention": {
+    "captured_sessions": 39,
+    "captured_messages": 2688,
+    "retained_raw_sources": 3,
+    "retained_raw_artifacts": 3,
+    "expired_payloads": "unavailable",
+    "exact_replay_scope": "only_explicitly_retained_sources",
+    "synthetic_replay_available": true
+  }
+}

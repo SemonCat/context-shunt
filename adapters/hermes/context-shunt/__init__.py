@@ -706,7 +706,7 @@ def transform_tool_result(
     tool_call_id: str = "",
     **kwargs,
 ) -> str | None:
-    """Capture an eligible oversized tool result and replace it with a bounded pointer.
+    """Replace an eligible oversized result with a bounded consumable representation.
 
     Registered only when the capability probe reports ``tool_result_capture`` supported -
     which requires an explicit operator attestation (see ``_tool_result_capture_mode``),
@@ -716,9 +716,10 @@ def transform_tool_result(
     Two-step by design, not by choice: the host does not forward the conversation's
     ``user_task`` to this hook at all (verified against the same live host this adapter's
     ordering evidence comes from), so there is no question here to answer with. This
-    handler only ever captures and points; ``context_shunt_read`` - which does carry an
-    explicit question - answers it afterward, exactly like the artifact-import boundary's
-    own capture-then-ask shape.
+    When caller reachability is proven, this handler captures and points;
+    ``context_shunt_read`` - which does carry an explicit question - answers it afterward,
+    exactly like the artifact-import boundary's own capture-then-ask shape. Without that
+    proof, it publishes bounded deterministic compaction and retains no pointer payload.
 
     Protected and unclassified identities pass verbatim before any capture work. Only
     explicitly eligible results reach measurement. For these candidates, never raises,
@@ -755,9 +756,31 @@ def transform_tool_result(
         return None
 
     request_id = _request_id({"tool_call_id": tool_call_id, **kwargs})
+    consumer_route = _consumer_route(kwargs.get("consumer_capabilities"))
+    if consumer_route is None:
+        try:
+            return _block_message(
+                _session(task_id, session_id).compact_tool_result_without_consumer(
+                    request_id,
+                    result,
+                    upstream_truncated=bool(kwargs.get("upstream_truncated", False)),
+                )
+            )
+        except Exception:
+            return _block_message(
+                compact_failure(
+                    request_id,
+                    result.encode("utf-8"),
+                    ShuntError("SPILL_FAILED", "CONSUMER_UNAVAILABLE", retryable=False),
+                    limits=_config.limits,
+                    hard_chars=_config.reader.legacy_compaction_max_chars,
+                )
+            )
     try:
         session = _session(task_id, session_id)
-        outcome = session.post_tool_result(request_id, result)
+        outcome = session.post_tool_result(
+            request_id, result, consumer_route=consumer_route
+        )
     except Exception as raw_exc:
         failure = (
             raw_exc
@@ -793,6 +816,41 @@ def transform_tool_result(
             )
         )
     return _block_message(outcome.envelope)
+
+
+def _consumer_route(raw: Any) -> str | None:
+    """Return a proven direct/deferred route from bounded host-supplied facts.
+
+    Current Hermes does not pass this descriptor to ``transform_tool_result``. That
+    absence deliberately returns ``None``: the adapter cannot reconstruct a restricted
+    session's toolsets from process-global registration without risking a scope bypass.
+    A future host may pass the session-scoped pre-assembly facts directly.
+    """
+    if not isinstance(raw, dict) or set(raw) - {"direct_tools", "deferred_tools"}:
+        return None
+
+    def names(value: Any) -> frozenset[str] | None:
+        if not isinstance(value, list) or len(value) > 128:
+            return None
+        normalized = []
+        for item in value:
+            name = normalize_tool_identity(item)
+            if not name or len(name) > 128:
+                return None
+            normalized.append(name)
+        return frozenset(normalized)
+
+    direct = names(raw.get("direct_tools"))
+    deferred = names(raw.get("deferred_tools"))
+    if direct is None or deferred is None:
+        return None
+    consumers = {"context_shunt_read", "context_shunt_inspect"}
+    if consumers <= direct:
+        return "direct"
+    bridges = {"tool_search", "tool_describe", "tool_call"}
+    if bridges <= direct and consumers <= deferred:
+        return "deferred"
+    return None
 
 
 def on_session_end(session_id: str = "", **kwargs):
@@ -934,7 +992,53 @@ def _tool_invocation_args(
             host[key] = value
         else:
             public[key] = value
+    if tool == "context_shunt_read":
+        public = _repair_stringified_handles(public)
     return {"tool": tool, **public}, host
+
+
+def _repair_stringified_handles(public: dict[str, Any]) -> dict[str, Any]:
+    """Repair only bounded JSON serialization accidents; strict validation follows.
+
+    Python literals, executable syntax and guessed identifiers are never accepted. The
+    ordinary public schema remains authoritative after this transport normalization.
+    """
+    raw = public.get("handles")
+    if isinstance(raw, str):
+        try:
+            raw_bytes = len(raw.encode("utf-8"))
+        except UnicodeEncodeError:
+            return public
+        if raw_bytes > 16_384:
+            return public
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError):
+            return public
+        if isinstance(decoded, dict):
+            decoded = [decoded]
+        if not isinstance(decoded, list):
+            return public
+        return {**public, "handles": decoded}
+    if isinstance(raw, list) and any(isinstance(item, str) for item in raw):
+        if len(raw) > 8:
+            return public
+        repaired = []
+        try:
+            for item in raw:
+                if isinstance(item, str):
+                    try:
+                        item_bytes = len(item.encode("utf-8"))
+                    except UnicodeEncodeError:
+                        return public
+                    if item_bytes > 4096:
+                        return public
+                    item = json.loads(item)
+                repaired.append(item)
+        except (TypeError, ValueError):
+            return public
+        return {**public, "handles": repaired}
+    return public
 
 
 def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -1152,7 +1256,9 @@ READER_TOOL_SCHEMA = {
         "matched to snapshot bytes; that check does not prove the prose. Uses a "
         "reader model. Shunt-owned failures automatically return labelled bounded deterministic "
         "legacy compaction with incomplete coverage. Read-only. Pass paths for a first look, or "
-        "handles to ask a sharper question about a snapshot you already hold."
+        "handles to ask a sharper semantic question about a snapshot you already hold. For "
+        "structured logs, metrics, exact counts, distinct values, or grouping, prefer "
+        "context_shunt_inspect aggregation so no semantic reader fan-out is required."
     ),
     "parameters": _registered_tool_parameters("readArgs"),
 }
@@ -1162,7 +1268,9 @@ INSPECT_TOOL_SCHEMA = {
     "description": (
         "Return exact text or bounded JSON aggregation from a snapshot you already hold: a "
         "line range, byte range, literal-search hits, or deterministic count/distinct/grouping. "
-        "No model is involved, so the result is source evidence rather than a summary. Each "
+        "Use aggregation for structured logs, metrics, and exact counting; use the reader for "
+        "genuinely semantic questions. No model is involved, so the result is source evidence "
+        "rather than a summary. Each "
         "page is capped at 16 KiB and counts against a "
         "cumulative disclosure budget, so a large file cannot be paged into a full copy; a "
         "file small enough to fit that budget can be returned in full. For minified one-line "

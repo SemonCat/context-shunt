@@ -29,10 +29,12 @@ protection for every possible read tool; disable uncontrolled tools if complete 
 
 ### Hermes tool results: capture first, ask afterward
 
-`tool_result_capture` intercepts eligible oversized MCP/tool
-results at `transform_tool_result`, before they enter the main-model context. It stores the
-full content received as an immutable artifact and replaces the result with a bounded opaque
-handle/pointer and metadata. Capture makes **zero model calls** and produces no heuristic summary.
+`tool_result_capture` intercepts eligible oversized MCP/tool results at
+`transform_tool_result`, before they enter the main-model context. A pointer is returned only
+when the hook invocation carries a scoped consumer-capability descriptor proving that the
+caller can reach both read and inspect, directly or through the complete deferred-tool bridge.
+Without that proof, the adapter returns bounded deterministic legacy compaction, creates no
+handle, and retains no pointer-only payload. Capture makes **zero model calls**.
 
 The hook **does not receive the user's question**. Reading is a separate step: the main
 model must call `context_shunt_read` with an explicit question and the artifact handle.
@@ -56,11 +58,14 @@ eligible oversized tool result          oversized local read
               main model can inspect bounded source ranges
 ```
 
-The Hermes hook currently captures oversized **string** results; structured/multimodal
+The Hermes hook currently receives oversized **string** results; structured/multimodal
 blocks pass through. It cannot restore content a producer already truncated. Hook ordering
-was inspected on one Hermes 0.21.1 host, not proven for every installation. New deployments
-must verify their own ordering and set both `tool_result_capture.enabled: true` and
-`tool_result_capture.host_ordering_verified_locally: true`. The adapter returns bounded legacy compaction when Shunt owns an eligible oversized capture failure; unsafe sources remain explicit refusals. It never returns the full raw result as fallback.
+was inspected on one Hermes 0.21.1 host, not proven for every installation. That host does
+not forward its session tool scope to `transform_tool_result`, so current invocations cannot
+prove pointer consumability and take the no-handle legacy-compaction path. A future host seam
+must forward an immutable per-invocation capability descriptor; the adapter never widens the
+caller's tool scope or treats global registration as proof. Capture remains off by default.
+Unsafe sources remain explicit refusals, and raw results are never returned as fallback.
 See the [capability evidence](docs/capability-matrix.md) and [cutover procedure](docs/acceptance.md#tool_result_capture-cutover-on-hermes).
 
 `suma_post_tool` is only a deprecated configuration migration alias, never the product name.

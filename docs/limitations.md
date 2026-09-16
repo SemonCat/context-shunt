@@ -108,6 +108,19 @@ capture is disabled at this host seam, even if configured. Results pass through,
 pointer-delivery or savings claim. A future host seam needs end-to-end replacement proof;
 see the [capability matrix](capability-matrix.md#openclaw).
 
+## Hermes result hooks cannot currently prove consumer reachability
+
+The inspected Hermes result-transform contract supplies the tool name, arguments, result,
+identifiers, duration, and status, but not the calling session's enabled/disabled toolsets.
+Global registration cannot prove that a restricted cron caller can invoke the registered
+reader or inspector, either directly or through deferred-tool wrappers. The adapter therefore
+does not publish or retain a pointer unless the individual hook invocation carries an
+explicit scoped consumer-capability descriptor. On the current host contract, eligible
+oversized results degrade to bounded deterministic no-handle legacy compaction. This is an
+availability mitigation, not equivalent full-source recovery. Enabling pointer capture for
+restricted callers requires a Hermes-core contract change that forwards immutable session
+capability; it cannot be repaired by broadening tool privileges in this plugin.
+
 ## Model attribution has a ceiling, and it is not `actual`
 
 Neither host proves which model generated the tokens.

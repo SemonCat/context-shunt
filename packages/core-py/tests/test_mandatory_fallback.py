@@ -13,7 +13,7 @@ from context_shunt.guard import enforce
 from context_shunt.legacy_compact import compact_tool_result
 from context_shunt.provider import FallbackChainProvider, HostBridgeProvider
 from context_shunt.session import ShuntSession
-from tests.support import FakeLuna, make_capability, make_config
+from tests.support import FakeLuna, answer_json, make_capability, make_config
 from tests.test_gate_legacy_compact_fallback import _no_evidence_luna, setup
 
 pytestmark = pytest.mark.gate_legacy_compact
@@ -235,7 +235,6 @@ def test_inspect_owned_failure_compacts_and_charges(tmp_path, monkeypatch, failu
         ("MODEL_ERROR", "MODEL_SUBSTITUTED"),
         ("DISCLOSURE_EXHAUSTED", None),
         ("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP"),
-        ("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP"),
         ("LIMIT_EXCEEDED", "UNKNOWN_CAP"),
         ("STORE_FAILED", "BLOB_CONTENT_MISMATCH"),
         ("HOST_UNSAFE", None),
@@ -249,6 +248,51 @@ def test_policy_boundary_is_not_legacy(code, detail):
     assert not fallback_allowed(code, detail)
     env = compact_failure("req_refused", b"innocent source", ShuntError(code, detail))
     assert env["code"] == code and "legacy_compaction" not in env
+    enforce(env)
+
+
+def test_request_token_cap_is_a_bounded_implementation_fallback():
+    from context_shunt.errors import fallback_allowed
+    from context_shunt.fallback import compact_failure
+
+    assert fallback_allowed("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP")
+    env = compact_failure(
+        "req_cap",
+        b"synthetic metric=7\n" * 200,
+        ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP"),
+    )
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["failure_detail"] == "REQUEST_OVER_TOKEN_CAP"
+    assert env["coverage"]["complete"] is False
+    assert env["recovery"]["handles_valid"] is False
+    enforce(env)
+
+
+def test_request_token_cap_after_citation_repair_preserves_bounded_recovery(tmp_path):
+    rejected = answer_json(
+        "The source reports a failure [c1].",
+        [{"id": "c1", "line_start": 1, "line_end": 1, "quote": "not present"}],
+    )
+    provider = FakeLuna(
+        replies=[
+            rejected,
+            ShuntError("LIMIT_EXCEEDED", "REQUEST_OVER_TOKEN_CAP"),
+        ]
+    )
+    session, entry, request, _ = setup(tmp_path, provider)
+
+    env = session.read(request)
+
+    assert provider.call_count == 2
+    assert env["code"] == "LEGACY_COMPACTED"
+    assert env["failure_detail"] == "REQUEST_OVER_TOKEN_CAP"
+    assert env["legacy_compaction"]["original_failure"] == "LIMIT_EXCEEDED"
+    assert len(env["sources"]) == 1
+    assert env["sources"][0]["source_id"] == entry.source_id
+    assert env["sources"][0]["snapshot_id"] == entry.snapshot.snapshot_id
+    assert env["coverage"]["complete"] is False
+    assert env["recovery"]["handles_valid"] is True
+    assert "Retrying the same full-source request" in env["guidance"]
     enforce(env)
 
 

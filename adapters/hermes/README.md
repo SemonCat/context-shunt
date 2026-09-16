@@ -14,10 +14,12 @@ positively established large unbounded reads on allowed sources.
 
 This adapter registers up to four read-only tools, no writer, and — only with an explicit
 operator attestation (`tool_result_capture.host_ordering_verified_locally: true`) — one
-`transform_tool_result` hook that captures an eligible oversized tool result and replaces it
-with a bounded pointer envelope before it reaches context. That hook never answers a
-question (Hermes does not forward one to it); a captured result is answered afterward
-through `context_shunt_read` like any other handle. See
+`transform_tool_result` hook. The hook emits a pointer only when its invocation includes a
+scoped consumer descriptor proving direct read+inspect access or the complete deferred-tool
+bridge plus deferred read+inspect access. The currently inspected Hermes host does not pass
+that descriptor, so eligible oversized results receive bounded no-handle legacy compaction
+instead of an unusable pointer. The adapter never infers session reachability from global
+tool registration and never widens tool privileges. See
 [`docs/acceptance.md`](../../docs/acceptance.md#tool_result_capture-cutover-on-hermes) for
 the cutover plan.
 
@@ -99,6 +101,10 @@ provenance verification; verify server configuration/collisions before adding an
 and recheck when that configuration changes. No Hermes/package patch is required.
 
 Small and structured/multimodal results remain unchanged. Once an eligible string is
-measured oversized, a Shunt-owned internal capture failure returns bounded `LEGACY_COMPACTED` after independent source safety checks.
+measured oversized, absent consumer proof or a Shunt-owned internal capture failure returns
+bounded `LEGACY_COMPACTED` after independent source safety checks. The absent-consumer path
+does not mint a handle or retain the raw payload. A future Hermes core change must forward
+the immutable invocation-scoped tool capability to the transform hook before pointer capture
+can be used safely for restricted cron sessions.
 `skill_view` also remains exempt from the pre-read gate; a generic `read_file` of a large
 `SKILL.md` remains subject to the normal gate and capture. OpenClaw behavior is unchanged.

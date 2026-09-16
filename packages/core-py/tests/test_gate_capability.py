@@ -41,6 +41,18 @@ pytestmark = pytest.mark.gate_capability
 
 REPO = Path(__file__).resolve().parents[3]
 ADAPTER_PATH = REPO / "adapters" / "hermes" / "context-shunt" / "__init__.py"
+DIRECT_CONSUMER = {
+    "consumer_capabilities": {
+        "direct_tools": ["context_shunt_read", "context_shunt_inspect"],
+        "deferred_tools": [],
+    }
+}
+DEFERRED_CONSUMER = {
+    "consumer_capabilities": {
+        "direct_tools": ["tool_search", "tool_describe", "tool_call"],
+        "deferred_tools": ["context_shunt_read", "context_shunt_inspect"],
+    }
+}
 
 
 def _load_adapter():
@@ -282,7 +294,11 @@ def test_transform_tool_result_never_returns_none_for_an_oversized_capture_failu
 
     module._sessions["tcap"] = _BoomSession()
     out = module.transform_tool_result(
-        tool_name="search_files", result=oversized, task_id="tcap", session_id="tcap"
+        tool_name="search_files",
+        result=oversized,
+        task_id="tcap",
+        session_id="tcap",
+        **DIRECT_CONSUMER,
     )
     assert out is not None
     assert oversized not in out
@@ -340,7 +356,11 @@ def test_skill_content_cannot_exempt_ordinary_results(tmp_path, tool_name):
             == "block"
         )
     out = module.transform_tool_result(
-        tool_name=tool_name, args={"path": str(path)}, result=payload, session_id="ordinary"
+        tool_name=tool_name,
+        args={"path": str(path)},
+        result=payload,
+        session_id="ordinary",
+        **DIRECT_CONSUMER,
     )
     assert out is not None
     assert json.loads(out)["code"] == "SPILLED"
@@ -375,7 +395,11 @@ def test_transform_tool_result_spills_an_eligible_string_result(tmp_path):
     module.register(FakeCtx(config, llm=FakeLlm()))
     oversized = "log line\n" * 50_000
     out = module.transform_tool_result(
-        tool_name="search_files", result=oversized, task_id="tspill", session_id="tspill"
+        tool_name="search_files",
+        result=oversized,
+        task_id="tspill",
+        session_id="tspill",
+        **DIRECT_CONSUMER,
     )
     assert out is not None
     envelope = json.loads(out)
@@ -389,8 +413,8 @@ def _guidance_json(guidance: str, label: str):
     return json.JSONDecoder().raw_decode(guidance[start:])[0]
 
 
-def test_spilled_pointer_guidance_drives_registered_reader_and_inspect(tmp_path):
-    """An actual oversized Hermes result carries executable direct/deferred handoffs."""
+def test_spilled_pointer_guidance_drives_registered_direct_reader_and_inspect(tmp_path):
+    """A direct-capable caller receives only executable direct handoffs."""
     module = _load_adapter()
     config = _config(tmp_path)
     config["tool_result_capture"] = {
@@ -408,6 +432,7 @@ def test_spilled_pointer_guidance_drives_registered_reader_and_inspect(tmp_path)
             result=payload,
             task_id="handoff",
             session_id="handoff",
+            **DIRECT_CONSUMER,
         )
     )
     assert pointer["code"] == "SPILLED"
@@ -417,24 +442,13 @@ def test_spilled_pointer_guidance_drives_registered_reader_and_inspect(tmp_path)
     handle = {key: pointer["pointer"][key] for key in ("source_id", "snapshot_id")}
 
     read_args = _guidance_json(guidance, "context_shunt_read direct arguments: ")
-    read_search = _guidance_json(guidance, "reader tool_search arguments: ")
-    read_describe = _guidance_json(guidance, "reader tool_describe arguments: ")
-    read_call = _guidance_json(guidance, "reader tool_call arguments: ")
     inspect_args = _guidance_json(guidance, "context_shunt_inspect direct arguments: ")
-    inspect_search = _guidance_json(guidance, "inspect tool_search arguments: ")
-    inspect_describe = _guidance_json(guidance, "inspect tool_describe arguments: ")
-    inspect_call = _guidance_json(guidance, "inspect tool_call arguments: ")
 
     assert read_args["handles"] == [handle]
     assert read_args["question"] == "<REPLACE_WITH_YOUR_SPECIFIC_QUESTION>"
-    assert read_search == {"query": "context_shunt_read", "limit": 5}
-    assert read_describe == {"name": "context_shunt_read"}
-    assert read_call == {"name": "context_shunt_read", "arguments": read_args}
     assert inspect_args["source_id"] == handle["source_id"]
     assert inspect_args["snapshot_id"] == handle["snapshot_id"]
-    assert inspect_search == {"query": "context_shunt_inspect", "limit": 5}
-    assert inspect_describe == {"name": "context_shunt_inspect"}
-    assert inspect_call == {"name": "context_shunt_inspect", "arguments": inspect_args}
+    assert "tool_search" not in guidance and "tool_call" not in guidance
     assert guidance.index("consume this existing pointer") < guidance.index(
         "re-reading or searching the original source"
     )
@@ -461,6 +475,148 @@ def test_spilled_pointer_guidance_drives_registered_reader_and_inspect(tmp_path)
     )
     assert inspected["code"] == "EXTRACTED"
     assert "max_retries = 3" in inspected["extraction"]["segments"][0]["text"]
+
+
+def test_spilled_pointer_guidance_uses_scoped_deferred_wrappers(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    payload = "synthetic structured log\n" * 2000
+    pointer = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result=payload,
+            task_id="deferred",
+            session_id="deferred",
+            **DEFERRED_CONSUMER,
+        )
+    )
+    assert pointer["code"] == "SPILLED"
+    guidance = pointer["guidance"]
+    handle = {key: pointer["pointer"][key] for key in ("source_id", "snapshot_id")}
+    read_call = _guidance_json(guidance, "reader tool_call arguments: ")
+    inspect_call = _guidance_json(guidance, "inspect tool_call arguments: ")
+    assert read_call["name"] == "context_shunt_read"
+    assert read_call["arguments"]["handles"] == [handle]
+    assert inspect_call["name"] == "context_shunt_inspect"
+    assert inspect_call["arguments"]["source_id"] == handle["source_id"]
+    assert "context_shunt_read direct arguments" not in guidance
+
+
+@pytest.mark.parametrize(
+    "consumer_capabilities",
+    [
+        None,
+        {"direct_tools": ["terminal"], "deferred_tools": []},
+        {"direct_tools": ["tool_call"], "deferred_tools": ["context_shunt_read"]},
+        {"direct_tools": ["tool_search", "tool_describe", "tool_call"], "deferred_tools": []},
+    ],
+)
+def test_restricted_or_unproven_consumer_gets_summary_not_pointer(
+    tmp_path, consumer_capabilities
+):
+    """A cron/toolset mismatch must not strand the caller behind an opaque handle."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    kwargs = {} if consumer_capabilities is None else {
+        "consumer_capabilities": consumer_capabilities
+    }
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="synthetic log row\n" * 3000,
+            task_id="cron-terminal-only",
+            session_id="cron-terminal-only",
+            tool_call_id="tc-cron-001",
+            **kwargs,
+        )
+    )
+    assert out["code"] == "LEGACY_COMPACTED"
+    assert out["failure_detail"] == "CONSUMER_UNAVAILABLE"
+    assert out["recovery"]["handles_valid"] is False
+    assert out["sources"] == [] and "pointer" not in out
+    assert out["legacy_compaction"]["summary"]
+    assert out["request_id"] == "req_tc-cron-001"
+    stats = json.loads(module.context_shunt_stats(session_id="cron-terminal-only"))["stats"]
+    record = next(row for row in stats["records"] if row["operation_id"] == out["accounting_id"])
+    assert record["code"] == "LEGACY_COMPACTED"
+    assert record["delivery_boundary"] == "extraction"
+    assert record["baseline_kind"] == "full_payload_counterfactual"
+
+
+def test_unproven_consumer_safety_refusal_is_accounted_as_an_envelope(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+    }
+    module.register(FakeCtx(config, llm=FakeLlm()))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="aws_secret_access_key=" + "x" * 40_000,
+            session_id="cron-safety-refusal",
+        )
+    )
+
+    assert out["code"] == "UNSAFE_SOURCE"
+    assert "legacy_compaction" not in out
+    stats = json.loads(module.context_shunt_stats(session_id="cron-safety-refusal"))["stats"]
+    record = next(row for row in stats["records"] if row["operation_id"] == out["accounting_id"])
+    assert record["delivery_boundary"] == "envelope"
+
+
+def test_json_stringified_handles_are_repaired_before_strict_validation(tmp_path):
+    module = _load_adapter()
+    llm = FakeLlm()
+    module.register(FakeCtx(_config(tmp_path), llm=llm))
+    path = tmp_path / "ws" / "stringified.txt"
+    path.write_text("max_retries = 3\n")
+    initial = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?", paths=[str(path)], task_id="stringified"
+        )
+    )
+    handle = {key: initial["sources"][0][key] for key in ("source_id", "snapshot_id")}
+    refined = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?",
+            handles=json.dumps([handle]),
+            task_id="stringified",
+        )
+    )
+    assert refined["code"] == "ANSWERED"
+    assert refined["sources"][0]["source_id"] == handle["source_id"]
+
+    refused = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?",
+            handles=str([handle]),
+            task_id="stringified",
+        )
+    )
+    assert refused["code"] == "INVALID_REQUEST"
+    assert refused["failure_detail"] == "TOOL_ARGS_VIOLATION"
+
+    invalid_unicode = json.loads(
+        module.context_shunt_read(
+            question="What is the retry ceiling?",
+            handles="\ud800",
+            task_id="stringified",
+        )
+    )
+    assert invalid_unicode["code"] == "INVALID_REQUEST"
+    assert invalid_unicode["failure_detail"] == "TOOL_ARGS_VIOLATION"
 
 
 def test_public_inspect_tool_aggregates_a_captured_minified_loki_result(tmp_path):
@@ -505,6 +661,7 @@ def test_public_inspect_tool_aggregates_a_captured_minified_loki_result(tmp_path
             result=body,
             task_id="aggregate-public",
             session_id="aggregate-public",
+            **DIRECT_CONSUMER,
         )
     )
     handle = spilled["sources"][0]
@@ -1162,6 +1319,9 @@ def test_inspect_recovers_an_oversized_single_line_tool_result_through_the_real_
     )
     assert bad_cut["code"] == "INVALID_REQUEST"
     assert bad_cut["failure_detail"] == "UTF8_RANGE_BOUNDARY"
+    assert "UTF-8" in bad_cut["guidance"]
+    assert "same retained handle" in bad_cut["guidance"]
+    assert "without a source re-read" in bad_cut["guidance"]
 
     marker_end = marker_start + len(marker.encode("utf-8"))
     exact = json.loads(
@@ -1631,7 +1791,10 @@ def test_allowlisted_mcp_resource_capture_recovery_and_accounting(tmp_path):
     payload = "max_retries = 3\n" + "resource data line\n" * 2000
     pointer = json.loads(
         module.transform_tool_result(
-            tool_name="mcp__x__read_resource", result=payload, session_id="resource"
+            tool_name="mcp__x__read_resource",
+            result=payload,
+            session_id="resource",
+            **DIRECT_CONSUMER,
         )
     )
     assert pointer["code"] == "SPILLED"
@@ -1674,7 +1837,9 @@ def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch,
     monkeypatch.setattr(module, "_session", broken)
     for value in ("small", {"image": "x" * 30_000}):
         assert module.transform_tool_result(tool_name=tool_name, result=value) is None
-    out = module.transform_tool_result(tool_name=tool_name, result="x" * 30_000)
+    out = module.transform_tool_result(
+        tool_name=tool_name, result="x" * 30_000, **DIRECT_CONSUMER
+    )
     assert json.loads(out)["code"] == "LEGACY_COMPACTED"
     assert json.loads(out)["failure_detail"] == "INTERNAL_ERROR"
     assert json.loads(out)["sources"] == []

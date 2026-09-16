@@ -79,6 +79,7 @@ class SpillEngine:
         *,
         internal_source_id: str | None = None,
         upstream_truncated: bool = False,
+        consumer_route: str = "both",
     ) -> SpillOutcome:
         """Decide what a host should do with one complete tool result."""
         if not self._enabled:
@@ -176,6 +177,38 @@ class SpillEngine:
         def compact_json(value: Any) -> str:
             return json.dumps(value, separators=(",", ":"))
 
+        if consumer_route not in {"direct", "deferred", "both"}:
+            raise ValueError("unknown consumer route")
+        direct_guidance = (
+            "Ask with context_shunt_read direct arguments: "
+            f"{compact_json(read_args)}. Replace only {question_placeholder} with your "
+            "specific question; copy both IDs exactly. For precise bounded lines or exact "
+            "JSON counts instead, use context_shunt_inspect direct arguments: "
+            f"{compact_json(inspect_args)}. "
+        )
+        deferred_guidance = (
+            "Use reader tool_search arguments: "
+            f"{compact_json({'query': 'context_shunt_read', 'limit': 5})}; reader "
+            "tool_describe arguments: "
+            f"{compact_json({'name': 'context_shunt_read'})}; then reader tool_call "
+            "arguments: "
+            f"{compact_json({'name': 'context_shunt_read', 'arguments': read_args})}. "
+            "For precise bounded lines or exact JSON counts, use inspect tool_search "
+            "arguments: "
+            f"{compact_json({'query': 'context_shunt_inspect', 'limit': 5})}; inspect "
+            "tool_describe arguments: "
+            f"{compact_json({'name': 'context_shunt_inspect'})}; then inspect tool_call "
+            "arguments: "
+            f"{compact_json({'name': 'context_shunt_inspect', 'arguments': inspect_args})}. "
+        )
+        route_guidance = (
+            direct_guidance
+            if consumer_route == "direct"
+            else deferred_guidance
+            if consumer_route == "deferred"
+            else direct_guidance + "If the tools are deferred, " + deferred_guidance
+        )
+
         env = E.build(
             request_id=request_id,
             status="ok",
@@ -197,23 +230,9 @@ class SpillEngine:
             guidance=(
                 "The tool result was too large and was moved out of this conversation. "
                 "First consume this existing pointer; do not recover the spilled content by "
-                "re-reading or searching the original source. Ask with context_shunt_read "
-                f"direct arguments: {compact_json(read_args)}. Replace only "
-                f"{question_placeholder} with your specific question; copy both IDs exactly. "
-                "If deferred, use reader tool_search arguments: "
-                f"{compact_json({'query': 'context_shunt_read', 'limit': 5})}; reader "
-                "tool_describe arguments: "
-                f"{compact_json({'name': 'context_shunt_read'})}; then reader tool_call "
-                "arguments: "
-                f"{compact_json({'name': 'context_shunt_read', 'arguments': read_args})}. "
-                "For precise bounded lines instead, use context_shunt_inspect direct "
-                f"arguments: {compact_json(inspect_args)}. If deferred, use inspect "
-                "tool_search arguments: "
-                f"{compact_json({'query': 'context_shunt_inspect', 'limit': 5})}; inspect "
-                "tool_describe arguments: "
-                f"{compact_json({'name': 'context_shunt_inspect'})}; then inspect tool_call "
-                "arguments: "
-                f"{compact_json({'name': 'context_shunt_inspect', 'arguments': inspect_args})}. "
+                "re-reading or searching the original source. "
+                + route_guidance
+                +
                 "Legitimate bounded source searches remain available afterward if more "
                 "navigation is needed."
             ),
