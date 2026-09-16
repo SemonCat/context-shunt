@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -47,7 +48,12 @@ RELEVANT_FILES = (
 )
 
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "evals"))
 import run as local_benchmark  # noqa: E402
+from evidence_binding import (  # noqa: E402
+    non_evidence_dirty_paths,
+    source_manifest_sha256,
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -69,14 +75,25 @@ def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
     call is started.  Ignored runtime caches and installed dependencies are not source
     inputs owned by either checkout.
     """
-    dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
-    if dirty:
-        raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
-    return {
+    if root.resolve() == ROOT.resolve():
+        dirty_paths = non_evidence_dirty_paths(root)
+        if dirty_paths:
+            raise SystemExit(
+                f"NOT_RUN: {label} checkout has non-evidence changes: "
+                + ", ".join(dirty_paths[:5])
+            )
+    else:
+        dirty = _git(root, "status", "--porcelain=v1", "--untracked-files=all")
+        if dirty:
+            raise SystemExit(f"NOT_RUN: {label} checkout is not clean")
+    identity = {
         "commit": _git(root, "rev-parse", "HEAD"),
         "git_tree": _git(root, "rev-parse", "HEAD^{tree}"),
         "clean": True,
     }
+    if root.resolve() == ROOT.resolve():
+        identity["source_manifest_sha256"] = source_manifest_sha256(root)
+    return identity
 
 
 def _binding(host_root: Path, route: str) -> dict[str, Any]:
@@ -90,6 +107,7 @@ def _binding(host_root: Path, route: str) -> dict[str, Any]:
         "worktree_head": worktree["commit"],
         "worktree_git_tree": worktree["git_tree"],
         "worktree_checkout_clean": worktree["clean"],
+        "worktree_source_manifest_sha256": worktree["source_manifest_sha256"],
         "working_tree_relevant_files": list(RELEVANT_FILES),
         "working_tree_relevant_files_sha256": local_benchmark.digest_files(
             ROOT, list(RELEVANT_FILES)
@@ -355,6 +373,10 @@ def main() -> None:
         raise SystemExit(
             f"NOT_RUN: configured route must be the qualifying route {DEFAULT_ROUTE}"
         )
+    if not os.environ.get("CONTEXT_SHUNT_LUNA_BUDGET_DB"):
+        raise SystemExit(
+            "NOT_RUN: set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable USD 2 ledger"
+        )
     lane_evidence_path = HERE / "real-luna-lanes-latest.json"
     evidence_binding = _binding(host_root, route)
     current_package = ROOT / "packages" / "core-py" / "src"
@@ -414,6 +436,18 @@ def main() -> None:
             for lane in ("pre", "new")
         ),
     }
+    from bridges.openclaw_inhost import budget_evidence
+
+    usd_budget = budget_evidence()
+    try:
+        reserved_usd = Decimal(usd_budget["reserved_usd"])
+    except (InvalidOperation, KeyError):
+        errors.append("USD reservation evidence is malformed")
+    else:
+        if usd_budget.get("limit_usd") != "2" or not Decimal("0") <= reserved_usd <= Decimal("2"):
+            errors.append("cumulative USD 2 ceiling was not enforced")
+        if usd_budget.get("statuses", {}).get("bound_breach", 0):
+            errors.append("provider usage breached a pre-dispatch USD reservation")
     report = {
         "schema": "context_shunt.intent_reader_real_luna.v1",
         "evaluated_worktree_head": evidence_binding["worktree_head"],
@@ -443,6 +477,9 @@ def main() -> None:
                 "working_tree_relevant_files_sha256"
             ],
             "pre_git_tree": evidence_binding["pre_git_tree"],
+            "source_manifest_sha256": evidence_binding[
+                "worktree_source_manifest_sha256"
+            ],
         },
         "execution": {
             "legacy": "actual owned compact_tool_result route; no model applicable",
@@ -457,6 +494,7 @@ def main() -> None:
         "results": [row for lane in LANES for row in payloads[lane]["rows"]],
         "totals": {lane: _live_totals(payloads[lane]) for lane in LANES},
         "attempt_outcomes": attempt_outcomes,
+        "usd_budget": usd_budget,
         "parent_context_canary_sha256": hashlib.sha256(
             os.environ.get(
                 "CONTEXT_SHUNT_EVAL_PARENT_CONTEXT_CANARY",
@@ -469,6 +507,7 @@ def main() -> None:
             "CONTEXT_SHUNT_LUNA_EVAL=1 "
             'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT" '
             f"CONTEXT_SHUNT_OPENCLAW_ROUTE={route} "
+            'CONTEXT_SHUNT_LUNA_BUDGET_DB="$CONTEXT_SHUNT_LUNA_BUDGET_DB" '
             "CONTEXT_SHUNT_EVAL_PARENT_CONTEXT_CANARY=PRIVATE_PARENT_CONTEXT_CANARY_7f9070 "
             ".venv/bin/python evals/intent-reader-audit/real_run.py "
             "--json-output evals/intent-reader-audit/real-luna-latest.json "

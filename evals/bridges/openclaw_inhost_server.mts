@@ -58,6 +58,8 @@ const { getModelsCommandSecretTargetIds } =
   await import(`${HOST}/src/cli/command-secret-targets.js`);
 const { createRuntimeLlm } =
   await import(`${HOST}/src/plugins/runtime/runtime-llm.runtime.js`);
+const { resolveModelCostConfig, resolveModelCostConfigFingerprint } =
+  await import(`${HOST}/src/utils/usage-format.js`);
 
 const authoredCfg = await loadConfig();
 const { resolvedConfig: cfg } = await resolveCommandConfigWithSecrets({
@@ -73,6 +75,37 @@ if (routeSlash <= 0 || routeSlash === ROUTE.length - 1) {
   process.stderr.write("CONTEXT_SHUNT_OPENCLAW_ROUTE must be <provider>/<model>\n");
   process.exit(2);
 }
+const routeProvider = ROUTE.slice(0, routeSlash);
+const routeModel = ROUTE.slice(routeSlash + 1);
+const resolvedCost = resolveModelCostConfig({
+  provider: routeProvider,
+  model: routeModel,
+  config: cfg,
+});
+const pricing = resolvedCost
+  ? {
+      route: ROUTE,
+      currency: "USD",
+      unit: "per_million_tokens",
+      source: "openclaw.resolveModelCostConfig",
+      fingerprint: resolveModelCostConfigFingerprint(cfg),
+      rates: {
+        input: resolvedCost.input,
+        output: resolvedCost.output,
+        cacheRead: resolvedCost.cacheRead,
+        cacheWrite: resolvedCost.cacheWrite,
+      },
+      tieredPricing: (resolvedCost.tieredPricing ?? []).map((tier) => ({
+        range: tier.range,
+        cost: {
+          input: tier.input,
+          output: tier.output,
+          cacheRead: tier.cacheRead,
+          cacheWrite: tier.cacheWrite,
+        },
+      })),
+    }
+  : null;
 
 const llm = createRuntimeLlm({
   getConfig: () => cfg,
@@ -93,6 +126,7 @@ const identity = {
   agent: AGENT,
   requested_route: ROUTE,
   host_version: (cfg as { version?: unknown })?.version ?? null,
+  pricing,
 };
 process.stdout.write(JSON.stringify({ ready: true, identity }) + "\n");
 

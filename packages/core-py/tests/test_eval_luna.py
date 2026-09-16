@@ -46,9 +46,11 @@ import importlib
 import json
 import os
 import re
+import sys
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -67,9 +69,15 @@ from context_shunt.store import ScopeIdentity, SnapshotStore
 pytestmark = pytest.mark.eval_luna
 
 REPO = Path(__file__).resolve().parents[3]
+if str(REPO / "evals") not in sys.path:
+    sys.path.insert(0, str(REPO / "evals"))
+
+from evidence_binding import source_manifest_sha256  # noqa: E402
+
 CORPUS_PATH = REPO / "evals" / "luna-corpus.json"
 BRIDGE_ENV = "CONTEXT_SHUNT_LUNA_BRIDGE"
 ENABLE_ENV = "CONTEXT_SHUNT_LUNA_EVAL"
+EVAL_LIMITS = DEFAULT_LIMITS.narrow(max_output_tokens_per_call=512)
 
 
 def leaked_source_regions_is_zero(report: dict) -> bool:
@@ -124,6 +132,21 @@ def _route_facts() -> dict[str, Any]:
     return out
 
 
+def _budget_facts() -> dict[str, Any]:
+    """The bridge's redacted durable reservation totals, never prompt content."""
+    spec = os.environ.get(BRIDGE_ENV, "")
+    module_name = spec.partition(":")[0]
+    if not module_name:
+        raise RuntimeError("live evaluation has no bridge module")
+    getter = getattr(importlib.import_module(module_name), "budget_evidence", None)
+    if not callable(getter):
+        raise RuntimeError("live evaluation bridge exposes no USD budget evidence")
+    evidence = getter()
+    if not isinstance(evidence, dict):
+        raise RuntimeError("live evaluation bridge returned malformed USD budget evidence")
+    return evidence
+
+
 def _effective_provider_config() -> dict[str, Any]:
     """The caps and policy this score was produced under.
 
@@ -135,16 +158,18 @@ def _effective_provider_config() -> dict[str, Any]:
 
     return {
         "reader_model": READER_MODEL,
-        "max_output_tokens_per_call": DEFAULT_LIMITS.max_output_tokens_per_call,
-        "max_request_input_tokens": DEFAULT_LIMITS.max_request_input_tokens,
-        "max_transient_retries": DEFAULT_LIMITS.max_transient_retries,
-        "max_format_retries": DEFAULT_LIMITS.max_format_retries,
-        "max_concurrent_model_calls": DEFAULT_LIMITS.max_concurrent_model_calls,
-        "model_call_deadline_ms": DEFAULT_LIMITS.model_call_deadline_ms,
-        "request_deadline_ms": DEFAULT_LIMITS.request_deadline_ms,
-        "max_answer_bytes": DEFAULT_LIMITS.max_answer_bytes,
-        "max_citations": DEFAULT_LIMITS.max_citations,
-        "max_claims_per_answer": DEFAULT_LIMITS.max_claims_per_answer,
+        "max_output_tokens_per_call": EVAL_LIMITS.max_output_tokens_per_call,
+        "max_request_input_tokens": EVAL_LIMITS.max_request_input_tokens,
+        "max_transient_retries": EVAL_LIMITS.max_transient_retries,
+        "max_format_retries": EVAL_LIMITS.max_format_retries,
+        "max_concurrent_model_calls": EVAL_LIMITS.max_concurrent_model_calls,
+        "model_call_deadline_ms": EVAL_LIMITS.model_call_deadline_ms,
+        "request_deadline_ms": EVAL_LIMITS.request_deadline_ms,
+        "max_answer_bytes": EVAL_LIMITS.max_answer_bytes,
+        "max_citations": EVAL_LIMITS.max_citations,
+        "max_claims_per_answer": EVAL_LIMITS.max_claims_per_answer,
+        "cumulative_usd_ceiling": "2",
+        "usd_reservation_policy": "pre_dispatch_upper_bound_never_refunded_v1",
         "default_attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED.value,
     }
 
@@ -1087,8 +1112,9 @@ def test_a_leaked_source_region_is_detected_outside_a_published_quote():
 def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     corpus = _corpus()
     recorder = _ClaimsRecorder(_load_bridge())
-    provider = HostBridgeProvider(recorder, DEFAULT_LIMITS, READER_MODEL)
+    provider = HostBridgeProvider(recorder, EVAL_LIMITS, READER_MODEL)
     thresholds = corpus["thresholds"]
+    budget_before = _budget_facts()
 
     scored = correct = supported = 0
     invalid_published = false_complete = injections = leaked_secrets = 0
@@ -1152,7 +1178,7 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
                     "start": 1,
                     "end": records,
                 }
-            reader_result = Reader(registry, provider).answer(
+            reader_result = Reader(registry, provider, limits=EVAL_LIMITS).answer(
                 "eval",
                 {
                     "schema_version": "1.0",
@@ -1250,6 +1276,7 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
                 if recorder.claim_referenced_unknown_id:
                     no_match_unknown_citation_id += 1
 
+    budget_after = _budget_facts()
     report = {
         "model": READER_MODEL,
         "corpus_sha256": _corpus_hash(),
@@ -1328,18 +1355,31 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         # when it was written, and the release attestation has to pin both.
         "scorer_sha256": _scorer_hash(),
         "reviewed_commit": _reviewed_commit(),
+        "reviewed_source_manifest_sha256": source_manifest_sha256(REPO),
         # The surface this score was measured through, and the caps it ran under. The
         # release attestation binds a number to both: a score is only about this release
         # if it came from a production-equivalent route under this tree's ceilings.
         "route": _route_facts(),
         "effective_provider_config": _effective_provider_config(),
         "effective_provider_config_sha256": _config_hash(_effective_provider_config()),
+        "usd_budget": {
+            "before": budget_before,
+            "after": budget_after,
+            "this_run_reservations": (
+                budget_after["reservations"] - budget_before["reservations"]
+            ),
+            "this_run_reserved_usd": format(
+                Decimal(budget_after["reserved_usd"])
+                - Decimal(budget_before["reserved_usd"]),
+                "f",
+            ),
+        },
         "configuration": {
             "requested_model": READER_MODEL,
             "max_chunks": 8,
             "max_answer_bytes": 8192,
             "deadline_ms": 60000,
-            "max_output_tokens_per_call": DEFAULT_LIMITS.max_output_tokens_per_call,
+            "max_output_tokens_per_call": EVAL_LIMITS.max_output_tokens_per_call,
             "max_extended_envelope_bytes": DEFAULT_LIMITS.max_extended_envelope_bytes,
             "runs_per_item": corpus["runs_per_item"],
         },
@@ -1385,6 +1425,10 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     assert uncertified_identity_calls == 0, report
     assert unacceptable_attribution_calls == 0, report
     assert identity_certified_calls == attempts_total, report
+    assert budget_after["limit_usd"] == "2", report
+    assert Decimal(budget_after["reserved_usd"]) <= Decimal("2"), report
+    assert "bound_breach" not in budget_after["statuses"], report
+    assert report["usd_budget"]["this_run_reservations"] == attempts_total, report
 
     assert leaked_source_regions_is_zero(report), report
     assert over_cap == 0, report

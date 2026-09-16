@@ -77,23 +77,29 @@ cross-chunk questions, no-answer/partial cases, and prompt injection. Each item 
 times. The gate requires live `gpt-5.6-luna`; without it the result is `NOT_RUN`, never a
 mock pass.
 
-It also requires a **qualifying route**. A live number describes the route it was measured
-on, and three properties decide whether it describes this product: the reader's fixed
+It also requires a **qualifying route** and a durable
+`CONTEXT_SHUNT_LUNA_BUDGET_DB`. A live number describes the route it was measured
+on, and four properties decide whether it describes this product: the reader's fixed
 instruction must be sent as a *system* message separate from the excerpt, the reader's
 `max_output_tokens` must reach the provider, and model dispatch must use the same
-production path as the shipped adapter. Each bridge in
-[`evals/bridges/`](../evals/bridges/) declares all three in a `BRIDGE` descriptor,
+production path as the shipped adapter. In addition, the route must resolve verified USD
+pricing and reserve each physical call against the immutable cumulative USD 2 ceiling
+before dispatch. Each bridge in
+[`evals/bridges/`](../evals/bridges/) declares all four in a `BRIDGE` descriptor,
 `unit bridge-contract` verifies the declarations against observed behaviour and source
 contracts, and `eval luna` and `benchmark provider` report `NOT_RUN` - naming the missing
 property - rather than scoring through a route that lacks one.
 
 `bridges.openclaw_cli` does lack both, and cannot be fixed: `openclaw infer model run`
 takes a single `--prompt` and has no output-token flag. `bridges.openclaw_inhost` provides
-all three by constructing the host-owned `runtime.llm.complete` facade and selecting its
+all four by constructing the host-owned `runtime.llm.complete` facade and selecting its
 `isolated-agent-runtime` branch with `systemPrompt` and `maxTokens` set from the reader's
 request. OpenClaw's command-scoped resolver materializes model-provider secret references
 only into the in-memory config before dispatch; the bridge never inspects or returns their
-values. It forwards the host's `usage` block, which makes the token half of the provider
+values. Its supported pricing resolver supplies only numeric USD rates and a non-secret
+pricing fingerprint. The SQLite reservation transaction is shared across concurrent and
+resumed calls, counts every retry, never refunds an uncertain attempt, and refuses unknown
+pricing or bounds. It forwards the host's `usage` block, which makes the token half of the provider
 benchmark measurable. The CLI route stays non-production-equivalent, and both routes'
 claims and gaps are fields the release attestation records verbatim.
 

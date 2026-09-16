@@ -43,6 +43,10 @@ Environment:
                                      the route's role/cap claims are *verified* rather than
                                      asserted in a descriptor nobody checks; source checks
                                      pin the production-dispatch claim.
+    CONTEXT_SHUNT_LUNA_BUDGET_DB     durable SQLite reservation ledger (required whenever
+                                     CONTEXT_SHUNT_LUNA_EVAL=1). Every physical call
+                                     reserves against the fixed cumulative USD 2 ceiling
+                                     before provider dispatch; reservations are not refunded.
 """
 
 from __future__ import annotations
@@ -56,6 +60,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+from bridges._usd_budget import (
+    BudgetError,
+    RoutePricing,
+    UsdBudgetLedger,
+    upper_bound_input_tokens,
+)
 
 #: The host route that serves gpt-5.6-luna. `sub2api-openai` is a plain
 #: openai-completions provider; the `openai/` route for the same model is bound to a
@@ -85,6 +96,7 @@ BRIDGE: dict[str, Any] = {
     "route_kind": "in_host_plugin_runtime_isolated_agent",
     "preserves_roles": True,
     "enforces_output_cap": True,
+    "enforces_usd_budget": True,
     "forwards_usage": True,
     "production_equivalent": True,
     "production_gap": "none for model dispatch",
@@ -385,6 +397,7 @@ class _Server:
 
 _SERVER: _Server | None = None
 _SERVER_LOCK = threading.Lock()
+_LAST_BUDGET: UsdBudgetLedger | None = None
 
 
 def _server(deadline: float | None = None) -> _Server:
@@ -419,6 +432,31 @@ def shutdown() -> None:
         server, _SERVER = _SERVER, None
     if server is not None:
         server.close()
+
+
+def _evaluation_budget(server: _Server, route: str) -> UsdBudgetLedger | None:
+    """Resolve the fixed live-eval budget without making a provider request."""
+    global _LAST_BUDGET
+    if os.environ.get("CONTEXT_SHUNT_LUNA_EVAL") != "1":
+        return None
+    raw_path = os.environ.get("CONTEXT_SHUNT_LUNA_BUDGET_DB", "")
+    if not raw_path:
+        raise BudgetError(
+            "live Luna evaluation requires CONTEXT_SHUNT_LUNA_BUDGET_DB"
+        )
+    pricing = RoutePricing.from_host_identity(server.identity, expected_route=route)
+    _LAST_BUDGET = UsdBudgetLedger(Path(raw_path), pricing)
+    return _LAST_BUDGET
+
+
+def budget_evidence() -> dict[str, Any]:
+    """Redacted cumulative reservation evidence for reports and release attestation."""
+    route = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROUTE") or DEFAULT_ROUTE
+    server = _server()
+    ledger = _evaluation_budget(server, route)
+    if ledger is None:
+        raise BudgetError("USD budget evidence is available only for a live evaluation")
+    return ledger.summary()
 
 
 def complete(
@@ -456,14 +494,71 @@ def complete(
 
     started = time.monotonic()
     deadline = started + timeout_ms / 1000.0
-    result = _server(deadline).complete(
-        system=system,
-        user=user,
-        max_output_tokens=max_output_tokens,
-        timeout_ms=timeout_ms,
-        deadline=deadline,
-    )
+    server = _server(deadline)
+    ledger = _evaluation_budget(server, route)
+    reservation = None
+    input_upper_bound = upper_bound_input_tokens(system, user)
+    if ledger is not None:
+        # This durable commit is the last operation before the NDJSON frame can reach the
+        # host. A retry calls this function again and gets a distinct reservation.
+        reservation = ledger.reserve(
+            input_token_upper_bound=input_upper_bound,
+            max_output_tokens=max_output_tokens,
+        )
+    try:
+        result = server.complete(
+            system=system,
+            user=user,
+            max_output_tokens=max_output_tokens,
+            timeout_ms=timeout_ms,
+            deadline=deadline,
+        )
+    except Exception:
+        if ledger is not None and reservation is not None:
+            ledger.record_result(reservation, status="usage_unknown")
+        raise
     elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    usage = result.get("usage")
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
+    if isinstance(usage, dict):
+        prompt_parts = [
+            usage.get("inputTokens"),
+            usage.get("cacheReadTokens"),
+            usage.get("cacheWriteTokens"),
+        ]
+        if all(
+            value is None
+            or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+            for value in prompt_parts
+        ) and any(value is not None for value in prompt_parts):
+            prompt_tokens = sum(value or 0 for value in prompt_parts)
+        raw_output = usage.get("outputTokens")
+        if (
+            isinstance(raw_output, int)
+            and not isinstance(raw_output, bool)
+            and raw_output >= 0
+        ):
+            output_tokens = raw_output
+    if ledger is not None and reservation is not None:
+        breached = (
+            prompt_tokens is not None and prompt_tokens > input_upper_bound
+        ) or (output_tokens is not None and output_tokens > max_output_tokens)
+        ledger.record_result(
+            reservation,
+            status=(
+                "bound_breach"
+                if breached
+                else "completed"
+                if prompt_tokens is not None and output_tokens is not None
+                else "usage_unknown"
+            ),
+            reported_input_tokens=prompt_tokens,
+            reported_output_tokens=output_tokens,
+        )
+        if breached:
+            raise BudgetError("provider usage exceeded a pre-dispatch USD reservation bound")
 
     if result.get("ok") is not True:
         # The host's message can quote the prompt back, so only its bounded kind crosses.

@@ -245,6 +245,7 @@ re-read from its source.
 CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
 CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
+CONTEXT_SHUNT_LUNA_BUDGET_DB=/private/operator/path/luna-budget.sqlite3 \
   ./scripts/verify eval luna
 
 # Live provider benchmark: reader latency, and token cost where the host reports it.
@@ -252,6 +253,7 @@ CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
 CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
 CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
+CONTEXT_SHUNT_LUNA_BUDGET_DB=/private/operator/path/luna-budget.sqlite3 \
   ./scripts/verify benchmark all
 
 # Deterministic benchmark half (no provider needed).
@@ -261,6 +263,7 @@ CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
 CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
 CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
+CONTEXT_SHUNT_LUNA_BUDGET_DB=/private/operator/path/luna-budget.sqlite3 \
   ./scripts/verify release all
 ```
 
@@ -277,8 +280,18 @@ prints or writes a credential:
 CONTEXT_SHUNT_LUNA_EVAL=1 \
 CONTEXT_SHUNT_OPENCLAW_ROOT=/path/to/openclaw \
 CONTEXT_SHUNT_LUNA_BRIDGE=bridges.openclaw_inhost:complete \
+CONTEXT_SHUNT_LUNA_BUDGET_DB=/private/operator/path/luna-budget.sqlite3 \
   ./scripts/verify eval luna
 ```
+
+The budget database must be reused across every eval, retry, benchmark, and resumed command
+that shares the authorized USD 2 total. The bridge reads the route's USD-per-million prices
+through OpenClaw's supported `resolveModelCostConfig`, binds the ledger to its pricing
+fingerprint, and atomically reserves a conservative input/output upper bound before each
+physical dispatch. Reservations are never refunded after timeouts, failures, or crashes;
+unknown/zero pricing, missing bounds, a changed fingerprint, or an unaffordable request
+fails before dispatch. A token cap remains an input to this calculation, not a substitute
+for the dollar ceiling.
 
 It lives under `evals/` rather than in a shipped package because it is isolated evaluation
 scaffolding, not product code. Its descriptor is hashed into the attestation, and the

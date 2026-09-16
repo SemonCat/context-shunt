@@ -53,7 +53,12 @@ REQUIRED_PROPERTIES = ("preserves_roles", "enforces_output_cap")
 #: What `scripts/verify` actually gates a release-quality live number on. Duplicated as a
 #: literal rather than imported: `scripts/verify` is a script, not a module, and a test
 #: that reads the value it is checking cannot catch the value changing.
-RELEASE_QUALITY_PROPERTIES = ("preserves_roles", "enforces_output_cap", "production_equivalent")
+RELEASE_QUALITY_PROPERTIES = (
+    "preserves_roles",
+    "enforces_output_cap",
+    "enforces_usd_budget",
+    "production_equivalent",
+)
 
 
 def _bridges_module(name: str):
@@ -76,6 +81,13 @@ print("[plugins] something failed to load, which is not the protocol", flush=Tru
 print(json.dumps({"ready": True, "identity": {
     "transport": "stub", "resolved_provider": "stub-provider",
     "resolved_model": "%(model)s",
+    "pricing": {
+        "route": "stub-provider/%(model)s", "currency": "USD",
+        "unit": "per_million_tokens", "source": "openclaw.resolveModelCostConfig",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rates": {"input": 1, "output": 6, "cacheRead": 0.1, "cacheWrite": 0},
+        "tieredPricing": [],
+    },
 }}), flush=True)
 for line in sys.stdin:
     line = line.strip()
@@ -100,6 +112,8 @@ for line in sys.stdin:
     }
     print(json.dumps(reply), flush=True)
 """
+
+_EXPENSIVE_PRICING_SERVER = _STUB_SERVER.replace('"input": 1,', '"input": 1000000,')
 
 _REFUSING_SERVER = """
 import json, sys
@@ -239,6 +253,25 @@ def test_the_in_host_route_forwards_the_readers_output_cap(inhost):
     assert 0 < sent[0]["timeout_ms"] <= 30000
     assert sent[0]["deadline_unix_ms"] >= int(__import__("time").time() * 1000)
     assert module.BRIDGE["enforces_output_cap"] is True
+
+
+def test_live_eval_reserves_dollars_before_the_host_can_receive_a_frame(
+    inhost, tmp_path, monkeypatch
+):
+    """An unaffordable first request is refused with zero provider frames written."""
+    module, received = inhost(server=_EXPENSIVE_PRICING_SERVER)
+    monkeypatch.setenv("CONTEXT_SHUNT_LUNA_EVAL", "1")
+    monkeypatch.setenv("CONTEXT_SHUNT_LUNA_BUDGET_DB", str(tmp_path / "budget.sqlite3"))
+    with pytest.raises(Exception, match="USD 2"):
+        module.complete(
+            system="s",
+            user="u",
+            provider="",
+            model=READER_MODEL,
+            max_output_tokens=2048,
+            timeout_ms=30000,
+        )
+    assert _requests(received) == []
 
 
 def test_the_in_host_route_forwards_reported_usage_and_only_when_complete(inhost):
@@ -542,6 +575,8 @@ def test_the_in_host_server_uses_the_shipped_isolated_runtime_path():
         "createRuntimeLlm",
         "resolveCommandConfigWithSecrets",
         "getModelsCommandSecretTargetIds",
+        "resolveModelCostConfig",
+        "resolveModelCostConfigFingerprint",
         'commandName: "context-shunt isolated reader evaluation"',
         "autoEnable: false",
         'caller: { kind: "plugin", id: "context-shunt-eval" }',
@@ -584,7 +619,7 @@ def test_exactly_one_route_preserves_roles_and_enforces_the_cap():
 
 
 def test_only_the_isolated_in_host_route_is_release_quality():
-    """The CLI remains disqualified; the runtime-isolated route satisfies all three."""
+    """The CLI remains disqualified; the runtime-isolated route satisfies every gate."""
     release_quality = []
     for path in sorted(BRIDGES.glob("*.py")):
         if path.name.startswith("_"):
@@ -597,7 +632,12 @@ def test_only_the_isolated_in_host_route_is_release_quality():
     # checking a property nothing reads.
     verify = (REPO / "scripts" / "verify").read_text()
     assert (
-        'REQUIRED_BRIDGE_PROPERTIES = ("preserves_roles", "enforces_output_cap", "production_equivalent")'
+        'REQUIRED_BRIDGE_PROPERTIES = (\n'
+        '    "preserves_roles",\n'
+        '    "enforces_output_cap",\n'
+        '    "enforces_usd_budget",\n'
+        '    "production_equivalent",\n'
+        ')'
         in verify
     )
 
@@ -623,6 +663,7 @@ def test_the_bridge_env_names_are_documented_where_an_operator_looks():
                 "CONTEXT_SHUNT_OPENCLAW_ROUTE",
                 "CONTEXT_SHUNT_OPENCLAW_TSX",
                 "CONTEXT_SHUNT_OPENCLAW_SERVER",
+                "CONTEXT_SHUNT_LUNA_BUDGET_DB",
             )
             if name in source
         }
@@ -667,6 +708,7 @@ def _sound_eval_report(commit: str, config_hash: str) -> dict:
     """An eval report that binds and passes, as a baseline for the negative cases."""
     return {
         "reviewed_commit": commit,
+        "reviewed_source_manifest_sha256": "e" * 64,
         "effective_provider_config_sha256": config_hash,
         "route": {
             "spec": "bridges.example:complete",
@@ -674,6 +716,7 @@ def _sound_eval_report(commit: str, config_hash: str) -> dict:
                 "id": "example",
                 "preserves_roles": True,
                 "enforces_output_cap": True,
+                "enforces_usd_budget": True,
                 "production_equivalent": True,
             },
         },
@@ -692,6 +735,14 @@ def _sound_eval_report(commit: str, config_hash: str) -> dict:
             "unacceptable_attribution_calls": 0,
             "identity_record_gaps": 0,
         },
+        "usd_budget": {
+            "this_run_reservations": 120,
+            "after": {
+                "limit_usd": "2",
+                "reserved_usd": "1.5",
+                "statuses": {"completed": 120},
+            },
+        },
     }
 
 
@@ -705,13 +756,22 @@ def test_a_fabricated_eval_report_does_not_bind_to_this_release():
     that does not describe this release is not weaker evidence about it.
     """
     verify = _verify_module()
-    core = {"effective_provider_config_sha256": "a" * 64}
+    core = {
+        "effective_provider_config_sha256": "a" * 64,
+        "source_manifest_sha256": "e" * 64,
+    }
     head = "b" * 40
     assert verify._eval_binding_faults(_sound_eval_report(head, "a" * 64), core, head) == []
 
-    wrong_commit = _sound_eval_report("c" * 40, "a" * 64)
-    faults = verify._eval_binding_faults(wrong_commit, core, head)
-    assert any("not the attested commit" in f for f in faults), faults
+    # An artifact-only commit changes HEAD but not the reviewed source manifest. This is
+    # the non-circular binding that lets authentic generated evidence be committed.
+    artifact_commit = _sound_eval_report("c" * 40, "a" * 64)
+    assert verify._eval_binding_faults(artifact_commit, core, head) == []
+
+    wrong_source = _sound_eval_report(head, "a" * 64)
+    wrong_source["reviewed_source_manifest_sha256"] = "f" * 64
+    faults = verify._eval_binding_faults(wrong_source, core, head)
+    assert any("source manifest" in f for f in faults), faults
 
     no_commit = _sound_eval_report(head, "a" * 64)
     no_commit["reviewed_commit"] = "unknown"
@@ -729,7 +789,10 @@ def test_a_fabricated_eval_report_does_not_bind_to_this_release():
 def test_a_route_that_is_not_release_quality_cannot_produce_binding_evidence():
     """Production equivalence is one of the properties a live number is gated on."""
     verify = _verify_module()
-    core = {"effective_provider_config_sha256": "a" * 64}
+    core = {
+        "effective_provider_config_sha256": "a" * 64,
+        "source_manifest_sha256": "e" * 64,
+    }
     head = "b" * 40
     report = _sound_eval_report(head, "a" * 64)
     report["route"]["bridge"]["production_equivalent"] = False

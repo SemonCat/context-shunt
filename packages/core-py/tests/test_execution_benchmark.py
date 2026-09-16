@@ -157,6 +157,15 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     assert digest.hexdigest() == report["implementation"][
         "working_tree_relevant_files_sha256"
     ]
+    real_run = _real_run_module(root)
+    assert report["implementation"]["source_manifest_sha256"] == (
+        real_run.source_manifest_sha256(root)
+    )
+    budget = report["usd_budget"]
+    assert budget["limit_usd"] == "2"
+    assert 0 < float(budget["reserved_usd"]) <= 2
+    assert budget["contains_prompt_or_completion"] is False
+    assert budget["statuses"].get("bound_breach", 0) == 0
 
     forbidden_raw_keys = {"system", "user", "answer", "quote", "source_excerpt"}
 
@@ -206,6 +215,9 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     )
     assert "/Users/" not in report["command"]
     assert 'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT"' in report[
+        "command"
+    ]
+    assert 'CONTEXT_SHUNT_LUNA_BUDGET_DB="$CONTEXT_SHUNT_LUNA_BUDGET_DB"' in report[
         "command"
     ]
 

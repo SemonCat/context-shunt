@@ -22,6 +22,10 @@ into `transform_tool_result`. The proposal:
 This is a proposal for upstream/operator review, not a vendored dependency or authorization
 to edit the live host. Apply it only to an isolated exact-version candidate, then run:
 
+The immutable build inputs, one-file candidate image plan, official-hook exhaustion,
+isolated canary, rollback, and upgrade risks are collected in
+[`hermes-0.21.3-operator-approval.md`](hermes-0.21.3-operator-approval.md).
+
 ```sh
 CONTEXT_SHUNT_HERMES_ROOT=/path/to/patched/hermes-0.21.3 \
 CONTEXT_SHUNT_HERMES_PYTHON=/path/to/that/runtime/python \

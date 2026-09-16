@@ -354,7 +354,12 @@ def _openclaw_prereq() -> tuple[bool, str]:
 #: ``runtime.llm.complete`` facade and selecting its isolated-agent-runtime branch; the CLI
 #: route remains disqualified. `unit bridge-contract` verifies each route against its own
 #: declaration and pins the server/adapter/host source relationship behind that claim.
-REQUIRED_BRIDGE_PROPERTIES = ("preserves_roles", "enforces_output_cap", "production_equivalent")
+REQUIRED_BRIDGE_PROPERTIES = (
+    "preserves_roles",
+    "enforces_output_cap",
+    "enforces_usd_budget",
+    "production_equivalent",
+)
 
 
 def _bridge_descriptor(spec: str) -> tuple[dict | None, str]:
@@ -388,6 +393,11 @@ def _luna_prereq() -> tuple[bool, str]:
         return False, (
             "set CONTEXT_SHUNT_LUNA_EVAL=1 and provide a host bridge that serves "
             "gpt-5.6-luna; a mock is never a pass"
+        )
+    if not os.environ.get("CONTEXT_SHUNT_LUNA_BUDGET_DB"):
+        return False, (
+            "set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable cumulative USD 2 "
+            "reservation ledger; token limits are not a currency ceiling"
         )
     spec = os.environ.get("CONTEXT_SHUNT_LUNA_BRIDGE", "")
     if not spec or ":" not in spec:
@@ -1377,6 +1387,7 @@ print(json.dumps({
     "acceptable_attribution_statuses": sorted(tel.ACCEPTABLE_ATTRIBUTION),
     "effective_provider_config_sha256": tel._config_hash(config),
     "effective_provider_config": config,
+    "source_manifest_sha256": tel.source_manifest_sha256(tel.REPO),
 }))
 """
     env = dict(os.environ)
@@ -1466,7 +1477,11 @@ def _live_evidence(core: dict | None, head: str = "") -> tuple[dict, list[str], 
                 "answer_correctness": report.get("answer_correctness"),
                 "citation_semantic_support": report.get("citation_semantic_support"),
                 "reviewed_commit": report.get("reviewed_commit"),
+                "reviewed_source_manifest_sha256": report.get(
+                    "reviewed_source_manifest_sha256"
+                ),
                 "route": report.get("route"),
+                "usd_budget": report.get("usd_budget"),
                 "effective_provider_config_sha256": report.get(
                     "effective_provider_config_sha256"
                 ),
@@ -1581,10 +1596,12 @@ def _eval_binding_faults(report: dict, core: dict | None, head: str) -> list[str
     reviewed = report.get("reviewed_commit")
     if not isinstance(reviewed, str) or not reviewed or reviewed == "unknown":
         faults.append("reports/eval-luna.json names no reviewed commit")
-    elif head and reviewed != head:
+    source_manifest = report.get("reviewed_source_manifest_sha256")
+    if not isinstance(source_manifest, str) or not source_manifest:
+        faults.append("reports/eval-luna.json names no reviewed source manifest")
+    elif core is not None and source_manifest != core.get("source_manifest_sha256"):
         faults.append(
-            "reports/eval-luna.json was produced at "
-            f"{reviewed[:12]}, not the attested commit {head[:12]}"
+            "reports/eval-luna.json was produced from a different source manifest"
         )
     route = report.get("route")
     if not isinstance(route, dict) or not isinstance(route.get("bridge"), dict):
@@ -1607,6 +1624,29 @@ def _eval_binding_faults(report: dict, core: dict | None, head: str) -> list[str
                 "reports/eval-luna.json was produced under a different effective provider "
                 "configuration: its caps or attribution policy are not this tree's"
             )
+    budget = report.get("usd_budget")
+    after = budget.get("after") if isinstance(budget, dict) else None
+    identity = report.get("identity")
+    physical_calls = identity.get("physical_calls") if isinstance(identity, dict) else None
+    if not isinstance(after, dict):
+        faults.append("reports/eval-luna.json carries no cumulative USD budget evidence")
+    else:
+        try:
+            reserved = float(after.get("reserved_usd"))
+        except (TypeError, ValueError):
+            reserved = float("inf")
+        if after.get("limit_usd") != "2" or not 0 <= reserved <= 2:
+            faults.append("reports/eval-luna.json did not enforce the cumulative USD 2 ceiling")
+        statuses = after.get("statuses")
+        if not isinstance(statuses, dict):
+            faults.append("reports/eval-luna.json has malformed reservation statuses")
+        elif statuses.get("bound_breach", 0):
+            faults.append("reports/eval-luna.json records a USD reservation bound breach")
+        if (
+            not isinstance(physical_calls, int)
+            or budget.get("this_run_reservations") != physical_calls
+        ):
+            faults.append("reports/eval-luna.json has a provider-call/reservation ledger gap")
     return faults
 
 
@@ -1723,6 +1763,7 @@ def run_release_attestation() -> GateResult:
             "prompt_construction": core["prompt_construction_sha256"],
             "scorer": core["scorer_sha256"],
             "corpus_via_core": core["corpus_sha256"],
+            "source_manifest": core["source_manifest_sha256"],
         })},
         "effective_provider_config": None if core is None else core["effective_provider_config"],
         "effective_provider_config_sha256": (
