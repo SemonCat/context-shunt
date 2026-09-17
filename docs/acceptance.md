@@ -83,7 +83,7 @@ on, and four properties decide whether it describes this product: the reader's f
 instruction must be sent as a *system* message separate from the excerpt, the reader's
 `max_output_tokens` must reach the provider, and model dispatch must use the same
 production path as the shipped adapter. In addition, the route must resolve verified USD
-pricing and reserve each physical call against the approved cumulative USD 2.50 ceiling
+pricing and reserve each physical call against the approved cumulative USD 10.00 ceiling
 before dispatch. Each bridge in
 [`evals/bridges/`](../evals/bridges/) declares all four in a `BRIDGE` descriptor,
 `unit bridge-contract` verifies the declarations against observed behaviour and source

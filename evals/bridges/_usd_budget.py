@@ -24,9 +24,9 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
-MAX_EVALUATION_USD = Decimal("2.5")
-PREVIOUS_MAX_EVALUATION_USD = Decimal("2")
-LIMIT_INCREASE_AUTHORIZATION = "mattermost:3feushz5if84uf8irw7tkx1k9r:2026-09-17"
+MAX_EVALUATION_USD = Decimal("10")
+PREVIOUS_MAX_EVALUATION_USD = Decimal("2.5")
+LIMIT_INCREASE_AUTHORIZATION = "mattermost:fwrx3rgb67f7tbtzr37xwxws6w:2026-09-17"
 NANO_USD_PER_USD = Decimal("1000000000")
 TOKENS_PER_MILLION = Decimal("1000000")
 LEDGER_SCHEMA_VERSION = "2"
@@ -269,7 +269,7 @@ class UsdBudgetLedger:
     def _is_approved_limit_increase(
         existing: dict[str, str], expected: dict[str, str]
     ) -> bool:
-        """Accept only the explicitly authorized cumulative 2.00 -> 2.50 change."""
+        """Accept only the explicitly authorized cumulative 2.50 -> 10.00 change."""
         old_limit = str(int(PREVIOUS_MAX_EVALUATION_USD * NANO_USD_PER_USD))
         return (
             existing.get("schema_version") == LEDGER_SCHEMA_VERSION

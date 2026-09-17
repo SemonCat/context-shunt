@@ -164,7 +164,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     )
     budget = report["usd_budget"]
     configured_limit = Decimal(budget["limit_usd"])
-    assert configured_limit == Decimal("2.5")
+    assert configured_limit == Decimal("10")
     assert Decimal("0") < Decimal(budget["reserved_usd"]) <= configured_limit
     assert budget["contains_prompt_or_completion"] is False
     assert budget["statuses"].get("bound_breach", 0) == 0

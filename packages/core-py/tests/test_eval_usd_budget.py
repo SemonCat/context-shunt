@@ -58,24 +58,24 @@ def test_unknown_or_zero_pricing_fails_closed():
         )
 
 
-def test_retry_reserves_again_and_cannot_cross_two_point_five_dollars(tmp_path):
+def test_retry_reserves_again_and_cannot_cross_ten_dollars(tmp_path):
     from bridges._usd_budget import BudgetError, UsdBudgetLedger
 
-    ledger = UsdBudgetLedger(tmp_path / "budget.sqlite3", _pricing(input_rate="700000"))
+    ledger = UsdBudgetLedger(tmp_path / "budget.sqlite3", _pricing(input_rate="3000000"))
     first = ledger.reserve(input_token_upper_bound=1, max_output_tokens=1)
-    assert first.reserved_usd > Decimal("1.25")
-    with pytest.raises(BudgetError, match="USD 2.5"):
+    assert first.reserved_usd > Decimal("5")
+    with pytest.raises(BudgetError, match="USD 10"):
         ledger.reserve(input_token_upper_bound=1, max_output_tokens=1)
     summary = ledger.summary()
     assert summary["reservations"] == 1
-    assert Decimal(summary["reserved_usd"]) <= Decimal("2.5")
+    assert Decimal(summary["reserved_usd"]) <= Decimal("10")
 
 
 def test_concurrent_reservations_are_serialized_under_the_cap(tmp_path):
     from bridges._usd_budget import BudgetError, UsdBudgetLedger
 
     path = tmp_path / "budget.sqlite3"
-    pricing = _pricing(input_rate="200000")
+    pricing = _pricing(input_rate="700000")
 
     def reserve_once() -> bool:
         try:
@@ -91,7 +91,7 @@ def test_concurrent_reservations_are_serialized_under_the_cap(tmp_path):
     summary = UsdBudgetLedger(path, pricing).summary()
     assert 0 < sum(accepted) < len(accepted)
     assert summary["reservations"] == sum(accepted)
-    assert Decimal(summary["reserved_usd"]) <= Decimal("2.5")
+    assert Decimal(summary["reserved_usd"]) <= Decimal("10")
 
 
 def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
@@ -116,9 +116,20 @@ def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
             "SELECT * FROM reservations ORDER BY reservation_id"
         ).fetchall()
         connection.execute(
-            "UPDATE metadata SET value='2000000000' WHERE key='limit_nano_usd'"
+            "UPDATE metadata SET value='2500000000' WHERE key='limit_nano_usd'"
         )
         connection.execute("DELETE FROM limit_history")
+        connection.execute(
+            """INSERT INTO limit_history(
+                   changed_unix_ms, from_nano_usd, to_nano_usd, authorization
+               ) VALUES (?, ?, ?, ?)""",
+            (
+                1,
+                2_000_000_000,
+                2_500_000_000,
+                "mattermost:3feushz5if84uf8irw7tkx1k9r:2026-09-17",
+            ),
+        )
 
     summary = UsdBudgetLedger(path, _pricing()).summary()
     with sqlite3.connect(path) as connection:
@@ -126,13 +137,19 @@ def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
             "SELECT * FROM reservations ORDER BY reservation_id"
         ).fetchall()
     assert after == before
-    assert summary["limit_usd"] == "2.5"
+    assert summary["limit_usd"] == "10"
     assert summary["accounted_usd"] == "0.00212"
     assert summary["limit_history"] == [
         {
-            "changed_unix_ms": summary["limit_history"][0]["changed_unix_ms"],
+            "changed_unix_ms": 1,
             "from_usd": "2",
             "to_usd": "2.5",
+            "authorization": "mattermost:3feushz5if84uf8irw7tkx1k9r:2026-09-17",
+        },
+        {
+            "changed_unix_ms": summary["limit_history"][1]["changed_unix_ms"],
+            "from_usd": "2.5",
+            "to_usd": "10",
             "authorization": LIMIT_INCREASE_AUTHORIZATION,
         }
     ]

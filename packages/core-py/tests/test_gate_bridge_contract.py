@@ -262,7 +262,7 @@ def test_live_eval_reserves_dollars_before_the_host_can_receive_a_frame(
     module, received = inhost(server=_EXPENSIVE_PRICING_SERVER)
     monkeypatch.setenv("CONTEXT_SHUNT_LUNA_EVAL", "1")
     monkeypatch.setenv("CONTEXT_SHUNT_LUNA_BUDGET_DB", str(tmp_path / "budget.sqlite3"))
-    with pytest.raises(Exception, match="USD 2.5"):
+    with pytest.raises(Exception, match="USD 10"):
         module.complete(
             system="s",
             user="u",
@@ -738,7 +738,7 @@ def _sound_eval_report(commit: str, config_hash: str) -> dict:
         "usd_budget": {
             "this_run_reservations": 120,
             "after": {
-                "limit_usd": "2.5",
+                "limit_usd": "10",
                 "reserved_usd": "1.5",
                 "statuses": {"completed": 120},
             },

@@ -285,11 +285,11 @@ CONTEXT_SHUNT_LUNA_BUDGET_DB=/private/operator/path/luna-budget.sqlite3 \
 ```
 
 The budget database must be reused across every eval, retry, benchmark, and resumed command
-that shares the authorized USD 2.50 total. The bridge reads the route's USD-per-million prices
+that shares the authorized USD 10.00 total. The bridge reads the route's USD-per-million prices
 through OpenClaw's supported `resolveModelCostConfig`, binds the ledger to its pricing
 fingerprint, and atomically reserves a conservative input/output upper bound before each
 physical dispatch. Timeouts, failures, crashes, and missing usage retain their full holds.
-An existing schema-v2 ledger at the former USD 2.00 ceiling is migrated atomically only
+An existing schema-v2 ledger at the former USD 2.50 ceiling is migrated atomically only
 when every route, pricing, policy, and schema field still matches. The migration preserves
 all reservation rows and records the approved 2026-09-17 ceiling change in
 `limit_history`; any other limit change fails closed.
