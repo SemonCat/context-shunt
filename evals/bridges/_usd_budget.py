@@ -24,7 +24,9 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
-MAX_EVALUATION_USD = Decimal("2")
+MAX_EVALUATION_USD = Decimal("2.5")
+PREVIOUS_MAX_EVALUATION_USD = Decimal("2")
+LIMIT_INCREASE_AUTHORIZATION = "mattermost:3feushz5if84uf8irw7tkx1k9r:2026-09-17"
 NANO_USD_PER_USD = Decimal("1000000000")
 TOKENS_PER_MILLION = Decimal("1000000")
 LEDGER_SCHEMA_VERSION = "2"
@@ -220,6 +222,16 @@ class UsdBudgetLedger:
                     reported_output_tokens INTEGER
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS limit_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    changed_unix_ms INTEGER NOT NULL,
+                    from_nano_usd INTEGER NOT NULL,
+                    to_nano_usd INTEGER NOT NULL,
+                    authorization TEXT NOT NULL UNIQUE,
+                    CHECK (to_nano_usd > from_nano_usd)
+                )"""
+            )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(reservations)")
             }
@@ -238,6 +250,8 @@ class UsdBudgetLedger:
                 connection.executemany(
                     "INSERT INTO metadata(key, value) VALUES (?, ?)", expected.items()
                 )
+            elif self._is_approved_limit_increase(existing, expected):
+                self._increase_limit(connection, existing, expected)
             elif existing != expected:
                 connection.rollback()
                 differing = "pricing" if any(
@@ -250,6 +264,53 @@ class UsdBudgetLedger:
                 "WHERE accounted_nano_usd IS NULL"
             )
             connection.commit()
+
+    @staticmethod
+    def _is_approved_limit_increase(
+        existing: dict[str, str], expected: dict[str, str]
+    ) -> bool:
+        """Accept only the explicitly authorized cumulative 2.00 -> 2.50 change."""
+        old_limit = str(int(PREVIOUS_MAX_EVALUATION_USD * NANO_USD_PER_USD))
+        return (
+            existing.get("schema_version") == LEDGER_SCHEMA_VERSION
+            and existing.get("reservation_policy") == RESERVATION_POLICY
+            and existing.get("limit_nano_usd") == old_limit
+            and expected.get("limit_nano_usd")
+            == str(int(MAX_EVALUATION_USD * NANO_USD_PER_USD))
+            and set(existing) == set(expected)
+            and all(
+                existing.get(key) == value
+                for key, value in expected.items()
+                if key != "limit_nano_usd"
+            )
+        )
+
+    def _increase_limit(
+        self,
+        connection: sqlite3.Connection,
+        existing: dict[str, str],
+        expected: dict[str, str],
+    ) -> None:
+        """Atomically preserve the ledger while recording the approved ceiling change."""
+        old_limit = int(existing["limit_nano_usd"])
+        new_limit = int(expected["limit_nano_usd"])
+        accounted = int(
+            connection.execute(
+                "SELECT COALESCE(SUM(accounted_nano_usd), 0) FROM reservations"
+            ).fetchone()[0]
+        )
+        if accounted > old_limit:
+            raise BudgetError("existing USD ledger already exceeds its prior ceiling")
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='limit_nano_usd' AND value=?",
+            (str(new_limit), str(old_limit)),
+        )
+        connection.execute(
+            """INSERT INTO limit_history(
+                   changed_unix_ms, from_nano_usd, to_nano_usd, authorization
+               ) VALUES (?, ?, ?, ?)""",
+            (int(time.time() * 1000), old_limit, new_limit, LIMIT_INCREASE_AUTHORIZATION),
+        )
 
     @staticmethod
     def _is_legacy_metadata(existing: dict[str, str], expected: dict[str, str]) -> bool:
@@ -309,20 +370,27 @@ class UsdBudgetLedger:
         nano = self._cost_nano_usd(input_token_upper_bound, max_output_tokens)
         if nano <= 0:
             raise BudgetError("request reservation rounded to a non-positive amount")
-        limit = int(MAX_EVALUATION_USD * NANO_USD_PER_USD)
+        expected_limit = int(MAX_EVALUATION_USD * NANO_USD_PER_USD)
         reservation_id = str(uuid.uuid4())
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            stored_limit = connection.execute(
+                "SELECT value FROM metadata WHERE key='limit_nano_usd'"
+            ).fetchone()
+            if stored_limit is None or stored_limit[0] != str(expected_limit):
+                connection.rollback()
+                raise BudgetError("existing USD ledger budget policy does not match this run")
             used = int(
                 connection.execute(
                     "SELECT COALESCE(SUM(accounted_nano_usd), 0) FROM reservations"
                 ).fetchone()[0]
             )
-            if used + nano > limit:
+            if used + nano > expected_limit:
                 connection.rollback()
                 raise BudgetError(
                     "provider request refused: conservative reservation would exceed "
-                    f"the cumulative USD 2 ceiling (reserved={Decimal(used) / NANO_USD_PER_USD}, "
+                    f"the cumulative USD {MAX_EVALUATION_USD} ceiling "
+                    f"(reserved={Decimal(used) / NANO_USD_PER_USD}, "
                     f"request={Decimal(nano) / NANO_USD_PER_USD})"
                 )
             connection.execute(
@@ -432,6 +500,18 @@ class UsdBudgetLedger:
                     "SELECT status, COUNT(*) FROM reservations GROUP BY status ORDER BY status"
                 )
             }
+            limit_history = [
+                {
+                    "changed_unix_ms": int(row[0]),
+                    "from_usd": format(Decimal(int(row[1])) / NANO_USD_PER_USD, "f"),
+                    "to_usd": format(Decimal(int(row[2])) / NANO_USD_PER_USD, "f"),
+                    "authorization": row[3],
+                }
+                for row in connection.execute(
+                    """SELECT changed_unix_ms, from_nano_usd, to_nano_usd, authorization
+                       FROM limit_history ORDER BY id"""
+                )
+            ]
         accounted = int(accounted)
         gross_reserved = int(gross_reserved)
         active_reserved = int(active_reserved)
@@ -456,6 +536,7 @@ class UsdBudgetLedger:
             "remaining_usd": format(Decimal(limit - accounted) / NANO_USD_PER_USD, "f"),
             "reservations": int(count),
             "statuses": statuses,
+            "limit_history": limit_history,
             "pricing": self.pricing.public_record(),
             "pricing_binding_sha256": self.pricing.binding_sha256,
             "reservation_policy": RESERVATION_POLICY,

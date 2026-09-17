@@ -396,7 +396,7 @@ def _luna_prereq() -> tuple[bool, str]:
         )
     if not os.environ.get("CONTEXT_SHUNT_LUNA_BUDGET_DB"):
         return False, (
-            "set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable cumulative USD 2 "
+            "set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable cumulative USD 2.50 "
             "reservation ledger; token limits are not a currency ceiling"
         )
     spec = os.environ.get("CONTEXT_SHUNT_LUNA_BRIDGE", "")
@@ -1635,8 +1635,10 @@ def _eval_binding_faults(report: dict, core: dict | None, head: str) -> list[str
             reserved = float(after.get("reserved_usd"))
         except (TypeError, ValueError):
             reserved = float("inf")
-        if after.get("limit_usd") != "2" or not 0 <= reserved <= 2:
-            faults.append("reports/eval-luna.json did not enforce the cumulative USD 2 ceiling")
+        if after.get("limit_usd") != "2.5" or not 0 <= reserved <= 2.5:
+            faults.append(
+                "reports/eval-luna.json did not enforce the cumulative USD 2.50 ceiling"
+            )
         statuses = after.get("statuses")
         if not isinstance(statuses, dict):
             faults.append("reports/eval-luna.json has malformed reservation statuses")

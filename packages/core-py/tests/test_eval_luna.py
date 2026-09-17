@@ -168,7 +168,7 @@ def _effective_provider_config() -> dict[str, Any]:
         "max_answer_bytes": EVAL_LIMITS.max_answer_bytes,
         "max_citations": EVAL_LIMITS.max_citations,
         "max_claims_per_answer": EVAL_LIMITS.max_claims_per_answer,
-        "cumulative_usd_ceiling": "2",
+        "cumulative_usd_ceiling": "2.5",
         "usd_reservation_policy": "pre_dispatch_reserve_exact_usage_upper_settlement_v2",
         "default_attribution_policy": AttributionPolicy.ALLOW_UNVERIFIED.value,
     }
@@ -1425,8 +1425,8 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     assert uncertified_identity_calls == 0, report
     assert unacceptable_attribution_calls == 0, report
     assert identity_certified_calls == attempts_total, report
-    assert budget_after["limit_usd"] == "2", report
-    assert Decimal(budget_after["reserved_usd"]) <= Decimal("2"), report
+    assert budget_after["limit_usd"] == "2.5", report
+    assert Decimal(budget_after["reserved_usd"]) <= Decimal("2.5"), report
     assert "bound_breach" not in budget_after["statuses"], report
     assert report["usd_budget"]["this_run_reservations"] == attempts_total, report
 

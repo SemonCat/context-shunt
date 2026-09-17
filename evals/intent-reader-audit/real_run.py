@@ -375,7 +375,7 @@ def main() -> None:
         )
     if not os.environ.get("CONTEXT_SHUNT_LUNA_BUDGET_DB"):
         raise SystemExit(
-            "NOT_RUN: set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable USD 2 ledger"
+            "NOT_RUN: set CONTEXT_SHUNT_LUNA_BUDGET_DB to the durable USD 2.50 ledger"
         )
     lane_evidence_path = HERE / "real-luna-lanes-latest.json"
     evidence_binding = _binding(host_root, route)
@@ -444,8 +444,8 @@ def main() -> None:
     except (InvalidOperation, KeyError):
         errors.append("USD reservation evidence is malformed")
     else:
-        if usd_budget.get("limit_usd") != "2" or not Decimal("0") <= reserved_usd <= Decimal("2"):
-            errors.append("cumulative USD 2 ceiling was not enforced")
+        if usd_budget.get("limit_usd") != "2.5" or not Decimal("0") <= reserved_usd <= Decimal("2.5"):
+            errors.append("cumulative USD 2.50 ceiling was not enforced")
         if usd_budget.get("statuses", {}).get("bound_breach", 0):
             errors.append("provider usage breached a pre-dispatch USD reservation")
     report = {
