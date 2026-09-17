@@ -15,14 +15,14 @@ positively established large unbounded reads on allowed sources.
 This adapter registers up to four read-only tools, no writer, and — only with both explicit
 operator attestations (`tool_result_capture.host_ordering_verified_locally: true` and
 `tool_result_capture.host_consumer_scope_verified_locally: true`) — one
-`transform_tool_result` hook. The hook emits a pointer only when its invocation includes a
-scoped consumer descriptor proving direct read+inspect access or the complete deferred-tool
-bridge plus deferred read+inspect access. The currently inspected Hermes host does not pass
-that descriptor. The source-located 0.21.3 proposal and exact-image probe demonstrate it,
-but this repository does not patch the third-party host. Without it, eligible oversized
-results receive bounded no-handle legacy compaction instead of an unusable pointer. The
-adapter never infers session reachability from global tool registration and never widens
-tool privileges. See
+official `tool_execution` middleware plus the `pre_api_request` observer. The observer
+runs after request middleware and binds the actual provider-visible tools to the same
+session/turn/API-request ids Hermes later puts on authorized tool dispatch. The middleware emits a pointer
+only when that exact request proves direct read+inspect access or the complete deferred
+bridge with explicitly listed read+inspect tools. Missing, truncated, partial, expired, or
+revoked evidence receives bounded no-handle legacy compaction. No Hermes source patch is
+required, global plugin availability is never treated as authority, and privileges are
+never widened. See
 [`docs/acceptance.md`](../../docs/acceptance.md#tool_result_capture-cutover-on-hermes) for
 the cutover plan.
 
@@ -38,12 +38,12 @@ capability probe supports the mode; registering a permanently-refusing surface i
 the model would be worse than not offering it. This host supports the mode because the
 import needs no interception ordering at all — it is not post-tool interception, and
 `tool_result_capture` (formerly `suma_post_tool`) is a separate mode, off by default and
-candidate-supported only with the 0.21.3 host seam and both explicit operator attestations — see
+candidate-supported on unmodified 0.21.3 through official hooks and both explicit operator attestations — see
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not).
 
 Run `./scripts/verify integration hermes --mode local` against a real host checkout to
 check the ordinary wiring. Run `./scripts/verify integration hermes --mode post-tool`
-against a host source tree with the proposal applied to prove direct/deferred delivery,
+against the exact unmodified host source/runtime to prove direct/deferred delivery,
 restricted fallback, pointer consumption, accounting, and retention. Without the required
 checkout/interpreter either required gate reports `NOT_RUN`, never a pass.
 
@@ -109,8 +109,8 @@ and recheck when that configuration changes. No Hermes/package patch is required
 Small and structured/multimodal results remain unchanged. Once an eligible string is
 measured oversized, absent consumer proof or a Shunt-owned internal capture failure returns
 bounded `LEGACY_COMPACTED` after independent source safety checks. The absent-consumer path
-does not mint a handle or retain the raw payload. A future Hermes core change must forward
-the immutable invocation-scoped tool capability to the transform hook before pointer capture
-can be used safely for restricted cron sessions.
+does not mint a handle or retain the raw payload. Hermes 0.21.3's post-middleware provider
+request observer supplies the necessary immutable correlation without a core change;
+restricted cron/subagent scopes that omit either consumer continue to receive no handle.
 `skill_view` also remains exempt from the pre-read gate; a generic `read_file` of a large
 `SKILL.md` remains subject to the normal gate and capture. OpenClaw behavior is unchanged.

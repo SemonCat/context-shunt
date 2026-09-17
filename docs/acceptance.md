@@ -225,15 +225,15 @@ today only one of them is live:
 | System | State today | State after cutover |
 | --- | --- | --- |
 | `oversize-tool-result-compactor` (incumbent, v0.3.0, `author: Edison`) | live; the only `transform_tool_result` listener; fail-open at the host level if it raises | disabled |
-| Hermes invocation-scope delivery | absent in unmodified 0.21.3 | source-located proposal accepted in the exact candidate host and exact-host probe passes |
+| Hermes invocation-scope delivery | official post-middleware observer present but Shunt disabled | exact unmodified-host probe passes and operator attests the observer correlation |
 | context-shunt `tool_result_capture` | implemented, registered only with two explicit attestations, currently off | enabled and both attestations set |
 
-Both hook the same `transform_tool_result` name. Hermes' `_apply_transform_tool_result_hook`
-takes the **first string return across every registered listener** (verified in the exact
-0.21.3 reading behind `capability-matrix.md`'s evidence) — so running both at once is not
-"defense in depth", it is undefined precedence between two different bounded outputs for
-the same oversized result. They must be switched atomically, not run in parallel and not
-left with a gap between disabling one and enabling the other.
+Shunt now captures earlier through official `tool_execution` middleware while the incumbent
+remains a `transform_tool_result` listener. Leaving both active is still not redundancy:
+the incumbent would receive Shunt's replacement as the tool result, and its independent
+classification/persistence contract was not designed as a pointer pass-through guarantee.
+They must therefore be switched atomically after the disabled canary, not left layered or
+with a gap between disabling one and enabling the other.
 
 #### The coverage-gap risk this plan exists to name
 
@@ -257,7 +257,7 @@ step 1 below is a precondition-check, not a suggestion.
    The post-tool gate must run against the exact Hermes source/interpreter; a synthetic
    adapter stub is not a substitute.
 2. The operator has personally reviewed [`capability-matrix.md`](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
-   and the host proposal's upgrade/rollback risk — both attestations below are *their*
+   and the official-hook upgrade/rollback risk — both attestations below are *their*
    claims, not this adapter's.
 3. Legacy compaction is mandatory regardless of the deprecated config key, so a
    reader failure on a captured handle degrades to a bounded summary rather than a bare
@@ -322,9 +322,9 @@ Two things this repository verified and two it did not, stated plainly:
 
 #### Rollback
 
-In one rollback, disable context-shunt capture, re-enable the incumbent, and restore the
-previous Hermes image if the invocation-scope proposal was packaged as a host image change.
-Do not leave both transform listeners active. No data migration is needed either direction:
+In one rollback, disable context-shunt capture and re-enable the incumbent. This candidate
+does not change the Hermes image, so host-image rollback is neither required nor desired.
+Do not leave both result handlers active. No data migration is needed either direction:
 context-shunt's captured handles and the incumbent's artifact files are independent stores
 that were never sharing state.
 

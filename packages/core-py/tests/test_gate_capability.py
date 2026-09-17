@@ -107,6 +107,7 @@ class FakeCtx:
             else [
                 "pre_tool_call",
                 "post_tool_call",
+                "pre_api_request",
                 "transform_tool_result",
                 "on_session_end",
                 "on_session_finalize",
@@ -114,6 +115,8 @@ class FakeCtx:
             ]
         )
         self.registered_hooks: list[str] = []
+        self.registered_hook_handlers: dict[str, object] = {}
+        self.registered_middleware: dict[str, object] = {}
         self.auxiliary_tasks: list[tuple[str, dict]] = []
         self.registered_tools: list[str] = []
         self.registered_toolsets: list[str] = []
@@ -125,6 +128,10 @@ class FakeCtx:
 
     def register_hook(self, name, _handler):
         self.registered_hooks.append(name)
+        self.registered_hook_handlers[name] = _handler
+
+    def register_middleware(self, kind, callback):
+        self.registered_middleware[kind] = callback
 
     def register_auxiliary_task(self, key, *, display_name, description, defaults=None):
         """Mirrors PluginContext.register_auxiliary_task's real keyword-only signature."""
@@ -245,7 +252,7 @@ def test_tool_result_capture_is_unsupported_by_default_with_host_evidence():
     mode = report.mode("tool_result_capture")
     assert mode.support is Support.UNSUPPORTED
     assert DisabledReason.ORDERING_UNPROVEN in mode.reasons
-    assert any("missing operator attestation" in e for e in mode.evidence)
+    assert any("consumer-scope rollout attestation" in e for e in mode.evidence)
     assert any("fail-open" in e for e in mode.evidence)
 
 
@@ -260,7 +267,8 @@ def test_tool_result_capture_is_supported_with_both_operator_attestations(tmp_pa
     assert mode.support is Support.SUPPORTED
     assert any("operator attestation" in e for e in mode.evidence)
     assert any("0.21.3" in e for e in mode.evidence)
-    assert "transform_tool_result" in ctx.registered_hooks
+    assert "tool_execution" in ctx.registered_middleware
+    assert "transform_tool_result" not in ctx.registered_hooks
 
 
 def test_tool_result_capture_hook_not_registered_without_attestation(tmp_path):
@@ -273,19 +281,47 @@ def test_tool_result_capture_hook_not_registered_without_attestation(tmp_path):
     assert "transform_tool_result" not in ctx.registered_hooks
 
 
-def test_ordering_attestation_alone_cannot_register_capture(tmp_path):
+def test_both_attestations_use_official_provider_request_scope(tmp_path):
     module = _load_adapter()
     config = _config(tmp_path)
     config["tool_result_capture"] = {
         "enabled": True,
         "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
     }
     ctx = FakeCtx(config, llm=FakeLlm())
     module.register(ctx)
     mode = module._capability.mode("tool_result_capture")
-    assert mode.support is Support.UNSUPPORTED
-    assert DisabledReason.CONSUMER_SCOPE_UNPROVEN in mode.reasons
+    assert mode.support is Support.SUPPORTED
+    assert "pre_api_request" in ctx.registered_hooks
+    assert "tool_execution" in ctx.registered_middleware
     assert "transform_tool_result" not in ctx.registered_hooks
+
+
+def test_both_attestations_without_scope_hook_keep_legacy_descriptor_compatibility(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
+    }
+    ctx = FakeCtx(
+        config,
+        llm=FakeLlm(),
+        hooks=[
+            "pre_tool_call",
+            "transform_tool_result",
+            "on_session_end",
+            "on_session_finalize",
+            "on_session_reset",
+        ],
+    )
+    module.register(ctx)
+    mode = module._capability.mode("tool_result_capture")
+    assert mode.support is Support.SUPPORTED
+    assert "pre_api_request" not in ctx.registered_hooks
+    assert "transform_tool_result" in ctx.registered_hooks
 
 
 def test_tool_result_capture_hook_not_registered_when_attested_but_config_disabled(tmp_path):
@@ -539,6 +575,290 @@ def test_spilled_pointer_guidance_uses_scoped_deferred_wrappers(tmp_path):
     assert inspect_call["name"] == "context_shunt_inspect"
     assert inspect_call["arguments"]["source_id"] == handle["source_id"]
     assert "context_shunt_read direct arguments" not in guidance
+
+
+def _provider_tool(name: str, description: str = "") -> dict:
+    return {
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": {}},
+    }
+
+
+def _observe_request(ctx: FakeCtx, *, session: str, request: str, tools: list[dict]) -> None:
+    ctx.registered_hook_handlers["pre_api_request"](
+        request={"method": "POST", "body": {"tools": tools}},
+        session_id=session,
+        task_id=f"task-{session}",
+        turn_id=f"turn-{session}",
+        api_request_id=request,
+    )
+
+
+def test_actual_provider_request_proves_direct_consumer_scope(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
+    }
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    tools = [
+        _provider_tool("search_files"),
+        _provider_tool("context_shunt_read"),
+        _provider_tool("context_shunt_inspect"),
+    ]
+    _observe_request(ctx, session="direct-scope", request="req-direct", tools=tools)
+
+    out = json.loads(module.transform_tool_result(
+        tool_name="search_files",
+        result="synthetic direct row\n" * 3000,
+        session_id="direct-scope",
+        task_id="task-direct-scope",
+        turn_id="turn-direct-scope",
+        api_request_id="req-direct",
+        tool_call_id="tool-direct",
+    ))
+    assert out["code"] == "SPILLED"
+    assert "context_shunt_read direct arguments" in out["guidance"]
+
+
+def test_official_tool_execution_middleware_replaces_result_once(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    tools = [
+        _provider_tool("search_files"),
+        _provider_tool("context_shunt_read"),
+        _provider_tool("context_shunt_inspect"),
+    ]
+    _observe_request(ctx, session="middleware", request="req-middleware", tools=tools)
+    calls = 0
+
+    def next_call(args):
+        nonlocal calls
+        calls += 1
+        assert args == {"query": "synthetic"}
+        return "middleware row\n" * 5000
+
+    out = json.loads(ctx.registered_middleware["tool_execution"](
+        tool_name="search_files",
+        args={"query": "synthetic"},
+        next_call=next_call,
+        session_id="middleware",
+        task_id="task-middleware",
+        turn_id="turn-middleware",
+        api_request_id="req-middleware",
+        tool_call_id="tool-middleware",
+    ))
+    assert calls == 1
+    assert out["code"] == "SPILLED"
+    assert "middleware row" not in json.dumps(out)
+
+
+def test_tool_execution_middleware_never_leaks_after_transform_failure(tmp_path, monkeypatch):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    raw = "never publish this row\n" * 5000
+    monkeypatch.setattr(
+        module,
+        "transform_tool_result",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("synthetic failure")),
+    )
+    out_text = ctx.registered_middleware["tool_execution"](
+        tool_name="search_files",
+        args={"query": "synthetic"},
+        next_call=lambda _args: raw,
+        session_id="middleware-failure",
+        task_id="task-middleware-failure",
+        turn_id="turn-middleware-failure",
+        api_request_id="req-middleware-failure",
+        tool_call_id="tool-middleware-failure",
+    )
+    assert raw not in out_text
+    assert json.loads(out_text)["code"] == "HOST_UNSAFE"
+
+    monkeypatch.setattr(module, "transform_tool_result", lambda **_kwargs: None)
+    missing_text = ctx.registered_middleware["tool_execution"](
+        tool_name="search_files",
+        args={"query": "synthetic"},
+        next_call=lambda _args: raw,
+        session_id="middleware-missing",
+        task_id="task-middleware-missing",
+        turn_id="turn-middleware-missing",
+        api_request_id="req-middleware-missing",
+        tool_call_id="tool-middleware-missing",
+    )
+    assert raw not in missing_text
+    assert json.loads(missing_text)["code"] == "HOST_UNSAFE"
+
+
+def test_actual_provider_request_proves_deferred_consumer_scope(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
+    }
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    listing = """Search 3 additional tools that are loaded on demand.
+
+Every deferred capability is listed below. If a tool name appears here, load it.
+
+Deferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):
+context_shunt tools (2):
+- context_shunt_inspect: Deterministically inspect a snapshot.
+- context_shunt_read: Answer from a snapshot.
+search tools (1):
+- search_files: Search synthetic files.
+"""
+    tools = [
+        _provider_tool("tool_search", listing),
+        _provider_tool("tool_describe"),
+        _provider_tool("tool_call"),
+    ]
+    _observe_request(ctx, session="deferred-scope", request="req-deferred", tools=tools)
+
+    out = json.loads(module.transform_tool_result(
+        tool_name="search_files",
+        result="synthetic deferred row\n" * 3000,
+        session_id="deferred-scope",
+        task_id="task-deferred-scope",
+        turn_id="turn-deferred-scope",
+        api_request_id="req-deferred",
+        tool_call_id="tool-deferred",
+    ))
+    assert out["code"] == "SPILLED"
+    assert "reader tool_call arguments" in out["guidance"]
+
+
+def test_provider_scope_is_request_local_revocable_and_fail_closed(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
+    }
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    capable = [
+        _provider_tool("search_files"),
+        _provider_tool("context_shunt_read"),
+        _provider_tool("context_shunt_inspect"),
+    ]
+    restricted = [_provider_tool("terminal")]
+    _observe_request(ctx, session="capable", request="req-a", tools=capable)
+    _observe_request(ctx, session="restricted", request="req-b", tools=restricted)
+
+    restricted_out = json.loads(module.transform_tool_result(
+        tool_name="search_files", result="restricted\n" * 5000,
+        session_id="restricted", task_id="task-restricted",
+        turn_id="turn-restricted", api_request_id="req-b",
+    ))
+    assert restricted_out["code"] == "LEGACY_COMPACTED"
+    assert restricted_out["recovery"]["handles_valid"] is False
+
+    incomplete_out = json.loads(module.transform_tool_result(
+        tool_name="search_files", result="missing task correlation\n" * 5000,
+        session_id="capable", task_id="",
+        turn_id="turn-capable", api_request_id="req-a",
+    ))
+    assert incomplete_out["code"] == "LEGACY_COMPACTED"
+    assert incomplete_out["recovery"]["handles_valid"] is False
+
+    module.on_session_reset(session_id="capable")
+    revoked_out = json.loads(module.transform_tool_result(
+        tool_name="search_files", result="revoked\n" * 5000,
+        session_id="capable", task_id="task-capable",
+        turn_id="turn-capable", api_request_id="req-a",
+    ))
+    assert revoked_out["code"] == "LEGACY_COMPACTED"
+    assert revoked_out["recovery"]["handles_valid"] is False
+
+
+def test_deferred_summary_or_partial_consumers_do_not_prove_scope(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {
+        "enabled": True,
+        "host_ordering_verified_locally": True,
+        "host_consumer_scope_verified_locally": True,
+    }
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    summary = """Search tools loaded on demand.
+
+Deferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):
+context_shunt (4 tools — names not listed; discover via `tool_search`)
+"""
+    tools = [
+        _provider_tool("tool_search", summary),
+        _provider_tool("tool_describe"),
+        _provider_tool("tool_call"),
+        _provider_tool("context_shunt_read"),
+    ]
+    _observe_request(ctx, session="partial", request="req-partial", tools=tools)
+    out = json.loads(module.transform_tool_result(
+        tool_name="search_files", result="partial\n" * 5000,
+        session_id="partial", task_id="task-partial",
+        turn_id="turn-partial", api_request_id="req-partial",
+    ))
+    assert out["code"] == "LEGACY_COMPACTED"
+    assert out["recovery"]["handles_valid"] is False
+
+
+def test_truncated_provider_request_revokes_same_id_evidence(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    capable = [
+        _provider_tool("search_files"),
+        _provider_tool("context_shunt_read"),
+        _provider_tool("context_shunt_inspect"),
+    ]
+    _observe_request(ctx, session="truncated", request="req-reused", tools=capable)
+    ctx.registered_hook_handlers["pre_api_request"](
+        request={"_truncated": True, "preview": "bounded"},
+        session_id="truncated",
+        task_id="task-truncated",
+        turn_id="turn-truncated",
+        api_request_id="req-reused",
+    )
+    out = json.loads(module.transform_tool_result(
+        tool_name="search_files", result="truncated\n" * 5000,
+        session_id="truncated", task_id="task-truncated",
+        turn_id="turn-truncated", api_request_id="req-reused",
+    ))
+    assert out["code"] == "LEGACY_COMPACTED"
+    assert out["recovery"]["handles_valid"] is False
+
+
+def test_provider_request_scope_cache_is_bounded(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    tools = [
+        _provider_tool("search_files"),
+        _provider_tool("context_shunt_read"),
+        _provider_tool("context_shunt_inspect"),
+    ]
+    for index in range(module._REQUEST_SCOPE_MAX + 7):
+        _observe_request(ctx, session=f"bounded-{index}", request=f"req-{index}", tools=tools)
+    assert len(module._request_scopes) == module._REQUEST_SCOPE_MAX
+    assert all(key[0] != "bounded-0" for key in module._request_scopes)
 
 
 @pytest.mark.parametrize(

@@ -32,11 +32,10 @@ available on the current checkout; consult the most recent verification output.
 ## Intentionally unavailable
 
 - `tool_result_capture` (formerly `suma_post_tool`) is unsupported on OpenClaw. On Hermes,
-  exact 0.21.3 source/image verification found a missing invocation-scope handoff at the
-  transform hook. The owned adapter requires two attestations and still fails closed per
-  invocation. A source-located host proposal plus automated exact-host probe now exist;
-  unmodified 0.21.3 is the red control, while the read-only mounted proposal passes. The
-  third-party host change remains outside this repository.
+  the owned adapter requires two attestations and fails closed per invocation. The
+  automated exact-host probe now passes on unmodified 0.21.3 by correlating the official
+  post-middleware provider-request observer to tool dispatch; no third-party host change is
+  required.
 - `artifact_import` is unsupported on OpenClaw: the TypeScript core has no import
   boundary. That is a repository gap rather than a host limitation, so closing it needs no
   host change.

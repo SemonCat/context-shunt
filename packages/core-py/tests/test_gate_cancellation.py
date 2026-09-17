@@ -41,6 +41,8 @@ class ClockProvider:
         reply = self.reply() if callable(self.reply) else self.reply
         if isinstance(reply, Exception):
             raise reply
+        if isinstance(reply, ModelResponse):
+            return reply
         return ModelResponse(
             text=reply,
             requested=ModelIdentity(provider="openai", model=L.reader_model),
@@ -53,6 +55,26 @@ class ClockProvider:
     @property
     def target(self) -> ProviderTarget:
         return ProviderTarget(model=L.reader_model, provider="openai")
+
+
+class ExpireAfterDeliveryResponse(ModelResponse):
+    """Spend the fake deadline only after the worker delivered this response.
+
+    ``_complete_with_deadline`` checks the deadline before returning the queue item. The
+    reader then asks the delivered response for its attribution while recording exact
+    usage. Expiring at that point deterministically exercises the later PUBLISH check,
+    without racing the provider worker's queue write.
+    """
+
+    def __init__(self, *, clock: FakeClock, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "_test_clock", clock)
+
+    def attribution(self):
+        clock = self._test_clock
+        if clock.now_ms() < 60_000:
+            clock.advance(60_000 - clock.now_ms())
+        return super().attribution()
 
 
 def make_registry_at(clock):
@@ -264,9 +286,19 @@ def test_a_deadline_after_the_call_still_accounts_for_what_the_provider_was_paid
     savings figure derived from it was overstated.
     """
     clock = FakeClock()
-    # The call itself fits the budget; the remaining time does not survive to PUBLISH.
+    # The response crosses the worker boundary inside budget, then the fake clock expires
+    # while the delivered response is accounted, before PUBLISH.
+    reply = ExpireAfterDeliveryResponse(
+        clock=clock,
+        text=answer_json("mode = fast [c1]", [(1, 1, "mode = fast")]),
+        requested=ModelIdentity(provider="openai", model=L.reader_model),
+        resolved=ModelIdentity(provider="openai", model=L.reader_model),
+        reported=ModelIdentity(provider="openai", model=L.reader_model),
+        provider_confirms_generation=True,
+        usage=Usage(input_tokens=1, output_tokens=1, method=TokenMethod.EXACT),
+    )
     provider = ClockProvider(
-        clock, 60_000, answer_json("mode = fast [c1]", [(1, 1, "mode = fast")])
+        clock, 0, reply
     )
     registry = make_registry_at(clock)
     entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))

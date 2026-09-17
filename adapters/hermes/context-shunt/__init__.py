@@ -56,18 +56,15 @@ Capture, inspect and stats do not depend on the reader and stay fully usable eit
 
 The optional oversized-tool-result capture mode (``tool_result_capture``, formerly
 documented under the internal name ``suma_post_tool``) is wired but not claimed
-unconditionally. ``transform_tool_result`` is registered when the capability probe reports
-the mode supported, which additionally requires two explicit operator attestations
-(``tool_result_capture.host_ordering_verified_locally: true`` and
-``host_consumer_scope_verified_locally: true``) - see
-``_tool_result_capture_mode`` for exactly what was and was not verified, and
-docs/capability-matrix.md for the dated evidence. Even when wired, the handler never
-depends on the host's fail-open behavior: ``_apply_transform_tool_result_hook`` still runs
-inside try/except on the host side, and this adapter's own handler never raises past that
-boundary regardless of which side of the ordering question the installed host is on.
+unconditionally. On Hermes 0.21.3, the two existing operator attestations register the
+official ``tool_execution`` middleware plus post-middleware ``pre_api_request`` observer.
+The adapter binds the actual provider-visible direct/deferred tool surface to immutable
+request ids and replaces results inside the authorized execution chain. It never
+infers reachability from global plugin registration. See ``_tool_result_capture_mode`` and
+docs/capability-matrix.md for the exact evidence. The handler also never depends on the
+host's fail-open behavior: every oversized owned failure becomes a bounded envelope.
 
-The hook receives no question - Hermes does not forward the conversation's ``user_task`` to
-``transform_tool_result`` at all - so it only ever captures and points; answering happens
+The middleware receives no question, so it only ever captures and points; answering happens
 through a separate ``context_shunt_read`` call, the same two-step shape the artifact-import
 boundary already uses.
 
@@ -85,7 +82,11 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from copy import deepcopy
 from functools import cache
@@ -180,6 +181,152 @@ _capability: CapabilityReport | None = None
 _llm = None
 _store: SnapshotStore | None = None
 _metrics = None
+
+# Provider-request capability evidence is deliberately short-lived and bounded. Hermes
+# generates one api_request_id per model request and forwards that same id to every tool
+# execution selected from the response. Keeping the full four-part key prevents two
+# concurrent sessions/turns from sharing evidence even if a test double reuses an id.
+_REQUEST_SCOPE_MAX = 512
+_REQUEST_SCOPE_TTL_SECONDS = 60 * 60
+_REQUEST_TOOLS_MAX = 4096
+_REQUEST_DESCRIPTION_MAX_CHARS = 256_000
+_request_scopes: "OrderedDict[tuple[str, str, str, str], tuple[float, frozenset[str], frozenset[str]]]" = OrderedDict()
+_request_scopes_lock = threading.RLock()
+
+
+def _request_scope_key(kwargs: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+    """Return an immutable host correlation key, or ``None`` when it is incomplete."""
+    session_id = str(kwargs.get("session_id") or "")
+    task_id = str(kwargs.get("task_id") or "")
+    turn_id = str(kwargs.get("turn_id") or "")
+    api_request_id = str(kwargs.get("api_request_id") or "")
+    if not session_id or not task_id or not turn_id or not api_request_id:
+        return None
+    if any(len(value) > 512 for value in (session_id, task_id, turn_id, api_request_id)):
+        return None
+    return session_id, task_id, turn_id, api_request_id
+
+
+def _provider_tool_name(tool: Any) -> str:
+    """Extract a direct tool name from OpenAI/Anthropic-style provider schemas."""
+    if not isinstance(tool, Mapping):
+        return ""
+    function = tool.get("function")
+    raw = function.get("name") if isinstance(function, Mapping) else tool.get("name")
+    return normalize_tool_identity(raw)
+
+
+def _provider_tool_description(tool: Any) -> str:
+    if not isinstance(tool, Mapping):
+        return ""
+    function = tool.get("function")
+    raw = function.get("description") if isinstance(function, Mapping) else tool.get("description")
+    return raw if isinstance(raw, str) and len(raw) <= _REQUEST_DESCRIPTION_MAX_CHARS else ""
+
+
+_CATALOG_HEADER = "Deferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):"
+_CATALOG_GROUP = re.compile(r"^(.+?) tools \((\d+)\):$")
+_CATALOG_NAME = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+
+
+def _explicit_deferred_names(description: str) -> frozenset[str]:
+    """Parse only names explicitly rendered by Hermes' bounded deferred catalog.
+
+    Tier-2 summaries (``names not listed``), malformed/truncated groups, and arbitrary
+    prose prove nothing. Each accepted group must contain exactly its declared number of
+    syntactically valid names, so a clipped hook payload cannot accidentally grant a
+    partial catalog broader meaning.
+    """
+    marker = description.find(_CATALOG_HEADER)
+    if marker < 0:
+        return frozenset()
+    lines = description[marker + len(_CATALOG_HEADER):].splitlines()
+    names: set[str] = set()
+    index = 0
+    while index < len(lines):
+        heading = _CATALOG_GROUP.fullmatch(lines[index].strip())
+        if heading is None:
+            index += 1
+            continue
+        declared = int(heading.group(2))
+        index += 1
+        body: list[str] = []
+        while index < len(lines) and _CATALOG_GROUP.fullmatch(lines[index].strip()) is None:
+            # A collapsed group is not a ``... tools (N):`` heading and is ignored. Stop
+            # at it rather than allowing its prose to be interpreted as a names line.
+            if "names not listed" in lines[index]:
+                break
+            if lines[index].strip():
+                body.append(lines[index].strip())
+            index += 1
+        parsed: list[str] = []
+        if body and all(line.startswith("- ") for line in body):
+            parsed = [line[2:].split(":", 1)[0].strip() for line in body]
+        elif len(body) == 1:
+            parsed = [part.strip() for part in body[0].split(",")]
+        if (
+            0 < declared <= _REQUEST_TOOLS_MAX
+            and len(parsed) == declared
+            and len(names) + len(parsed) <= _REQUEST_TOOLS_MAX
+            and all(_CATALOG_NAME.fullmatch(name) for name in parsed)
+        ):
+            names.update(parsed)
+    return frozenset(names)
+
+
+def _provider_request_tools(request: Any) -> tuple[frozenset[str], frozenset[str]] | None:
+    """Return actual direct/deferred names from a post-middleware hook payload."""
+    if not isinstance(request, Mapping) or request.get("_truncated") is True:
+        return None
+    body = request.get("body", request)
+    if not isinstance(body, Mapping) or body.get("_truncated") is True:
+        return None
+    tools = body.get("tools")
+    if not isinstance(tools, list) or len(tools) > _REQUEST_TOOLS_MAX:
+        return None
+    direct: set[str] = set()
+    deferred: set[str] = set()
+    for tool in tools:
+        name = _provider_tool_name(tool)
+        if not name:
+            return None
+        direct.add(name)
+        if name == "tool_search":
+            deferred.update(_explicit_deferred_names(_provider_tool_description(tool)))
+    return frozenset(direct), frozenset(deferred)
+
+
+def observe_provider_request(request: Any = None, **kwargs: Any) -> None:
+    """Record exact model-visible capability for this one Hermes API request.
+
+    ``pre_api_request`` runs after all official request middleware. It is observer-only;
+    this callback never rewrites provider input and never derives authority from global
+    plugin registration or configuration. Missing/truncated evidence is stored as no
+    capability, preventing stale evidence for a reused synthetic id.
+    """
+    key = _request_scope_key(kwargs)
+    if key is None:
+        return None
+    observed = _provider_request_tools(request)
+    now = time.monotonic()
+    with _request_scopes_lock:
+        cutoff = now - _REQUEST_SCOPE_TTL_SECONDS
+        while _request_scopes and next(iter(_request_scopes.values()))[0] < cutoff:
+            _request_scopes.popitem(last=False)
+        _request_scopes.pop(key, None)
+        if observed is not None:
+            _request_scopes[key] = (now, observed[0], observed[1])
+        while len(_request_scopes) > _REQUEST_SCOPE_MAX:
+            _request_scopes.popitem(last=False)
+    return None
+
+
+def _forget_request_scopes(session_id: str) -> None:
+    if not session_id:
+        return
+    with _request_scopes_lock:
+        for key in [key for key in _request_scopes if key[0] == session_id]:
+            _request_scopes.pop(key, None)
 
 
 class _ReaderMetrics:
@@ -318,7 +465,7 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
     # Oversized tool-result capture: see _tool_result_capture_mode's docstring for why
     # this is not a blanket claim even though the ordering was directly verified on one
     # live host.
-    modes.append(_tool_result_capture_mode())
+    modes.append(_tool_result_capture_mode(ctx))
 
     return CapabilityReport(
         adapter=ADAPTER,
@@ -335,7 +482,7 @@ def build_capability_report(ctx: Any, *, host_version: str = "") -> CapabilityRe
     )
 
 
-def _tool_result_capture_mode() -> ModeCapability:
+def _tool_result_capture_mode(ctx: Any = None) -> ModeCapability:
     """Whether ``tool_result_capture`` (oversized-tool-result capture) is supported.
 
     Deliberately not a blanket claim. A prior version of this adapter reported the mode
@@ -344,24 +491,21 @@ def _tool_result_capture_mode() -> ModeCapability:
     (``CAPTURE_AFTER_TRUNCATION``), and the host wraps the hook dispatch in try/except, so
     a raising handler leaves the original result in place (``HOST_FAIL_OPEN``).
 
-    Direct, read-only inspection of one operator's own live Hermes 0.21.3 host on
-    2026-09-16 (cited in ``docs/capability-matrix.md``) found the CAPTURE_AFTER_TRUNCATION
-    reason no longer holds at that dispatch layer: ``handle_function_call`` calls
-    ``_execute_tool``, emits ``post_tool_call``, and only then calls
-    ``_apply_transform_tool_result_hook`` - with no truncation call visible between execute
-    and the hook. That is evidence about one running instance, not a reproducible,
-    version-independent proof this adapter can make about every host it might be installed
-    against: a registry tool could still self-truncate its own output before returning,
-    which was not (and cannot generically be) audited here. ``HOST_FAIL_OPEN`` still holds
-    regardless of that finding - it is unrelated to the truncation-ordering question - so
-    ``transform_tool_result`` below never raises, whichever side of this the installed host
-    is actually on.
+    Direct, read-only inspection and an isolated exact-image probe of the operator's
+    Hermes 0.21.3 host on 2026-09-17 found a stronger official route: authorized dispatch
+    runs inside ``tool_execution`` middleware before the result reaches context. The
+    middleware is concurrency-safe, unlike the host's bounded transform-hook dispatcher.
+    This remains evidence about one exact host version: a registry tool could still
+    self-truncate before returning. The compatibility transform route remains fail-safe,
+    and the middleware wrapper converts unexpected oversized-transform failures to a fixed
+    envelope because Hermes otherwise preserves a completed downstream result.
 
     So: unsupported by default (``ORDERING_UNPROVEN`` - a narrower, honest reason than the
-    stale ``CAPTURE_AFTER_TRUNCATION`` claim), *unless* the deployment sets
-    ``tool_result_capture.host_ordering_verified_locally: true`` and
-    ``host_consumer_scope_verified_locally: true`` in its own config - explicit operator
-    attestations this code does not and cannot prove for itself.
+    stale ``CAPTURE_AFTER_TRUNCATION`` claim), *unless* the deployment sets both existing
+    attestations. The consumer attestation is retained as an explicit rollout interlock:
+    it says the operator ran the exact-host observer canary, not merely that plugin tools
+    appeared in global config. Hermes 0.21.3 exposes the provider-bound request and
+    immutable request ids through official hooks, so no core patch is needed.
     """
     ordering_attested = bool(
         _config is not None
@@ -371,32 +515,58 @@ def _tool_result_capture_mode() -> ModeCapability:
         _config is not None
         and _config.tool_result_capture.host_consumer_scope_verified_locally
     )
+    hooks = _supported_hooks(ctx) if ctx is not None else set()
+    provider_request_observer = "pre_api_request" in hooks
+    middleware_route = provider_request_observer and callable(
+        getattr(ctx, "register_middleware", None)
+    )
+    legacy_transform_route = "transform_tool_result" in hooks
     fail_open_evidence = (
         "hermes-agent model_tools.py: _apply_transform_tool_result_hook runs inside "
         "try/except and the original result survives a raising handler (fail-open); "
         "this adapter's own hook handler never raises regardless"
     )
-    if ordering_attested and consumer_scope_attested:
+    if ordering_attested and consumer_scope_attested and (
+        middleware_route or legacy_transform_route
+    ):
+        scope_evidence = (
+            "official Hermes pre_api_request observer supplies the post-middleware "
+            "provider-bound tools array plus immutable session/turn/api_request ids; "
+            "official tool_execution middleware wraps authorized dispatch without the "
+            "bounded-hook single-flight suppression and publishes a pointer only on an "
+            "exact id match"
+            if middleware_route
+            else
+            "operator attestation: host_consumer_scope_verified_locally=true - the "
+            "installed host forwards a fresh invocation-scoped direct/deferred tool "
+            "descriptor to transform_tool_result"
+        )
+        replacement_evidence = (
+            "official tool_execution middleware runs inside the authorized dispatch "
+            "chain before the result reaches context; Hermes otherwise returns a "
+            "completed downstream result when middleware raises, so this adapter catches "
+            "unexpected oversized-transform failures and emits a fixed bounded envelope"
+            if middleware_route
+            else fail_open_evidence
+        )
         return supported(
             "tool_result_capture",
             evidence=(
                 "operator attestation: tool_result_capture.host_ordering_verified_locally="
                 "true - this adapter does not independently verify the installed host's "
                 "hook ordering; the operator has",
-                "operator attestation: host_consumer_scope_verified_locally=true - the "
-                "installed host forwards a fresh invocation-scoped direct/deferred tool "
-                "descriptor to transform_tool_result; absent or incomplete descriptors "
-                "remain no-handle legacy compaction",
-                "read-only inspection of live Hermes 0.21.3 (2026-09-16) found "
-                "handle_function_call -> _execute_tool -> _emit(post_tool_call) -> "
-                "_apply_transform_tool_result_hook, no truncation call visible between "
-                "execute and the hook at that dispatch layer (docs/capability-matrix.md); "
-                "per-tool self-truncation upstream of that layer was not audited",
+                scope_evidence + "; absent, truncated, stale, partial, or incomplete "
+                "evidence remains no-handle legacy compaction",
+                "read-only inspection and the isolated exact-image probe on live Hermes "
+                "0.21.3 (2026-09-17) found authorized dispatch inside tool_execution "
+                "middleware with no host truncation before replacement "
+                "(docs/capability-matrix.md); per-tool self-truncation upstream of that "
+                "layer was not audited",
                 "capture classifier: read_file/search_files plus operator exact "
                 "capture_tool_allowlist only; protected instructions/control/catalogs "
                 "and unknown tools pass verbatim; MCP read_resource requires allowlisting "
                 "because executed-utility provenance is unavailable at the hook",
-                fail_open_evidence,
+                replacement_evidence,
             ),
         )
     reasons = []
@@ -404,13 +574,16 @@ def _tool_result_capture_mode() -> ModeCapability:
         reasons.append(DisabledReason.ORDERING_UNPROVEN)
     if not consumer_scope_attested:
         reasons.append(DisabledReason.CONSUMER_SCOPE_UNPROVEN)
+    if not middleware_route and not legacy_transform_route:
+        reasons.append(DisabledReason.HOOK_MISSING)
     return unsupported(
         "tool_result_capture",
         *reasons,
         evidence=(
-            "missing operator attestation for capture ordering and/or immutable "
-            "invocation-scoped consumer capability: enabled=true alone never registers "
-            "the transform hook",
+            "missing capture-ordering and/or consumer-scope rollout attestation: "
+            "enabled=true alone never registers the transform hook; each invocation "
+            "still needs the official correlated request evidence or a legacy immutable "
+            "descriptor",
             fail_open_evidence,
         ),
     )
@@ -773,6 +946,16 @@ def transform_tool_result(
     request_id = _request_id({"tool_call_id": tool_call_id, **kwargs})
     consumer_route = _consumer_route(kwargs.get("consumer_capabilities"))
     if consumer_route is None:
+        consumer_route = _consumer_route_from_request(
+            tool_name,
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "turn_id": kwargs.get("turn_id"),
+                "api_request_id": kwargs.get("api_request_id"),
+            },
+        )
+    if consumer_route is None:
         try:
             return _block_message(
                 _session(task_id, session_id).compact_tool_result_without_consumer(
@@ -833,14 +1016,65 @@ def transform_tool_result(
     return _block_message(outcome.envelope)
 
 
+def capture_tool_execution(
+    tool_name: str = "",
+    args: dict | None = None,
+    next_call: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """Official Hermes tool-execution middleware for concurrency-safe capture.
+
+    Hermes invokes this after authorization and supplies the same immutable request ids
+    observed at ``pre_api_request``. Unlike bounded lifecycle hooks, execution middleware
+    does not suppress a concurrent invocation of the same callback. The downstream call is
+    made exactly once. A Shunt transform failure after an oversized eligible result is
+    converted by ``transform_tool_result`` to a bounded envelope, never returned raw.
+    """
+    if not callable(next_call):
+        raise TypeError("tool execution middleware requires next_call")
+    result = next_call(args if isinstance(args, dict) else {})
+    must_bound = bool(
+        _config is not None
+        and _capability is not None
+        and _capability.enabled("tool_result_capture")
+        and classify_tool_result(tool_name, _capture_tool_allowlist) == "eligible"
+        and isinstance(result, str)
+        and len(result.encode("utf-8", errors="replace"))
+        > _config.limits.max_tool_result_bytes
+    )
+    try:
+        replacement = transform_tool_result(
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            task_id=str(kwargs.get("task_id") or ""),
+            session_id=str(kwargs.get("session_id") or ""),
+            tool_call_id=str(kwargs.get("tool_call_id") or ""),
+            turn_id=kwargs.get("turn_id"),
+            api_request_id=kwargs.get("api_request_id"),
+        )
+    except Exception:
+        # Hermes intentionally returns the already-completed downstream result when
+        # execution middleware raises. For an oversized owned candidate that would be a
+        # raw leak, so collapse even an unexpected adapter bug to the smallest legal
+        # envelope inside this callback.
+        if must_bound:
+            return _block_message(
+                fixed_error(_request_id(kwargs), code="HOST_UNSAFE")
+            )
+        raise
+    if must_bound and replacement is None:
+        return _block_message(fixed_error(_request_id(kwargs), code="HOST_UNSAFE"))
+    return result if replacement is None else replacement
+
+
 def _consumer_route(raw: Any) -> str | None:
     """Return a proven direct/deferred route from bounded host-supplied facts.
 
-    Unmodified Hermes 0.21.3 does not pass this descriptor to
-    ``transform_tool_result``. That absence deliberately returns ``None``: the adapter
-    cannot reconstruct a restricted session's toolsets from process-global registration
-    without risking a scope bypass. The exact source-located host proposal passes the
-    session-scoped pre-assembly facts directly; the adapter still validates their shape.
+    This is the compatibility path for a host that supplies a descriptor directly.
+    Unmodified Hermes 0.21.3 instead uses ``_consumer_route_from_request`` and the official
+    provider-request observer below. Neither path reconstructs authority from global
+    registration, and both validate bounded immutable facts.
     """
     if not isinstance(raw, Mapping) or set(raw) - {"direct_tools", "deferred_tools"}:
         return None
@@ -869,6 +1103,34 @@ def _consumer_route(raw: Any) -> str | None:
     return None
 
 
+def _consumer_route_from_request(tool_name: Any, ids: Mapping[str, Any]) -> str | None:
+    """Resolve a route from exact provider-request evidence, never global availability."""
+    key = _request_scope_key(ids)
+    if key is None:
+        return None
+    now = time.monotonic()
+    with _request_scopes_lock:
+        evidence = _request_scopes.get(key)
+        if evidence is None:
+            return None
+        observed_at, direct, deferred = evidence
+        if observed_at < now - _REQUEST_SCOPE_TTL_SECONDS:
+            _request_scopes.pop(key, None)
+            return None
+    executed = normalize_tool_identity(tool_name)
+    if not executed or executed not in direct | deferred:
+        # The ids alone are insufficient if this tool was not actually offered in the
+        # correlated request. This also rejects direct host/test calls that borrow ids.
+        return None
+    consumers = {"context_shunt_read", "context_shunt_inspect"}
+    if consumers <= direct:
+        return "direct"
+    bridges = {"tool_search", "tool_describe", "tool_call"}
+    if bridges <= direct and consumers <= deferred:
+        return "deferred"
+    return None
+
+
 def on_session_end(session_id: str = "", **kwargs):
     """Per-turn, not a session boundary.
 
@@ -886,6 +1148,7 @@ def on_session_end(session_id: str = "", **kwargs):
 def on_session_finalize(session_id: str = "", **kwargs):
     """A real session boundary: revoke this scope's handles."""
     key = session_id or str(kwargs.get("task_id") or "unbound")
+    _forget_request_scopes(session_id)
     session = _sessions.pop(key, None)
     if session is not None:
         session.close()
@@ -894,6 +1157,7 @@ def on_session_finalize(session_id: str = "", **kwargs):
 def on_session_reset(session_id: str = "", **kwargs):
     """``/reset`` and ``/new``: bump the generation so old handles cannot be replayed."""
     key = session_id or str(kwargs.get("task_id") or "unbound")
+    _forget_request_scopes(session_id)
     session = _sessions.pop(key, None)
     _generations[key] = _generations.get(key, 1) + 1
     if session is not None:
@@ -1337,6 +1601,8 @@ def register(ctx: Any) -> None:
     for session in _sessions.values():
         session.close()
     _sessions.clear()
+    with _request_scopes_lock:
+        _request_scopes.clear()
     raw = dict(_load_plugin_config(ctx))
     _capture_tool_allowlist = frozenset()
     allowlist = raw.pop("capture_tool_allowlist", [])
@@ -1396,9 +1662,15 @@ def register(ctx: Any) -> None:
     if (
         _capability.enabled("tool_result_capture")
         and _config.tool_result_capture.enabled
-        and "transform_tool_result" in hooks
     ):
-        ctx.register_hook("transform_tool_result", transform_tool_result)
+        register_middleware = getattr(ctx, "register_middleware", None)
+        if callable(register_middleware) and "pre_api_request" in hooks:
+            ctx.register_hook("pre_api_request", observe_provider_request)
+            register_middleware("tool_execution", capture_tool_execution)
+        elif "transform_tool_result" in hooks:
+            # Compatibility route for an older/operator-attested host that supplies an
+            # immutable consumer_capabilities descriptor directly to the transform hook.
+            ctx.register_hook("transform_tool_result", transform_tool_result)
 
     register_tool = getattr(ctx, "register_tool", None)
     if callable(register_tool):

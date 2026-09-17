@@ -26,12 +26,12 @@ Hermes 攔截 `read_file`、`search_files` 與 `terminal`；OpenClaw 涵蓋
 
 ### Hermes 工具結果：先擷取，再提問
 
-`tool_result_capture` 在 `transform_tool_result` 攔截符合條件的過大 MCP／工具結果，
-此時結果尚未進入主模型上下文。只有當該次呼叫的能力描述證明可直接或透過完整 deferred
+`tool_result_capture` 在 Hermes 官方 `tool_execution` middleware 攔截符合條件的過大
+MCP／工具結果，此時結果尚未進入主模型上下文。只有當關聯的 provider request 證明可直接或透過完整 deferred
 bridge 使用 read 與 inspect 時，才保存不可變更的 artifact 並回傳有界 pointer；否則回傳
 沒有 handle 的有界決定性舊版壓縮，也不保留只有 pointer 才能讀取的內容。此步驟**不呼叫模型**。
 
-這個 hook **收不到使用者的問題**。閱讀是另一個步驟：主模型必須呼叫
+這個 middleware **收不到使用者的問題**。閱讀是另一個步驟：主模型必須呼叫
 `context_shunt_read`，傳入明確問題與 artifact handle。部署範例的 reader
 使用 `gpt-5.6-luna`；使用者可自行設定模型與 provider。
 
@@ -53,10 +53,10 @@ bridge 使用 read 與 inspect 時，才保存不可變更的 artifact 並回傳
                     主模型可檢視有界來源範圍
 ```
 
-Hermes hook 目前擷取過大的**字串**結果；結構化／多模態區塊直接放行。它無法還原 producer
-事先截掉的內容。2026-09-16 已檢查實際 Hermes 0.21.3 映像與原始碼；未修改的 host 不會把
-該次呼叫的工具範圍傳給 `transform_tool_result`，所以只能回傳沒有 handle 的有界舊版壓縮。
-本 repo 提供精確定位的 host 提案與同映像測試，但不修改第三方程式。新部署必須自行確認
+Hermes middleware 目前擷取過大的**字串**結果；結構化／多模態區塊直接放行。它無法還原 producer
+事先截掉的內容。2026-09-17 已檢查實際 Hermes 0.21.3 映像與原始碼；未修改的 host 已可透過
+官方 `pre_api_request` observer 與同一組 request ID 證明 model-visible scope，並由
+concurrency-safe 的 `tool_execution` middleware 取代結果，不需要 Hermes core patch。新部署必須自行確認
 順序與每次呼叫的 consumer scope，並同時設定 `tool_result_capture.enabled: true`、
 `tool_result_capture.host_ordering_verified_locally: true` 與
 `tool_result_capture.host_consumer_scope_verified_locally: true`。符合條件的過大結果若擷取失敗，

@@ -1,4 +1,9 @@
-# Hermes 0.21.3 operator approval package
+# Archived Hermes 0.21.3 patch proposal — superseded
+
+> Superseded on 2026-09-17. The exact unmodified host exposes sufficient scoped evidence
+> through its official post-middleware `pre_api_request` hook. Do not apply this patch or
+> build a modified Hermes image for the context-shunt candidate. See
+> [`../capability-matrix.md`](../capability-matrix.md) and the no-core exact-image probe.
 
 Status: **proposal only**. It was not applied to installed source, built into an image, or
 enabled in production. Ruby owns approval, image construction, canary, and rollback.

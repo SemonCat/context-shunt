@@ -26,7 +26,7 @@ to the report separately, and does not block. Every other absent prerequisite st
 blocks, so ``release all`` exits 0 exactly when every required gate passed.
 
 Hermes post-tool capture is now a required, exact-host probe because the owned adapter has
-a fail-closed invocation-scope contract and a source-located 0.21.3 host proposal. OpenClaw
+a fail-closed invocation-scope contract over official unmodified-host hooks. OpenClaw
 capture remains retired and therefore ``EXPECTED_UNSUPPORTED``.
 
 The ``shadow`` suite is deliberately split the same way. ``shadow deterministic`` runs

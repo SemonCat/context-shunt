@@ -12,9 +12,10 @@ import it:
 Without those, ``scripts/verify`` reports NOT_RUN (exit 2). It is never a pass, and the
 deterministic adapter-contract gate (``unit capability``) is not a substitute for it.
 
-The post-tool mode has no test here on purpose: Hermes' ``transform_tool_result`` receives
-a result that is already truncated and is wrapped in try/except by the host, so complete
-capture before truncation cannot be shown. See docs/capability-matrix.md.
+The tool-result capture mode has a separate exact-version probe because current Hermes uses
+the official ``pre_api_request`` observer plus ``tool_execution`` middleware, while this
+compatibility harness also supports the older 0.18.2 checkout. See
+``evals/hermes-host-contract/probe.py`` and docs/capability-matrix.md.
 """
 
 from __future__ import annotations

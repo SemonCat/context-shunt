@@ -1,4 +1,13 @@
-# Hermes host proposal (not applied by this repository)
+# Archived Hermes host proposal (not required; do not apply for this candidate)
+
+The 2026-09-17 official-API investigation superseded this proposal. Unmodified Hermes
+0.21.3 exposes the post-middleware provider-bound tool array through `pre_api_request`,
+correlated by the same immutable request ids used at tool dispatch. The owned adapter and
+exact-image probe now use that route. No Hermes source patch or modified image is part of
+the production candidate.
+
+The material below is retained only as historical review context. It must not be treated
+as an operator instruction or candidate build input.
 
 `hermes-0.21.3-consumer-capabilities.patch` targets the exact `model_tools.py` inspected
 from image `context-shunt/hermes:5492046470eb-v2026.9.14`, Hermes 0.21.3. The original

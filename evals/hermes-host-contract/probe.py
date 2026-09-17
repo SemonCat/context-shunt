@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact-host probe for invocation-scoped post-tool consumer delivery.
+"""Exact-host probe for no-core-patch invocation-scoped consumer delivery.
 
 This script intentionally uses only the Python standard library plus the selected Hermes
 runtime and this repository. It is designed for an isolated copy/container of a specific
@@ -8,18 +8,20 @@ host version; it never contacts a provider and prints only bounded synthetic met
 Examples (environment paths are required)::
 
     HERMES_ROOT=/opt/hermes SHUNT_CORE=... SHUNT_ADAPTER=... \
-      python probe.py --expect missing-seam
+      python probe.py --expect no-observation
     HERMES_ROOT=/opt/hermes SHUNT_CORE=... SHUNT_ADAPTER=... \
       python probe.py --expect ready
 
-``missing-seam`` is the red-capable control for an unmodified 0.21.3 host. ``ready`` is
-the acceptance expectation after applying the source-located proposal in
-``docs/host-proposals/hermes-0.21.3-consumer-capabilities.patch``.
+``no-observation`` is the red-capable control: the exact same unmodified host dispatches
+without a correlated provider-request observation and must return no handle. ``ready``
+uses Hermes' official post-middleware ``pre_api_request`` hook and unmodified tool-search
+assembly to prove direct and deferred scopes end to end.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -35,8 +37,8 @@ from typing import Any
 
 EXPECTED_HERMES_VERSION = "0.21.3"
 EXPECTED_MODEL_TOOLS_SHA256 = {
-    "missing-seam": "c99620c824ab59f341ac7d0e22cde016b0c469d0643e7a5a5a82e0d63176e4b5",
-    "ready": "738e5ede949a93ab7632da544f17422780fac7ecd7ea5a4749158a9de3519897",
+    "no-observation": "c99620c824ab59f341ac7d0e22cde016b0c469d0643e7a5a5a82e0d63176e4b5",
+    "ready": "c99620c824ab59f341ac7d0e22cde016b0c469d0643e7a5a5a82e0d63176e4b5",
 }
 
 
@@ -55,7 +57,8 @@ def _handle(pointer: dict[str, Any]) -> dict[str, str]:
 
 
 def _call(model_tools: Any, name: str, args: dict[str, Any], *, session: str,
-          tools: list[str] | None, toolsets: list[str], call_id: str) -> dict[str, Any]:
+          tools: list[str] | None, toolsets: list[str], call_id: str,
+          pre_tool_checked: bool = False) -> dict[str, Any]:
     return _envelope(
         model_tools.handle_function_call(
             name,
@@ -68,7 +71,23 @@ def _call(model_tools: Any, name: str, args: dict[str, Any], *, session: str,
             enabled_tools=None if tools is None else list(tools),
             enabled_toolsets=list(toolsets),
             disabled_toolsets=[],
+            skip_pre_tool_call_hook=pre_tool_checked,
         )
+    )
+
+
+def _observe(host_plugins: Any, tools: list[dict[str, Any]], *, session: str, call_id: str) -> None:
+    """Fire the real post-middleware observer payload shape for one synthetic request."""
+    host_plugins.invoke_hook(
+        "pre_api_request",
+        request={"method": "POST", "body": {"tools": tools}},
+        session_id=session,
+        task_id=session,
+        turn_id=f"turn-{call_id}",
+        api_request_id=f"api-{call_id}",
+        platform="cli",
+        model="synthetic-public-probe",
+        provider="offline",
     )
 
 
@@ -89,7 +108,7 @@ def _assert_accounted(stats: dict[str, Any], envelope: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expect", choices=("missing-seam", "ready"), required=True)
+    parser.add_argument("--expect", choices=("no-observation", "ready"), required=True)
     args = parser.parse_args()
 
     for key in ("HERMES_ROOT", "SHUNT_CORE", "SHUNT_ADAPTER"):
@@ -101,7 +120,6 @@ def main() -> int:
     from agent.plugin_llm import _TrustPolicy, make_plugin_llm_for_test
     from hermes_cli import plugins as host_plugins
     from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
-    from tools.registry import registry
     import model_tools
 
     host_version = importlib.metadata.version("hermes-agent")
@@ -137,6 +155,7 @@ def main() -> int:
                             "config": {
                                 "workspace_roots": [str(workspace)],
                                 "cache_dir": str(cache),
+                                "capture_tool_allowlist": ["probe_source", "terminal"],
                                 "tool_result_capture": {
                                     "enabled": True,
                                     "host_ordering_verified_locally": True,
@@ -214,60 +233,101 @@ def main() -> int:
         ),
         sync_caller=fake_caller,
     )
+
+    ctx.register_tool(
+        "probe_source",
+        "context_shunt",
+        {
+            "name": "probe_source",
+            "description": "Return a bounded synthetic public host-probe payload.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        lambda _args, **_kwargs: payload,
+        description="Return a bounded synthetic public host-probe payload.",
+    )
     adapter.register(ctx)
 
-    if not host_plugins.has_hook("transform_tool_result"):
-        raise AssertionError("capture hook was not registered under both explicit attestations")
+    if host_plugins.has_hook("transform_tool_result"):
+        raise AssertionError("current host should use middleware, not the bounded transform hook")
+    if not host_plugins.has_hook("pre_api_request") or not host_plugins.has_middleware("tool_execution"):
+        raise AssertionError("official observer/execution middleware route was not registered")
 
-    real_dispatch = registry.dispatch
-
-    def synthetic_dispatch(name: str, call_args: dict[str, Any], **kwargs: Any) -> str:
-        if name == "search_files":
-            return payload
-        return real_dispatch(name, call_args, **kwargs)
-
-    registry.dispatch = synthetic_dispatch
-
-    direct_tools = [
-        "search_files",
-        "context_shunt_read",
-        "context_shunt_inspect",
-        "context_shunt_stats",
-    ]
+    direct_tools = ["probe_source", "context_shunt_read", "context_shunt_inspect", "context_shunt_stats"]
     bridge_tools = ["tool_search", "tool_describe", "tool_call"]
 
+    raw_capable_defs = model_tools.get_tool_definitions(
+        enabled_toolsets=["context_shunt"], disabled_toolsets=[], quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+    deferred_defs = assemble_tool_defs(
+        raw_capable_defs,
+        context_length=128_000,
+        config=ToolSearchConfig(
+            enabled="on", threshold_pct=5.0, search_default_limit=5,
+            max_search_limit=25, listing="on", listing_max_tokens=4000,
+        ),
+    ).tool_defs
+    terminal_defs = model_tools.get_tool_definitions(
+        enabled_toolsets=["terminal"], disabled_toolsets=[], quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    partial_defs = [
+        definition for definition in raw_capable_defs
+        if definition.get("function", {}).get("name") != "context_shunt_inspect"
+    ]
+    from tools.delegate_tool_toolsets import _resolve_child_toolsets
+    child_toolsets, child_disabled = _resolve_child_toolsets(
+        SimpleNamespace(
+            enabled_toolsets=["terminal", "context_shunt"],
+            disabled_toolsets=[],
+        ),
+        ["terminal"],
+        "worker",
+    )
+    if child_toolsets != ["terminal"] or "kanban" not in child_disabled:
+        raise AssertionError("official subagent toolset resolver did not preserve narrowing")
+
     try:
+        if args.expect == "ready":
+            _observe(host_plugins, raw_capable_defs, session="direct-probe", call_id="capture-direct")
         direct = _call(
             model_tools,
-            "search_files",
-            {"query": "synthetic"},
+            "probe_source",
+            {},
             session="direct-probe",
             tools=direct_tools,
             toolsets=["context_shunt"],
             call_id="capture-direct",
         )
+        if args.expect == "ready":
+            _observe(host_plugins, deferred_defs, session="deferred-probe", call_id="capture-deferred")
         deferred = _call(
             model_tools,
-            "search_files",
-            {"query": "synthetic"},
+            "tool_call",
+            {"calls": [{"name": "probe_source", "arguments": {}}]},
             session="deferred-probe",
             tools=bridge_tools,
             toolsets=["context_shunt"],
             call_id="capture-deferred",
         )
+        if args.expect == "ready":
+            _observe(host_plugins, terminal_defs, session="terminal-probe", call_id="capture-terminal")
         terminal = _call(
             model_tools,
-            "search_files",
-            {"query": "synthetic"},
+            "terminal",
+            {"command": "python -c \"print('synthetic terminal row\\n' * 3000)\""},
             session="terminal-probe",
             tools=["terminal"],
             toolsets=["terminal"],
             call_id="capture-terminal",
         )
+        if args.expect == "ready":
+            _observe(host_plugins, partial_defs, session="partial-direct-probe", call_id="capture-partial-direct")
         partial_direct = _call(
             model_tools,
-            "search_files",
-            {"query": "synthetic"},
+            "probe_source",
+            {},
             session="partial-direct-probe",
             tools=["search_files", "context_shunt_read"],
             toolsets=["context_shunt"],
@@ -275,8 +335,8 @@ def main() -> int:
         )
         unscoped = _call(
             model_tools,
-            "search_files",
-            {"query": "synthetic"},
+            "probe_source",
+            {},
             session="unscoped-probe",
             tools=None,
             toolsets=["context_shunt"],
@@ -296,7 +356,7 @@ def main() -> int:
             if restricted.get("failure_detail") != "CONSUMER_UNAVAILABLE":
                 raise AssertionError("restricted fallback did not explain consumer unavailability")
 
-        if args.expect == "missing-seam":
+        if args.expect == "no-observation":
             if direct.get("code") != "LEGACY_COMPACTED" or deferred.get("code") != "LEGACY_COMPACTED":
                 raise AssertionError("control host unexpectedly delivered a consumer descriptor")
             direct_stats = _call(
@@ -310,7 +370,7 @@ def main() -> int:
             )
             _assert_accounted(direct_stats, direct)
             result = {
-                "status": "EXPECTED_MISSING_SEAM",
+                "status": "EXPECTED_NO_OBSERVATION",
                 "host_version": host_version,
                 "model_tools_sha256": model_tools_sha256,
                 "direct": direct.get("code"),
@@ -325,20 +385,30 @@ def main() -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
 
-        descriptor = model_tools._invocation_consumer_capabilities(
-            direct_tools, ["context_shunt"], []
-        )
-        if not isinstance(descriptor["direct_tools"], tuple):
-            raise AssertionError("host descriptor values are not immutable tuples")
-        try:
-            descriptor["direct_tools"] = ("terminal",)
-        except TypeError:
-            pass
-        else:
-            raise AssertionError("host descriptor mapping is mutable")
-
         if direct.get("code") != "SPILLED" or deferred.get("code") != "SPILLED":
-            raise AssertionError("ready host did not deliver direct and deferred consumer descriptors")
+            raise AssertionError("official observer did not prove direct and deferred consumer scope")
+
+        _observe(host_plugins, raw_capable_defs, session="concurrent-capable", call_id="concurrent-a")
+        _observe(host_plugins, terminal_defs, session="concurrent-restricted", call_id="concurrent-b")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            capable_future = executor.submit(
+                _call, model_tools, "probe_source", {}, session="concurrent-capable",
+                tools=direct_tools, toolsets=["context_shunt"], call_id="concurrent-a",
+                pre_tool_checked=True,
+            )
+            restricted_future = executor.submit(
+                _call, model_tools, "terminal",
+                {"command": "python -c \"print('concurrent restricted row\\n' * 3000)\""},
+                session="concurrent-restricted", tools=["terminal"],
+                toolsets=child_toolsets, call_id="concurrent-b",
+                pre_tool_checked=True,
+            )
+            concurrent_capable = capable_future.result()
+            concurrent_restricted = restricted_future.result()
+        if concurrent_capable.get("code") != "SPILLED":
+            raise AssertionError("concurrent capable scope lost its consumer evidence")
+        if concurrent_restricted.get("code") != "LEGACY_COMPACTED":
+            raise AssertionError("concurrent restricted scope inherited another request's capability")
 
         direct_handle = _handle(direct)
         direct_read = _call(
@@ -384,12 +454,14 @@ def main() -> int:
             model_tools,
             "tool_call",
             {
-                "name": "context_shunt_inspect",
-                "arguments": {
-                    **deferred_handle,
-                    "selector": {"kind": "lines", "start": 1, "end": 1},
-                    "max_result_bytes": 4096,
-                },
+                "calls": [{
+                    "name": "context_shunt_inspect",
+                    "arguments": {
+                        **deferred_handle,
+                        "selector": {"kind": "lines", "start": 1, "end": 1},
+                        "max_result_bytes": 4096,
+                    },
+                }],
             },
             session="deferred-probe",
             tools=bridge_tools,
@@ -450,19 +522,24 @@ def main() -> int:
             "payload_bytes": len(payload.encode()),
             "raw_payload_published": False,
             "accounting_correlated": True,
-            "descriptor_immutable": True,
+            "request_scope_immutable": True,
+            "host_core_modified": False,
+            "concurrent_capable": concurrent_capable.get("code"),
+            "concurrent_restricted": concurrent_restricted.get("code"),
+            "subagent_toolsets_narrowed": True,
             "provider_calls": 0,
         }
         print(json.dumps(result, sort_keys=True))
         return 0
     finally:
-        registry.dispatch = real_dispatch
         for session in (
             "direct-probe",
             "deferred-probe",
             "terminal-probe",
             "partial-direct-probe",
             "unscoped-probe",
+            "concurrent-capable",
+            "concurrent-restricted",
         ):
             try:
                 host_plugins.invoke_hook(

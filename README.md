@@ -29,14 +29,14 @@ protection for every possible read tool; disable uncontrolled tools if complete 
 
 ### Hermes tool results: capture first, ask afterward
 
-`tool_result_capture` intercepts eligible oversized MCP/tool results at
-`transform_tool_result`, before they enter the main-model context. A pointer is returned only
-when the hook invocation carries a scoped consumer-capability descriptor proving that the
-caller can reach both read and inspect, directly or through the complete deferred-tool bridge.
+`tool_result_capture` intercepts eligible oversized MCP/tool results in Hermes's official
+`tool_execution` middleware, before they enter the main-model context. A pointer is returned only
+when the correlated post-middleware provider request proves that the caller can reach both
+read and inspect, directly or through the complete explicitly listed deferred-tool bridge.
 Without that proof, the adapter returns bounded deterministic legacy compaction, creates no
 handle, and retains no pointer-only payload. Capture makes **zero model calls**.
 
-The hook **does not receive the user's question**. Reading is a separate step: the main
+The middleware **does not receive the user's question**. Reading is a separate step: the main
 model must call `context_shunt_read` with an explicit question and the artifact handle.
 The reader uses `gpt-5.6-luna` in the deployed example; users can configure the model and provider.
 
@@ -60,13 +60,12 @@ eligible oversized tool result          oversized local read
 
 The Hermes hook currently receives oversized **string** results; structured/multimodal
 blocks pass through. It cannot restore content a producer already truncated. Exact Hermes
-0.21.3 source and the running image were inspected on 2026-09-16. The unmodified host does
-not forward its session tool scope to `transform_tool_result`, so current invocations cannot
-prove pointer consumability and take the no-handle legacy-compaction path. A source-located
-host proposal and exact-image probe show the required immutable per-invocation descriptor,
-but that third-party change is not made by this repository. The adapter never widens the
-caller's tool scope or treats global registration as proof. Capture remains off by default
-and requires separate ordering and consumer-scope operator attestations.
+0.21.3 source and the running image were inspected on 2026-09-17. The unmodified host's
+official post-middleware `pre_api_request` hook exposes the provider-visible tools with the
+same request ids later attached to tool dispatch. The adapter uses that exact correlation,
+including explicit deferred catalog names, and never treats global registration as proof.
+The exact-image no-network probe passes without a Hermes patch. Capture remains off by
+default and requires separate ordering and consumer-scope operator attestations.
 Unsafe sources remain explicit refusals, and raw results are never returned as fallback.
 See the [capability evidence](docs/capability-matrix.md) and [cutover procedure](docs/acceptance.md#tool_result_capture-cutover-on-hermes).
 

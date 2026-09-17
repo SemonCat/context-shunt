@@ -106,8 +106,8 @@ it as an ordinary handle. It needs no interception ordering at all, which is why
 supported wherever a host can register the tool.
 
 **`tool_result_capture`** requires a proven replacement seam. Hermes has an owned
-fail-closed adapter plus a source-located 0.21.3 host proposal; the unmodified host still
-lacks invocation-scoped consumer delivery. OpenClaw automatic capture is unsupported after the live
+fail-closed adapter that correlates its official post-middleware provider-request observer
+to tool dispatch; the exact unmodified 0.21.3 host probe proves the scope boundary. OpenClaw automatic capture is unsupported after the live
 canary disproved the effective pointer boundary; no handler is installed and raw results
 pass through without capture savings claims. See [capability evidence](capability-matrix.md#openclaw).
 
@@ -311,14 +311,15 @@ verified against store state, not trusted from payload data.
 
 This engine is behind `tool_result_capture` (formerly documented under the internal name
 `suma_post_tool`). OpenClaw automatic capture is retired. On Hermes, exact 0.21.3 source
-shows execution and `post_tool_call` before `transform_tool_result`, but unmodified host
-code drops the invocation's direct/deferred tool scope at the hook boundary. The adapter
-therefore emits bounded no-handle compaction unless a valid descriptor proves both read and
-inspect reachability. It registers the transform hook only when a deployment sets both
+shows execution and `post_tool_call` before `transform_tool_result`. Its official
+`pre_api_request` observer runs after middleware with the provider-bound tool array and the
+same immutable request ids later attached to tool dispatch. The adapter stores a bounded,
+TTL-limited correlation and emits no handle unless that exact request proves both read and
+inspect reachability. It registers the observer and execution middleware only when a deployment sets both
 `host_ordering_verified_locally: true` and
-`host_consumer_scope_verified_locally: true`; neither flag is inferred. The source-located
-host proposal snapshots the existing scoped facts without widening privileges, and the
-exact-image probe proves direct/deferred consumption and restricted fallback. See
+`host_consumer_scope_verified_locally: true`; neither flag is inferred. The exact-image
+probe proves direct/deferred consumption, concurrent scope isolation, lifecycle revocation,
+and restricted fallback on unmodified Hermes. See
 [capability-matrix.md](capability-matrix.md#tool_result_capture-on-hermes-021-what-changed-and-what-did-not)
 for the exact evidence and [acceptance.md](acceptance.md#tool_result_capture-cutover-on-hermes)
 for the cutover plan.

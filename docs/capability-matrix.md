@@ -139,47 +139,63 @@ the first two dispatch-layer conditions hold: `model_tools.py` executes the tool
 truncation. The hook remains fail-open, so the owned handler never raises. Individual tools
 can still self-truncate before returning; the ordering attestation remains operator-owned.
 
-The same source inspection found the missing seam precisely:
+The same source inspection initially appeared to show a missing transform-hook seam:
 
 - `agent/agent_init.py:1061-1066` produces the final model-visible tool names.
 - `agent/tool_executor.py:1536-1551` copies those names and passes them, plus enabled and
   disabled toolsets, to `handle_function_call`.
 - `model_tools.py:858-909` preserves those values across normal and deferred `tool_call`
   dispatch.
-- `model_tools.py:834-848,941-945` drops them when invoking `transform_tool_result`.
+- `model_tools.py:834-848,941-945` does not attach them directly to `transform_tool_result`.
 - `tools/tool_search.py:524-530` already exposes the scoped pre-assembly deferred universe.
 
-No official plugin hook supplies equivalent scope: session-start, pre-LLM, pre-tool and
-post-tool hooks omit the final visible/deferred set. Reconstructing it from global tool
-registration would widen a restricted cron/terminal invocation, so the adapter refuses to
-do that.
+The exhausted official API search found a simpler existing route:
+`agent/turn_api_request.py:139-158` applies every `llm_request` middleware and then fires
+`pre_api_request`; `agent/api_request_hooks.py:134-144` serializes the provider-bound body;
+the hook carries `session_id`, `task_id`, `turn_id`, and `api_request_id`. Tool dispatch
+later carries those same ids. The adapter observes only this post-middleware array, parses
+deferred names only from complete deterministic Hermes catalog groups, and correlates an
+exact request under a bounded one-hour/512-entry cache. Truncation, malformed groups,
+missing ids, partial consumers, expiry, reset, and finalize all narrow to no pointer.
+Global registration and configured platform toolsets are never capability evidence.
 
-[`docs/host-proposals/hermes-0.21.3-consumer-capabilities.patch`](host-proposals/hermes-0.21.3-consumer-capabilities.patch)
-is an exact, source-located proposal, not a vendored or live-host edit. It snapshots direct
-names as an immutable tuple and derives deferred names with the host's own scoped function;
-absence/error narrows to no descriptor. The standard-library probe
+Why “just guarantee the plugin tools are loaded” is not the authorization boundary:
+
+- plugin toolsets are default-on only while platform resolution allows them; an explicit
+  platform list can omit them and `agent.disabled_toolsets` is applied last;
+- cron jobs carry their own `enabled_toolsets` and may intentionally be terminal-only;
+- delegated children inherit or intersect the parent scope and cannot gain an omitted
+  toolset;
+- `tools.tool_search.enabled: off` makes selected plugin tools eager/direct but does not
+  select the toolset for a restricted agent; with normal tool search, plugin tools are
+  deferred and only a complete model-visible catalog listing proves their names;
+- therefore forcing `context_shunt` into every agent would widen intentionally restricted
+  scopes. The adapter instead observes each provider request and leaves unproven callers on
+  bounded fallback.
+
+The standard-library probe
 [`evals/hermes-host-contract/probe.py`](../evals/hermes-host-contract/probe.py) runs inside
 the exact image without network or providers:
 
-- unmodified 0.21.3: direct and deferred callers both receive
-  `LEGACY_COMPACTED` (`EXPECTED_MISSING_SEAM`);
-- the same image with only the proposed `model_tools.py` mounted read-only: direct and
-  deferred calls receive `SPILLED`, direct read returns `ANSWERED`, direct and deferred
-  inspect return `EXTRACTED`, a per-turn end preserves the handle, finalization returns
-  `SOURCE_EXPIRED`, and terminal-only/partial-direct callers still receive no-handle
-  `LEGACY_COMPACTED`.
+- unmodified 0.21.3 without a provider-request observation: every caller receives
+  `LEGACY_COMPACTED` (`EXPECTED_NO_OBSERVATION`), the red-capable control;
+- the same unmodified image with the official observer: direct and deferred calls receive
+  `SPILLED`, direct read returns `ANSWERED`, direct and deferred inspect return `EXTRACTED`,
+  a per-turn end preserves the handle, finalization returns `SOURCE_EXPIRED`, concurrent
+  capable/restricted scopes remain isolated, and terminal-only/partial/unobserved callers
+  still receive no-handle `LEGACY_COMPACTED`.
 
 So `tool_result_capture` remains unsupported by default. Registration requires both
 `host_ordering_verified_locally: true` and
-`host_consumer_scope_verified_locally: true`; `enabled: true` or the old ordering
-attestation alone registers no transform hook. Even after registration, every individual
-invocation still fails closed to bounded no-handle compaction when its descriptor is absent
-or incomplete.
+`host_consumer_scope_verified_locally: true`; the second flag is retained as an explicit
+operator canary/rollout interlock. `enabled: true` or the ordering attestation alone
+registers no capture middleware. Even after registration, every invocation fails closed to
+bounded no-handle compaction when correlated provider evidence is absent or incomplete.
 
 | Reason (default, missing attestation) | Evidence |
 | --- | --- |
 | `ORDERING_UNPROVEN` | No version-independent proof covers every installed host or per-tool self-truncation path. |
-| `CONSUMER_SCOPE_UNPROVEN` | Unmodified Hermes 0.21.3 drops the available invocation scope before the transform hook. The exact-image control reproduces this. |
+| `CONSUMER_SCOPE_UNPROVEN` | The operator has not attested the exact-image post-middleware observer canary. Configured/global tools alone are insufficient. |
 | `HOST_FAIL_OPEN` | The host preserves the original result if a transform handler raises. The adapter therefore converts every owned oversized failure to a bounded envelope and never relies on host fail-open. |
 
 ### Hermes authoritative skill boundary
@@ -290,7 +306,7 @@ overrides exist in the internal contract but are not uniformly exposed by host r
 | `integration <host> --mode unsupported` | implemented — deterministic fail-closed behaviour |
 | `integration hermes --mode local` | implemented; runs against a real `hermes-agent` checkout, NOT_RUN without one |
 | `integration openclaw --mode local` | implemented; runs against a real `openclaw` checkout, NOT_RUN without one |
-| `integration <host> --mode post-tool` | OpenClaw remains `expected_unsupported`. Hermes is a required exact-host gate: `NOT_RUN` without its checkout/interpreter, `FAIL` on unmodified 0.21.3 because invocation scope is missing, and `PASS` only when the source-located proposal is present and the probe proves direct/deferred consumption, restricted fallback, lifecycle, no full-raw publication, and accounting correlation. The two operator attestations remain deployment decisions; the probe does not set them in production. |
+| `integration <host> --mode post-tool` | OpenClaw remains `expected_unsupported`. Hermes is a required exact-host gate: `NOT_RUN` without its checkout/interpreter and `PASS` only when the unmodified exact source matches and the official observer probe proves direct/deferred consumption, restricted/concurrent isolation, lifecycle, no full-raw publication, and accounting correlation. The two operator attestations remain deployment decisions; the probe does not set them in production. |
 | `shadow deterministic` | implemented — four-lane A/B over a fixed synthetic corpus; reports main-context reduction, evidence regression against the raw baseline, and model-free latency for real |
 | `shadow reader` | `expected_unsupported` (printed `N/A`) — task correctness, semantic evidence support, mechanical citation validity and follow-up rate are scored by `eval luna`, which owns the fixed corpus, thresholds and runs-per-item; net cost reduction additionally needs a pricing table this repository does not have |
 | `benchmark core` | implemented — gate/spill latency, envelope caps, context savings, bounded memory |
@@ -344,9 +360,6 @@ is deployable and unproven at production equivalence — not that it is better.
 - A controlled MCP producer wrapper for Hermes that would make `tool_result_capture`
   provably supportable there without depending on an unaudited per-tool
   self-truncation assumption or an operator attestation.
-- Upstream acceptance of the source-located Hermes 0.21.3 consumer-capability proposal,
-  followed by rerunning `integration hermes --mode post-tool` against the exact candidate
-  host version. This repository does not patch or vendor the host.
 - The optional writer contract (`operation: propose_patch`). It is refused today; a future
   version needs its own schema version, write scopes, conflict checks and acceptance.
 - A host that lets a plugin observe the provider's own report of which model generated the

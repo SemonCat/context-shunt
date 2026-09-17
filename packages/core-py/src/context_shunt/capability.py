@@ -4,13 +4,15 @@ A mode is enabled only when the adapter can *prove* the host gives it what the m
 needs. Where the proof does not exist the mode is reported ``unsupported`` with a fixed
 reason and stays off - never faked, never "probably fine".
 
-For the optional post-tool spill mode the required proof is two-part:
+For the optional tool-result spill mode the required proof is two-part:
 
 * complete capture of the result **before** any host truncation, and
 * safe replacement **before** persistence and context insertion.
 
-Neither supported host provides both today; see ``docs/capability-matrix.md`` for the
-file-and-line evidence behind each ``DisabledReason``.
+Hermes 0.21.3 provides both through its official provider-request observer and authorized
+tool-execution middleware when the adapter's exact-host attestations are set. OpenClaw
+automatic capture remains retired. See ``docs/capability-matrix.md`` for the file-and-line
+evidence behind each ``DisabledReason``.
 
 The ``artifact_import`` mode needs much less, which is the point of it: an artifact an
 external producer already persisted has already been captured, so all the host has to
