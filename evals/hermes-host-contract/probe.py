@@ -76,18 +76,38 @@ def _call(model_tools: Any, name: str, args: dict[str, Any], *, session: str,
     )
 
 
-def _observe(host_plugins: Any, tools: list[dict[str, Any]], *, session: str, call_id: str) -> None:
-    """Fire the real post-middleware observer payload shape for one synthetic request."""
-    host_plugins.invoke_hook(
-        "pre_api_request",
-        request={"method": "POST", "body": {"tools": tools}},
-        session_id=session,
-        task_id=session,
-        turn_id=f"turn-{call_id}",
+def _observe(tools: list[dict[str, Any]], *, session: str, call_id: str) -> None:
+    """Run Hermes' real provider-request serializer and lifecycle dispatch."""
+    from agent.api_request_hooks import ApiRequestHooksMixin
+    from agent.turn_api_request import _fire_pre_api_request_hook
+
+    class ProbeAgent(ApiRequestHooksMixin):
+        pass
+
+    agent = ProbeAgent()
+    agent.session_id = session
+    agent.platform = "cli"
+    agent.model = "synthetic-public-probe"
+    agent.provider = "offline"
+    agent.base_url = ""
+    agent.api_mode = "chat_completions"
+    agent.max_tokens = 1024
+    agent.tools = tools
+    _fire_pre_api_request_hook(
+        agent,
+        {"messages": [], "tools": tools},
+        [],
+        [],
+        messages=[],
+        original_user_message="synthetic public exact-host probe",
+        approx_tokens=0,
+        total_chars=0,
+        retry_count=0,
+        api_call_count=1,
         api_request_id=f"api-{call_id}",
-        platform="cli",
-        model="synthetic-public-probe",
-        provider="offline",
+        api_start_time=0.0,
+        effective_task_id=session,
+        turn_id=f"turn-{call_id}",
     )
 
 
@@ -290,7 +310,7 @@ def main() -> int:
 
     try:
         if args.expect == "ready":
-            _observe(host_plugins, raw_capable_defs, session="direct-probe", call_id="capture-direct")
+            _observe(raw_capable_defs, session="direct-probe", call_id="capture-direct")
         direct = _call(
             model_tools,
             "probe_source",
@@ -301,7 +321,7 @@ def main() -> int:
             call_id="capture-direct",
         )
         if args.expect == "ready":
-            _observe(host_plugins, deferred_defs, session="deferred-probe", call_id="capture-deferred")
+            _observe(deferred_defs, session="deferred-probe", call_id="capture-deferred")
         deferred = _call(
             model_tools,
             "tool_call",
@@ -312,7 +332,7 @@ def main() -> int:
             call_id="capture-deferred",
         )
         if args.expect == "ready":
-            _observe(host_plugins, terminal_defs, session="terminal-probe", call_id="capture-terminal")
+            _observe(terminal_defs, session="terminal-probe", call_id="capture-terminal")
         terminal = _call(
             model_tools,
             "terminal",
@@ -323,7 +343,7 @@ def main() -> int:
             call_id="capture-terminal",
         )
         if args.expect == "ready":
-            _observe(host_plugins, partial_defs, session="partial-direct-probe", call_id="capture-partial-direct")
+            _observe(partial_defs, session="partial-direct-probe", call_id="capture-partial-direct")
         partial_direct = _call(
             model_tools,
             "probe_source",
@@ -388,8 +408,8 @@ def main() -> int:
         if direct.get("code") != "SPILLED" or deferred.get("code") != "SPILLED":
             raise AssertionError("official observer did not prove direct and deferred consumer scope")
 
-        _observe(host_plugins, raw_capable_defs, session="concurrent-capable", call_id="concurrent-a")
-        _observe(host_plugins, terminal_defs, session="concurrent-restricted", call_id="concurrent-b")
+        _observe(raw_capable_defs, session="concurrent-capable", call_id="concurrent-a")
+        _observe(terminal_defs, session="concurrent-restricted", call_id="concurrent-b")
         with ThreadPoolExecutor(max_workers=2) as executor:
             capable_future = executor.submit(
                 _call, model_tools, "probe_source", {}, session="concurrent-capable",
