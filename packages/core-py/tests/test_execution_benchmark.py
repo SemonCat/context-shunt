@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -162,8 +163,9 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         real_run.source_manifest_sha256(root)
     )
     budget = report["usd_budget"]
-    assert budget["limit_usd"] == "2.5"
-    assert 0 < float(budget["reserved_usd"]) <= 2
+    configured_limit = Decimal(budget["limit_usd"])
+    assert configured_limit == Decimal("2.5")
+    assert Decimal("0") < Decimal(budget["reserved_usd"]) <= configured_limit
     assert budget["contains_prompt_or_completion"] is False
     assert budget["statuses"].get("bound_breach", 0) == 0
 
