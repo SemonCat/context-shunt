@@ -76,6 +76,48 @@ def test_verifier_checks_every_path_and_body_before_import(tmp_path: Path) -> No
         )
 
 
+def test_default_verifier_uses_versioned_root_not_global_incumbent(tmp_path: Path, monkeypatch) -> None:
+    package = {"__init__.py": b'__version__ = "1.1.0"\n', "data/item.json": b"candidate\n"}
+    incumbent = tmp_path / "incumbent"
+    (incumbent / "context_shunt").mkdir(parents=True)
+    (incumbent / "context_shunt" / "__init__.py").write_bytes(package["__init__.py"])
+    (incumbent / "context_shunt" / "data").mkdir()
+    (incumbent / "context_shunt" / "data/item.json").write_bytes(b"stale incumbent\n")
+
+    release_root = tmp_path / "release"
+    package_root = release_root / "python" / "context_shunt"
+    for relative, data in package.items():
+        target = package_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    dist_info = release_root / "python" / "context_shunt_core-1.1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: context-shunt-core\nVersion: 1.1.0\n")
+    wheel = tmp_path / "context_shunt_core-1.1.0-py3-none-any.whl"
+    release = {
+        "wheel_sha256": make_wheel(wheel, package),
+        "installed_core_tree_sha256": tree_hash(package),
+    }
+    original_root = VERIFY.ROOT
+    VERIFY.ROOT = release_root
+    original_distributions = VERIFY.metadata.distributions
+    calls: list[list[str] | None] = []
+
+    def guarded_distributions(**kwargs):
+        path = kwargs.get("path")
+        calls.append(path)
+        assert path == [str((release_root / "python").resolve())]
+        return original_distributions(**kwargs)
+
+    monkeypatch.setattr(VERIFY.metadata, "distributions", guarded_distributions)
+    try:
+        result = VERIFY.verify(wheel, release)
+    finally:
+        VERIFY.ROOT = original_root
+    assert result["core_file_count"] == 2
+    assert calls == [[str((release_root / "python").resolve())]]
+
+
 def test_runtime_tools_reject_optimized_python() -> None:
     environment = {**os.environ, "PYTHONOPTIMIZE": "1"}
     for script, message in (

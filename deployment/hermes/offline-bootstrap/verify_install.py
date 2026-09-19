@@ -7,11 +7,14 @@ import hashlib
 import importlib.metadata as metadata
 import json
 from pathlib import Path
+import os
+import subprocess
 import sys
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parent
+PACKAGE_VERSION = "1.1.0"
 
 
 def require(condition: bool, message: str) -> None:
@@ -40,18 +43,27 @@ def verify(
             if name.startswith("context_shunt/") and not name.endswith("/")
         }
 
-    if package_root is None:
-        distribution = metadata.distribution("context-shunt-core")
-        package_root = Path(distribution.locate_file("context_shunt")).resolve()
+    default_root = package_root is None
+    if default_root:
+        # ensure_core installs with --target ROOT/python.  Never discover the
+        # incumbent distribution from the interpreter's global site-packages.
+        versioned_root = (ROOT / "python").resolve()
+        distribution = next(
+            (
+                candidate
+                for candidate in metadata.distributions(path=[str(versioned_root)])
+                if candidate.metadata.get("Name", "").lower() == "context-shunt-core"
+            ),
+            None,
+        )
+        require(distribution is not None, "versioned core distribution is absent")
+        package_root = (versioned_root / "context_shunt").resolve()
         package_version = distribution.version
-        site = (
-            Path(sys.prefix)
-            / "lib"
-            / f"python{sys.version_info.major}.{sys.version_info.minor}"
-            / "site-packages"
-        ).resolve()
-        require(package_root.is_relative_to(site), "installed core is outside target virtualenv")
-    require(package_version == "1.1.0", "installed core version mismatch")
+        require(
+            Path(distribution.locate_file("context_shunt")).resolve() == package_root,
+            "installed core is outside the versioned release root",
+        )
+    require(package_version == PACKAGE_VERSION, "installed core version mismatch")
     installed = {
         path.relative_to(package_root).as_posix(): path
         for path in package_root.rglob("*")
@@ -75,6 +87,25 @@ def verify(
         tree_hash == release["installed_core_tree_sha256"],
         "installed core tree hash mismatch",
     )
+    if default_root:
+        # Validate origin in a genuinely fresh interpreter, so an incumbent module
+        # already present in this verifier cannot make the check appear successful.
+        env = {**os.environ, "PYTHONPATH": str((ROOT / "python").resolve()), "PYTHONNOUSERSITE": "1"}
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import context_shunt, pathlib; p=pathlib.Path(context_shunt.__file__).resolve(); r=pathlib.Path(__import__('sys').argv[1]).resolve(); raise SystemExit(0 if p.is_relative_to(r) else 1)",
+                str((ROOT / "python").resolve()),
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        require(probe.returncode == 0, "fresh import did not originate from versioned release root")
     return {
         "core_file_count": len(installed),
         "core_tree_sha256": tree_hash,

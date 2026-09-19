@@ -31,7 +31,7 @@
       "context_shunt_core-1.1.0-py3-none-any.whl": "be5da4818b8cca70a4f663cd9708658b6f971dde452aded395f2e928d1a51855",
       "ensure_core.py": "c14e3d4f78140cc037d3d828f1a24b886103703aaa85d12750ac8230e1da1ffb",
       "release.json": "9a58c29726427004de7f0168cea3658310de9cdd118293c83d57669117c1a84c",
-      "verify_install.py": "ed7b353b1046d19d0d8970fd7c7941e619ebb1ef7b066c40727323ad5a34ffd6"
+      "verify_install.py": "a479082ff4e5fca11ad37d04dd5983d31d0021585f75fc9c8864ea8a9e8c3295"
     }
   },
   "candidate_files": {
