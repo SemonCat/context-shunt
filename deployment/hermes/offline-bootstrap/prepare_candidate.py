@@ -34,8 +34,31 @@ def render_hook(before: bytes, manifest: dict[str, object]) -> bytes:
     prefix, remainder = before.split(BEGIN, 1)
     _old_body, suffix = remainder.split(END, 1)
     release = manifest["release"]  # type: ignore[assignment]
+    versioned_site = str(release["container_directory"]) + "/python"  # type: ignore[index]
     command = (
-        b"/opt/hermes/.venv/bin/python -B "
+        b"# CONTEXT_SHUNT_VERSIONED_IMPORT_PATH\n"
+        + b'default_run="/run/service/gateway-default/run"\n'
+        + b'expected_python_path='
+        + json.dumps(
+            'export PYTHONPATH="'
+            + versioned_site
+            + '${PYTHONPATH:+:$PYTHONPATH}"'
+        ).encode()
+        + b'\n'
+        + b'if [ -f "$default_run" ]; then\n'
+        + b'  if grep -q CONTEXT_SHUNT_VERSIONED_IMPORT_PATH "$default_run"; then\n'
+        + b'    grep -Fqx "$expected_python_path" "$default_run" || { echo "context-shunt service run marker drift" >&2; exit 1; }\n'
+        + b'  else\n'
+        + b'  tmp_run="${default_run}.context-shunt.$$"\n'
+        + b"  awk -v shunt_python="
+        + json.dumps(versioned_site).encode()
+        + b" ' /^export HERMES_S6_SUPERVISED_CHILD=1$/ && !done { print \"# CONTEXT_SHUNT_VERSIONED_IMPORT_PATH\"; print \"export PYTHONPATH=\\\"\" shunt_python \"${PYTHONPATH:+:$PYTHONPATH}\\\"\"; done=1 } { print } END { if (!done) exit 42 }' \"$default_run\" > \"$tmp_run\"\n"
+        + b'  chown --reference="$default_run" "$tmp_run" 2>/dev/null || chown 10000:10000 "$tmp_run"\n'
+        + b'  chmod --reference="$default_run" "$tmp_run" 2>/dev/null || chmod 755 "$tmp_run"\n'
+        + b'  mv -f "$tmp_run" "$default_run"\n'
+        + b'  fi\n'
+        + b"fi\n"
+        + b"/opt/hermes/.venv/bin/python -B "
         + str(release["container_directory"]).encode()  # type: ignore[index]
         + b"/ensure_core.py || exit 1\n"
     )
@@ -125,15 +148,22 @@ def prepare(hook: Path, wheel: Path, output: Path) -> None:
             "transaction": {
                 "snapshot": [
                     manifest["hook"]["host_path"],  # type: ignore[index]
+                    manifest["service_run"]["host_path"],  # type: ignore[index]
                     manifest["release"]["host_directory"],  # type: ignore[index]
                 ],
                 "drift_guard": manifest["hook"]["expected_before_sha256"],  # type: ignore[index]
                 "atomic_targets": [
                     manifest["release"]["host_directory"],  # type: ignore[index]
                     manifest["hook"]["host_path"],  # type: ignore[index]
+                    manifest["service_run"]["host_path"],  # type: ignore[index]
                 ],
                 "rollback_unit": "hook plus complete pinned release directory",
-                "package_rollback": "archive the versioned default-profile release in-place, restore the hook preimage, then reload only the default profile process; do not recreate the Hermes container or disturb Aida",
+                "package_rollback": "discard and recreate the candidate container from the prior image/package preimage; preserve Aida and the incumbent container until Ruby's scoped cutover procedure",
+                "service_run_snapshot": {
+                    "path": manifest["service_run"]["host_path"],  # type: ignore[index]
+                    "expected_before_sha256": manifest["service_run"]["expected_before_sha256"],  # type: ignore[index]
+                    "rollback": "restore atomically from the transaction backup before restoring the hook",
+                },
             },
         }
         write_new(

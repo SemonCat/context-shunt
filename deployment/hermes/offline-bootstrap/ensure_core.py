@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import zipfile
+import shutil
 
 from packaging.requirements import Requirement
 
@@ -24,13 +25,9 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def installed_site() -> Path:
-    return (
-        Path(sys.prefix)
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-    )
+def versioned_site() -> Path:
+    """The release-local import root selected by the default service run file."""
+    return ROOT / "python"
 
 
 def main() -> None:
@@ -64,8 +61,12 @@ def main() -> None:
             f"required distribution is incompatible: {requirement.name}",
         )
 
-    site = installed_site()
+    # Do not mutate the image's shared site-packages.  The hook places this
+    # release-local root first on the default gateway's PYTHONPATH; rollback
+    # restores the old hook and therefore the incumbent package import.
+    site = versioned_site()
     package_root = site / "context_shunt"
+    sys.path.insert(0, str(site))
 
     def matches() -> bool:
         try:
@@ -74,7 +75,7 @@ def main() -> None:
             installed = {
                 path.relative_to(package_root).as_posix(): path
                 for path in package_root.rglob("*")
-                if path.is_file() and "__pycache__" not in path.parts
+                if path.is_file() and "__pycache__" not in path.parts and path.name != ".lock"
             }
             if set(installed) != set(package):
                 return False
@@ -93,13 +94,11 @@ def main() -> None:
         except (FileNotFoundError, metadata.PackageNotFoundError):
             return False
 
-    excluded = "context-shunt-core"
-    before = sorted(
-        (distribution.metadata["Name"], distribution.version)
-        for distribution in metadata.distributions()
-        if distribution.metadata["Name"].lower().replace("_", "-") != excluded
-    )
     if not matches():
+        shutil.rmtree(package_root, ignore_errors=True)
+        for dist_info in site.glob("context_shunt_core-*.dist-info"):
+            shutil.rmtree(dist_info, ignore_errors=True)
+        site.mkdir(mode=0o755, parents=True, exist_ok=True)
         process = subprocess.run(
             [
                 "/usr/local/bin/uv",
@@ -108,10 +107,8 @@ def main() -> None:
                 "install",
                 "--offline",
                 "--no-deps",
-                "--reinstall-package",
-                "context-shunt-core",
-                "--python",
-                sys.executable,
+                "--target",
+                str(site),
                 str(wheel),
             ],
             stdout=subprocess.DEVNULL,
@@ -121,19 +118,12 @@ def main() -> None:
         )
         require(process.returncode == 0, "offline core install failed")
     require(matches(), "installed core does not match pinned wheel")
-    after = sorted(
-        (distribution.metadata["Name"], distribution.version)
-        for distribution in metadata.distributions()
-        if distribution.metadata["Name"].lower().replace("_", "-") != excluded
-    )
-    require(after == before, "offline install changed another distribution")
-
     import context_shunt
 
     require(context_shunt.__version__ == PACKAGE_VERSION, "imported core version mismatch")
     require(
         Path(context_shunt.__file__).resolve().is_relative_to(site),
-        "imported core is outside the target virtualenv",
+        "imported core is outside the versioned release root",
     )
 
 

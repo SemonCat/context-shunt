@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tarfile
 
 import pytest
@@ -39,9 +41,11 @@ def test_renderer_changes_only_marked_body() -> None:
     after_prefix, after_remainder = after.split(MODULE.BEGIN)
     after_body, after_suffix = after_remainder.split(MODULE.END)
     assert (after_prefix, after_suffix) == (before_prefix, before_suffix)
-    assert after_body == (
+    assert b"CONTEXT_SHUNT_VERSIONED_IMPORT_PATH" in after_body
+    assert (
         b"/opt/hermes/.venv/bin/python -B "
         b"/opt/data/context-shunt/ffa218c/ensure_core.py || exit 1\n"
+        in after_body
     )
 
 
@@ -53,6 +57,35 @@ def test_renderer_refuses_drift_and_duplicate_blocks() -> None:
     manifest["hook"]["expected_before_sha256"] = MODULE.sha256(before + MODULE.BEGIN + MODULE.END)
     with pytest.raises(ValueError, match="exactly one"):
         MODULE.render_hook(before + MODULE.BEGIN + MODULE.END, manifest)
+
+
+def test_versioned_release_precedes_and_restores_incumbent_in_fresh_process(
+    tmp_path: Path,
+) -> None:
+    incumbent = tmp_path / "incumbent"
+    release = tmp_path / "release" / "python"
+    for root, version in ((incumbent, "incumbent"), (release, "candidate")):
+        package = root / "context_shunt"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(f"__version__ = {version!r}\n")
+
+    code = "import context_shunt; print(context_shunt.__version__)"
+    with_candidate = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": f"{release}:{incumbent}"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    after_rollback = subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": str(incumbent)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert with_candidate.stdout.strip() == "candidate"
+    assert after_rollback.stdout.strip() == "incumbent"
 
 
 def test_repository_release_metadata_is_self_consistent() -> None:
@@ -106,6 +139,10 @@ def test_prepare_emits_complete_checksummed_candidate(tmp_path: Path, monkeypatc
         },
         "candidate_files": {
             "activate_bootstrap.py": MODULE.sha256(source_files["activate_bootstrap.py"])
+        },
+        "service_run": {
+            "host_path": "/run/service/gateway-default/run",
+            "expected_before_sha256": "a" * 64,
         },
     }
     (source / "bootstrap.json").write_text(json.dumps(manifest) + "\n")

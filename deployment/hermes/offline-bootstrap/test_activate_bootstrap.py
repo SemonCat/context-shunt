@@ -39,6 +39,10 @@ def make_candidate(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object]]
     hook = scripts / "99-hermes-local-patches"
     hook.write_bytes(before)
     hook.chmod(0o755)
+    service_run = tmp_path / "run" / "service" / "gateway-default" / "run"
+    service_run.parent.mkdir(parents=True)
+    service_run.write_bytes(b"#!/bin/sh\nexport HERMES_S6_SUPERVISED_CHILD=1\n")
+    service_run.chmod(0o755)
 
     candidate = tmp_path / "candidate"
     release_dir = candidate / "release"
@@ -69,8 +73,16 @@ def make_candidate(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object]]
             "target_uid": current_uid,
             "target_gid": current_gid,
         },
+        "service_run": {
+            "host_path": str(service_run),
+            "expected_before_sha256": digest(service_run.read_bytes()),
+            "mode": "0755",
+            "uid": current_uid,
+            "gid": current_gid,
+        },
         "release": {
             "host_directory": str(store / "ffa218c"),
+            "container_directory": "/opt/data/context-shunt/ffa218c",
             "directory_mode": "0755",
             "file_mode": "0444",
             "uid": current_uid,
@@ -101,6 +113,7 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
     tmp_path: Path, monkeypatch
 ) -> None:
     candidate, hook, backup, manifest = make_candidate(tmp_path)
+    service_run = Path(manifest["service_run"]["host_path"])
     monkeypatch.setattr(MODULE.os, "chown", lambda *_args: None)
     monkeypatch.setattr(MODULE.os, "fchown", lambda *_args: None)
 
@@ -110,9 +123,9 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
     finally:
         os.umask(previous_umask)
     assert applied["result"] == "APPLIED"
-    assert applied["container_recreate_required_for_package_rollback"] is False
-    assert applied["default_profile_process_reload_required"] is True
+    assert applied["container_recreate_required_for_package_rollback"] is True
     assert hook.read_bytes() == b"after hook\n"
+    service_run.write_bytes(MODULE.expected_service_run_after(manifest, service_run.read_bytes()))
     release_path = Path(manifest["release"]["host_directory"])
     assert release_path.is_dir()
     assert release_path.stat().st_mode & 0o777 == 0o755
@@ -122,14 +135,26 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
 
     rolled_back = MODULE.rollback(candidate, backup)
     assert rolled_back["result"] == "ROLLED_BACK"
-    assert rolled_back["container_recreate_required_for_package_rollback"] is False
-    assert rolled_back["default_profile_process_reload_required"] is True
+    assert rolled_back["container_recreate_required_for_package_rollback"] is True
     assert hook.read_bytes() == b"before hook\n"
+    assert service_run.read_bytes() == b"#!/bin/sh\nexport HERMES_S6_SUPERVISED_CHILD=1\n"
     assert not release_path.exists()
     assert (backup / "candidate-release.rollback").is_dir()
 
     with pytest.raises(RuntimeError, match="backup is not reusable"):
         MODULE.apply(candidate, backup)
+
+
+def test_rollback_refuses_service_run_drift(tmp_path: Path, monkeypatch) -> None:
+    candidate, hook, backup, manifest = make_candidate(tmp_path)
+    monkeypatch.setattr(MODULE.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(MODULE.os, "fchown", lambda *_args: None)
+    MODULE.apply(candidate, backup)
+    service_run = Path(manifest["service_run"]["host_path"])
+    service_run.write_bytes(b"#!/bin/sh\nconcurrent edit\n")
+    with pytest.raises(RuntimeError, match="service run drift"):
+        MODULE.rollback(candidate, backup)
+    assert service_run.read_bytes() == b"#!/bin/sh\nconcurrent edit\n"
 
 
 def test_apply_resumes_after_release_rename_interruption(tmp_path: Path, monkeypatch) -> None:

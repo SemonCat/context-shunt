@@ -152,6 +152,38 @@ def live_paths(manifest: dict[str, Any]) -> tuple[Path, Path]:
     return Path(manifest["hook"]["host_path"]), Path(manifest["release"]["host_directory"])
 
 
+def service_run_path(manifest: dict[str, Any]) -> Path:
+    return Path(manifest["service_run"]["host_path"])
+
+
+def expected_service_run_after(manifest: dict[str, Any], before: bytes) -> bytes:
+    """Render the exact default-run edit made by the bootstrap shell block."""
+    marker = b"# CONTEXT_SHUNT_VERSIONED_IMPORT_PATH\n"
+    if marker in before:
+        return before
+    line = b"export HERMES_S6_SUPERVISED_CHILD=1\n"
+    require(line in before, "default service run lacks the supervised-child insertion point")
+    python_path = (
+        b'export PYTHONPATH="'
+        + str(manifest["release"]["container_directory"]).encode()
+        + b'/python${PYTHONPATH:+:$PYTHONPATH}"\n'
+    )
+    insertion = marker + python_path
+    return before.replace(line, insertion + line, 1)
+
+
+def validate_service_run_preimage(manifest: dict[str, Any]) -> None:
+    config = manifest["service_run"]
+    path = service_run_path(manifest)
+    require_metadata(
+        path,
+        mode=int(config["mode"], 8),
+        uid=config["uid"],
+        gid=config["gid"],
+    )
+    require(sha256(path) == config["expected_before_sha256"], "service run content drift")
+
+
 def validate_live_hook_preimage(manifest: dict[str, Any]) -> None:
     hook_path, _release_path = live_paths(manifest)
     hook = manifest["hook"]
@@ -167,6 +199,7 @@ def validate_live_hook_preimage(manifest: dict[str, Any]) -> None:
 def validate_live_preimage(manifest: dict[str, Any]) -> None:
     _hook_path, release_path = live_paths(manifest)
     validate_live_hook_preimage(manifest)
+    validate_service_run_preimage(manifest)
     require(not release_path.exists(), f"target release already exists: {release_path}")
     require(not release_path.is_symlink(), f"target release symlink refused: {release_path}")
 
@@ -195,6 +228,9 @@ def create_backup(backup: Path, hook_path: Path, manifest: dict[str, Any]) -> No
     os.chown(backup, 0, 0)
     original = backup / "99-hermes-local-patches.before"
     copy_new(hook_path, original, mode=0o600, uid=0, gid=0)
+    service_run = service_run_path(manifest)
+    service_run_backup = backup / "gateway-default.run.before"
+    copy_new(service_run, service_run_backup, mode=0o600, uid=0, gid=0)
     write_json(
         backup / "preimage.json",
         {
@@ -210,12 +246,19 @@ def create_backup(backup: Path, hook_path: Path, manifest: dict[str, Any]) -> No
                 "path": manifest["release"]["host_directory"],
                 "state": "absent",
             },
-            # The transaction only owns the default-profile hook and versioned
-            # release.  Rollback archives that release in-place; a process reload
-            # may be needed for code already imported, but recreating the Hermes
-            # container (and therefore disturbing Aida) is not part of rollback.
-            "container_recreate_required_for_package_rollback": False,
-            "default_profile_process_reload_required": True,
+            "service_run": {
+                "path": str(service_run),
+                "sha256": manifest["service_run"]["expected_before_sha256"],
+                "mode": manifest["service_run"]["mode"],
+                "uid": manifest["service_run"]["uid"],
+                "gid": manifest["service_run"]["gid"],
+                "expected_after_sha256": hashlib.sha256(
+                    expected_service_run_after(
+                        manifest, service_run_backup.read_bytes()
+                    )
+                ).hexdigest(),
+            },
+            "container_recreate_required_for_package_rollback": True,
         },
     )
     fsync_directory(backup)
@@ -333,12 +376,23 @@ def validate_backup(backup: Path, manifest: dict[str, Any]) -> None:
     original = backup / "99-hermes-local-patches.before"
     require_regular(original)
     require(sha256(original) == manifest["hook"]["expected_before_sha256"], "backup hook mismatch")
+    service_run_original = backup / "gateway-default.run.before"
+    require_regular(service_run_original)
+    require(
+        sha256(service_run_original) == manifest["service_run"]["expected_before_sha256"],
+        "backup service run mismatch",
+    )
     preimage_path = backup / "preimage.json"
     require_regular(preimage_path)
     preimage = json.loads(preimage_path.read_text())
     require(preimage.get("schema") == "context-shunt.hermes-offline-bootstrap-preimage.v1", "bad preimage schema")
     require(preimage.get("hook", {}).get("sha256") == manifest["hook"]["expected_before_sha256"], "bad hook preimage")
     require(preimage.get("release", {}).get("state") == "absent", "bad release preimage")
+    require(
+        preimage.get("service_run", {}).get("sha256")
+        == manifest["service_run"]["expected_before_sha256"],
+        "bad service run preimage",
+    )
 
 
 def validate_apply_backup_state(backup: Path) -> None:
@@ -365,6 +419,16 @@ def validate_apply_backup_state(backup: Path) -> None:
 def restore_after_failed_apply(backup: Path, manifest: dict[str, Any]) -> None:
     hook_path, release_path = live_paths(manifest)
     hook = manifest["hook"]
+    atomic_restore(
+        backup / "gateway-default.run.before",
+        service_run_path(manifest),
+        mode=int(manifest["service_run"]["mode"], 8),
+        uid=manifest["service_run"]["uid"],
+        gid=manifest["service_run"]["gid"],
+        # /run is commonly tmpfs while the durable transaction backup is on
+        # /opt/hermes-data; staging in the destination namespace avoids EXDEV.
+        staging_directory=service_run_path(manifest).parent,
+    )
     staged_hook = backup / f".{hook_path.name}.stage-{os.getpid()}"
     if staged_hook.exists():
         failed_hook = backup / "hook-stage.failed"
@@ -445,8 +509,7 @@ def apply(candidate: Path, backup: Path) -> dict[str, Any]:
             "backup": str(backup),
             "hook_sha256": manifest["hook"]["expected_after_sha256"],
             "release": manifest["release"]["files"],
-            "container_recreate_required_for_package_rollback": False,
-            "default_profile_process_reload_required": True,
+            "container_recreate_required_for_package_rollback": True,
         }
         write_json(backup / "apply.json", receipt)
         return receipt
@@ -465,6 +528,24 @@ def rollback(candidate: Path, backup: Path) -> dict[str, Any]:
     require(backup.stat().st_dev == release_path.parent.stat().st_dev, "backup crosses filesystem")
     require(backup.stat().st_dev == hook_path.parent.stat().st_dev, "hook crosses filesystem")
     original = backup / "99-hermes-local-patches.before"
+    service_original = backup / "gateway-default.run.before"
+    service_path = service_run_path(manifest)
+    require_metadata(
+        service_path,
+        mode=int(manifest["service_run"]["mode"], 8),
+        uid=manifest["service_run"]["uid"],
+        gid=manifest["service_run"]["gid"],
+    )
+    service_current_hash = sha256(service_path)
+    service_preimage = json.loads((backup / "preimage.json").read_text())["service_run"]
+    require(
+        service_current_hash
+        in {
+            service_preimage["sha256"],
+            service_preimage["expected_after_sha256"],
+        },
+        "service run drift: refusing to overwrite concurrent edits",
+    )
     archived = backup / "candidate-release.rollback"
     current_hook_state = hook_state(manifest)
     if archived.exists():
@@ -479,6 +560,14 @@ def rollback(candidate: Path, backup: Path) -> dict[str, Any]:
         validate_release(manifest)
         require(backup.stat().st_dev == release_path.stat().st_dev, "archive crosses filesystem")
     hook = manifest["hook"]
+    atomic_restore(
+        service_original,
+        service_path,
+        mode=int(manifest["service_run"]["mode"], 8),
+        uid=manifest["service_run"]["uid"],
+        gid=manifest["service_run"]["gid"],
+        staging_directory=service_path.parent,
+    )
     if current_hook_state == "after":
         atomic_restore(
             original,
@@ -498,8 +587,7 @@ def rollback(candidate: Path, backup: Path) -> dict[str, Any]:
         "result": "ROLLED_BACK",
         "hook_sha256": manifest["hook"]["expected_before_sha256"],
         "candidate_release_archive": str(archived),
-        "container_recreate_required_for_package_rollback": False,
-        "default_profile_process_reload_required": True,
+        "container_recreate_required_for_package_rollback": True,
     }
     write_json(backup / "rollback.json", receipt)
     return receipt

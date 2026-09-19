@@ -21,12 +21,14 @@ literal before extracting or executing `activate_bootstrap.py`. Do not trust a c
 file obtained only from inside the archive.
 
 `activate_bootstrap.py` enforces the file transaction. Run `preflight`, then `apply` with a
-fresh backup path after both profiles are drained. It snapshots the hook into a root-owned
-`0700` backup, repeats the live drift check, stages the root-owned/read-only release on the
-same filesystem, atomically renames release first and hook second, and writes a receipt. On
-any failed pre-start or startup gate, run `rollback` while the service is stopped; it
-atomically restores the hook first and moves the complete candidate release into the same
-backup. Never restore one without the other.
+fresh backup path after both profiles are drained. It snapshots the hook and default-profile
+service run into a root-owned `0700` backup, repeats the live drift check, stages the
+root-owned/read-only release on the same filesystem, and writes a receipt. The service-run
+edit is installed with a same-directory atomic rename, preserving its mode/owner; rollback
+stages in `/run`'s destination namespace to avoid cross-filesystem `EXDEV`, and refuses to
+overwrite a concurrent service-run edit. On any failed pre-start or startup gate, run
+`rollback` while the service is stopped; it restores the service run and hook and archives
+the complete candidate release. Never restore one without the other.
 The durable preimage/state records and actual live bytes make both `apply` and `rollback`
 resumable after interruption between the two atomic renames.
 
@@ -35,6 +37,9 @@ transaction. No site-packages file is copied directly: the init hook invokes the
 installer, which verifies the wheel, installed dependencies, every packaged
 `context_shunt/` file, and the unchanged set of all other installed distributions.
 
-The virtualenv lives in the container image, not the data volume. A full rollout rollback
-must discard and recreate the candidate container from the prior image after `rollback`;
-that restores package state as well as the host-mounted files.
+The virtualenv lives in the container image, not the data volume. The candidate package is
+installed into its versioned release-local `python/` directory and selected only by the
+default-profile service run. A fresh default-profile process after rollback therefore
+imports the incumbent package while Aida and shared site-packages remain untouched. A
+process that already imported the candidate still needs the documented default-profile
+reload/container-recreate step; the receipt deliberately keeps that requirement explicit.
