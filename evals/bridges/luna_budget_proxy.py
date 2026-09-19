@@ -14,10 +14,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from bridges._usd_budget import RoutePricing, UsdBudgetLedger, upper_bound_input_tokens
+from bridges._usd_budget import RoutePricing, UsdBudgetLedger
 
 ROUTE = "sub2api-openai/gpt-5.6-luna"
 MODEL = "gpt-5.6-luna"
+DEFAULT_OUTPUT_CAP = 2048
+MODEL_INPUT_WINDOW = 131072
 
 
 def _json_env(name: str) -> dict:
@@ -45,29 +47,20 @@ class Proxy(BaseHTTPRequestHandler):
             if length <= 0 or length > 262_144:
                 raise ValueError("bounded request body required")
             body = json.loads(self.rfile.read(length))
-            if (
-                body.get("model") != MODEL
-                or body.get("stream") is True
-                or body.get("tools")
-                or not isinstance(body.get("messages"), list)
-                or not isinstance(body.get("max_tokens"), int)
-                or not 1 <= body["max_tokens"] <= 2048
-            ):
-                raise ValueError("only bounded non-streaming Luna requests are supported")
+            outbound, output_cap = sanitize_request(body)
             route = os.environ.get("CONTEXT_SHUNT_PROXY_ROUTE", ROUTE)
             if route != ROUTE:
                 raise ValueError("route is not the pinned Luna route")
             ledger = self.server.ledger  # type: ignore[attr-defined]
             reservation = ledger.reserve(
-                input_token_upper_bound=upper_bound_input_tokens(
-                    "", json.dumps(body["messages"], ensure_ascii=False)
-                ),
-                max_output_tokens=body["max_tokens"],
+                input_token_upper_bound=reservation_input_bound(body),
+                max_output_tokens=output_cap,
             )
+            settled = False
             try:
                 request = Request(
                     os.environ["CONTEXT_SHUNT_PROXY_UPSTREAM"],
-                    data=json.dumps(body).encode(),
+                    data=json.dumps(outbound).encode(),
                     headers={
                         "content-type": "application/json",
                         "authorization": "Bearer " + os.environ["CONTEXT_SHUNT_PROXY_API_KEY"],
@@ -80,14 +73,27 @@ class Proxy(BaseHTTPRequestHandler):
                 usage = payload.get("usage")
                 inp = usage.get("prompt_tokens") if isinstance(usage, dict) else None
                 out = usage.get("completion_tokens") if isinstance(usage, dict) else None
-                if not isinstance(inp, int) or not isinstance(out, int):
+                if (
+                    not isinstance(inp, int)
+                    or not isinstance(out, int)
+                    or isinstance(inp, bool)
+                    or isinstance(out, bool)
+                    or inp < 0
+                    or out < 0
+                ):
                     ledger.record_result(reservation, status="usage_unknown")
-                elif inp > reservation_input_bound(body) or out > body["max_tokens"]:
+                    settled = True
+                    raise ValueError("provider usage was not exact")
+                elif inp > reservation_input_bound(body) or out > output_cap:
                     ledger.record_result(reservation, status="bound_breach", reported_input_tokens=inp, reported_output_tokens=out)
+                    settled = True
+                    raise ValueError("provider usage exceeded the reserved bound")
                 else:
                     ledger.record_result(reservation, status="completed", reported_input_tokens=inp, reported_output_tokens=out)
+                    settled = True
             except Exception:
-                ledger.record_result(reservation, status="usage_unknown")
+                if not settled:
+                    ledger.record_result(reservation, status="usage_unknown")
                 raise
             encoded = json.dumps(payload).encode()
             self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
@@ -98,7 +104,40 @@ class Proxy(BaseHTTPRequestHandler):
 
 
 def reservation_input_bound(body: dict) -> int:
-    return upper_bound_input_tokens("", json.dumps(body["messages"], ensure_ascii=False))
+    # Reserve the model's complete input window, including protocol/reasoning overhead,
+    # rather than trusting a caller-provided token estimate.
+    return MODEL_INPUT_WINDOW
+
+
+def sanitize_request(body: object) -> tuple[dict, int]:
+    if not isinstance(body, dict):
+        raise ValueError("request must be an object")
+    if body.get("model") not in (None, MODEL):
+        raise ValueError("model is not the pinned Luna model")
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages or len(messages) > 2:
+        raise ValueError("only bounded system/user text messages are supported")
+    clean: list[dict[str, str]] = []
+    for item in messages:
+        if not isinstance(item, dict) or item.get("role") not in {"system", "user"}:
+            raise ValueError("message role is not allowed")
+        content = item.get("content")
+        if not isinstance(content, str) or len(content.encode()) > 262_144:
+            raise ValueError("message content must be bounded text")
+        clean.append({"role": item["role"], "content": content})
+    supplied = body.get("max_tokens", DEFAULT_OUTPUT_CAP)
+    if isinstance(supplied, bool) or not isinstance(supplied, int) or not 1 <= supplied <= DEFAULT_OUTPUT_CAP:
+        raise ValueError("output cap is outside the configured bound")
+    forbidden = set(body) - {"model", "messages", "max_tokens"}
+    if forbidden:
+        raise ValueError("request contains unsupported overrides")
+    return {
+        "model": MODEL,
+        "messages": clean,
+        "n": 1,
+        "stream": False,
+        "max_tokens": supplied,
+    }, supplied
 
 
 class NoRedirect(HTTPRedirectHandler):
