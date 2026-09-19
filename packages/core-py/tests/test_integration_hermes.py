@@ -56,7 +56,7 @@ pytestmark = [
 # Runs inside the host interpreter so the hook registry, the tool dispatcher and the
 # plugin context are all the host's own. Output is a single JSON line.
 HOST_SCRIPT = r"""
-import hashlib, importlib.util, json, os, pathlib, sys, tempfile, re, time
+import base64, hashlib, importlib.metadata, importlib.util, json, os, pathlib, shlex, sys, tempfile, re, time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.environ["HERMES_ROOT"])
@@ -74,6 +74,7 @@ try:
     from tools.registry import registry
     import model_tools
     out["host_import"] = True
+    out["host_version"] = importlib.metadata.version("hermes-agent")
     out["hook_names"] = sorted(host_plugins.VALID_HOOKS)
 except Exception as exc:
     out["errors"].append(f"host import failed: {type(exc).__name__}")
@@ -300,6 +301,93 @@ try:
         "contains_omitted_marker": deadline_marker.encode() in recovered,
     }
 
+    # Hermes 0.21.3's numbered read_file representation omits a terminal newline even
+    # while reporting the original file_size and truncated=false. The Shunt pointer must
+    # still offer an exact supported recovery path, so page the same immutable snapshot by
+    # byte offsets through context_shunt_inspect and reconstruct it without touching the
+    # filesystem directly.
+    recovery_handle = deadline_env["sources"][0]
+    inspect_request = {
+        "source_id": recovery_handle["source_id"],
+        "snapshot_id": recovery_handle["snapshot_id"],
+        "selector": {"kind": "bytes", "start": 0, "end": out["deadline_source_bytes"]},
+        "max_result_bytes": 16384,
+    }
+    exact_pages = []
+    cursor = None
+    for page_number in range(8):
+        args = dict(inspect_request)
+        if cursor:
+            args["cursor"] = cursor
+        page = json.loads(model_tools.handle_function_call(
+            "context_shunt_inspect", args,
+            task_id="task-deadline", session_id="session-deadline",
+            tool_call_id=f"tc-artifact-inspect-{page_number}"
+        ))
+        if page.get("code") != "EXTRACTED":
+            raise AssertionError(f"exact recovery failed: {page.get('code')}")
+        exact_pages.extend(page["extraction"]["segments"])
+        cursor = page["extraction"].get("next_cursor")
+        if page["extraction"].get("complete"):
+            break
+        if not cursor:
+            raise AssertionError("incomplete exact recovery returned no cursor")
+    else:
+        raise AssertionError("exact recovery did not finish within eight bounded pages")
+    exact_recovered = "".join(segment["text"] for segment in exact_pages).encode()
+    out["artifact_inspect_readback"] = {
+        "bytes": len(exact_recovered),
+        "sha256": hashlib.sha256(exact_recovered).hexdigest(),
+        "matches_original": exact_recovered == deadline_body.encode(),
+        "contains_omitted_marker": deadline_marker.encode() in exact_recovered,
+        "pages": page_number + 1,
+    }
+
+    # The host file tool is a line-oriented representation, not a byte transport. Prove
+    # the separately authorized terminal surface can recover the original artifact path
+    # without a host patch: each agent-visible result is a bounded base64 page, and a
+    # separate in-tool size/hash receipt detects gaps, repeats, or representation damage.
+    terminal_chunks = []
+    terminal_chunk_bytes = 8192
+    for start in range(0, out["deadline_source_bytes"], terminal_chunk_bytes):
+        stop = min(start + terminal_chunk_bytes, out["deadline_source_bytes"])
+        code = (
+            "import base64,pathlib; "
+            f"data=pathlib.Path({artifact_path!r}).read_bytes()[{start}:{stop}]; "
+            "print(base64.b64encode(data).decode('ascii'))"
+        )
+        terminal_result = json.loads(model_tools.handle_function_call(
+            "terminal", {"command": f"/opt/hermes/.venv/bin/python -c {shlex.quote(code)}"},
+            task_id="task-deadline", session_id="session-deadline",
+            tool_call_id=f"tc-artifact-terminal-{start}"
+        ))
+        if terminal_result.get("exit_code") != 0:
+            raise AssertionError("terminal byte recovery failed")
+        terminal_chunks.append(base64.b64decode(terminal_result["output"].strip(), validate=True))
+    terminal_recovered = b"".join(terminal_chunks)
+    receipt_code = (
+        "import hashlib,json,pathlib; "
+        f"data=pathlib.Path({artifact_path!r}).read_bytes(); "
+        "print(json.dumps({'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}))"
+    )
+    receipt_result = json.loads(model_tools.handle_function_call(
+        "terminal", {"command": f"/opt/hermes/.venv/bin/python -c {shlex.quote(receipt_code)}"},
+        task_id="task-deadline", session_id="session-deadline",
+        tool_call_id="tc-artifact-terminal-receipt"
+    ))
+    if receipt_result.get("exit_code") != 0:
+        raise AssertionError("terminal byte receipt failed")
+    terminal_receipt = json.loads(receipt_result["output"])
+    out["artifact_terminal_readback"] = {
+        "bytes": len(terminal_recovered),
+        "sha256": hashlib.sha256(terminal_recovered).hexdigest(),
+        "matches_original": terminal_recovered == deadline_body.encode(),
+        "contains_omitted_marker": deadline_marker.encode() in terminal_recovered,
+        "chunks": len(terminal_chunks),
+        "chunk_bytes": terminal_chunk_bytes,
+        "receipt": terminal_receipt,
+    }
+
     out["capability"] = adapter.capability_report()
 
     # User auxiliary config wins over the plugin's own default.
@@ -437,20 +525,23 @@ def test_stats_reports_this_session_without_content(host_result):
     assert "What is the retry ceiling?" not in blob
 
 
-def test_hermes_compatibility_host_is_unverified_and_never_claims_actual(host_result):
-    """This pinned older checkout has no task argument, so its result stays unverified."""
+def test_current_task_aware_host_resolves_route_and_never_claims_actual(host_result):
+    """The exact 0.21.3 task-aware host resolves policy routing, but not generation identity."""
     envelope = json.loads(host_result["reader_result"])
     provenance = envelope["provenance"]
     assert provenance["derived"] is True
-    assert provenance["attribution_status"] == "unverified"
+    assert provenance["attribution_status"] == "resolved"
+    assert provenance["attribution_status"] != "actual"
     assert provenance["requested_model"] == "gpt-5.6-luna"
-    assert provenance["resolved_model"] is None
+    assert provenance["resolved_model"] == "gpt-5.6-luna"
+    assert provenance["reported_model"] is None
 
 
 def test_capability_report_names_the_real_host_version(host_result):
     capability = host_result.get("capability") or {}
     assert capability.get("host", {}).get("name") == "hermes-agent"
-    assert capability.get("host", {}).get("version") == "0.18.2"
+    assert host_result["host_version"] == "0.21.3"
+    assert capability.get("host", {}).get("version") == host_result["host_version"]
     assert capability.get("reader_model") == "gpt-5.6-luna"
     assert capability.get("contract_version") == EMITTED_SCHEMA_VERSION
     modes = {m["mode"]: m for m in capability["modes"]}
@@ -474,21 +565,50 @@ def test_real_hermes_timeout_fails_open_with_summary_path_and_no_late_fallback(h
     assert envelope["sources"][0]["source_id"] == legacy["source_id"]
     assert envelope["sources"][0]["snapshot_id"] == legacy["snapshot_id"]
     assert host_result["deadline_body_in_result"] is False
-    assert host_result["deadline_model_calls"] == [
-        {"model": "gpt-5.6-luna", "provider": None}
-    ]
+    assert host_result["deadline_model_calls"] == [{"model": "gpt-5.6-luna", "provider": None}]
 
 
-def test_real_hermes_file_tool_reads_every_raw_artifact_byte(host_result):
+def test_real_hermes_file_tool_representation_exposes_its_terminal_newline_gap(host_result):
+    """Pin the host limitation instead of pretending its numbered text is byte-exact."""
     envelope = json.loads(host_result["deadline_result"])
     readback = host_result["artifact_readback"]
     assert readback["path"] == envelope["legacy_compaction"]["raw_artifact_path"]
     assert readback["truncated"] is False
     assert readback["file_size"] == host_result["deadline_source_bytes"]
+    assert readback["bytes"] == host_result["deadline_source_bytes"] - 1
+    assert readback["sha256"] != host_result["deadline_source_sha256"]
+    assert readback["matches_original"] is False
+    assert readback["contains_omitted_marker"] is True
+
+
+def test_real_hermes_inspect_recovers_every_raw_artifact_byte(host_result):
+    """Shunt inspect is exact for this bounded artifact, within its disclosure ceiling."""
+    envelope = json.loads(host_result["deadline_result"])
+    readback = host_result["artifact_inspect_readback"]
+    assert 1 < readback["pages"] <= 8
     assert readback["bytes"] == host_result["deadline_source_bytes"]
     assert readback["sha256"] == host_result["deadline_source_sha256"]
     assert readback["sha256"] == envelope["legacy_compaction"]["snapshot_id"].removeprefix(
         "sha256:"
     )
+    assert readback["matches_original"] is True
+    assert readback["contains_omitted_marker"] is True
+
+
+def test_real_hermes_terminal_recovers_original_path_bytes_in_bounded_chunks(host_result):
+    """Terminal-capable callers have exact recovery beyond read_file's text representation."""
+    envelope = json.loads(host_result["deadline_result"])
+    readback = host_result["artifact_terminal_readback"]
+    assert readback["chunks"] > 1
+    assert 0 < readback["chunk_bytes"] <= 8192
+    assert readback["bytes"] == host_result["deadline_source_bytes"]
+    assert readback["sha256"] == host_result["deadline_source_sha256"]
+    assert readback["sha256"] == envelope["legacy_compaction"]["snapshot_id"].removeprefix(
+        "sha256:"
+    )
+    assert readback["receipt"] == {
+        "bytes": host_result["deadline_source_bytes"],
+        "sha256": host_result["deadline_source_sha256"],
+    }
     assert readback["matches_original"] is True
     assert readback["contains_omitted_marker"] is True

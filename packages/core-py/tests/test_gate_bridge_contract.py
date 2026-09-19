@@ -186,13 +186,17 @@ def inhost(tmp_path, monkeypatch):
     module = _bridges_module("openclaw_inhost")
 
     def start(*, text: str = "{}", usage: str = "None", server: str = _STUB_SERVER):
+        # A full release run exports the live-eval budget variables for the later Luna
+        # gate. This fixture drives a synthetic route with synthetic pricing, so inheriting
+        # the live ledger would either contaminate it or fail on its route binding. The one
+        # budget-specific test below opts back in explicitly after constructing the stub.
+        monkeypatch.delenv("CONTEXT_SHUNT_LUNA_EVAL", raising=False)
+        monkeypatch.delenv("CONTEXT_SHUNT_LUNA_BUDGET_DB", raising=False)
         script = tmp_path / "server.py"
         script.write_text(server % {"model": READER_MODEL, "text": text, "usage": usage})
         received = tmp_path / "received.jsonl"
         monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROOT", str(tmp_path))
-        monkeypatch.setenv(
-            "CONTEXT_SHUNT_OPENCLAW_ROUTE", f"stub-provider/{READER_MODEL}"
-        )
+        monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROUTE", f"stub-provider/{READER_MODEL}")
         monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_TSX", sys.executable)
         # `argv[1]` of the stub is where it writes what it was asked. The bridge passes
         # only the server path, so the record path rides on the environment.
@@ -632,13 +636,12 @@ def test_only_the_isolated_in_host_route_is_release_quality():
     # checking a property nothing reads.
     verify = (REPO / "scripts" / "verify").read_text()
     assert (
-        'REQUIRED_BRIDGE_PROPERTIES = (\n'
+        "REQUIRED_BRIDGE_PROPERTIES = (\n"
         '    "preserves_roles",\n'
         '    "enforces_output_cap",\n'
         '    "enforces_usd_budget",\n'
         '    "production_equivalent",\n'
-        ')'
-        in verify
+        ")" in verify
     )
 
 
@@ -822,8 +825,7 @@ def test_an_eval_report_that_binds_and_fails_is_a_failure_not_a_missing_prerequi
     invalid_citation = _sound_eval_report(head, "a" * 64)
     invalid_citation["invalid_published_citations"] = 1
     assert any(
-        "invalid_published_citations" in f
-        for f in verify._eval_outcome_failures(invalid_citation)
+        "invalid_published_citations" in f for f in verify._eval_outcome_failures(invalid_citation)
     )
 
     wrong_model = _sound_eval_report(head, "a" * 64)
