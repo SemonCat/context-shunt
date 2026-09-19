@@ -19,7 +19,8 @@ from bridges._usd_budget import RoutePricing, UsdBudgetLedger
 ROUTE = "sub2api-openai/gpt-5.6-luna"
 MODEL = "gpt-5.6-luna"
 DEFAULT_OUTPUT_CAP = 2048
-MODEL_INPUT_WINDOW = 131072
+MAX_CANARY_INPUT_BYTES = 65_536
+MAX_CANARY_INPUT_TOKENS = 16_384
 
 
 def _json_env(name: str) -> dict:
@@ -104,9 +105,12 @@ class Proxy(BaseHTTPRequestHandler):
 
 
 def reservation_input_bound(body: dict) -> int:
-    # Reserve the model's complete input window, including protocol/reasoning overhead,
-    # rather than trusting a caller-provided token estimate.
-    return MODEL_INPUT_WINDOW
+    # Bound the canary by bytes, then add conservative framing overhead. This is not a
+    # claim about the provider's full context window; it is a deliberately small local cap.
+    encoded = json.dumps(body["messages"], ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) > MAX_CANARY_INPUT_BYTES:
+        raise ValueError("canary input exceeds the 65536-byte bound")
+    return min(MAX_CANARY_INPUT_TOKENS, (len(encoded) + 4095) // 4 + 256)
 
 
 def sanitize_request(body: object) -> tuple[dict, int]:
@@ -125,10 +129,18 @@ def sanitize_request(body: object) -> tuple[dict, int]:
         if not isinstance(content, str) or len(content.encode()) > 262_144:
             raise ValueError("message content must be bounded text")
         clean.append({"role": item["role"], "content": content})
+    if len(json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode()) > MAX_CANARY_INPUT_BYTES:
+        raise ValueError("canary input exceeds the 65536-byte bound")
     supplied = body.get("max_tokens", DEFAULT_OUTPUT_CAP)
     if isinstance(supplied, bool) or not isinstance(supplied, int) or not 1 <= supplied <= DEFAULT_OUTPUT_CAP:
         raise ValueError("output cap is outside the configured bound")
-    forbidden = set(body) - {"model", "messages", "max_tokens"}
+    if "n" in body and body["n"] != 1:
+        raise ValueError("n must be one")
+    if "stream" in body and body["stream"] is not False:
+        raise ValueError("stream must be false")
+    if "temperature" in body and body["temperature"] != 0:
+        raise ValueError("temperature must be zero")
+    forbidden = set(body) - {"model", "messages", "max_tokens", "n", "stream", "temperature"}
     if forbidden:
         raise ValueError("request contains unsupported overrides")
     return {
