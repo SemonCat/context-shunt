@@ -42,6 +42,22 @@ pytestmark = pytest.mark.bridge_contract
 
 REPO = Path(__file__).resolve().parents[3]
 BRIDGES = REPO / "evals" / "bridges"
+EXCLUDED_HELPER_MODULES = frozenset(
+    {
+        "luna_budget_proxy.py",
+        "native_hermes_relay.py",
+        "native_hermes_launcher.py",
+        "native_hermes_invoke.py",
+    }
+)
+
+
+def _bridge_paths() -> list[Path]:
+    return sorted(
+        path
+        for path in BRIDGES.glob("*.py")
+        if not path.name.startswith("test_") and path.name not in EXCLUDED_HELPER_MODULES
+    )
 
 #: The two properties a required live gate will not score without.
 #: The two protocol properties this gate verifies against each route's own behaviour.
@@ -68,6 +84,14 @@ def _bridges_module(name: str):
     import importlib
 
     return importlib.import_module(f"bridges.{name}")
+
+
+def test_excluded_helpers_cannot_be_callable_evaluation_bridges():
+    for path in sorted(BRIDGES.glob("*.py")):
+        if path.name.startswith("test_") or path.name not in EXCLUDED_HELPER_MODULES:
+            continue
+        module = _bridges_module(path.stem)
+        assert not callable(getattr(module, "complete", None)), path.name
 
 
 #: A stand-in for the in-host NDJSON server. It prints the host's kind of log noise first,
@@ -552,7 +576,7 @@ def test_the_cli_route_really_does_collapse_the_roles_and_drop_the_cap(tmp_path,
 
 def test_every_bridge_declares_the_properties_the_release_gates_read():
     """A bridge with no descriptor, or a partial one, must not be silently scored."""
-    for path in sorted(BRIDGES.glob("*.py")):
+    for path in _bridge_paths():
         if path.name.startswith("_"):
             continue
         module = _bridges_module(path.stem)
@@ -613,7 +637,7 @@ def test_exactly_one_route_preserves_roles_and_enforces_the_cap():
     through it describes a different prompt under no cap.
     """
     qualifying = []
-    for path in sorted(BRIDGES.glob("*.py")):
+    for path in _bridge_paths():
         if path.name.startswith("_"):
             continue
         descriptor = getattr(_bridges_module(path.stem), "BRIDGE", {})
@@ -625,7 +649,7 @@ def test_exactly_one_route_preserves_roles_and_enforces_the_cap():
 def test_only_the_isolated_in_host_route_is_release_quality():
     """The CLI remains disqualified; the runtime-isolated route satisfies every gate."""
     release_quality = []
-    for path in sorted(BRIDGES.glob("*.py")):
+    for path in _bridge_paths():
         if path.name.startswith("_"):
             continue
         descriptor = getattr(_bridges_module(path.stem), "BRIDGE", {})
