@@ -36,6 +36,26 @@ class Plan:
     omitted: tuple[dict[str, Any], ...]
 
 
+def render_excerpt(chunk: Chunk) -> str:
+    """What the model actually sees for a chunk's text: gutters, then the wrapper's job.
+
+    A "lines" chunk carries every physical line prefixed with its authoritative global
+    line number (``"{n}: "``), so the model never has to count lines itself to answer
+    ``line_start``/``line_end`` - a long chunk, especially one with a blank line near the
+    end, made that count wrong even when the quote it cited was byte-exact. Splitting on
+    ``"\\n"`` only, never ``str.splitlines()``, matches ``LineIndex``: a bare CR, U+2028 or
+    U+0085 is not a physical line break here, and must not gain a gutter of its own.
+
+    A "records" chunk is JSON addressed by record index, not by physical line, and is
+    passed through unchanged - a gutter would misrepresent it as line-addressable.
+    """
+    if chunk.locator.get("kind") != "lines":
+        return chunk.text
+    start = int(chunk.locator["start"])
+    lines = chunk.text.split("\n")
+    return "\n".join(f"{start + i}: {line}" for i, line in enumerate(lines))
+
+
 def per_call_overhead_tokens(
     limits: Limits = DEFAULT_LIMITS,
     question: str = "",
@@ -223,7 +243,7 @@ def plan(
             from .provider import READER_SYSTEM_PROMPT, build_user_message
 
             call_tokens = estimate_tokens(READER_SYSTEM_PROMPT, limits) + estimate_tokens(
-                build_user_message(question, chunk.text, chunk.locator), limits
+                build_user_message(question, render_excerpt(chunk), chunk.locator), limits
             )
             projected = spent_tokens + call_tokens
             if len(produced) >= budget_chunks or projected > limits.max_request_input_tokens:

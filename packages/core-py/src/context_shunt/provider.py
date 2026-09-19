@@ -95,6 +95,11 @@ READER_SYSTEM_PROMPT = (
     "every id in every claim's citation_ids must appear in `citations`.\n"
     "5. If the excerpt does not answer the question, say so and return empty claims and "
     "empty citations. Never fill a gap with a guess.\n"
+    "6. When the excerpt addresses lines, each physical line is shown as `N: ` followed by "
+    "its text, including blank lines - for example `42: attempt_limit = 7`. That `N: ` "
+    "gutter is not source text: never include its digits, colon or the space after it in a "
+    "quote, and always set `line_start`/`line_end` to the exact gutter number(s) of the "
+    "lines you cite. Read the gutter; never count lines yourself.\n"
     'Reply with JSON only: {"claims": [{"text": string, "citation_ids": [string]}], '
     '"citations": [{"id": "c1", "line_start": int, "line_end": int, "quote": string}]}\n'
     f"Example: {_CLAIMS_EXAMPLE}"

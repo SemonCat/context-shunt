@@ -49,7 +49,7 @@ from typing import Any
 from . import envelope as E
 from .accounting import ReaderCost
 from .accounting import estimate_tokens as accounting_tokens
-from .chunking import Chunk, estimate_tokens, plan
+from .chunking import Chunk, estimate_tokens, plan, render_excerpt
 from .citations import (
     CitationVerifier,
     Reason,
@@ -1757,7 +1757,7 @@ class Reader:
             # the first report only.
             ledger = _AttemptLedger(outcome)
             try:
-                user = build_user_message(question, chunk.text, chunk.locator)
+                user = build_user_message(question, render_excerpt(chunk), chunk.locator)
                 per_call_tokens = estimate_tokens(
                     READER_SYSTEM_PROMPT, self._limits
                 ) + estimate_tokens(user, self._limits)

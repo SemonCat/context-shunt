@@ -699,7 +699,7 @@ def test_empty_model_no_match_remains_valid_when_nothing_was_dropped(tmp_path):
 
 def _per_call_tokens(entry, limits=L, question: str = _CAP_QUESTION) -> int:
     """What the reader debits for one physical call of this chunk's prompt."""
-    from context_shunt.chunking import estimate_tokens as chunk_tokens
+    from context_shunt.chunking import estimate_tokens as chunk_tokens, render_excerpt
     from context_shunt.chunking import plan
     from context_shunt.provider import READER_SYSTEM_PROMPT, build_user_message
 
@@ -711,7 +711,7 @@ def _per_call_tokens(entry, limits=L, question: str = _CAP_QUESTION) -> int:
     )
     chunk = the_plan.chunks[0]
     return chunk_tokens(READER_SYSTEM_PROMPT, limits) + chunk_tokens(
-        build_user_message(question, chunk.text, chunk.locator), limits
+        build_user_message(question, render_excerpt(chunk), chunk.locator), limits
     )
 
 

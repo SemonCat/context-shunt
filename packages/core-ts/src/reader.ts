@@ -32,7 +32,7 @@ import {
   estimateTokens as accountingTokens,
   noReaderCost,
 } from "./accounting.js";
-import { Chunk, estimateTokens, planChunks } from "./chunking.js";
+import { Chunk, estimateTokens, planChunks, renderExcerpt } from "./chunking.js";
 import {
   type Claim, type Reason, CitationVerifier, normalizeClaims, referencedIds, renderClaims,
   stripUnsupportedAssertions, unpublishedMarkerIds,
@@ -1618,7 +1618,7 @@ export class Reader {
       // late and cancelled outcomes all report through it, and it counts the first only.
       const ledger = new AttemptLedger(outcome);
       try {
-        const user = buildUserMessage(question, chunk.text, chunk.locator);
+        const user = buildUserMessage(question, renderExcerpt(chunk), chunk.locator);
         const perCallTokens =
           estimateTokens(READER_SYSTEM_PROMPT, this.limits) + estimateTokens(user, this.limits);
         // This debit covers the physical call this frame is about to start. A composite

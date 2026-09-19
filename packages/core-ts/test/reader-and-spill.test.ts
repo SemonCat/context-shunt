@@ -23,7 +23,7 @@ import { DEFAULT_LIMITS as L, READER_MODEL, narrowLimits } from "../src/limits.j
 import { InMemoryMetrics } from "../src/metrics.js";
 import { Deadline, FakeClock } from "../src/clock.js";
 import { estimateTokens as accountingTokens } from "../src/accounting.js";
-import { estimateTokens, planChunks } from "../src/chunking.js";
+import { estimateTokens, planChunks, renderExcerpt } from "../src/chunking.js";
 import { referencedIds } from "../src/citations.js";
 import {
   INCOMPLETE_ANSWER_PREFIX,
@@ -2061,10 +2061,10 @@ describe("release blockers: forged markers, caps, shared budget, identity", () =
       [{ sourceId: entry.sourceId, snapshot: entry.snapshot as never, selector: { kind: "all" } }],
       { maxChunks: 8, limits, question },
     );
-    const chunk = planned.chunks[0] as { text: string; locator: Record<string, unknown> };
+    const chunk = planned.chunks[0]!;
     return (
       estimateTokens(READER_SYSTEM_PROMPT, limits)
-      + estimateTokens(buildUserMessage(question, chunk.text, chunk.locator), limits)
+      + estimateTokens(buildUserMessage(question, renderExcerpt(chunk), chunk.locator), limits)
     );
   }
 

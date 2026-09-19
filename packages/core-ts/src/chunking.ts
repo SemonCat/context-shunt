@@ -29,6 +29,28 @@ export interface Plan {
 }
 
 /**
+ * What the model actually sees for a chunk's text: gutters, then the wrapper's job.
+ *
+ * A "lines" chunk carries every physical line prefixed with its authoritative global line
+ * number (`"{n}: "`), so the model never has to count lines itself to answer
+ * `line_start`/`line_end` - a long chunk, especially one with a blank line near the end,
+ * made that count wrong even when the quote it cited was byte-exact. Splitting on `"\n"`
+ * only, never a `splitlines`-style break, matches `LineIndex`: a bare CR, U+2028 or U+0085
+ * is not a physical line break here and must not gain a gutter of its own.
+ *
+ * A "records" chunk is JSON addressed by record index, not by physical line, and is passed
+ * through unchanged - a gutter would misrepresent it as line-addressable.
+ */
+export function renderExcerpt(chunk: Chunk): string {
+  if (chunk.locator.kind !== "lines") return chunk.text;
+  const start = Number(chunk.locator.start);
+  return chunk.text
+    .split("\n")
+    .map((line, i) => `${start + i}: ${line}`)
+    .join("\n");
+}
+
+/**
  * Tokens each call spends on the fixed instruction and the excerpt wrapper.
  *
  * The request budget covers *all* prompt input, not just chunk text, so the planner has to
@@ -223,7 +245,7 @@ export function planChunks(
       }
       const callTokens = estimateTokens(READER_SYSTEM_PROMPT, limits)
         + estimateTokens(
-          buildUserMessage(opts.question ?? "", chunk.text, chunk.locator),
+          buildUserMessage(opts.question ?? "", renderExcerpt(chunk), chunk.locator),
           limits,
         );
       const projected = spentTokens + callTokens;
