@@ -132,6 +132,11 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
     assert {path.name for path in release_path.iterdir()} == set(
         manifest["release"]["files"]
     )
+    # The init hook installs into the release-local import root before rollback.
+    (release_path / "python" / "context_shunt").mkdir(parents=True)
+    (release_path / "python" / "context_shunt" / "__init__.py").write_text(
+        "__version__ = 'candidate'\n"
+    )
 
     rolled_back = MODULE.rollback(candidate, backup)
     assert rolled_back["result"] == "ROLLED_BACK"

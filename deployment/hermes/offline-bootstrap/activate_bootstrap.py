@@ -312,7 +312,17 @@ def validate_release_at(release_path: Path, release: dict[str, Any]) -> None:
     require(not release_path.is_symlink(), "installed release is a symlink")
     require(stat.S_IMODE(release_stat.st_mode) == int(release["directory_mode"], 8), "release mode")
     require((release_stat.st_uid, release_stat.st_gid) == (release["uid"], release["gid"]), "release owner")
-    actual_names = {entry.name for entry in release_path.iterdir()}
+    # ensure_core.py populates the release-local import root after the file transaction;
+    # it is owned by this release but is not one of the immutable staged inputs.
+    python_root = release_path / "python"
+    if python_root.exists():
+        require(
+            python_root.is_dir() and not python_root.is_symlink(),
+            "installed python root invalid",
+        )
+    actual_names = {
+        entry.name for entry in release_path.iterdir() if entry.name != "python"
+    }
     require(actual_names == set(release["files"]), "installed release file set mismatch")
     for name, expected in release["files"].items():
         target = release_path / name
