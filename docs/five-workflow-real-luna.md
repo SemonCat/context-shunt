@@ -6,15 +6,15 @@ Resolved route required and observed on every completed call: `sub2api-openai/gp
 
 | Lane | Correct | Citations valid/applicable | Coverage complete/total | Calls (reported/unknown) | Provider tokens in/out/cache* | Role bytes | Transport bytes in/out | Lane wall ms | Cache hits |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| legacy_compactor | 3/5 | 0/0 | 0/0 | 0 (0/0) | unknown/unknown/unknown | unknown | unknown/unknown | 92.048 | 0 |
-| pre | 3/5 | 3/3 | 5/17 | 7 (7/0) | 12902/2013/7680 | 145991 | 147742/8389 | 67210.801 | 0 |
-| new | 5/5 | 2/2 | 7/18 | 2 (2/0) | 1280/144/0 | 5132 | 5564/1940 | 22418.013 | 1 |
+| legacy_compactor | 3/5 | 0/0 | 0/0 | 0 (0/0) | unknown/unknown/unknown | unknown | unknown/unknown | 84.895 | 0 |
+| pre | 3/5 | 2/2 | 5/17 | 8 (8/0) | 17692/2653/7680 | 180835 | 183043/10581 | 86073.091 | 0 |
+| new | 5/5 | 2/2 | 7/18 | 2 (2/0) | 1480/108/0 | 5934 | 6368/1940 | 24798.173 | 1 |
 
 \* Token values are provider-reported lower bounds only. Missing input/output or cache usage remains `unknown`; no count is reconstructed from bytes or a completion ratio. Main-context byte/token estimates are separate in the JSON evidence.
 
 Wall time is the observed duration of each independently launched lane, including its own initialization. It is reported as execution evidence, not as an end-to-end time-savings claim; the legacy lane makes no provider calls and is not latency-comparable to PRE/NEW.
 
-The run started 9 real attempts: 9 completed, 0 timed out, 0 failed, and 0 remained late/in-flight. Timed-out, failed, or late usage remains unknown rather than being reconstructed from response bytes.
+The run started 10 real attempts: 10 completed, 0 timed out, 0 failed, and 0 remained late/in-flight. Timed-out, failed, or late usage remains unknown rather than being reconstructed from response bytes.
 
 Each real call retains only redacted payload evidence: role names, byte lengths, SHA-256 digests, exact-template booleans, bounded caps, resolved route/execution identity, status, duration, and provider usage when reported. It stores no system prompt, question, source excerpt, completion, citation quote, credential, or host stderr.
 
