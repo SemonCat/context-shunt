@@ -181,14 +181,21 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         cost = result.cost
         samples.append(
             {
+                # The corpus's own synthetic, non-sensitive fixture label (e.g.
+                # "fact_retry") - never raw source content, never invented.
+                "item_id": item["id"],
                 "category": item["category"],
                 "latency_ms": elapsed_ms,
                 "status": result.envelope["status"],
                 "code": result.envelope["code"],
+                "failure_detail": result.envelope.get("failure_detail"),
                 # Every chunk the request gave up on, and why. A total provider outage
                 # surfaces here as omissions, not as a failed status.
                 "omitted": [o.get("reason") for o in result.envelope["coverage"]["omitted"]],
                 "complete": bool(result.envelope["coverage"]["complete"]),
+                "processed_chunks": result.envelope["coverage"]["processed_chunks"],
+                "planned_chunks": result.envelope["coverage"]["planned_chunks"],
+                "upstream_truncated": result.envelope["coverage"]["upstream_truncated"],
                 "attempts_started": cost.attempts_started,
                 "attempts_usage_complete": cost.attempts_usage_complete,
                 "input_tokens": cost.input_tokens,
@@ -234,6 +241,25 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         and all(s["input_tokens"] is not None for s in samples)
         and all(s["token_method"] == TokenMethod.EXACT.value for s in samples)
     )
+
+    sample_diagnostics = [
+        {
+            "item_id": s["item_id"],
+            "category": s["category"],
+            "status": s["status"],
+            "code": s["code"],
+            "failure_detail": s["failure_detail"],
+            "complete": s["complete"],
+            "omitted": s["omitted"],
+            "processed_chunks": s["processed_chunks"],
+            "planned_chunks": s["planned_chunks"],
+            "upstream_truncated": s["upstream_truncated"],
+            "latency_ms": s["latency_ms"],
+            "attempts_started": s["attempts_started"],
+            "attempts_usage_complete": s["attempts_usage_complete"],
+        }
+        for s in samples
+    ]
 
     report = {
         "model": READER_MODEL,
@@ -282,6 +308,11 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
             }
             for s in samples
         },
+        # One entry per sample, not collapsed by category like `by_category` above - two
+        # same-category samples with different outcomes are indistinguishable there, which
+        # hid which specific sample failed. The id is synthetic (category + its index
+        # within that category), never raw corpus content or credentials.
+        "sample_diagnostics": sample_diagnostics,
     }
     reports = REPO / "reports"
     reports.mkdir(exist_ok=True)

@@ -1125,6 +1125,10 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
     answerable_no_match = 0
     no_match_legacy_shape = no_match_ambiguous_shape = 0
     no_match_unparseable_reply = no_match_unknown_citation_id = 0
+    # Which specific runs went unanswered, so a threshold miss can be traced back to a
+    # corpus item instead of only being visible as an aggregate count. Synthetic fixture
+    # data only - item ids are the corpus's own non-sensitive labels, never raw content.
+    no_answer_runs: list[dict] = []
     # Hard-failure counters: each of these is asserted zero, not averaged away.
     wrong_model_calls = leaked_regions = over_cap = 0
     attempts_total = attempts_reported_total = 0
@@ -1275,6 +1279,23 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
                     no_match_unparseable_reply += 1
                 if recorder.claim_referenced_unknown_id:
                     no_match_unknown_citation_id += 1
+                no_answer_runs.append(
+                    {
+                        "item_id": item["id"],
+                        "category": item["category"],
+                        "run": run,
+                        "status": envelope["status"],
+                        "code": envelope["code"],
+                        "failure_detail": envelope.get("failure_detail"),
+                        "coverage_complete": bool(envelope["coverage"]["complete"]),
+                        "omitted_reasons": [
+                            o.get("reason") for o in envelope["coverage"]["omitted"]
+                        ],
+                        "processed_chunks": envelope["coverage"]["processed_chunks"],
+                        "planned_chunks": envelope["coverage"]["planned_chunks"],
+                        "upstream_truncated": envelope["coverage"]["upstream_truncated"],
+                    }
+                )
 
     budget_after = _budget_facts()
     report = {
@@ -1306,6 +1327,11 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         "of_which_ambiguous_shape_reply": no_match_ambiguous_shape,
         "of_which_unparseable_reply": no_match_unparseable_reply,
         "of_which_claim_referenced_unknown_id": no_match_unknown_citation_id,
+        # Every no-answer run named individually - item id, run index, category and the
+        # envelope's own status/code/coverage - so a threshold miss traces back to which
+        # corpus items produced it instead of only showing up as the aggregate count
+        # above. Purely diagnostic: nothing here feeds a threshold or an assertion.
+        "no_answer_runs": no_answer_runs,
         # Every raw reply's shape, across the whole run - not only the empty-answer ones -
         # so adoption of the claims contract is visible even when it did not cause a
         # failure: a model reverting to legacy prose that still carried a marker still
