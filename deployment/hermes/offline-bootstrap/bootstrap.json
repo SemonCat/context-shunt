@@ -5,7 +5,7 @@
     "host_path": "/opt/hermes-data/scripts/99-hermes-local-patches",
     "container_path": "/etc/cont-init.d/99-hermes-local-patches",
     "expected_before_sha256": "bb3fb0efe675727fa637b3392be9a291416899a0af668197a23e478951cddcd4",
-    "expected_after_sha256": "ba82202c0779987c97d863774f482bc8fcba9af0e6c3ee17b88a498f98655156",
+    "expected_after_sha256": "fda7987164375fa5a8e7b4c90e457b9c7d2f0901fbf2525cde460c21c81fd2e7",
     "before_mode": "0755",
     "before_uid": 10000,
     "before_gid": 10000,
