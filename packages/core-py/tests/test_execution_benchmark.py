@@ -406,6 +406,23 @@ def test_runtime_dist_binding_rejects_symlink_root_and_wrong_import_root(tmp_pat
         real_run._runtime_dist_root(host, server)
 
 
+def test_runtime_dist_binding_records_dependency_links_without_traversing(tmp_path) -> None:
+    root = tmp_path / "dist"
+    (root / "generated").mkdir(parents=True)
+    (root / "generated/app.mjs").write_text("export {}\n")
+    deps = root / "extensions/example/node_modules"
+    deps.mkdir(parents=True)
+    (deps / "pkg").symlink_to("../../../../node_modules/.pnpm/pkg/node_modules/pkg")
+    (deps / "ignored.txt").write_text("dependency payload\n")
+    from evidence_binding import regular_file_tree_sha256
+
+    first = regular_file_tree_sha256(root)
+    (deps / "pkg").unlink()
+    (deps / "pkg").symlink_to("../../../../node_modules/.pnpm/pkg@other/node_modules/pkg")
+    second = regular_file_tree_sha256(root)
+    assert first != second
+
+
 def test_real_luna_revalidates_checkout_binding_between_stages(monkeypatch) -> None:
     root = Path(__file__).resolve().parents[3]
     real_run = _real_run_module(root)

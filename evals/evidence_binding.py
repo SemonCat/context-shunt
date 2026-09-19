@@ -63,27 +63,61 @@ def source_manifest_sha256(root: Path) -> str:
 
 
 def regular_file_tree_sha256(root: Path) -> str:
-    """Bind every regular runtime artifact while rejecting symlink substitution."""
-    root = root.resolve()
-    if not root.is_dir() or root.is_symlink():
+    """Bind generated files and dependency-link topology without traversing dependencies.
+
+    OpenClaw's generated ``dist/extensions/*/node_modules`` contains pnpm links. Those
+    links are part of the runtime topology, but their installed dependency contents are
+    outside this checkout's source identity and are deliberately not traversed.
+    """
+    lexical_root = root
+    if lexical_root.is_symlink():
+        raise ValueError(f"runtime artifact root symlink refused: {lexical_root.name}")
+    root = lexical_root.resolve()
+    if not root.is_dir():
         raise ValueError(f"runtime artifact root is not a directory: {root.name}")
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError(f"runtime artifact symlink refused: {path.name}")
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix()
-        payload = path.read_bytes()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(format(path.stat().st_mode & 0o7777, "o").encode("ascii"))
-        digest.update(b"\0")
-        digest.update(str(len(payload)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(payload)
-        digest.update(b"\0")
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        dirnames[:] = sorted(dirnames)
+        filenames = sorted(filenames)
+        for name in list(dirnames):
+            path = directory_path / name
+            relative_path = path.relative_to(root)
+            if path.is_symlink():
+                if "node_modules" not in relative_path.parts:
+                    raise ValueError(f"runtime artifact symlink refused: {relative_path}")
+                _add_link_digest(digest, relative_path, path)
+                dirnames.remove(name)
+        for name in filenames:
+            path = directory_path / name
+            relative_path = path.relative_to(root)
+            if "node_modules" in relative_path.parts:
+                if path.is_symlink():
+                    _add_link_digest(digest, relative_path, path)
+                continue
+            if path.is_symlink():
+                raise ValueError(f"runtime artifact symlink refused: {relative_path}")
+            relative = relative_path.as_posix()
+            payload = path.read_bytes()
+            digest.update(b"file\0")
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(format(path.stat().st_mode & 0o7777, "o").encode("ascii"))
+            digest.update(b"\0")
+            digest.update(str(len(payload)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(payload)
+            digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _add_link_digest(digest: "hashlib._Hash", relative_path: Path, path: Path) -> None:
+    """Record a dependency link itself, never the target it may escape to."""
+    digest.update(b"link\0")
+    digest.update(relative_path.as_posix().encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+    digest.update(b"\0")
 
 
 def non_evidence_dirty_paths(root: Path) -> list[str]:
