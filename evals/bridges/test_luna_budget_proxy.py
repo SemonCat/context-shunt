@@ -12,7 +12,7 @@ import pytest
 
 import bridges.luna_budget_proxy as proxy
 from bridges._usd_budget import RoutePricing, UsdBudgetLedger
-from bridges.luna_budget_proxy import MODEL, NoRedirect, sanitize_request
+from bridges.luna_budget_proxy import MODEL, NoRedirect, reservation_input_bound, sanitize_request
 
 
 def test_omitted_output_cap_is_filled_and_payload_is_rebuilt() -> None:
@@ -47,6 +47,21 @@ def test_conflicting_fixed_values_are_rejected() -> None:
 def test_cumulative_input_bytes_are_bounded() -> None:
     with pytest.raises(ValueError, match="65536"):
         sanitize_request({"messages": [{"role": "user", "content": "x" * 70_000}]})
+
+
+def test_reservation_does_not_use_bytes_divided_by_four() -> None:
+    body = {"messages": [{"role": "user", "content": "A" * 1024}]}
+    bound = reservation_input_bound(body)
+    assert bound == len(json.dumps(body["messages"], ensure_ascii=False, separators=(",", ":")).encode()) + 256
+    assert bound > 1024 // 4
+
+
+def test_long_permitted_payload_reserves_full_conservative_bound() -> None:
+    body = {"messages": [{"role": "system", "content": "é" * 20_000}, {"role": "user", "content": "Z" * 20_000}]}
+    outbound, _ = sanitize_request(body)
+    encoded_bytes = len(json.dumps(outbound["messages"], ensure_ascii=False, separators=(",", ":")).encode())
+    assert encoded_bytes <= 65_536
+    assert reservation_input_bound(outbound) == encoded_bytes + 512
 
 
 def test_non_text_and_invalid_message_object_are_rejected() -> None:

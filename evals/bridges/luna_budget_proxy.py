@@ -20,7 +20,6 @@ ROUTE = "sub2api-openai/gpt-5.6-luna"
 MODEL = "gpt-5.6-luna"
 DEFAULT_OUTPUT_CAP = 2048
 MAX_CANARY_INPUT_BYTES = 65_536
-MAX_CANARY_INPUT_TOKENS = 16_384
 
 
 def _json_env(name: str) -> dict:
@@ -105,12 +104,14 @@ class Proxy(BaseHTTPRequestHandler):
 
 
 def reservation_input_bound(body: dict) -> int:
-    # Bound the canary by bytes, then add conservative framing overhead. This is not a
-    # claim about the provider's full context window; it is a deliberately small local cap.
+    # Bound the canary by bytes, then add conservative per-message framing overhead. One
+    # token per UTF-8 byte is intentionally pessimistic; bytes/4 is not a hard tokenizer
+    # upper bound for arbitrary ASCII or multilingual input. The byte limit is enforced by
+    # sanitize_request separately, so this must never truncate the reservation.
     encoded = json.dumps(body["messages"], ensure_ascii=False, separators=(",", ":")).encode()
     if len(encoded) > MAX_CANARY_INPUT_BYTES:
         raise ValueError("canary input exceeds the 65536-byte bound")
-    return min(MAX_CANARY_INPUT_TOKENS, (len(encoded) + 4095) // 4 + 256)
+    return len(encoded) + 256 * len(body["messages"])
 
 
 def sanitize_request(body: object) -> tuple[dict, int]:
