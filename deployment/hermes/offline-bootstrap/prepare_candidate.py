@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 
@@ -39,7 +40,7 @@ def render_hook(before: bytes, manifest: dict[str, object]) -> bytes:
         b"# CONTEXT_SHUNT_VERSIONED_IMPORT_PATH\n"
         + b'default_run="/run/service/gateway-default/run"\n'
         + b'expected_python_path='
-        + json.dumps(
+        + shlex.quote(
             'export PYTHONPATH="'
             + versioned_site
             + '${PYTHONPATH:+:$PYTHONPATH}"'

@@ -47,6 +47,50 @@ def test_renderer_changes_only_marked_body() -> None:
         b"/opt/data/context-shunt/ffa218c/ensure_core.py || exit 1\n"
         in after_body
     )
+    assert b"expected_python_path='export PYTHONPATH=\"" in after_body
+
+
+def test_rendered_block_is_idempotent_across_inherited_pythonpath_and_detects_drift(
+    tmp_path: Path,
+) -> None:
+    before = inspected_hook()
+    after = MODULE.render_hook(before, manifest_for(before))
+    block = after.split(MODULE.BEGIN, 1)[1].split(MODULE.END, 1)[0]
+    service = tmp_path / "service-run"
+    service.write_text("#!/bin/sh\nexport HERMES_S6_SUPERVISED_CHILD=1\n")
+    portable = block.replace(
+        b'default_run="/run/service/gateway-default/run"',
+        f'default_run="{service}"'.encode(),
+    )
+    # The transaction test isolates the service-run edit; installation and ownership
+    # are covered by the exact-image drill and are unavailable to an unprivileged host.
+    portable = portable.replace(
+        b'  chown --reference="$default_run" "$tmp_run" 2>/dev/null || chown 10000:10000 "$tmp_run"\n',
+        b"  :\n",
+    ).replace(
+        b'  chmod --reference="$default_run" "$tmp_run" 2>/dev/null || chmod 755 "$tmp_run"\n',
+        b"  :\n",
+    )
+    portable = portable.replace(
+        b"/opt/hermes/.venv/bin/python -B /opt/data/context-shunt/ffa218c/ensure_core.py || exit 1",
+        b"true",
+    )
+    original = service.read_bytes()
+    for inherited in (None, "/tmp/inherited"):
+        env = dict(os.environ)
+        if inherited is None:
+            env.pop("PYTHONPATH", None)
+        else:
+            env["PYTHONPATH"] = inherited
+        completed = subprocess.run(["/bin/sh", "-eu", "-c", portable], env=env)
+        assert completed.returncode == 0
+        assert service.read_bytes().startswith(b"#!/bin/sh\n")
+    rendered = service.read_text()
+    assert '${PYTHONPATH:+:$PYTHONPATH}' in rendered
+    drifted = portable.replace(b"/opt/data/context-shunt/ffa218c/python", b"/wrong/python")
+    completed = subprocess.run(["/bin/sh", "-eu", "-c", drifted], env=os.environ.copy())
+    assert completed.returncode != 0
+    assert service.read_bytes() != original
 
 
 def test_renderer_refuses_drift_and_duplicate_blocks() -> None:
