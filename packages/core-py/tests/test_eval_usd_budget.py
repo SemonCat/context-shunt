@@ -9,7 +9,9 @@ from decimal import Decimal
 import pytest
 
 
-def _pricing(*, input_rate: str = "1", output_rate: str = "6"):
+def _pricing(
+    *, input_rate: str = "1", output_rate: str = "6", fingerprint: str = "a" * 64
+):
     from bridges._usd_budget import RoutePricing
 
     return RoutePricing.from_host_identity(
@@ -19,7 +21,7 @@ def _pricing(*, input_rate: str = "1", output_rate: str = "6"):
                 "currency": "USD",
                 "unit": "per_million_tokens",
                 "source": "openclaw.resolveModelCostConfig",
-                "fingerprint": "a" * 64,
+                "fingerprint": fingerprint,
                 "rates": {
                     "input": input_rate,
                     "output": output_rate,
@@ -301,6 +303,92 @@ def test_pricing_change_on_an_existing_ledger_fails_closed(tmp_path):
     )
     with pytest.raises(BudgetError, match="pricing"):
         UsdBudgetLedger(path, _pricing(output_rate="7"))
+
+
+def test_authorized_pricing_identity_migration_preserves_rows_and_audit(tmp_path):
+    import sqlite3
+
+    from bridges._usd_budget import (
+        UsdBudgetLedger,
+        migrate_pricing_identity,
+    )
+
+    path = tmp_path / "budget.sqlite3"
+    old = _pricing()
+    ledger = UsdBudgetLedger(path, old)
+    reservation = ledger.reserve(input_token_upper_bound=1_000, max_output_tokens=20)
+    ledger.record_result(
+        reservation,
+        status="completed",
+        reported_input_tokens=100,
+        reported_output_tokens=10,
+    )
+    # RoutePricing gets its identity from the host resolver; this fixture models an
+    # equivalent-rate resolver identity change without changing any chargeable rate.
+    new = _pricing(fingerprint="b" * 64)
+    receipt = migrate_pricing_identity(
+        path,
+        new,
+        authorization="resume:pricing-identity-migration:test",
+    )
+    assert receipt["from_fingerprint"] == "a" * 64
+    assert receipt["to_fingerprint"] == "b" * 64
+    assert receipt["reservation_count"] == 1
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT pricing_fingerprint, pricing_binding_sha256, accounted_nano_usd "
+            "FROM reservations"
+        ).fetchone()
+        migration = connection.execute(
+            "SELECT from_fingerprint, to_fingerprint, reservation_count "
+            "FROM pricing_migrations"
+        ).fetchone()
+        assert row[0] == "a" * 64
+        assert row[1] == old.binding_sha256
+        assert migration == ("a" * 64, "b" * 64, 1)
+    resumed = UsdBudgetLedger(path, new)
+    assert resumed.summary()["accounted_usd"] == "0.00026"
+    assert resumed.summary()["pricing_migrations"][0]["to_fingerprint"] == "b" * 64
+    next_reservation = resumed.reserve(input_token_upper_bound=100, max_output_tokens=10)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT pricing_fingerprint FROM reservations WHERE reservation_id=?",
+            (next_reservation.reservation_id,),
+        ).fetchone()[0] == "b" * 64
+
+
+def test_pricing_identity_migration_rejects_rate_drift_and_active_holds(tmp_path):
+    from bridges._usd_budget import BudgetError, UsdBudgetLedger, migrate_pricing_identity
+
+    path = tmp_path / "budget.sqlite3"
+    ledger = UsdBudgetLedger(path, _pricing())
+    held = ledger.reserve(input_token_upper_bound=100, max_output_tokens=10)
+    changed = _pricing(output_rate="7", fingerprint="c" * 64)
+    with pytest.raises(BudgetError, match="rate drift"):
+        migrate_pricing_identity(path, changed, authorization="resume:drift:test")
+    ledger.record_result(held, status="usage_unknown")
+    equivalent = _pricing(fingerprint="d" * 64)
+    with pytest.raises(BudgetError, match="active or unknown"):
+        migrate_pricing_identity(path, equivalent, authorization="resume:hold:test")
+
+
+def test_pricing_identity_migration_receipt_is_immutable(tmp_path):
+    import sqlite3
+
+    from bridges._usd_budget import UsdBudgetLedger, migrate_pricing_identity
+
+    path = tmp_path / "budget.sqlite3"
+    old = _pricing()
+    UsdBudgetLedger(path, old)
+    new = _pricing(fingerprint="e" * 64)
+    migrate_pricing_identity(path, new, authorization="resume:immutable:test")
+    with sqlite3.connect(path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                "UPDATE pricing_migrations SET route='other' WHERE id=1"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute("DELETE FROM pricing_migrations WHERE id=1")
 
 
 @pytest.mark.parametrize("input_bound, output_bound", [(0, 1), (1, 0), (-1, 1)])

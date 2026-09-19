@@ -210,7 +210,12 @@ def create_backup(backup: Path, hook_path: Path, manifest: dict[str, Any]) -> No
                 "path": manifest["release"]["host_directory"],
                 "state": "absent",
             },
-            "container_recreate_required_for_package_rollback": True,
+            # The transaction only owns the default-profile hook and versioned
+            # release.  Rollback archives that release in-place; a process reload
+            # may be needed for code already imported, but recreating the Hermes
+            # container (and therefore disturbing Aida) is not part of rollback.
+            "container_recreate_required_for_package_rollback": False,
+            "default_profile_process_reload_required": True,
         },
     )
     fsync_directory(backup)
@@ -440,7 +445,8 @@ def apply(candidate: Path, backup: Path) -> dict[str, Any]:
             "backup": str(backup),
             "hook_sha256": manifest["hook"]["expected_after_sha256"],
             "release": manifest["release"]["files"],
-            "container_recreate_required_for_package_rollback": True,
+            "container_recreate_required_for_package_rollback": False,
+            "default_profile_process_reload_required": True,
         }
         write_json(backup / "apply.json", receipt)
         return receipt
@@ -492,7 +498,8 @@ def rollback(candidate: Path, backup: Path) -> dict[str, Any]:
         "result": "ROLLED_BACK",
         "hook_sha256": manifest["hook"]["expected_before_sha256"],
         "candidate_release_archive": str(archived),
-        "container_recreate_required_for_package_rollback": True,
+        "container_recreate_required_for_package_rollback": False,
+        "default_profile_process_reload_required": True,
     }
     write_json(backup / "rollback.json", receipt)
     return receipt

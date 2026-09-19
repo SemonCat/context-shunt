@@ -32,6 +32,7 @@ TOKENS_PER_MILLION = Decimal("1000000")
 LEDGER_SCHEMA_VERSION = "2"
 RESERVATION_POLICY = "pre_dispatch_reserve_exact_usage_upper_settlement_v2"
 LEGACY_RESERVATION_POLICY = "pre_dispatch_upper_bound_never_refunded_v1"
+PRICING_IDENTITY_MIGRATION_SCHEMA = "pricing_identity_migration_v1"
 
 
 class BudgetError(RuntimeError):
@@ -232,12 +233,47 @@ class UsdBudgetLedger:
                     CHECK (to_nano_usd > from_nano_usd)
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS pricing_migrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schema TEXT NOT NULL,
+                    migrated_unix_ms INTEGER NOT NULL,
+                    authorization TEXT NOT NULL UNIQUE,
+                    route TEXT NOT NULL,
+                    from_fingerprint TEXT NOT NULL,
+                    from_binding_sha256 TEXT NOT NULL,
+                    to_fingerprint TEXT NOT NULL,
+                    to_binding_sha256 TEXT NOT NULL,
+                    old_pricing TEXT NOT NULL,
+                    new_pricing TEXT NOT NULL,
+                    reservation_count INTEGER NOT NULL,
+                    accounted_nano_usd INTEGER NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TRIGGER IF NOT EXISTS pricing_migrations_no_update
+                   BEFORE UPDATE ON pricing_migrations
+                   BEGIN SELECT RAISE(ABORT, 'pricing migration receipts are immutable'); END"""
+            )
+            connection.execute(
+                """CREATE TRIGGER IF NOT EXISTS pricing_migrations_no_delete
+                   BEFORE DELETE ON pricing_migrations
+                   BEGIN SELECT RAISE(ABORT, 'pricing migration receipts are immutable'); END"""
+            )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(reservations)")
             }
             if "accounted_nano_usd" not in columns:
                 connection.execute(
                     "ALTER TABLE reservations ADD COLUMN accounted_nano_usd INTEGER"
+                )
+            if "pricing_fingerprint" not in columns:
+                connection.execute(
+                    "ALTER TABLE reservations ADD COLUMN pricing_fingerprint TEXT"
+                )
+            if "pricing_binding_sha256" not in columns:
+                connection.execute(
+                    "ALTER TABLE reservations ADD COLUMN pricing_binding_sha256 TEXT"
                 )
             existing = dict(connection.execute("SELECT key, value FROM metadata"))
             if not existing:
@@ -262,6 +298,11 @@ class UsdBudgetLedger:
             connection.execute(
                 "UPDATE reservations SET accounted_nano_usd=reserved_nano_usd "
                 "WHERE accounted_nano_usd IS NULL"
+            )
+            connection.execute(
+                "UPDATE reservations SET pricing_fingerprint=?, pricing_binding_sha256=? "
+                "WHERE pricing_fingerprint IS NULL OR pricing_binding_sha256 IS NULL",
+                (self.pricing.fingerprint, self.pricing.binding_sha256),
             )
             connection.commit()
 
@@ -396,8 +437,9 @@ class UsdBudgetLedger:
             connection.execute(
                 """INSERT INTO reservations(
                     reservation_id, created_unix_ms, input_token_upper_bound,
-                    output_token_upper_bound, reserved_nano_usd, accounted_nano_usd, status
-                ) VALUES (?, ?, ?, ?, ?, ?, 'reserved')""",
+                    output_token_upper_bound, reserved_nano_usd, accounted_nano_usd, status,
+                    pricing_fingerprint, pricing_binding_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?)""",
                 (
                     reservation_id,
                     int(time.time() * 1000),
@@ -405,6 +447,8 @@ class UsdBudgetLedger:
                     max_output_tokens,
                     nano,
                     nano,
+                    self.pricing.fingerprint,
+                    self.pricing.binding_sha256,
                 ),
             )
             connection.commit()
@@ -512,6 +556,25 @@ class UsdBudgetLedger:
                        FROM limit_history ORDER BY id"""
                 )
             ]
+            pricing_migrations = [
+                {
+                    "migrated_unix_ms": int(row[0]),
+                    "authorization": row[1],
+                    "route": row[2],
+                    "from_fingerprint": row[3],
+                    "to_fingerprint": row[4],
+                    "reservation_count": int(row[5]),
+                    "accounted_usd": format(
+                        Decimal(int(row[6])) / NANO_USD_PER_USD, "f"
+                    ),
+                }
+                for row in connection.execute(
+                    """SELECT migrated_unix_ms, authorization, route,
+                              from_fingerprint, to_fingerprint,
+                              reservation_count, accounted_nano_usd
+                       FROM pricing_migrations ORDER BY id"""
+                )
+            ]
         accounted = int(accounted)
         gross_reserved = int(gross_reserved)
         active_reserved = int(active_reserved)
@@ -537,11 +600,190 @@ class UsdBudgetLedger:
             "reservations": int(count),
             "statuses": statuses,
             "limit_history": limit_history,
+            "pricing_migrations": pricing_migrations,
             "pricing": self.pricing.public_record(),
             "pricing_binding_sha256": self.pricing.binding_sha256,
             "reservation_policy": RESERVATION_POLICY,
             "contains_prompt_or_completion": False,
         }
+
+
+def migrate_pricing_identity(
+    path: Path, pricing: RoutePricing, *, authorization: str
+) -> dict[str, Any]:
+    """Migrate only a pricing *identity* while preserving every reservation and cost.
+
+    This is deliberately narrower than changing prices.  The old and new public route
+    records must have identical route, source, currency, units, rates, tiers, and worst
+    rates; only the resolver fingerprint/binding may differ.  The ledger must have no
+    active or unknown holds.  Existing rows receive immutable attribution columns naming
+    the old identity, while future rows use the new identity.  Receipts are append-only
+    and protected by SQLite triggers so a later run cannot rewrite the audit history.
+    """
+
+    if not authorization or len(authorization) > 256:
+        raise BudgetError("pricing identity migration requires bounded authorization")
+    ledger_path = Path(path)
+    if not ledger_path.exists() or ledger_path.is_symlink():
+        raise BudgetError("pricing identity migration requires a regular existing ledger")
+    new_public = pricing.public_record()
+    with closing(sqlite3.connect(ledger_path, timeout=30, isolation_level=None)) as connection:
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("BEGIN IMMEDIATE")
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        required = {
+            "schema_version",
+            "limit_nano_usd",
+            "route",
+            "pricing_fingerprint",
+            "pricing_binding_sha256",
+            "pricing",
+            "reservation_policy",
+        }
+        if set(metadata) != required:
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires the current ledger schema")
+        if metadata["schema_version"] != LEDGER_SCHEMA_VERSION:
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires schema version 2")
+        if metadata["reservation_policy"] != RESERVATION_POLICY:
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires the current budget policy")
+        if metadata["limit_nano_usd"] != str(int(MAX_EVALUATION_USD * NANO_USD_PER_USD)):
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires the authorized USD 10 ceiling")
+        if metadata["pricing_fingerprint"] == pricing.fingerprint:
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires a new resolver identity")
+        try:
+            old_public = json.loads(metadata["pricing"])
+        except (TypeError, json.JSONDecodeError):
+            connection.rollback()
+            raise BudgetError("existing ledger pricing record is invalid") from None
+        comparable = (
+            "route",
+            "currency",
+            "unit",
+            "source",
+            "rates",
+            "tiered_rates",
+            "worst_input_rate",
+            "worst_output_rate",
+        )
+        if any(old_public.get(key) != new_public.get(key) for key in comparable):
+            connection.rollback()
+            raise BudgetError(
+                "pricing identity migration refuses route or rate drift; only identity may change"
+            )
+        if metadata["route"] != pricing.route:
+            connection.rollback()
+            raise BudgetError("pricing identity migration refuses route drift")
+        active = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM reservations WHERE status IN ('reserved', 'usage_unknown')"
+            ).fetchone()[0]
+        )
+        if active:
+            connection.rollback()
+            raise BudgetError("pricing identity migration requires zero active or unknown holds")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(reservations)")}
+        if "accounted_nano_usd" not in columns:
+            connection.execute("ALTER TABLE reservations ADD COLUMN accounted_nano_usd INTEGER")
+            connection.execute(
+                "UPDATE reservations SET accounted_nano_usd=reserved_nano_usd "
+                "WHERE accounted_nano_usd IS NULL"
+            )
+        if "pricing_fingerprint" not in columns:
+            connection.execute("ALTER TABLE reservations ADD COLUMN pricing_fingerprint TEXT")
+        if "pricing_binding_sha256" not in columns:
+            connection.execute("ALTER TABLE reservations ADD COLUMN pricing_binding_sha256 TEXT")
+        connection.execute(
+            "UPDATE reservations SET pricing_fingerprint=?, pricing_binding_sha256=? "
+            "WHERE pricing_fingerprint IS NULL OR pricing_binding_sha256 IS NULL",
+            (metadata["pricing_fingerprint"], metadata["pricing_binding_sha256"]),
+        )
+        accounted = int(
+            connection.execute(
+                "SELECT COALESCE(SUM(accounted_nano_usd), 0) FROM reservations"
+            ).fetchone()[0]
+        )
+        if accounted > int(MAX_EVALUATION_USD * NANO_USD_PER_USD):
+            connection.rollback()
+            raise BudgetError("pricing identity migration refuses an over-ceiling ledger")
+        reservation_count = int(
+            connection.execute("SELECT COUNT(*) FROM reservations").fetchone()[0]
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS pricing_migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema TEXT NOT NULL,
+                migrated_unix_ms INTEGER NOT NULL,
+                authorization TEXT NOT NULL UNIQUE,
+                route TEXT NOT NULL,
+                from_fingerprint TEXT NOT NULL,
+                from_binding_sha256 TEXT NOT NULL,
+                to_fingerprint TEXT NOT NULL,
+                to_binding_sha256 TEXT NOT NULL,
+                old_pricing TEXT NOT NULL,
+                new_pricing TEXT NOT NULL,
+                reservation_count INTEGER NOT NULL,
+                accounted_nano_usd INTEGER NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TRIGGER IF NOT EXISTS pricing_migrations_no_update
+               BEFORE UPDATE ON pricing_migrations
+               BEGIN SELECT RAISE(ABORT, 'pricing migration receipts are immutable'); END"""
+        )
+        connection.execute(
+            """CREATE TRIGGER IF NOT EXISTS pricing_migrations_no_delete
+               BEFORE DELETE ON pricing_migrations
+               BEGIN SELECT RAISE(ABORT, 'pricing migration receipts are immutable'); END"""
+        )
+        try:
+            connection.execute(
+                """INSERT INTO pricing_migrations(
+                    schema, migrated_unix_ms, authorization, route,
+                    from_fingerprint, from_binding_sha256,
+                    to_fingerprint, to_binding_sha256,
+                    old_pricing, new_pricing, reservation_count, accounted_nano_usd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    PRICING_IDENTITY_MIGRATION_SCHEMA,
+                    int(time.time() * 1000),
+                    authorization,
+                    pricing.route,
+                    metadata["pricing_fingerprint"],
+                    metadata["pricing_binding_sha256"],
+                    pricing.fingerprint,
+                    pricing.binding_sha256,
+                    _canonical_json(old_public),
+                    _canonical_json(new_public),
+                    reservation_count,
+                    accounted,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise BudgetError("pricing identity migration authorization was already used") from exc
+        updates = {
+            "pricing_fingerprint": pricing.fingerprint,
+            "pricing_binding_sha256": pricing.binding_sha256,
+            "pricing": _canonical_json(new_public),
+        }
+        connection.executemany(
+            "UPDATE metadata SET value=? WHERE key=?",
+            [(value, key) for key, value in updates.items()],
+        )
+        connection.commit()
+    return {
+        "authorization": authorization,
+        "from_fingerprint": metadata["pricing_fingerprint"],
+        "to_fingerprint": pricing.fingerprint,
+        "route": pricing.route,
+        "reservation_count": reservation_count,
+        "accounted_usd": format(Decimal(accounted) / NANO_USD_PER_USD, "f"),
+    }
 
 
 def upper_bound_input_tokens(system: str, user: str) -> int:

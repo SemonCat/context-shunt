@@ -133,7 +133,7 @@ def prepare(hook: Path, wheel: Path, output: Path) -> None:
                     manifest["hook"]["host_path"],  # type: ignore[index]
                 ],
                 "rollback_unit": "hook plus complete pinned release directory",
-                "package_rollback": "discard and recreate candidate container from prior image",
+                "package_rollback": "archive the versioned default-profile release in-place, restore the hook preimage, then reload only the default profile process; do not recreate the Hermes container or disturb Aida",
             },
         }
         write_new(

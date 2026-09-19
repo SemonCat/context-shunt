@@ -110,6 +110,8 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
     finally:
         os.umask(previous_umask)
     assert applied["result"] == "APPLIED"
+    assert applied["container_recreate_required_for_package_rollback"] is False
+    assert applied["default_profile_process_reload_required"] is True
     assert hook.read_bytes() == b"after hook\n"
     release_path = Path(manifest["release"]["host_directory"])
     assert release_path.is_dir()
@@ -120,6 +122,8 @@ def test_apply_and_rollback_are_one_recoverable_file_transaction(
 
     rolled_back = MODULE.rollback(candidate, backup)
     assert rolled_back["result"] == "ROLLED_BACK"
+    assert rolled_back["container_recreate_required_for_package_rollback"] is False
+    assert rolled_back["default_profile_process_reload_required"] is True
     assert hook.read_bytes() == b"before hook\n"
     assert not release_path.exists()
     assert (backup / "candidate-release.rollback").is_dir()
