@@ -53,13 +53,14 @@ from pathlib import Path
 import pytest
 
 from context_shunt.binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
-from context_shunt.limits import DEFAULT_LIMITS, READER_MODEL
+from context_shunt.limits import DEFAULT_LIMITS, EMITTED_SCHEMA_VERSION, READER_MODEL
 from context_shunt.provenance import TokenMethod
 from context_shunt.provider import HostBridgeProvider
 from context_shunt.reader import Reader
 from context_shunt.registry import SourceRegistry
 from context_shunt.snapshot import snapshot_bytes
 from context_shunt.store import ScopeIdentity, SnapshotStore
+from tests.support import FakeLuna, make_registry
 
 pytestmark = pytest.mark.benchmark_provider
 
@@ -108,6 +109,38 @@ def _summed(samples: list[dict], field: str) -> int | None:
     return sum(values)
 
 
+def _benchmark_request(
+    *,
+    request_id: str,
+    question: str,
+    source_id: str,
+    snapshot_id: str,
+    deadline_ms: int,
+    schema_version: str = EMITTED_SCHEMA_VERSION,
+) -> dict:
+    """The one request shape this module sends to a reader, live or stubbed.
+
+    Both the live gate and its free regression below build their request through this
+    function so a caller cannot make the free check pass while the live gate still sends
+    a schema the validator rejects - editing ``schema_version`` back to an unsupported
+    revision here fails the free positive case immediately, before it ever needs a bridge.
+    """
+    return {
+        "schema_version": schema_version,
+        "request_id": request_id,
+        "operation": "read",
+        "question": question,
+        "sources": [
+            {
+                "source_id": source_id,
+                "snapshot_id": snapshot_id,
+                "selector": {"kind": "all"},
+            }
+        ],
+        "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": deadline_ms},
+    }
+
+
 def _registry(root: Path) -> SourceRegistry:
     identity = ScopeIdentity(
         host="bench", profile="luna", principal="local", session="bench", generation=1
@@ -136,20 +169,13 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         started = time.monotonic()
         result = Reader(registry, provider).answer(
             "bench",
-            {
-                "schema_version": "1.0",
-                "request_id": f"req_bench_{item['id']}",
-                "operation": "read",
-                "question": item["question"],
-                "sources": [
-                    {
-                        "source_id": entry.source_id,
-                        "snapshot_id": entry.snapshot.snapshot_id,
-                        "selector": {"kind": "all"},
-                    }
-                ],
-                "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": deadline_ms},
-            },
+            _benchmark_request(
+                request_id=f"req_bench_{item['id']}",
+                question=item["question"],
+                source_id=entry.source_id,
+                snapshot_id=entry.snapshot.snapshot_id,
+                deadline_ms=deadline_ms,
+            ),
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
         cost = result.cost
@@ -294,6 +320,66 @@ def test_reader_latency_and_cost_against_live_luna(tmp_path):
         else:
             assert isinstance(sample["input_tokens"], int), report
             assert sample["token_method"] == TokenMethod.EXACT.value, report
+
+
+def test_benchmark_request_shape_reaches_provider_stub_free(tmp_path):
+    """Free regression: the live gate's own request builder must clear the request schema.
+
+    This module's live gate above only runs against a real bridge, so a request shape
+    that the schema validator rejects before any provider call is invisible to it in
+    ordinary CI - the gate reports NOT_RUN and the mismatch never surfaces. This test
+    needs no bridge: it sends :func:`_benchmark_request` - the exact function the live
+    gate calls, not a copy of its fields - through a zero-cost stub provider, so if that
+    function ever regresses to an unsupported schema version this test fails with it
+    instead of quietly diverging from what the live gate actually sends.
+
+    The negative case pins the historical bug independently of that builder: the
+    benchmark used to declare ``schema_version: "1.0"`` while requesting
+    ``budgets.deadline_ms`` from :data:`DEFAULT_LIMITS.request_deadline_ms` (240000ms) -
+    schema 1.0/1.1 cap ``deadline_ms`` at 60000ms, so every sample was rejected as
+    ``INVALID_REQUEST``/``SCHEMA_VIOLATION`` before the stub was ever called.
+    """
+    registry = make_registry(tmp_path, session_id="bench")
+    entry = registry.register("bench", snapshot_bytes(b"line one\nline two\n"))
+    deadline_ms = DEFAULT_LIMITS.request_deadline_ms
+
+    # The old, mismatched shape, spelled out literally (not via the builder) so this
+    # negative case stays anchored to the historical bug regardless of what the builder
+    # does later: still rejected before the stub is ever called.
+    stale_request = {
+        "schema_version": "1.0",
+        "request_id": "req_bench_free_stale",
+        "operation": "read",
+        "question": "What is on the second line?",
+        "sources": [
+            {
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "selector": {"kind": "all"},
+            }
+        ],
+        "budgets": {"max_chunks": 8, "max_answer_bytes": 8192, "deadline_ms": deadline_ms},
+    }
+    stale_luna = FakeLuna()
+    stale_env = Reader(registry, stale_luna).answer("bench", stale_request).envelope
+    assert stale_luna.call_count == 0
+    assert stale_env["status"] == "error"
+    assert stale_env["code"] == "INVALID_REQUEST"
+    assert stale_env["failure_detail"] == "SCHEMA_VIOLATION"
+
+    # The live gate's actual request, built by the same function it calls: the request
+    # clears validation and the stub is called.
+    live_luna = FakeLuna(default_reply=json.dumps({"answer": "two", "citations": []}))
+    live_request = _benchmark_request(
+        request_id="req_bench_free_live",
+        question="What is on the second line?",
+        source_id=entry.source_id,
+        snapshot_id=entry.snapshot.snapshot_id,
+        deadline_ms=deadline_ms,
+    )
+    live_env = Reader(registry, live_luna).answer("bench", live_request).envelope
+    assert live_luna.call_count > 0
+    assert live_env["code"] != "INVALID_REQUEST"
 
 
 def test_a_partly_reported_route_is_not_called_host_exposed():

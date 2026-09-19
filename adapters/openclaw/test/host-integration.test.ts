@@ -1,4 +1,5 @@
-/** Deterministic integration against the installed 2026.9.4 host loader/runner.
+/** Deterministic integration against one of the reviewed, installed host loader/runner
+ * versions in SUPPORTED_HOST_VERSIONS below.
  * No gateway, live configuration, provider calls, deployment or host source writes.
  * Requires CONTEXT_SHUNT_OPENCLAW_ROOT; absent prerequisites are NOT_RUN in verify.
  */
@@ -16,6 +17,12 @@ import { buildCapabilityReport } from "../src/capability.js";
 const ROOT = process.env["CONTEXT_SHUNT_OPENCLAW_ROOT"] ?? "";
 const available = ROOT.length > 0 && existsSync(join(ROOT, "package.json"));
 
+// Exact versions this suite has actually been run against and reviewed. Not a range:
+// a host version not in this list must fail the version assertion below rather than be
+// silently accepted, so bumping it requires deliberately re-running this integration
+// against the new version and adding it here.
+const SUPPORTED_HOST_VERSIONS = ["2026.9.4", "2026.9.5"];
+
 function hostFile(relative: string): string {
   const path = join(ROOT, relative);
   if (!existsSync(path)) throw new Error(`host file missing: ${relative}`);
@@ -26,7 +33,7 @@ describe.skipIf(!available)("openclaw host integration", () => {
   it("reads the installed host version", () => {
     const pkg = JSON.parse(hostFile("package.json"));
     expect(pkg.name).toBe("openclaw");
-    expect(String(pkg.version)).toBe("2026.9.4");
+    expect(SUPPORTED_HOST_VERSIONS).toContain(String(pkg.version));
   });
 
   it("exposes the typed hooks the adapter depends on", () => {
