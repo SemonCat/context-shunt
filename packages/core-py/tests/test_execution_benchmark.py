@@ -340,6 +340,72 @@ def test_real_luna_refuses_an_alternate_provider_before_starting_a_lane(
         real_run.main()
 
 
+def test_real_luna_rejects_arbitrary_server_override_before_dispatch(monkeypatch, tmp_path) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_SERVER", str(tmp_path / "stub.mjs"))
+    (tmp_path / "stub.mjs").write_text("export {}\n")
+    with pytest.raises(SystemExit, match="canonical or the tracked owned server"):
+        real_run._select_server_entry()
+
+
+def test_real_luna_selects_owned_runtime_server_and_binds_dist(monkeypatch) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    server = root / "evals/bridges/openclaw_dist_server.mjs"
+    monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_SERVER", str(server))
+    assert real_run._select_server_entry() == server.resolve()
+    host = Path("/Users/edisonpve/openclaw")
+    if host.is_dir() and (host / "dist").is_dir():
+        assert real_run._runtime_dist_root(host, server) == (host / "dist").resolve()
+
+
+def test_real_luna_binding_changes_when_runtime_dist_digest_changes(monkeypatch) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    host = Path("/Users/edisonpve/openclaw")
+    if not host.is_dir():
+        pytest.skip("configured clean OpenClaw checkout unavailable")
+    monkeypatch.setenv(
+        "CONTEXT_SHUNT_OPENCLAW_SERVER",
+        str(root / "evals/bridges/openclaw_dist_server.mjs"),
+    )
+    monkeypatch.setattr(
+        real_run,
+        "_checkout_identity",
+        lambda checkout, label: {
+            "commit": "a" * 40,
+            "git_tree": "b" * 40,
+            "clean": True,
+            "source_manifest_sha256": "c" * 64,
+        },
+    )
+    values = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(real_run, "regular_file_tree_sha256", lambda _path: next(values))
+    first = real_run._binding(host, real_run.DEFAULT_ROUTE)
+    second = real_run._binding(host, real_run.DEFAULT_ROUTE)
+    assert first["host_dist_tree_sha256"] != second["host_dist_tree_sha256"]
+
+
+def test_runtime_dist_binding_rejects_symlink_root_and_wrong_import_root(tmp_path) -> None:
+    root = Path(__file__).resolve().parents[3]
+    real_run = _real_run_module(root)
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "dist-target").mkdir()
+    (host / "dist").symlink_to(host / "dist-target", target_is_directory=True)
+    server = tmp_path / "server.mjs"
+    server.write_text(f'import "{host / "dist" / "runtime.mjs"}";\n')
+    with pytest.raises(SystemExit, match="dist root symlink refused"):
+        real_run._runtime_dist_root(host, server)
+
+    (host / "dist").unlink()
+    (host / "dist").mkdir()
+    server.write_text('import "/unrelated/openclaw/dist/runtime.mjs";\n')
+    with pytest.raises(SystemExit, match="different dist root"):
+        real_run._runtime_dist_root(host, server)
+
+
 def test_real_luna_revalidates_checkout_binding_between_stages(monkeypatch) -> None:
     root = Path(__file__).resolve().parents[3]
     real_run = _real_run_module(root)

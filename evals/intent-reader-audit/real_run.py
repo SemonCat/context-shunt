@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from decimal import Decimal, InvalidOperation
@@ -52,6 +53,7 @@ sys.path.insert(0, str(ROOT / "evals"))
 import run as local_benchmark  # noqa: E402
 from evidence_binding import (  # noqa: E402
     non_evidence_dirty_paths,
+    regular_file_tree_sha256,
     source_manifest_sha256,
 )
 
@@ -99,6 +101,8 @@ def _checkout_identity(root: Path, label: str) -> dict[str, Any]:
 def _binding(host_root: Path, route: str) -> dict[str, Any]:
     worktree = _checkout_identity(ROOT, "context-shunt")
     host = _checkout_identity(host_root, "OpenClaw host")
+    server = _select_server_entry()
+    dist_root = _runtime_dist_root(host_root, server)
     return {
         "provider_kind": "live",
         "route": route,
@@ -116,7 +120,55 @@ def _binding(host_root: Path, route: str) -> dict[str, Any]:
         "host_git_commit": host["commit"],
         "host_git_tree": host["git_tree"],
         "host_checkout_clean": host["clean"],
+        "server_entry": _server_label(server),
+        "server_entry_sha256": hashlib.sha256(server.read_bytes()).hexdigest(),
+        "host_dist_tree_sha256": regular_file_tree_sha256(dist_root),
+        "host_dist_root": "dist",
     }
+
+
+def _select_server_entry() -> Path:
+    """Allow only the canonical source bridge or the tracked current-runtime bridge."""
+    canonical = ROOT / "evals" / "bridges" / "openclaw_inhost_server.mts"
+    owned = ROOT / "evals" / "bridges" / "openclaw_dist_server.mjs"
+    configured = os.environ.get("CONTEXT_SHUNT_OPENCLAW_SERVER")
+    selected = Path(configured).expanduser() if configured else canonical
+    try:
+        resolved = selected.resolve(strict=True)
+    except OSError as exc:
+        raise SystemExit("NOT_RUN: configured OpenClaw bridge entry is unavailable") from exc
+    if selected.is_symlink() or resolved not in {canonical.resolve(), owned.resolve()}:
+        raise SystemExit("NOT_RUN: OpenClaw bridge entry must be canonical or the tracked owned server")
+    if not resolved.is_file():
+        raise SystemExit("NOT_RUN: OpenClaw bridge entry is not a regular file")
+    return resolved
+
+
+def _server_label(server: Path) -> str:
+    try:
+        return server.relative_to(ROOT).as_posix()
+    except ValueError:
+        raise SystemExit("NOT_RUN: OpenClaw bridge entry escaped the owned checkout")
+
+
+def _runtime_dist_root(host_root: Path, server: Path) -> Path:
+    """Resolve static server imports to the exact clean checkout being evaluated."""
+    source = server.read_text()
+    roots = {
+        Path(match).resolve()
+        for match in re.findall(r"['\"]([^'\"]+/dist)/[^'\"]+['\"]", source)
+    }
+    lexical_expected = host_root / "dist"
+    if lexical_expected.is_symlink():
+        raise SystemExit("NOT_RUN: OpenClaw dist root symlink refused")
+    expected = lexical_expected.resolve()
+    if not expected.is_relative_to(host_root.resolve()):
+        raise SystemExit("NOT_RUN: OpenClaw dist root escaped the checkout")
+    if roots and roots != {expected}:
+        raise SystemExit("NOT_RUN: owned OpenClaw server imports a different dist root")
+    if not expected.is_dir() or expected.is_symlink():
+        raise SystemExit("NOT_RUN: OpenClaw checkout has no regular dist root")
+    return expected
 
 
 def _assert_binding_unchanged(
@@ -362,8 +414,8 @@ def main() -> None:
     args = parser.parse_args()
     if os.environ.get("CONTEXT_SHUNT_LUNA_EVAL") != "1":
         raise SystemExit("NOT_RUN: set CONTEXT_SHUNT_LUNA_EVAL=1")
-    if os.environ.get("CONTEXT_SHUNT_OPENCLAW_SERVER"):
-        raise SystemExit("NOT_RUN: real evidence refuses CONTEXT_SHUNT_OPENCLAW_SERVER override")
+    server = _select_server_entry()
+    os.environ["CONTEXT_SHUNT_OPENCLAW_SERVER"] = str(server)
     host_root_raw = os.environ.get("CONTEXT_SHUNT_OPENCLAW_ROOT", "")
     host_root = Path(host_root_raw)
     if not host_root.is_dir():
@@ -459,7 +511,9 @@ def main() -> None:
             "model_required": MODEL,
             "transport_required": "runtime.llm.complete/isolated-agent-runtime",
             "roles_required": ["system", "user"],
-            "server_override_refused": True,
+            "server_entry": evidence_binding["server_entry"],
+            "server_entry_sha256": evidence_binding["server_entry_sha256"],
+            "server_override_refused": False,
         },
         "host": {
             "kind": "openclaw_source_checkout",
@@ -480,6 +534,8 @@ def main() -> None:
             "source_manifest_sha256": evidence_binding[
                 "worktree_source_manifest_sha256"
             ],
+            "host_dist_root": evidence_binding["host_dist_root"],
+            "host_dist_tree_sha256": evidence_binding["host_dist_tree_sha256"],
         },
         "execution": {
             "legacy": "actual owned compact_tool_result route; no model applicable",

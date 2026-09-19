@@ -62,6 +62,30 @@ def source_manifest_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
+def regular_file_tree_sha256(root: Path) -> str:
+    """Bind every regular runtime artifact while rejecting symlink substitution."""
+    root = root.resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError(f"runtime artifact root is not a directory: {root.name}")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"runtime artifact symlink refused: {path.name}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        payload = path.read_bytes()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(format(path.stat().st_mode & 0o7777, "o").encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(len(payload)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def non_evidence_dirty_paths(root: Path) -> list[str]:
     """Dirty paths that are not the known generated evidence outputs."""
     raw = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
