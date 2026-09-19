@@ -91,8 +91,10 @@ class Proxy(BaseHTTPRequestHandler):
                 raise
             encoded = json.dumps(payload).encode()
             self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(encoded))); self.end_headers(); self.wfile.write(encoded)
-        except (ValueError, KeyError, json.JSONDecodeError, HTTPError, URLError, RuntimeError) as error:
-            self.send_error(502, str(error)[:160])
+        except (ValueError, KeyError, json.JSONDecodeError, HTTPError, URLError, RuntimeError):
+            # Never reflect provider errors, URLs, headers, or response fragments to the
+            # Hermes caller; the relay is a test boundary, not an error transport.
+            self.send_error(502, "bounded upstream failure")
 
 
 def reservation_input_bound(body: dict) -> int:
