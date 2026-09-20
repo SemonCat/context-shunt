@@ -294,8 +294,130 @@ def test_both_attestations_use_official_provider_request_scope(tmp_path):
     mode = module._capability.mode("tool_result_capture")
     assert mode.support is Support.SUPPORTED
     assert "pre_api_request" in ctx.registered_hooks
+    assert "llm_execution" in ctx.registered_middleware
     assert "tool_execution" in ctx.registered_middleware
     assert "transform_tool_result" not in ctx.registered_hooks
+
+
+def test_full_llm_execution_request_replaces_sanitized_preflight_scope(tmp_path):
+    """The real host's bounded preflight payload cannot be the authority for large requests."""
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+
+    ids = {
+        "session_id": "large-request-scope",
+        "task_id": "task-large-request-scope",
+        "turn_id": "turn-large-request-scope",
+        "api_request_id": "api-large-request-scope",
+    }
+    ctx.registered_hook_handlers["pre_api_request"](
+        request={"_truncated": True, "preview": "bounded"}, **ids
+    )
+    request = {
+        "messages": [{"role": "user", "content": "history " * 2_000} for _ in range(30)],
+        "tools": [
+            _provider_tool("search_files"),
+            _provider_tool("context_shunt_read"),
+            _provider_tool("context_shunt_inspect"),
+        ],
+    }
+    downstream = ctx.registered_middleware["llm_execution"](
+        request=request,
+        next_call=lambda effective: {"tool_count": len(effective["tools"])},
+        **ids,
+    )
+    assert downstream == {"tool_count": 3}
+
+    out = json.loads(module.transform_tool_result(
+        tool_name="search_files",
+        result="authoritative direct row\n" * 3_000,
+        tool_call_id="tool-large-request-scope",
+        **ids,
+    ))
+    assert out["code"] == "SPILLED"
+    assert "context_shunt_read direct arguments" in out["guidance"]
+
+
+def test_llm_execution_scope_is_exact_once_and_fail_closed(tmp_path):
+    module = _load_adapter()
+    config = _config(tmp_path)
+    config["tool_result_capture"] = {"enabled": True, **CAPTURE_ATTESTATIONS}
+    ctx = FakeCtx(config, llm=FakeLlm())
+    module.register(ctx)
+    middleware = ctx.registered_middleware["llm_execution"]
+    request = {
+        "messages": [],
+        "tools": [_provider_tool("terminal")],
+    }
+    seen = []
+    assert middleware(
+        request=request,
+        next_call=lambda effective: seen.append(effective) or "response",
+        session_id="restricted-execution",
+        task_id="task-restricted-execution",
+        turn_id="turn-restricted-execution",
+        api_request_id="api-restricted-execution",
+    ) == "response"
+    assert seen == [request]
+
+    restricted = json.loads(module.transform_tool_result(
+        tool_name="search_files",
+        result="restricted execution row\n" * 3_000,
+        session_id="restricted-execution",
+        task_id="task-restricted-execution",
+        turn_id="turn-restricted-execution",
+        api_request_id="api-restricted-execution",
+    ))
+    assert restricted["code"] == "LEGACY_COMPACTED"
+    assert restricted["failure_detail"] == "CONSUMER_UNAVAILABLE"
+
+    def downstream_failure(_request):
+        raise RuntimeError("synthetic downstream failure")
+
+    with pytest.raises(RuntimeError, match="synthetic downstream failure"):
+        middleware(
+            request={"messages": [], "tools": [_provider_tool("context_shunt_read")]},
+            next_call=downstream_failure,
+            session_id="failed-execution",
+            task_id="task-failed-execution",
+            turn_id="turn-failed-execution",
+            api_request_id="api-failed-execution",
+        )
+
+    for ids in (
+        {
+            "session_id": "restricted-execution",
+            "task_id": "task-restricted-execution",
+            "turn_id": "turn-restricted-execution",
+            "api_request_id": "api-missing-execution",
+        },
+        {
+            "session_id": "other-execution",
+            "task_id": "task-restricted-execution",
+            "turn_id": "turn-restricted-execution",
+            "api_request_id": "api-restricted-execution",
+        },
+    ):
+        missing_or_mismatched = json.loads(module.transform_tool_result(
+            tool_name="search_files",
+            result="mismatched execution row\n" * 3_000,
+            **ids,
+        ))
+        assert missing_or_mismatched["code"] == "LEGACY_COMPACTED"
+
+    module.on_session_reset(session_id="restricted-execution")
+    stale = json.loads(module.transform_tool_result(
+        tool_name="search_files",
+        result="stale execution row\n" * 3_000,
+        session_id="restricted-execution",
+        task_id="task-restricted-execution",
+        turn_id="turn-restricted-execution",
+        api_request_id="api-restricted-execution",
+    ))
+    assert stale["code"] == "LEGACY_COMPACTED"
 
 
 def test_both_attestations_without_scope_hook_keep_legacy_descriptor_compatibility(tmp_path):

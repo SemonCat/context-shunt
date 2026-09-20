@@ -321,6 +321,24 @@ def observe_provider_request(request: Any = None, **kwargs: Any) -> None:
     return None
 
 
+def observe_llm_execution(
+    request: Any = None, next_call: Any = None, **kwargs: Any
+) -> Any:
+    """Record the full provider request at Hermes' official execution boundary.
+
+    ``pre_api_request`` receives a bounded/sanitized copy and is therefore only a
+    provisional observation. ``llm_execution`` receives the effective request after
+    request middleware; recording after its downstream call preserves the host's normal
+    middleware/transport path and makes this evidence available before any tool result
+    can be dispatched.
+    """
+    if not callable(next_call):
+        raise TypeError("llm execution middleware requires next_call")
+    result = next_call(request)
+    observe_provider_request(request, **kwargs)
+    return result
+
+
 def _forget_request_scopes(session_id: str) -> None:
     if not session_id:
         return
@@ -1666,6 +1684,7 @@ def register(ctx: Any) -> None:
         register_middleware = getattr(ctx, "register_middleware", None)
         if callable(register_middleware) and "pre_api_request" in hooks:
             ctx.register_hook("pre_api_request", observe_provider_request)
+            ctx.register_middleware("llm_execution", observe_llm_execution)
             register_middleware("tool_execution", capture_tool_execution)
         elif "transform_tool_result" in hooks:
             # Compatibility route for an older/operator-attested host that supplies an

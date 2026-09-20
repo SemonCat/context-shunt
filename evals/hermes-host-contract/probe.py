@@ -80,6 +80,7 @@ def _observe(tools: list[dict[str, Any]], *, session: str, call_id: str) -> None
     """Run Hermes' real provider-request serializer and lifecycle dispatch."""
     from agent.api_request_hooks import ApiRequestHooksMixin
     from agent.turn_api_request import _fire_pre_api_request_hook
+    from hermes_cli.middleware import run_llm_execution_middleware
 
     class ProbeAgent(ApiRequestHooksMixin):
         pass
@@ -92,13 +93,21 @@ def _observe(tools: list[dict[str, Any]], *, session: str, call_id: str) -> None
     agent.base_url = ""
     agent.api_mode = "chat_completions"
     agent.max_tokens = 1024
+    history = [
+        {"role": "user", "content": f"synthetic history item {index}: " + "context " * 400}
+        for index in range(60)
+    ]
+    request = {"messages": history, "tools": tools}
     agent.tools = tools
+    sanitized = agent._api_request_payload_for_hook(request)
+    if not isinstance(sanitized, dict) or sanitized.get("_truncated") is not True:
+        raise AssertionError("realistic long provider request did not hit host hook sanitizer")
     _fire_pre_api_request_hook(
         agent,
-        {"messages": [], "tools": tools},
+        request,
         [],
         [],
-        messages=[],
+        messages=history,
         original_user_message="synthetic public exact-host probe",
         approx_tokens=0,
         total_chars=0,
@@ -109,6 +118,33 @@ def _observe(tools: list[dict[str, Any]], *, session: str, call_id: str) -> None
         effective_task_id=session,
         turn_id=f"turn-{call_id}",
     )
+    terminal_requests: list[dict[str, Any]] = []
+
+    def terminal(effective_request: dict[str, Any]) -> dict[str, int]:
+        terminal_requests.append(effective_request)
+        return {"tool_count": len(effective_request.get("tools", []))}
+
+    execution_result = run_llm_execution_middleware(
+        request,
+        terminal,
+        task_id=session,
+        turn_id=f"turn-{call_id}",
+        api_request_id=f"api-{call_id}",
+        session_id=session,
+        platform="cli",
+        model="synthetic-public-probe",
+        provider="offline",
+        base_url="",
+        api_mode="chat_completions",
+        api_call_count=1,
+        middleware_trace=[],
+    )
+    if execution_result != {"tool_count": len(tools)}:
+        raise AssertionError("llm execution middleware did not reach the terminal callback")
+    if len(terminal_requests) != 1 or [
+        definition.get("function", {}).get("name") for definition in terminal_requests[0].get("tools", [])
+    ] != [definition.get("function", {}).get("name") for definition in tools]:
+        raise AssertionError("llm execution chain changed the provider-visible tool surface")
 
 
 def _assert_accounted(stats: dict[str, Any], envelope: dict[str, Any]) -> None:
