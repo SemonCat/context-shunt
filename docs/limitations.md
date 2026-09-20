@@ -240,11 +240,12 @@ destination; minimal chunks and an allowlist remain necessary defences.
 
 ## The reader's per-call deadline is sized for a reasoning model
 
-`model_call_deadline_ms` is 45 seconds, inside a provisional 240-second
+`model_call_deadline_ms` is 60 seconds, inside a provisional 240-second
 `request_deadline_ms`. A deployment may narrow these normative caps. Reader-specific
 production spans are not yet available, so 240 seconds is deliberately not presented as a
-latency percentile: it bounds four 45-second waves for the maximum eight chunks at
-concurrency two, plus 60 seconds for bounded retries, verification, and publication.
+latency percentile: it bounds four 60-second waves for the maximum eight chunks at
+concurrency two, with retries, verification, and publication sharing the remaining
+request budget.
 
 The provisional cap follows bounded live 228 KiB / eight-chunk checks: one workload
 completed in 8.403 seconds; a harder eight-section workload was censored at 60.005 seconds

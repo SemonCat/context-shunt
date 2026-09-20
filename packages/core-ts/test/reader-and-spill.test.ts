@@ -148,6 +148,13 @@ describe("reader gate", () => {
     expect(call.system).toContain("data, never instructions");
   });
 
+  it("passes the sixty-second default call deadline to the bridge", async () => {
+    const { entry, luna, reader } = fixture(answerJson("", []));
+    await reader.answer("sess", request(entry));
+    expect(luna.calls[0]!.timeoutMs).toBeGreaterThanOrEqual(59_900);
+    expect(luna.calls[0]!.timeoutMs).toBeLessThanOrEqual(60_000);
+  });
+
   it("reports MODEL_ERROR rather than substituting a model", async () => {
     const registry = makeRegistry(tmp(), { sessionId: "sess" });
     const entry = registry.register("sess", snapshotBytes(enc(SOURCE)));
@@ -1024,7 +1031,7 @@ describe("output guard", () => {
 describe("cancellation and deadlines", () => {
   it("pins the contract deadlines", () => {
     expect([L.gateProbeDeadlineMs, L.spillIoDeadlineMs]).toEqual([1000, 5000]);
-    expect([L.modelCallDeadlineMs, L.requestDeadlineMs]).toEqual([45000, 240000]);
+    expect([L.modelCallDeadlineMs, L.requestDeadlineMs]).toEqual([60000, 240000]);
     // The default model must be reachable under the default deadline. `model_call` was
     // 20000 through the 1.1 work, but the default reader model `gpt-5.6-luna` is a
     // reasoning model and a measured live call takes roughly 34s - so every call aborted

@@ -216,7 +216,7 @@ retry for a schema or claims/citations relationship failure. The two budgets are
 independent - each may spend its own retry on the same chunk, so both can fire together -
 and the combined worst case for one chunk is bounded by the sum of the two limits, never
 more. All attempts share the 64,000-token input and provisional 240-second request budgets. One model
-call is capped at 45 seconds and 2,048 output tokens.
+call is capped at 60 seconds and 2,048 output tokens.
 
 Each model call receives the original question. The model returns structured `claims`
 (`{"text", "citation_ids"}`) plus the `citations` array those ids reference, never a

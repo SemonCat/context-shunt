@@ -110,7 +110,7 @@ def test_live_payload_attestation_detects_parent_context_leak(monkeypatch) -> No
         READER_SYSTEM_PROMPT,
         build_user_message("What is retry_limit?", "retry_limit: 7", locator),
         2048,
-        45000,
+        60000,
     )
     assert clean["roles"] == ["system", "user"]
     assert clean["system_is_exact_reader_contract"] is True
@@ -123,7 +123,7 @@ def test_live_payload_attestation_detects_parent_context_leak(monkeypatch) -> No
         READER_SYSTEM_PROMPT,
         build_user_message(f"What is retry_limit? {marker}", "retry_limit: 7", locator),
         2048,
-        45000,
+        60000,
     )
     assert leaked["user_is_exact_reader_template"] is True
     assert leaked["parent_context_canary_absent"] is False

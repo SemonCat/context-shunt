@@ -683,7 +683,7 @@ def _reader_target() -> tuple[str, str]:
 AUX_TASK_DEFAULTS: dict[str, Any] = {
     "provider": "auto",
     "model": READER_MODEL,
-    "timeout": 45,
+    "timeout": 60,
 }
 
 

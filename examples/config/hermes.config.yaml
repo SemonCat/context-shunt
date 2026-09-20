@@ -146,7 +146,7 @@ plugins:
 #   context_shunt_reader:
 #     provider: auto
 #     model: gpt-5.6-luna
-#     timeout: 45
+#     timeout: 60
 
 # There is no writer key. `writer.enabled: true` is refused at load time rather than
 # accepted and ignored.

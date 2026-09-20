@@ -1237,6 +1237,7 @@ def test_the_reader_is_registered_as_an_auxiliary_task(tmp_path):
     assert key == module.AUX_TASK_KEY == "context_shunt_reader"
     assert payload["display_name"] and payload["description"]
     assert payload["defaults"]["model"] == module._config.reader.model
+    assert payload["defaults"]["timeout"] == 60
     assert module._capability.enabled("reader_task_config")
 
 
@@ -1424,6 +1425,27 @@ def test_reader_tool_answers_with_luna_and_verified_citations(tmp_path):
     assert len(llm.calls) == 1
     assert llm.calls[0]["model"] == READER_MODEL
     assert "What is the retry ceiling?" in llm.calls[0]["messages"][1]["content"]
+
+
+def test_bridge_call_forwards_60000ms_as_60_second_llm_timeout(tmp_path):
+    module = _load_adapter()
+    llm = FakeLlm()
+    module.register(FakeCtx(_config(tmp_path), llm=llm))
+
+    result = module._bridge_call(
+        system="reader system",
+        user="reader user",
+        provider="",
+        model=READER_MODEL,
+        max_output_tokens=2048,
+        timeout_ms=60000,
+    )
+
+    assert result["text"]
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["timeout"] == 60.0
+    assert llm.calls[0]["max_tokens"] == 2048
+    assert llm.calls[0]["purpose"] == "context-shunt-reader"
 
 
 def test_hermes_reader_timeout_returns_compactor_summary_and_readable_raw_path(tmp_path):

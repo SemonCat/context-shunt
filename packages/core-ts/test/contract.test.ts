@@ -219,6 +219,27 @@ describe("contract invariants", () => {
       "/tmp/context-shunt-cache",
     )).toThrowError(ShuntError);
   });
+
+  it("cannot raise the sixty-second model-call cap", () => {
+    expect(() => loadConfig(
+      {
+        workspace_roots: ["/tmp/context-shunt-config"],
+        limits: { model_call_deadline_ms: 60_001 },
+      } as never,
+      "/tmp/context-shunt-cache",
+    )).toThrowError(ShuntError);
+    try {
+      loadConfig(
+        {
+          workspace_roots: ["/tmp/context-shunt-config"],
+          limits: { model_call_deadline_ms: 60_001 },
+        } as never,
+        "/tmp/context-shunt-cache",
+      );
+    } catch (err) {
+      expect((err as ShuntError).detail).toBe("LIMIT_MAY_ONLY_NARROW");
+    }
+  });
 });
 
 describe("tool_result_capture / suma_post_tool config migration", () => {

@@ -111,7 +111,7 @@ Hermes has two separate layers:
 2. The adapter registers `context_shunt_reader` as an auxiliary task. User values in
    `auxiliary.context_shunt_reader.provider` and `.model` override the plugin's
    `reader.provider` and `reader.model`. Hermes' `auto` sentinel means inherit. The
-   registered task also has a host-facing `timeout` default of 45 seconds, and core calls
+   registered task also has a host-facing `timeout` default of 60 seconds, and core calls
    pass their own bounded timeout derived from `model_call_deadline_ms`.
 
 The auxiliary override is read through Hermes' public config loader to compute the target
@@ -191,7 +191,7 @@ These names are accepted under `limits`. They are current defaults, not timeless
 | `bytes_per_token_estimate` | 4 | Divisor used by the named `bytes_div_4` estimator. |
 | `gate_probe_deadline_ms` | 1,000 | Gate probe deadline. |
 | `spill_io_deadline_ms` | 5,000 | Snapshot/spill I/O deadline. |
-| `model_call_deadline_ms` | 45,000 | Per model call ceiling. |
+| `model_call_deadline_ms` | 60,000 | Per model call ceiling. |
 | `request_deadline_ms` | 240,000 | Provisional whole-reader request cap, including queueing, retries, verification, and publication. |
 
 The 45-second call ceiling sits inside a provisional 240-second request. A retry is permitted by count

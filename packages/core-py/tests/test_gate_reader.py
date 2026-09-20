@@ -107,6 +107,7 @@ def test_every_call_carries_the_original_question_and_luna(tmp_path):
     assert call.model == READER_MODEL
     assert QUESTION in call.user
     assert call.max_output_tokens <= 2048
+    assert 59900 <= call.timeout_ms <= 60000
 
 
 def test_retry_also_carries_the_question_and_counts_once(tmp_path):

@@ -235,6 +235,20 @@ def test_config_rejects_unknown_limit_and_top_level_sections(tmp_path):
             )
 
 
+def test_config_cannot_raise_the_sixty_second_model_call_cap(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(ShuntError) as exc:
+        load_config(
+            {
+                "workspace_roots": [str(workspace)],
+                "limits": {"model_call_deadline_ms": 60001},
+            },
+            default_spill_dir=tmp_path / "cache",
+        )
+    assert exc.value.detail == "LIMIT_MAY_ONLY_NARROW"
+
+
 def test_reader_output_caps_are_a_strict_trusted_config_boolean_defaulting_on(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
