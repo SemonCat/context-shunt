@@ -547,6 +547,13 @@ class ShuntSession:
                 "failure; keep these handles and use deterministic inspect "
                 "search/aggregate, or narrow the selector and question for one refined read."
             )
+        elif original_failure == "TIMEOUT":
+            guidance += (
+                " This result is partial, not complete. Retrying the identical full-source "
+                "question would likely repeat the same deadline; instead target the "
+                "specific missing evidence with a narrower question or selector, or use "
+                "context_shunt_inspect for exact bounded evidence over the retained handles."
+            )
         legacy_compaction = {
             "deterministic": True,
             "source_id": entry.source_id,
@@ -1244,9 +1251,12 @@ class ShuntSession:
             provenance=deterministic(ProvenanceLabel.POINTER_ONLY),
             accounting_id=operation_id,
             guidance=(
-                "A large tool-result artifact was adopted without entering this "
-                "conversation. Ask the context-shunt reader a question about this handle "
-                "for a cited answer, or use context_shunt_inspect for exact lines."
+                f"A large tool-result artifact ({outcome.byte_count} bytes) was adopted "
+                "without entering this conversation. For exact fields, error codes, or a "
+                "known snippet, use context_shunt_inspect for exact bounded lines. For "
+                "cross-section synthesis or comparison, ask the context-shunt reader a "
+                "question about this handle, stating the goal and any known bounds, for a "
+                "cited answer. Prefer narrowing the query over a broad one."
             ),
         )
         published = enforce_or_fixed(env, self.config.limits)

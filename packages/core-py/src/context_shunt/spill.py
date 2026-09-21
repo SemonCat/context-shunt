@@ -180,26 +180,25 @@ class SpillEngine:
         if consumer_route not in {"direct", "deferred", "both"}:
             raise ValueError("unknown consumer route")
         direct_guidance = (
-            "Ask with context_shunt_read direct arguments: "
-            f"{compact_json(read_args)}. Replace only {question_placeholder} with your "
-            "specific question; copy both IDs exactly. For precise bounded lines or exact "
-            "JSON counts instead, use context_shunt_inspect direct arguments: "
-            f"{compact_json(inspect_args)}. "
+            "Exact fields, error codes, or a known snippet: use context_shunt_inspect "
+            f"direct arguments: {compact_json(inspect_args)}. Synthesis or comparison "
+            f"across sections: use context_shunt_read direct arguments: "
+            f"{compact_json(read_args)}, replacing only {question_placeholder} with your "
+            "specific question and stating the goal and any known bounds if you have "
+            "them; copy both IDs exactly. "
         )
         deferred_guidance = (
-            "Use reader tool_search arguments: "
+            "Exact fields, error codes, or a known snippet: inspect tool_search "
+            f"arguments: {compact_json({'query': 'context_shunt_inspect', 'limit': 5})}; "
+            "inspect tool_describe arguments: "
+            f"{compact_json({'name': 'context_shunt_inspect'})}; then inspect tool_call "
+            f"arguments: {compact_json({'name': 'context_shunt_inspect', 'arguments': inspect_args})}. "
+            "Synthesis or comparison across sections: reader tool_search arguments: "
             f"{compact_json({'query': 'context_shunt_read', 'limit': 5})}; reader "
             "tool_describe arguments: "
             f"{compact_json({'name': 'context_shunt_read'})}; then reader tool_call "
-            "arguments: "
-            f"{compact_json({'name': 'context_shunt_read', 'arguments': read_args})}. "
-            "For precise bounded lines or exact JSON counts, use inspect tool_search "
-            "arguments: "
-            f"{compact_json({'query': 'context_shunt_inspect', 'limit': 5})}; inspect "
-            "tool_describe arguments: "
-            f"{compact_json({'name': 'context_shunt_inspect'})}; then inspect tool_call "
-            "arguments: "
-            f"{compact_json({'name': 'context_shunt_inspect', 'arguments': inspect_args})}. "
+            f"arguments: {compact_json({'name': 'context_shunt_read', 'arguments': read_args})}, "
+            "stating the goal and any known bounds in the question. "
         )
         route_guidance = (
             direct_guidance
@@ -228,13 +227,13 @@ class SpillEngine:
             result_kind=ResultKind.POINTER,
             provenance=deterministic(ProvenanceLabel.POINTER_ONLY),
             guidance=(
-                "The tool result was too large and was moved out of this conversation. "
-                "First consume this existing pointer; do not recover the spilled content by "
-                "re-reading or searching the original source. "
+                f"The tool result ({size} bytes) was too large and was moved out of this "
+                "conversation. First consume this existing pointer; do not recover the "
+                "spilled content by re-reading or searching the original source. "
                 + route_guidance
                 +
-                "Legitimate bounded source searches remain available afterward if more "
-                "navigation is needed."
+                "Prefer a narrower query over a broad one; bounded source searches "
+                "remain available afterward if more is needed."
             ),
         )
         return SpillOutcome(

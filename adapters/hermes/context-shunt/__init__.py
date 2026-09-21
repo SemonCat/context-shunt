@@ -1554,9 +1554,15 @@ READER_TOOL_SCHEMA = {
         "matched to snapshot bytes; that check does not prove the prose. Uses a "
         "reader model. Shunt-owned failures automatically return labelled bounded deterministic "
         "legacy compaction with incomplete coverage. Read-only. Pass paths for a first look, or "
-        "handles to ask a sharper semantic question about a snapshot you already hold. For "
-        "structured logs, metrics, exact counts, distinct values, or grouping, prefer "
-        "context_shunt_inspect aggregation so no semantic reader fan-out is required."
+        "handles to ask a sharper question about a snapshot you already hold. State the goal "
+        "and any known bounds (a section, line range, or known term) in the question if you "
+        "have them. This tool is for cross-section "
+        "synthesis or comparison - genuinely semantic questions that span more of the source "
+        "than one bounded lookup can answer; do not use it for exact fields, error codes, or a "
+        "known snippet, and do not call it repeatedly over the same handle to page through a "
+        "source one piece at a time. For structured logs, metrics, exact counts, distinct "
+        "values, grouping, or a known snippet, prefer context_shunt_inspect so no semantic "
+        "reader fan-out is required."
     ),
     "parameters": _registered_tool_parameters("readArgs"),
 }
@@ -1566,9 +1572,11 @@ INSPECT_TOOL_SCHEMA = {
     "description": (
         "Return exact text or bounded JSON aggregation from a snapshot you already hold: a "
         "line range, byte range, literal-search hits, or deterministic count/distinct/grouping. "
-        "Use aggregation for structured logs, metrics, and exact counting; use the reader for "
-        "genuinely semantic questions. No model is involved, so the result is source evidence "
-        "rather than a summary. Each "
+        "This tool is for exact fields, error codes, a known snippet, or aggregation over "
+        "structured logs and metrics - not for synthesis. Use the reader instead for genuinely "
+        "semantic questions that require synthesizing or comparing across sections; do not force "
+        "an inspect-first pass before a reader question that is already a synthesis question. No "
+        "model is involved, so the result is source evidence rather than a summary. Each "
         "page is capped at 16 KiB and counts against a "
         "cumulative disclosure budget, so a large file cannot be paged into a full copy; a "
         "file small enough to fit that budget can be returned in full. For minified one-line "
@@ -1596,7 +1604,8 @@ IMPORT_TOOL_SCHEMA = {
         "inside a configured import root; the manifest's size and digest claims are "
         "re-proven against the file before anything is accepted. Returns an opaque handle "
         "and metadata - never the artifact's contents. Read it afterwards with "
-        "context_shunt_read for a cited answer, or context_shunt_inspect for exact lines."
+        "context_shunt_inspect for exact fields or a known snippet, or context_shunt_read for "
+        "a cited answer to a cross-section synthesis question."
     ),
     "parameters": _registered_tool_parameters("importArgs"),
 }

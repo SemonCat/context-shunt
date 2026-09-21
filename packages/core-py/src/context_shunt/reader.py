@@ -113,17 +113,26 @@ _MAX_CITATION_REPAIR_REASONS = 8
 # only `answer` could still publish the model's "exactly zero" as a source-wide conclusion.
 # Prefixing the main answer creates a boundary that survives such consumers and languages.
 _INCOMPLETE_ANSWER_PREFIX = "[Reviewed subset only; citations verify bytes, not claims] "
+_INCOMPLETE_COVERAGE_ACTION = (
+    "Do not repeat the identical question. If coverage.omitted lists unreviewed ranges, "
+    "those bytes are still in the snapshot - use context_shunt_inspect to search or read "
+    "them directly. If coverage.upstream_truncated is set, those bytes were never captured "
+    "from the source at all - inspect cannot recover them; issue a new, narrower upstream "
+    "query or tool call instead."
+)
 _INCOMPLETE_NO_MATCH_GUIDANCE = (
     "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
     "was omitted or reported as upstream-truncated (see coverage.omitted and "
     "coverage.upstream_truncated). No matching evidence was found in what was reviewed, but "
-    "this is not a confirmed absence in the whole source - only in the part covered."
+    "this is not a confirmed absence in the whole source - only in the part covered. "
+    + _INCOMPLETE_COVERAGE_ACTION
 )
 _INCOMPLETE_ANSWER_GUIDANCE = (
     "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
     "was omitted or reported as upstream-truncated (see coverage.omitted and "
     "coverage.upstream_truncated). The answer is explicitly scoped to the reviewed subset. "
-    "Mechanical citation checks do not establish that the cited bytes support its prose."
+    "Mechanical citation checks do not establish that the cited bytes support its prose. "
+    + _INCOMPLETE_COVERAGE_ACTION
 )
 
 
