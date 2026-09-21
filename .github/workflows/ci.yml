@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The deterministic benchmark (scripts/verify benchmark core) runs `git archive`
+          # against the pinned PRE baseline commit; actions/checkout's default shallow
+          # clone doesn't have that history.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
