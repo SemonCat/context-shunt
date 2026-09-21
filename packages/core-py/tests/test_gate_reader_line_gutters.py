@@ -87,12 +87,9 @@ def _line_aware_stub(quote: str):
         lines = excerpt.split("\n")
         found = next(i for i, line in enumerate(lines) if quote in line)
         gutter = _GUTTER_RE.match(lines[found])
-        if gutter is not None:
-            line_no = int(gutter.group(1))
-        else:
-            # Reproduces the live trace: undercounts by one across the blank line that
-            # sits just before the final fact in this fixture.
-            line_no = start + found - 1
+        # Reproduces the live trace: undercounts by one across the blank line that
+        # sits just before the final fact in this fixture.
+        line_no = int(gutter.group(1)) if gutter is not None else start + found - 1
         citation = {"id": "c1", "line_start": line_no, "line_end": line_no, "quote": quote}
         claim = {"text": "threshold_0 is 100.", "citation_ids": ["c1"]}
         return claims_json([claim], [citation])

@@ -331,12 +331,14 @@ def test_full_llm_execution_request_replaces_sanitized_preflight_scope(tmp_path)
     )
     assert downstream == {"tool_count": 3}
 
-    out = json.loads(module.transform_tool_result(
-        tool_name="search_files",
-        result="authoritative direct row\n" * 3_000,
-        tool_call_id="tool-large-request-scope",
-        **ids,
-    ))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="authoritative direct row\n" * 3_000,
+            tool_call_id="tool-large-request-scope",
+            **ids,
+        )
+    )
     assert out["code"] == "SPILLED"
     assert "context_shunt_read direct arguments" in out["guidance"]
 
@@ -353,24 +355,29 @@ def test_llm_execution_scope_is_exact_once_and_fail_closed(tmp_path):
         "tools": [_provider_tool("terminal")],
     }
     seen = []
-    assert middleware(
-        request=request,
-        next_call=lambda effective: seen.append(effective) or "response",
-        session_id="restricted-execution",
-        task_id="task-restricted-execution",
-        turn_id="turn-restricted-execution",
-        api_request_id="api-restricted-execution",
-    ) == "response"
+    assert (
+        middleware(
+            request=request,
+            next_call=lambda effective: seen.append(effective) or "response",
+            session_id="restricted-execution",
+            task_id="task-restricted-execution",
+            turn_id="turn-restricted-execution",
+            api_request_id="api-restricted-execution",
+        )
+        == "response"
+    )
     assert seen == [request]
 
-    restricted = json.loads(module.transform_tool_result(
-        tool_name="search_files",
-        result="restricted execution row\n" * 3_000,
-        session_id="restricted-execution",
-        task_id="task-restricted-execution",
-        turn_id="turn-restricted-execution",
-        api_request_id="api-restricted-execution",
-    ))
+    restricted = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="restricted execution row\n" * 3_000,
+            session_id="restricted-execution",
+            task_id="task-restricted-execution",
+            turn_id="turn-restricted-execution",
+            api_request_id="api-restricted-execution",
+        )
+    )
     assert restricted["code"] == "LEGACY_COMPACTED"
     assert restricted["failure_detail"] == "CONSUMER_UNAVAILABLE"
 
@@ -401,22 +408,26 @@ def test_llm_execution_scope_is_exact_once_and_fail_closed(tmp_path):
             "api_request_id": "api-restricted-execution",
         },
     ):
-        missing_or_mismatched = json.loads(module.transform_tool_result(
-            tool_name="search_files",
-            result="mismatched execution row\n" * 3_000,
-            **ids,
-        ))
+        missing_or_mismatched = json.loads(
+            module.transform_tool_result(
+                tool_name="search_files",
+                result="mismatched execution row\n" * 3_000,
+                **ids,
+            )
+        )
         assert missing_or_mismatched["code"] == "LEGACY_COMPACTED"
 
     module.on_session_reset(session_id="restricted-execution")
-    stale = json.loads(module.transform_tool_result(
-        tool_name="search_files",
-        result="stale execution row\n" * 3_000,
-        session_id="restricted-execution",
-        task_id="task-restricted-execution",
-        turn_id="turn-restricted-execution",
-        api_request_id="api-restricted-execution",
-    ))
+    stale = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="stale execution row\n" * 3_000,
+            session_id="restricted-execution",
+            task_id="task-restricted-execution",
+            turn_id="turn-restricted-execution",
+            api_request_id="api-restricted-execution",
+        )
+    )
     assert stale["code"] == "LEGACY_COMPACTED"
 
 
@@ -618,13 +629,10 @@ def test_spilled_pointer_guidance_drives_registered_direct_reader_and_inspect(tm
     assert pointer["answer"] == "" and pointer["citations"] == []
     assert payload not in json.dumps(pointer)
     stats = json.loads(
-        ctx.registered_handlers["context_shunt_stats"](
-            {}, task_id="handoff", session_id="handoff"
-        )
+        ctx.registered_handlers["context_shunt_stats"]({}, task_id="handoff", session_id="handoff")
     )["stats"]
     record = next(
-        row for row in stats["records"]
-        if row["operation_id"] == pointer["accounting_id"]
+        row for row in stats["records"] if row["operation_id"] == pointer["accounting_id"]
     )
     assert pointer["accounting_id"] != "acc_0000000000000000"
     assert record["code"] == "SPILLED"
@@ -733,15 +741,17 @@ def test_actual_provider_request_proves_direct_consumer_scope(tmp_path):
     ]
     _observe_request(ctx, session="direct-scope", request="req-direct", tools=tools)
 
-    out = json.loads(module.transform_tool_result(
-        tool_name="search_files",
-        result="synthetic direct row\n" * 3000,
-        session_id="direct-scope",
-        task_id="task-direct-scope",
-        turn_id="turn-direct-scope",
-        api_request_id="req-direct",
-        tool_call_id="tool-direct",
-    ))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="synthetic direct row\n" * 3000,
+            session_id="direct-scope",
+            task_id="task-direct-scope",
+            turn_id="turn-direct-scope",
+            api_request_id="req-direct",
+            tool_call_id="tool-direct",
+        )
+    )
     assert out["code"] == "SPILLED"
     assert "context_shunt_read direct arguments" in out["guidance"]
 
@@ -766,16 +776,18 @@ def test_official_tool_execution_middleware_replaces_result_once(tmp_path):
         assert args == {"query": "synthetic"}
         return "middleware row\n" * 5000
 
-    out = json.loads(ctx.registered_middleware["tool_execution"](
-        tool_name="search_files",
-        args={"query": "synthetic"},
-        next_call=next_call,
-        session_id="middleware",
-        task_id="task-middleware",
-        turn_id="turn-middleware",
-        api_request_id="req-middleware",
-        tool_call_id="tool-middleware",
-    ))
+    out = json.loads(
+        ctx.registered_middleware["tool_execution"](
+            tool_name="search_files",
+            args={"query": "synthetic"},
+            next_call=next_call,
+            session_id="middleware",
+            task_id="task-middleware",
+            turn_id="turn-middleware",
+            api_request_id="req-middleware",
+            tool_call_id="tool-middleware",
+        )
+    )
     assert calls == 1
     assert out["code"] == "SPILLED"
     assert "middleware row" not in json.dumps(out)
@@ -849,15 +861,17 @@ search tools (1):
     ]
     _observe_request(ctx, session="deferred-scope", request="req-deferred", tools=tools)
 
-    out = json.loads(module.transform_tool_result(
-        tool_name="search_files",
-        result="synthetic deferred row\n" * 3000,
-        session_id="deferred-scope",
-        task_id="task-deferred-scope",
-        turn_id="turn-deferred-scope",
-        api_request_id="req-deferred",
-        tool_call_id="tool-deferred",
-    ))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="synthetic deferred row\n" * 3000,
+            session_id="deferred-scope",
+            task_id="task-deferred-scope",
+            turn_id="turn-deferred-scope",
+            api_request_id="req-deferred",
+            tool_call_id="tool-deferred",
+        )
+    )
     assert out["code"] == "SPILLED"
     assert "reader tool_call arguments" in out["guidance"]
 
@@ -881,28 +895,43 @@ def test_provider_scope_is_request_local_revocable_and_fail_closed(tmp_path):
     _observe_request(ctx, session="capable", request="req-a", tools=capable)
     _observe_request(ctx, session="restricted", request="req-b", tools=restricted)
 
-    restricted_out = json.loads(module.transform_tool_result(
-        tool_name="search_files", result="restricted\n" * 5000,
-        session_id="restricted", task_id="task-restricted",
-        turn_id="turn-restricted", api_request_id="req-b",
-    ))
+    restricted_out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="restricted\n" * 5000,
+            session_id="restricted",
+            task_id="task-restricted",
+            turn_id="turn-restricted",
+            api_request_id="req-b",
+        )
+    )
     assert restricted_out["code"] == "LEGACY_COMPACTED"
     assert restricted_out["recovery"]["handles_valid"] is False
 
-    incomplete_out = json.loads(module.transform_tool_result(
-        tool_name="search_files", result="missing task correlation\n" * 5000,
-        session_id="capable", task_id="",
-        turn_id="turn-capable", api_request_id="req-a",
-    ))
+    incomplete_out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="missing task correlation\n" * 5000,
+            session_id="capable",
+            task_id="",
+            turn_id="turn-capable",
+            api_request_id="req-a",
+        )
+    )
     assert incomplete_out["code"] == "LEGACY_COMPACTED"
     assert incomplete_out["recovery"]["handles_valid"] is False
 
     module.on_session_reset(session_id="capable")
-    revoked_out = json.loads(module.transform_tool_result(
-        tool_name="search_files", result="revoked\n" * 5000,
-        session_id="capable", task_id="task-capable",
-        turn_id="turn-capable", api_request_id="req-a",
-    ))
+    revoked_out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="revoked\n" * 5000,
+            session_id="capable",
+            task_id="task-capable",
+            turn_id="turn-capable",
+            api_request_id="req-a",
+        )
+    )
     assert revoked_out["code"] == "LEGACY_COMPACTED"
     assert revoked_out["recovery"]["handles_valid"] is False
 
@@ -929,11 +958,16 @@ context_shunt (4 tools — names not listed; discover via `tool_search`)
         _provider_tool("context_shunt_read"),
     ]
     _observe_request(ctx, session="partial", request="req-partial", tools=tools)
-    out = json.loads(module.transform_tool_result(
-        tool_name="search_files", result="partial\n" * 5000,
-        session_id="partial", task_id="task-partial",
-        turn_id="turn-partial", api_request_id="req-partial",
-    ))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="partial\n" * 5000,
+            session_id="partial",
+            task_id="task-partial",
+            turn_id="turn-partial",
+            api_request_id="req-partial",
+        )
+    )
     assert out["code"] == "LEGACY_COMPACTED"
     assert out["recovery"]["handles_valid"] is False
 
@@ -957,11 +991,16 @@ def test_truncated_provider_request_revokes_same_id_evidence(tmp_path):
         turn_id="turn-truncated",
         api_request_id="req-reused",
     )
-    out = json.loads(module.transform_tool_result(
-        tool_name="search_files", result="truncated\n" * 5000,
-        session_id="truncated", task_id="task-truncated",
-        turn_id="turn-truncated", api_request_id="req-reused",
-    ))
+    out = json.loads(
+        module.transform_tool_result(
+            tool_name="search_files",
+            result="truncated\n" * 5000,
+            session_id="truncated",
+            task_id="task-truncated",
+            turn_id="turn-truncated",
+            api_request_id="req-reused",
+        )
+    )
     assert out["code"] == "LEGACY_COMPACTED"
     assert out["recovery"]["handles_valid"] is False
 
@@ -992,9 +1031,7 @@ def test_provider_request_scope_cache_is_bounded(tmp_path):
         {"direct_tools": ["tool_search", "tool_describe", "tool_call"], "deferred_tools": []},
     ],
 )
-def test_restricted_or_unproven_consumer_gets_summary_not_pointer(
-    tmp_path, consumer_capabilities
-):
+def test_restricted_or_unproven_consumer_gets_summary_not_pointer(tmp_path, consumer_capabilities):
     """A cron/toolset mismatch must not strand the caller behind an opaque handle."""
     module = _load_adapter()
     config = _config(tmp_path)
@@ -1004,9 +1041,9 @@ def test_restricted_or_unproven_consumer_gets_summary_not_pointer(
         "host_consumer_scope_verified_locally": True,
     }
     module.register(FakeCtx(config, llm=FakeLlm()))
-    kwargs = {} if consumer_capabilities is None else {
-        "consumer_capabilities": consumer_capabilities
-    }
+    kwargs = (
+        {} if consumer_capabilities is None else {"consumer_capabilities": consumer_capabilities}
+    )
     out = json.loads(
         module.transform_tool_result(
             tool_name="search_files",
@@ -2338,9 +2375,7 @@ def test_eligible_session_construction_failure_is_bounded(tmp_path, monkeypatch,
     monkeypatch.setattr(module, "_session", broken)
     for value in ("small", {"image": "x" * 30_000}):
         assert module.transform_tool_result(tool_name=tool_name, result=value) is None
-    out = module.transform_tool_result(
-        tool_name=tool_name, result="x" * 30_000, **DIRECT_CONSUMER
-    )
+    out = module.transform_tool_result(tool_name=tool_name, result="x" * 30_000, **DIRECT_CONSUMER)
     assert json.loads(out)["code"] == "LEGACY_COMPACTED"
     assert json.loads(out)["failure_detail"] == "INTERNAL_ERROR"
     assert json.loads(out)["sources"] == []

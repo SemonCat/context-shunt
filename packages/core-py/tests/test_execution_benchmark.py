@@ -131,9 +131,7 @@ def test_live_payload_attestation_detects_parent_context_leak(monkeypatch) -> No
 
 def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code() -> None:
     root = Path(__file__).resolve().parents[3]
-    report = json.loads(
-        (root / "evals/intent-reader-audit/real-luna-latest.json").read_text()
-    )
+    report = json.loads((root / "evals/intent-reader-audit/real-luna-latest.json").read_text())
     corpus = root / "evals/intent-reader-audit/corpus.json"
     assert report["acceptance"] == {"passed": True, "errors": []}
     outcomes = report["attempt_outcomes"]
@@ -143,10 +141,10 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     assert sum(report["attempt_outcomes"].values()) == sum(
         report["totals"][lane]["reader_attempts_observed"] for lane in ("pre", "new")
     )
-    assert sum(
-        report["totals"][lane]["reader_unknown_usage_attempts"]
-        for lane in ("pre", "new")
-    ) == outcomes["timed_out"]
+    assert (
+        sum(report["totals"][lane]["reader_unknown_usage_attempts"] for lane in ("pre", "new"))
+        == outcomes["timed_out"]
+    )
     assert report["corpus_sha256"] == hashlib.sha256(corpus.read_bytes()).hexdigest()
 
     digest = hashlib.sha256()
@@ -155,9 +153,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         digest.update(b"\0")
         digest.update((root / relative).read_bytes())
         digest.update(b"\0")
-    assert digest.hexdigest() == report["implementation"][
-        "working_tree_relevant_files_sha256"
-    ]
+    assert digest.hexdigest() == report["implementation"]["working_tree_relevant_files_sha256"]
     real_run = _real_run_module(root)
     assert report["implementation"]["source_manifest_sha256"] == (
         real_run.source_manifest_sha256(root)
@@ -189,9 +185,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
     ]
     assert len(real_calls) == sum(outcomes.values())
     completed = [call for call in real_calls if call["status"] == "completed"]
-    timed_out = [
-        call for call in real_calls if call["status"] == "timed_out_usage_unknown"
-    ]
+    timed_out = [call for call in real_calls if call["status"] == "timed_out_usage_unknown"]
     assert len(completed) == outcomes["completed"]
     assert len(timed_out) == outcomes["timed_out"]
     assert all(call["resolved_model"] == "gpt-5.6-luna" for call in completed)
@@ -210,24 +204,15 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         for call in real_calls
     )
     assert all(
-        row.get("semantic_answer_published") is False
-        or row["citation_validity"] is True
+        row.get("semantic_answer_published") is False or row["citation_validity"] is True
         for row in report["results"]
         if row["lane"] in {"pre", "new"}
     )
     assert "/Users/" not in report["command"]
-    assert 'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT"' in report[
-        "command"
-    ]
-    assert 'CONTEXT_SHUNT_LUNA_BUDGET_DB="$CONTEXT_SHUNT_LUNA_BUDGET_DB"' in report[
-        "command"
-    ]
+    assert 'CONTEXT_SHUNT_OPENCLAW_ROOT="$CONTEXT_SHUNT_OPENCLAW_ROOT"' in report["command"]
+    assert 'CONTEXT_SHUNT_LUNA_BUDGET_DB="$CONTEXT_SHUNT_LUNA_BUDGET_DB"' in report["command"]
 
-    new = {
-        row["workflow"]: row
-        for row in report["results"]
-        if row["lane"] == "new"
-    }
+    new = {row["workflow"]: row for row in report["results"] if row["lane"] == "new"}
     for deterministic in (
         "session-2-minified-loki-counts",
         "session-4-abandoned-pointer-requery",
@@ -236,11 +221,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
         assert new[deterministic]["reader"]["attempts_observed"] == 0
 
     # A missing core total remains unknown; it is never folded into an exact-looking zero.
-    pre_rows = [
-        json.loads(json.dumps(row))
-        for row in report["results"]
-        if row["lane"] == "pre"
-    ]
+    pre_rows = [json.loads(json.dumps(row)) for row in report["results"] if row["lane"] == "pre"]
     with_attempt = next(row for row in pre_rows if row["reader"]["attempts_observed"])
     with_attempt["reader"]["core_accounted_input_tokens"] = None
     assert real_run_totals(root, pre_rows)["reader_core_accounted_input_tokens"] is None
@@ -256,9 +237,7 @@ def test_committed_real_luna_evidence_is_redacted_and_bound_to_the_executed_code
 
     # Providers may expose the two fields independently; neither direction crashes or
     # fabricates the absent half.
-    first_call = next(
-        call for row in pre_rows for call in row["reader"]["calls"]
-    )
+    first_call = next(call for row in pre_rows for call in row["reader"]["calls"])
     first_call["reported_input_tokens"] = 17
     input_only = real_run_totals(root, pre_rows)
     assert input_only["reader_input_tokens_reported_lower_bound"] == 17
@@ -326,9 +305,7 @@ def test_real_luna_refuses_an_alternate_provider_before_starting_a_lane(
     host.mkdir()
     monkeypatch.setenv("CONTEXT_SHUNT_LUNA_EVAL", "1")
     monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROOT", str(host))
-    monkeypatch.setenv(
-        "CONTEXT_SHUNT_OPENCLAW_ROUTE", "alternate-provider/gpt-5.6-luna"
-    )
+    monkeypatch.setenv("CONTEXT_SHUNT_OPENCLAW_ROUTE", "alternate-provider/gpt-5.6-luna")
     monkeypatch.delenv("CONTEXT_SHUNT_OPENCLAW_SERVER", raising=False)
     monkeypatch.setattr("sys.argv", ["real_run.py"])
     monkeypatch.setattr(
@@ -436,23 +413,16 @@ def test_real_luna_revalidates_checkout_binding_between_stages(monkeypatch) -> N
 def test_real_luna_acceptance_rejects_a_citationless_semantic_answer() -> None:
     root = Path(__file__).resolve().parents[3]
     real_run = _real_run_module(root)
-    report = json.loads(
-        (root / "evals/intent-reader-audit/real-luna-latest.json").read_text()
-    )
+    report = json.loads((root / "evals/intent-reader-audit/real-luna-latest.json").read_text())
     payloads = {
         lane: {
             "rows": [
-                json.loads(json.dumps(row))
-                for row in report["results"]
-                if row["lane"] == lane
+                json.loads(json.dumps(row)) for row in report["results"] if row["lane"] == lane
             ]
         }
         for lane in real_run.LANES
     }
-    target = next(
-        row for row in payloads["new"]["rows"]
-        if row["reader"]["attempts_observed"] > 0
-    )
+    target = next(row for row in payloads["new"]["rows"] if row["reader"]["attempts_observed"] > 0)
     for lane in ("pre", "new"):
         for row in payloads[lane]["rows"]:
             row.setdefault("semantic_answer_published", False)
@@ -527,7 +497,9 @@ def test_real_luna_acceptance_rejects_bad_per_answer_and_cache_evidence() -> Non
     }
     errors = real_run._semantic_evidence_errors(payloads)
     assert any("answer-2: semantic answer lacked verified citations" in error for error in errors)
-    assert any("answer-2: cached answer did not match its verified origin" in error for error in errors)
+    assert any(
+        "answer-2: cached answer did not match its verified origin" in error for error in errors
+    )
 
 
 def real_run_totals(root: Path, rows: list[dict]):

@@ -103,12 +103,8 @@ _READ_CHUNK = 256 * 1024
 _SCOPE_ID_RE = re.compile(r"scp_[0-9a-f]{32}")
 _HANDLE_ID_RE = re.compile(r"src_[0-9a-f]{16}")
 _ARTIFACT_NAME_RE = re.compile(r"(src_[0-9a-f]{16})\.[0-9a-f]{32}\.txt")
-_ARTIFACT_TEMP_RE = re.compile(
-    r"src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt\.[0-9a-f]{16}\.part"
-)
-_ARTIFACT_SEAL_RE = re.compile(
-    r"(src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt)\.[0-9a-f]{32}\.seal"
-)
+_ARTIFACT_TEMP_RE = re.compile(r"src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt\.[0-9a-f]{16}\.part")
+_ARTIFACT_SEAL_RE = re.compile(r"(src_[0-9a-f]{16}\.[0-9a-f]{32}\.txt)\.[0-9a-f]{32}\.seal")
 
 #: Blob file names are ``<hash>.bin``; legacy spill artifacts ended in ``.spill``.
 _BLOB_SUFFIX = ".bin"
@@ -197,9 +193,7 @@ class Capture:
     def __post_init__(self) -> None:
         if self.kind not in HANDLE_KINDS:
             raise ShuntError("STORE_FAILED", "BAD_HANDLE_KIND", retryable=False)
-        if self.upstream_truncated is not None and not isinstance(
-            self.upstream_truncated, bool
-        ):
+        if self.upstream_truncated is not None and not isinstance(self.upstream_truncated, bool):
             raise ShuntError("STORE_FAILED", "BAD_CAPTURE_ORIGIN", retryable=False)
 
     @property
@@ -461,10 +455,7 @@ class SnapshotStore:
             raise ShuntError("STORE_FAILED", "MIGRATION_FAILED", retryable=False) from None
         found = self._metadata(conn, "ddl_version")
         if found != str(self._limits.store_ddl_version):
-            if (
-                found not in {"1", "2"}
-                or str(self._limits.store_ddl_version) != "3"
-            ):
+            if found not in {"1", "2"} or str(self._limits.store_ddl_version) != "3":
                 # A store from an unknown revision is refused rather than migrated in
                 # place by guesswork; docs/install.md documents the supported path.
                 raise ShuntError("STORE_FAILED", "DDL_VERSION_MISMATCH", retryable=False)
@@ -502,8 +493,7 @@ class SnapshotStore:
                 return  # Not a bridge this core knows; `_bootstrap_metadata` decides.
             additions: list[tuple[str, str]] = []
             disclosure_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(disclosure_events)")
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(disclosure_events)")
             }
             if found == "1" and disclosure_columns and "blob_hash" not in disclosure_columns:
                 additions.append(
@@ -673,8 +663,7 @@ class SnapshotStore:
                     "SELECT closed_at_ms FROM scopes WHERE scope_id = ?", (scope_id,)
                 ).fetchone()
                 live = conn.execute(
-                    "SELECT 1 FROM handles "
-                    "WHERE scope_id = ? AND revoked = 0 LIMIT 1",
+                    "SELECT 1 FROM handles WHERE scope_id = ? AND revoked = 0 LIMIT 1",
                     (scope_id,),
                 ).fetchone()
                 if row is not None and row["closed_at_ms"] is not None and live is None:
@@ -815,9 +804,7 @@ class SnapshotStore:
                     # mirror failure does not invalidate the handle: bounded summary and
                     # exact inspect recovery remain available.
                     artifact_key = self._artifact_key_locked(conn)
-                    for handle, (capture, _final, _digest) in zip(
-                        published, staged, strict=True
-                    ):
+                    for handle, (capture, _final, _digest) in zip(published, staged, strict=True):
                         with contextlib.suppress(ShuntError):
                             self._write_or_verify_raw_artifact(
                                 handle, capture.data, artifact_key=artifact_key
@@ -1049,10 +1036,7 @@ class SnapshotStore:
         ).fetchone()
         added_artifacts = sum(len(capture.data) for capture, _path, _digest in staged)
         charged = (
-            int(blob_row["total"])
-            + int(artifact_row["total"])
-            + added_blobs
-            + added_artifacts
+            int(blob_row["total"]) + int(artifact_row["total"]) + added_blobs + added_artifacts
         )
         if charged > self._limits.store_max_bytes:
             raise ShuntError("LIMIT_EXCEEDED", "STORE_BYTE_QUOTA", retryable=False)
@@ -1174,12 +1158,8 @@ class SnapshotStore:
                     data = self.load_payload(handle)
                     self._assert_artifact_capacity_locked(conn)
                     artifact_key = self._artifact_key_locked(conn)
-                    self._write_or_verify_raw_artifact(
-                        handle, data, artifact_key=artifact_key
-                    )
-                    published_path = str(
-                        self._raw_artifact_path(handle, artifact_key).absolute()
-                    )
+                    self._write_or_verify_raw_artifact(handle, data, artifact_key=artifact_key)
+                    published_path = str(self._raw_artifact_path(handle, artifact_key).absolute())
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "WRITE_FAILED", retryable=False) from None
         return published_path
@@ -1253,8 +1233,7 @@ class SnapshotStore:
             conn = self._connect()
             with _write_txn(conn):
                 live = conn.execute(
-                    "SELECT 1 FROM handles "
-                    "WHERE handle_id = ? AND scope_id = ? AND revoked = 0",
+                    "SELECT 1 FROM handles WHERE handle_id = ? AND scope_id = ? AND revoked = 0",
                     (handle_id, scope_id),
                 ).fetchone()
                 if live is None:
@@ -1663,9 +1642,7 @@ class SnapshotStore:
                 raise ShuntError("STORE_FAILED", "SWEEP_FAILED", retryable=False) from None
         for row in artifact_rows:
             with contextlib.suppress(ShuntError, OSError):
-                self._remove_raw_artifact(
-                    str(row["scope_id"]), str(row["handle_id"])
-                )
+                self._remove_raw_artifact(str(row["scope_id"]), str(row["handle_id"]))
         deleted = self._collect_pending_blobs()
         self._collect_orphan_artifacts()
         orphans = self._collect_orphan_blob_files()
@@ -1897,9 +1874,7 @@ class SnapshotStore:
                 os.close(fd)
             raise ShuntError("STORE_FAILED", "UNSAFE_CACHE_PATH", retryable=False) from None
 
-    def _open_artifact_scope(
-        self, scope_id: str, *, create: bool
-    ) -> tuple[int, int] | None:
+    def _open_artifact_scope(self, scope_id: str, *, create: bool) -> tuple[int, int] | None:
         if not _SCOPE_ID_RE.fullmatch(scope_id):
             raise ShuntError("STORE_FAILED", "BAD_HANDLE_ID", retryable=False)
         root_fd = self._open_artifact_root()
@@ -1952,10 +1927,7 @@ class SnapshotStore:
                 # materialize_raw_artifact loaded and hash-verified independently.
                 self._unlink_artifact_at(scope_fd, name)
                 mirrored = None
-            if (
-                mirrored is not None
-                and hashlib.sha256(mirrored).hexdigest() != handle.blob_hash
-            ):
+            if mirrored is not None and hashlib.sha256(mirrored).hexdigest() != handle.blob_hash:
                 self._unlink_artifact_at(scope_fd, name)
                 mirrored = None
             if mirrored is None:
@@ -1998,9 +1970,7 @@ class SnapshotStore:
                     or info.st_size != handle.bytes_len
                 ):
                     raise OSError
-                seal_name = self._artifact_seal_name(
-                    handle, artifact_key, name, info
-                )
+                seal_name = self._artifact_seal_name(handle, artifact_key, name, info)
                 flags = (
                     os.O_WRONLY
                     | os.O_CREAT
@@ -2011,9 +1981,7 @@ class SnapshotStore:
                 try:
                     seal_fd = os.open(seal_name, flags, _FILE_MODE, dir_fd=scope_fd)
                 except FileExistsError:
-                    seal_info = os.stat(
-                        seal_name, dir_fd=scope_fd, follow_symlinks=False
-                    )
+                    seal_info = os.stat(seal_name, dir_fd=scope_fd, follow_symlinks=False)
                     if (
                         not stat.S_ISREG(seal_info.st_mode)
                         or seal_info.st_nlink != 1
@@ -2059,9 +2027,7 @@ class SnapshotStore:
                 with contextlib.suppress(OSError):
                     os.unlink(candidate, dir_fd=scope_fd)
 
-    def _raw_artifact_exists(
-        self, handle: PublishedHandle, artifact_key: bytes
-    ) -> bool:
+    def _raw_artifact_exists(self, handle: PublishedHandle, artifact_key: bytes) -> bool:
         """Check only metadata for a prepared mirror; never read the payload bytes."""
         try:
             opened = self._open_artifact_scope(handle.scope_id, create=False)
@@ -2072,9 +2038,7 @@ class SnapshotStore:
         root_fd, scope_fd = opened
         try:
             name = self._raw_artifact_name(handle, artifact_key)
-            return self._artifact_seal_valid_at(
-                scope_fd, handle, artifact_key, name
-            )
+            return self._artifact_seal_valid_at(scope_fd, handle, artifact_key, name)
         finally:
             os.close(scope_fd)
             os.close(root_fd)
@@ -2098,9 +2062,7 @@ class SnapshotStore:
             or int(info.st_size) != handle.bytes_len
         ):
             return False
-        seal_name = self._artifact_seal_name(
-            handle, artifact_key, artifact_name, info
-        )
+        seal_name = self._artifact_seal_name(handle, artifact_key, artifact_name, info)
         if candidate_seal is not None and candidate_seal != seal_name:
             return False
         try:
@@ -2211,9 +2173,7 @@ class SnapshotStore:
                     try:
                         for scope_id in os.listdir(root_fd):
                             try:
-                                info = os.stat(
-                                    scope_id, dir_fd=root_fd, follow_symlinks=False
-                                )
+                                info = os.stat(scope_id, dir_fd=root_fd, follow_symlinks=False)
                             except OSError:
                                 continue
                             if not stat.S_ISDIR(info.st_mode):
@@ -2238,9 +2198,7 @@ class SnapshotStore:
                                     match = _ARTIFACT_NAME_RE.fullmatch(name)
                                     seal = _ARTIFACT_SEAL_RE.fullmatch(name)
                                     artifact_name = seal.group(1) if seal else name
-                                    handle = active_handles.get(
-                                        (scope_id, artifact_name)
-                                    )
+                                    handle = active_handles.get((scope_id, artifact_name))
                                     keep = bool(
                                         handle
                                         and self._artifact_seal_valid_at(
@@ -2252,9 +2210,7 @@ class SnapshotStore:
                                         )
                                     )
                                     if keep or not (
-                                        match
-                                        or seal
-                                        or _ARTIFACT_TEMP_RE.fullmatch(name)
+                                        match or seal or _ARTIFACT_TEMP_RE.fullmatch(name)
                                     ):
                                         continue
                                     with contextlib.suppress(OSError):

@@ -49,7 +49,10 @@ pytestmark = pytest.mark.gate_accounting
 
 def _gbrain_result(rows: int, tag: str) -> str:
     """Synthetic content shaped after a GBrain search result: many short JSON-ish rows."""
-    body = "\n".join(f'{{"doc": "{tag}_{i:05d}", "score": 0.{i % 100:02d}}}' for i in range(rows)) + "\n"
+    body = (
+        "\n".join(f'{{"doc": "{tag}_{i:05d}", "score": 0.{i % 100:02d}}}' for i in range(rows))
+        + "\n"
+    )
     return body
 
 
@@ -64,7 +67,9 @@ def test_two_never_read_spills_credit_a_counterfactual_never_a_confirmation(tmp_
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
 
@@ -98,7 +103,9 @@ def test_a_below_threshold_recovery_search_never_reaches_the_ledger(tmp_path):
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
 
@@ -129,7 +136,9 @@ def test_a_below_threshold_recovery_search_never_reaches_the_ledger(tmp_path):
     non_stats = [r for r in records if r["kind"] != "stats"]
     assert len(non_stats) == 2
     assert all(r["kind"] == "spill" for r in non_stats)
-    assert all(r["baseline_kind"] == BaselineKind.FULL_PAYLOAD_COUNTERFACTUAL.value for r in non_stats)
+    assert all(
+        r["baseline_kind"] == BaselineKind.FULL_PAYLOAD_COUNTERFACTUAL.value for r in non_stats
+    )
     assert all(r["net_tokens_saved"] > 0 for r in non_stats)
 
 

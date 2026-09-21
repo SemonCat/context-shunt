@@ -59,6 +59,7 @@ def _bridge_paths() -> list[Path]:
         if not path.name.startswith("test_") and path.name not in EXCLUDED_HELPER_MODULES
     )
 
+
 #: The two properties a required live gate will not score without.
 #: The two protocol properties this gate verifies against each route's own behaviour.
 #: `scripts/verify` requires a third - `production_equivalent` - before a live number may

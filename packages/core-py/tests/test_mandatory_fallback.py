@@ -71,11 +71,13 @@ def test_expired_provider_chain_fails_open_with_a_recoverable_exact_source(tmp_p
         "request_id": "req_deadline_fallback",
         "operation": "read",
         "question": "What evidence was retained?",
-        "sources": [{
-            "source_id": entry.source_id,
-            "snapshot_id": entry.snapshot.snapshot_id,
-            "selector": {"kind": "all"},
-        }],
+        "sources": [
+            {
+                "source_id": entry.source_id,
+                "snapshot_id": entry.snapshot.snapshot_id,
+                "selector": {"kind": "all"},
+            }
+        ],
         "budgets": {"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60_000},
     }
 
@@ -103,15 +105,17 @@ def test_expired_provider_chain_fails_open_with_a_recoverable_exact_source(tmp_p
     )
     assert stat.S_IMODE(os.stat(artifact_path).st_mode) == 0o600
 
-    inspected = session.inspect({
-        "schema_version": "1.1",
-        "request_id": "req_deadline_locator",
-        "operation": "inspect",
-        "source_id": env["sources"][0]["source_id"],
-        "snapshot_id": env["sources"][0]["snapshot_id"],
-        "selector": {"kind": "search", "needle": marker, "max_matches": 1},
-        "budgets": {"max_result_bytes": 4096, "max_scan_lines": 20_000},
-    })
+    inspected = session.inspect(
+        {
+            "schema_version": "1.1",
+            "request_id": "req_deadline_locator",
+            "operation": "inspect",
+            "source_id": env["sources"][0]["source_id"],
+            "snapshot_id": env["sources"][0]["snapshot_id"],
+            "selector": {"kind": "search", "needle": marker, "max_matches": 1},
+            "budgets": {"max_result_bytes": 4096, "max_scan_lines": 20_000},
+        }
+    )
     assert inspected["code"] == "EXTRACTED"
     assert marker in inspected["extraction"]["segments"][0]["text"]
     assert calls == {"primary": 1, "fallback": 0}
@@ -384,9 +388,7 @@ def test_reader_fallback_obeys_disclosure_exhaustion(tmp_path):
 
 
 def test_artifact_write_failure_keeps_mandatory_handle_backed_compaction(tmp_path, monkeypatch):
-    session, entry, request, _ = setup(
-        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
-    )
+    session, entry, request, _ = setup(tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR")))
     artifact = Path(session._store.raw_artifact_path(session._identity, entry.source_id))
     artifact.unlink()
     env = session.read(request)
@@ -409,9 +411,7 @@ def test_artifact_write_failure_keeps_mandatory_handle_backed_compaction(tmp_pat
 
 
 def test_timeout_fallback_never_materializes_after_deadline(tmp_path, monkeypatch):
-    session, _, request, _ = setup(
-        tmp_path, FakeLuna(default_reply=ShuntError("TIMEOUT"))
-    )
+    session, _, request, _ = setup(tmp_path, FakeLuna(default_reply=ShuntError("TIMEOUT")))
 
     def fail(*_args, **_kwargs):
         raise AssertionError("post-deadline artifact I/O")
@@ -423,9 +423,7 @@ def test_timeout_fallback_never_materializes_after_deadline(tmp_path, monkeypatc
 
 
 def test_unrepresentable_artifact_path_keeps_mandatory_compaction(tmp_path, monkeypatch):
-    session, entry, request, _ = setup(
-        tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR"))
-    )
+    session, entry, request, _ = setup(tmp_path, FakeLuna(default_reply=ShuntError("MODEL_ERROR")))
 
     def fail(*_args, **_kwargs):
         raise ShuntError("STORE_FAILED", "ARTIFACT_PATH_UNAVAILABLE")

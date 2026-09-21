@@ -9,12 +9,7 @@ import pytest
 
 pytestmark = [pytest.mark.gate_capability, pytest.mark.gate_accounting]
 
-CORPUS = (
-    Path(__file__).resolve().parents[3]
-    / "evals"
-    / "production-regressions"
-    / "corpus.json"
-)
+CORPUS = Path(__file__).resolve().parents[3] / "evals" / "production-regressions" / "corpus.json"
 
 
 def _load():
@@ -73,8 +68,7 @@ def test_cutoff_mismatch_stays_unresolved_and_tokens_keep_distinct_meanings():
         tokens["reader_input_tokens_reported"] + tokens["reader_output_tokens_reported"]
     )
     assert tokens["net_tokens_saved_estimate"] == (
-        tokens["main_context_tokens_saved_estimate"]
-        - tokens["reader_total_tokens_reported"]
+        tokens["main_context_tokens_saved_estimate"] - tokens["reader_total_tokens_reported"]
     )
     assert tokens["attempts_usage_complete"] < tokens["attempts_started"]
     assert tokens["usage_complete"] is False

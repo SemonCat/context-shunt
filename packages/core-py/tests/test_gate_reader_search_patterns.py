@@ -117,7 +117,10 @@ def test_patterns_ors_several_literals_and_finds_the_real_hit(tmp_path):
 
 def test_patterns_matches_if_any_single_literal_is_present(tmp_path):
     """A ``patterns`` list ORs, it does not require every phrase on the same line."""
-    reply = answer_json("ok [c1].", [{"id": "c1", "line_start": 4, "line_end": 4, "quote": "reviewed_by: ops-rotation"}])
+    reply = answer_json(
+        "ok [c1].",
+        [{"id": "c1", "line_start": 4, "line_end": 4, "quote": "reviewed_by: ops-rotation"}],
+    )
     registry, entry, luna, reader = _fixture(tmp_path, reply)
     selector = {
         "kind": "search",

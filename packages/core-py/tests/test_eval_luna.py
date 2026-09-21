@@ -1391,12 +1391,9 @@ def test_luna_eval_meets_the_fixed_thresholds(tmp_path):
         "usd_budget": {
             "before": budget_before,
             "after": budget_after,
-            "this_run_reservations": (
-                budget_after["reservations"] - budget_before["reservations"]
-            ),
+            "this_run_reservations": (budget_after["reservations"] - budget_before["reservations"]),
             "this_run_reserved_usd": format(
-                Decimal(budget_after["reserved_usd"])
-                - Decimal(budget_before["reserved_usd"]),
+                Decimal(budget_after["reserved_usd"]) - Decimal(budget_before["reserved_usd"]),
                 "f",
             ),
         },

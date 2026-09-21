@@ -167,10 +167,18 @@ def test_answer_quote_and_citation_caps_are_enforced():
     enforce(base)
     for provenance in (
         {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 2},
-        {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 0,
-         "usage_complete": True},
-        {**base["provenance"], "attempts_started": 1, "attempts_usage_complete": 1,
-         "usage_complete": False},
+        {
+            **base["provenance"],
+            "attempts_started": 1,
+            "attempts_usage_complete": 0,
+            "usage_complete": True,
+        },
+        {
+            **base["provenance"],
+            "attempts_started": 1,
+            "attempts_usage_complete": 1,
+            "usage_complete": False,
+        },
     ):
         with pytest.raises(OutputGuardError, match="usage counts disagree"):
             enforce({**base, "provenance": provenance})
@@ -699,8 +707,8 @@ def test_empty_model_no_match_remains_valid_when_nothing_was_dropped(tmp_path):
 
 def _per_call_tokens(entry, limits=L, question: str = _CAP_QUESTION) -> int:
     """What the reader debits for one physical call of this chunk's prompt."""
-    from context_shunt.chunking import estimate_tokens as chunk_tokens, render_excerpt
-    from context_shunt.chunking import plan
+    from context_shunt.chunking import estimate_tokens as chunk_tokens
+    from context_shunt.chunking import plan, render_excerpt
     from context_shunt.provider import READER_SYSTEM_PROMPT, build_user_message
 
     the_plan = plan(

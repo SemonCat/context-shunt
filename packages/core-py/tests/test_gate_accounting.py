@@ -1271,8 +1271,8 @@ def test_a_flattened_chain_never_transmits_more_prompts_than_the_budget_allows(t
 
 def _prompt_tokens(entry, question: str, limits=L) -> int:
     """What the reader debits for one physical call of this chunk's prompt."""
-    from context_shunt.chunking import estimate_tokens as chunk_tokens, render_excerpt
-    from context_shunt.chunking import plan
+    from context_shunt.chunking import estimate_tokens as chunk_tokens
+    from context_shunt.chunking import plan, render_excerpt
     from context_shunt.provider import READER_SYSTEM_PROMPT, build_user_message
 
     chunk = plan(

@@ -202,7 +202,9 @@ def _request_scope_key(kwargs: Mapping[str, Any]) -> tuple[str, str, str, str] |
     api_request_id = str(kwargs.get("api_request_id") or "")
     if not session_id or not task_id or not turn_id or not api_request_id:
         return None
-    if any(len(value) > 512 for value in (session_id, task_id, turn_id, api_request_id)):
+    if any(
+        len(value) > 512 for value in (session_id, task_id, turn_id, api_request_id)
+    ):
         return None
     return session_id, task_id, turn_id, api_request_id
 
@@ -220,11 +222,21 @@ def _provider_tool_description(tool: Any) -> str:
     if not isinstance(tool, Mapping):
         return ""
     function = tool.get("function")
-    raw = function.get("description") if isinstance(function, Mapping) else tool.get("description")
-    return raw if isinstance(raw, str) and len(raw) <= _REQUEST_DESCRIPTION_MAX_CHARS else ""
+    raw = (
+        function.get("description")
+        if isinstance(function, Mapping)
+        else tool.get("description")
+    )
+    return (
+        raw
+        if isinstance(raw, str) and len(raw) <= _REQUEST_DESCRIPTION_MAX_CHARS
+        else ""
+    )
 
 
-_CATALOG_HEADER = "Deferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):"
+_CATALOG_HEADER = (
+    "Deferred tool catalog (call schemas via `tool_describe`, invoke via `tool_call`):"
+)
 _CATALOG_GROUP = re.compile(r"^(.+?) tools \((\d+)\):$")
 _CATALOG_NAME = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 
@@ -240,7 +252,7 @@ def _explicit_deferred_names(description: str) -> frozenset[str]:
     marker = description.find(_CATALOG_HEADER)
     if marker < 0:
         return frozenset()
-    lines = description[marker + len(_CATALOG_HEADER):].splitlines()
+    lines = description[marker + len(_CATALOG_HEADER) :].splitlines()
     names: set[str] = set()
     index = 0
     while index < len(lines):
@@ -251,7 +263,10 @@ def _explicit_deferred_names(description: str) -> frozenset[str]:
         declared = int(heading.group(2))
         index += 1
         body: list[str] = []
-        while index < len(lines) and _CATALOG_GROUP.fullmatch(lines[index].strip()) is None:
+        while (
+            index < len(lines)
+            and _CATALOG_GROUP.fullmatch(lines[index].strip()) is None
+        ):
             # A collapsed group is not a ``... tools (N):`` heading and is ignored. Stop
             # at it rather than allowing its prose to be interpreted as a names line.
             if "names not listed" in lines[index]:
@@ -274,7 +289,9 @@ def _explicit_deferred_names(description: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _provider_request_tools(request: Any) -> tuple[frozenset[str], frozenset[str]] | None:
+def _provider_request_tools(
+    request: Any,
+) -> tuple[frozenset[str], frozenset[str]] | None:
     """Return actual direct/deferred names from a post-middleware hook payload."""
     if not isinstance(request, Mapping) or request.get("_truncated") is True:
         return None
@@ -544,8 +561,10 @@ def _tool_result_capture_mode(ctx: Any = None) -> ModeCapability:
         "try/except and the original result survives a raising handler (fail-open); "
         "this adapter's own hook handler never raises regardless"
     )
-    if ordering_attested and consumer_scope_attested and (
-        middleware_route or legacy_transform_route
+    if (
+        ordering_attested
+        and consumer_scope_attested
+        and (middleware_route or legacy_transform_route)
     ):
         scope_evidence = (
             "official Hermes pre_api_request observer supplies the post-middleware "
@@ -554,8 +573,7 @@ def _tool_result_capture_mode(ctx: Any = None) -> ModeCapability:
             "bounded-hook single-flight suppression and publishes a pointer only on an "
             "exact id match"
             if middleware_route
-            else
-            "operator attestation: host_consumer_scope_verified_locally=true - the "
+            else "operator attestation: host_consumer_scope_verified_locally=true - the "
             "installed host forwards a fresh invocation-scoped direct/deferred tool "
             "descriptor to transform_tool_result"
         )
@@ -821,9 +839,7 @@ def _bridge_call(
     reported_provider = getattr(result, "provider", "") or ""
     audit = getattr(result, "audit", None)
     task_routed = (
-        task_aware
-        and isinstance(audit, dict)
-        and audit.get("task") == AUX_TASK_KEY
+        task_aware and isinstance(audit, dict) and audit.get("task") == AUX_TASK_KEY
     )
     return {
         "text": getattr(result, "text", "") or "",
@@ -1077,9 +1093,7 @@ def capture_tool_execution(
         # raw leak, so collapse even an unexpected adapter bug to the smallest legal
         # envelope inside this callback.
         if must_bound:
-            return _block_message(
-                fixed_error(_request_id(kwargs), code="HOST_UNSAFE")
-            )
+            return _block_message(fixed_error(_request_id(kwargs), code="HOST_UNSAFE"))
         raise
     if must_bound and replacement is None:
         return _block_message(fixed_error(_request_id(kwargs), code="HOST_UNSAFE"))
@@ -1352,7 +1366,9 @@ def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
     try:
         tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
-        return _accounted_tool_error(request_id, exc, "context_shunt_inspect", host_kwargs)
+        return _accounted_tool_error(
+            request_id, exc, "context_shunt_inspect", host_kwargs
+        )
     session = _session(
         str(host_kwargs.get("task_id") or ""),
         str(host_kwargs.get("session_id") or ""),
@@ -1399,7 +1415,9 @@ def context_shunt_stats(args: dict[str, Any] | None = None, **kwargs) -> str:
     try:
         tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
-        return _accounted_tool_error(request_id, exc, "context_shunt_stats", host_kwargs)
+        return _accounted_tool_error(
+            request_id, exc, "context_shunt_stats", host_kwargs
+        )
     session = _session(
         str(host_kwargs.get("task_id") or ""),
         str(host_kwargs.get("session_id") or ""),
@@ -1432,7 +1450,9 @@ def context_shunt_import(args: dict[str, Any] | None = None, **kwargs) -> str:
     try:
         tool_args = _validate_tool_args(public_args)
     except ShuntError as exc:
-        return _accounted_tool_error(request_id, exc, "context_shunt_import", host_kwargs)
+        return _accounted_tool_error(
+            request_id, exc, "context_shunt_import", host_kwargs
+        )
     session = _session(
         str(host_kwargs.get("task_id") or ""),
         str(host_kwargs.get("session_id") or ""),
@@ -1453,9 +1473,7 @@ def _error(request_id: str, exc: ShuntError) -> str:
     from context_shunt import envelope as E
 
     return _block_message(
-        enforce_or_fixed(
-            E.error_envelope(request_id, exc), _config.limits
-        )
+        enforce_or_fixed(E.error_envelope(request_id, exc), _config.limits)
     )
 
 

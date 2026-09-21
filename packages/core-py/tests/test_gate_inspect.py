@@ -137,9 +137,7 @@ def test_a_snapshot_mismatch_is_refused_rather_than_answered_from_a_newer_snapsh
     assert "malformed" in malformed["guidance"]
     assert "do not shorten" in malformed["guidance"]
 
-    original = session.inspect(
-        _request(entry, {"kind": "lines", "start": 1, "end": 2})
-    )
+    original = session.inspect(_request(entry, {"kind": "lines", "start": 1, "end": 2}))
     assert original["code"] == "EXTRACTED"
     assert CANARY_HEAD in original["extraction"]["segments"][0]["text"]
 

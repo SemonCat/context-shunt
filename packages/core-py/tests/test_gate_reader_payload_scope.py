@@ -28,11 +28,7 @@ pytestmark = pytest.mark.gate_reader
 QUESTION = "What is the configured retry limit?"
 
 # The source the request actually selects and expects evidence from.
-SELECTED_SOURCE = (
-    "service: checkout-api\n"
-    "retry_limit: 7\n"
-    "timeout_ms: 4000\n"
-)
+SELECTED_SOURCE = "service: checkout-api\nretry_limit: 7\ntimeout_ms: 4000\n"
 
 # A second source, registered in the same session, that the request never names. Its
 # content is an unrelated sentinel - the kind of thing that would appear in a full parent

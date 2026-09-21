@@ -316,12 +316,16 @@ def test_partial_exact_zero_claim_is_scoped_inside_the_published_answer(tmp_path
             ],
         )
     )
-    env = Reader(registry, luna).answer(
-        "sess",
-        _request(
-            entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
-        ),
-    ).envelope
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess",
+            _request(
+                entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+            ),
+        )
+        .envelope
+    )
 
     assert env["status"] == "partial" and env["code"] == "ANSWERED"
     assert env["coverage"]["complete"] is False
@@ -373,9 +377,7 @@ def test_unknown_legacy_origin_keeps_a_multi_source_no_match_partial(tmp_path):
         for entry in (complete, unknown)
     ]
     luna = FakeLuna(replies=[answer_json("", []), answer_json("", [])])
-    env = Reader(registry, luna).answer(
-        "sess", _request(complete, sources=sources)
-    ).envelope
+    env = Reader(registry, luna).answer("sess", _request(complete, sources=sources)).envelope
     assert env["code"] == "NO_MATCH"
     assert env["status"] == "partial"
     assert env["coverage"]["complete"] is False

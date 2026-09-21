@@ -259,9 +259,7 @@ def test_aggregate_rejects_nonstandard_constants_in_text_plain_json(tmp_path, co
     outcome = session.post_tool_result("spill-constant", body)
     assert outcome.action == "spill"
     entry = session.registry.resolve("sess", outcome.source_id)
-    env = session.inspect(
-        _request(entry, {"kind": "aggregate", "records_pointer": "/records"})
-    )
+    env = session.inspect(_request(entry, {"kind": "aggregate", "records_pointer": "/records"}))
     assert env["code"] == "INVALID_REQUEST"
     assert env["failure_detail"] == "BAD_JSON"
 

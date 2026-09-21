@@ -169,9 +169,7 @@ def test_normal_revocation_removes_real_artifact_and_serializes_republish(
 
     entered = threading.Event()
     release = threading.Event()
-    cleanup_name = (
-        "_remove_scope_artifacts" if boundary == "scope" else "_remove_raw_artifact"
-    )
+    cleanup_name = "_remove_scope_artifacts" if boundary == "scope" else "_remove_raw_artifact"
     original_cleanup = getattr(first, cleanup_name)
 
     def delayed_cleanup(*args, **kwargs):
@@ -258,9 +256,7 @@ def test_repeated_handles_reserve_artifact_copies_against_byte_quota(tmp_path):
         store.publish(identity, [_capture()])
     assert refused.value.code == "LIMIT_EXCEEDED"
     assert refused.value.detail == "STORE_BYTE_QUOTA"
-    artifact_bytes = sum(
-        path.stat().st_size for path in (store.root / "artifacts").rglob("*.txt")
-    )
+    artifact_bytes = sum(path.stat().st_size for path in (store.root / "artifacts").rglob("*.txt"))
     blob_bytes = sum(path.stat().st_size for path in (store.root / "blobs").rglob("*.bin"))
     assert artifact_bytes + blob_bytes <= limits.store_max_bytes
 

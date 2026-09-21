@@ -79,7 +79,9 @@ def test_a_realized_loss_and_an_unrealized_credit_share_one_scope(tmp_path):
         tmp_path, tool_result_capture={"enabled": True, "host_ordering_verified_locally": True}
     )
     session = ShuntSession(
-        "sess", config, make_capability(tool_result_capture=True),
+        "sess",
+        config,
+        make_capability(tool_result_capture=True),
         provider=UnavailableProvider("SHOULD_NOT_BE_CALLED"),
     )
 
@@ -123,7 +125,9 @@ def test_a_realized_loss_and_an_unrealized_credit_share_one_scope(tmp_path):
 
     # The composite claim under test: the Slack source's own contribution to the scope
     # (its spill credit plus both inspect costs) is net-negative on its own -
-    slack_contribution = slack_spill["net_tokens_saved"] + sum(r["net_tokens_saved"] for r in inspect_records)
+    slack_contribution = slack_spill["net_tokens_saved"] + sum(
+        r["net_tokens_saved"] for r in inspect_records
+    )
     assert slack_contribution < 0, (
         "the fully-reread source must be a real loss on its own terms, not merely diluted "
         "by the other source's uncontested credit"

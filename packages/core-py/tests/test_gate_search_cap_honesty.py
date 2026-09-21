@@ -209,9 +209,7 @@ def test_pre_1_3_cursor_preserves_cumulative_max_matches(tmp_path, schema_versio
     )
     body, _ = _loki_shaped_source()
     pointer = _spilled_pointer(tmp_path, session, body)
-    first = session.inspect(
-        _search_request(pointer, max_matches=20, schema_version=schema_version)
-    )
+    first = session.inspect(_search_request(pointer, max_matches=20, schema_version=schema_version))
     assert first["extraction"]["matches_found"] == 20
     assert first["extraction"]["complete"] is False
     resumed = session.inspect(
@@ -240,9 +238,7 @@ def test_search_cursor_cannot_change_request_version_mid_chain(tmp_path):
     body, _ = _loki_shaped_source()
     pointer = _spilled_pointer(tmp_path, session, body)
     first = session.inspect(
-        _search_request(
-            pointer, max_matches=200, max_scan_lines=1000, schema_version="1.2"
-        )
+        _search_request(pointer, max_matches=200, max_scan_lines=1000, schema_version="1.2")
     )
     changed = session.inspect(
         _search_request(

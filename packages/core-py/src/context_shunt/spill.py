@@ -231,8 +231,7 @@ class SpillEngine:
                 "conversation. First consume this existing pointer; do not recover the "
                 "spilled content by re-reading or searching the original source. "
                 + route_guidance
-                +
-                "Prefer a narrower query over a broad one; bounded source searches "
+                + "Prefer a narrower query over a broad one; bounded source searches "
                 "remain available afterward if more is needed."
             ),
         )

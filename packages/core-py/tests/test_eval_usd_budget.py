@@ -9,9 +9,7 @@ from decimal import Decimal
 import pytest
 
 
-def _pricing(
-    *, input_rate: str = "1", output_rate: str = "6", fingerprint: str = "a" * 64
-):
+def _pricing(*, input_rate: str = "1", output_rate: str = "6", fingerprint: str = "a" * 64):
     from bridges._usd_budget import RoutePricing
 
     return RoutePricing.from_host_identity(
@@ -81,9 +79,7 @@ def test_concurrent_reservations_are_serialized_under_the_cap(tmp_path):
 
     def reserve_once() -> bool:
         try:
-            UsdBudgetLedger(path, pricing).reserve(
-                input_token_upper_bound=1, max_output_tokens=1
-            )
+            UsdBudgetLedger(path, pricing).reserve(input_token_upper_bound=1, max_output_tokens=1)
             return True
         except BudgetError:
             return False
@@ -114,12 +110,8 @@ def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
         reported_output_tokens=20,
     )
     with sqlite3.connect(path) as connection:
-        before = connection.execute(
-            "SELECT * FROM reservations ORDER BY reservation_id"
-        ).fetchall()
-        connection.execute(
-            "UPDATE metadata SET value='2500000000' WHERE key='limit_nano_usd'"
-        )
+        before = connection.execute("SELECT * FROM reservations ORDER BY reservation_id").fetchall()
+        connection.execute("UPDATE metadata SET value='2500000000' WHERE key='limit_nano_usd'")
         connection.execute("DELETE FROM limit_history")
         connection.execute(
             """INSERT INTO limit_history(
@@ -135,9 +127,7 @@ def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
 
     summary = UsdBudgetLedger(path, _pricing()).summary()
     with sqlite3.connect(path) as connection:
-        after = connection.execute(
-            "SELECT * FROM reservations ORDER BY reservation_id"
-        ).fetchall()
+        after = connection.execute("SELECT * FROM reservations ORDER BY reservation_id").fetchall()
     assert after == before
     assert summary["limit_usd"] == "10"
     assert summary["accounted_usd"] == "0.00212"
@@ -153,7 +143,7 @@ def test_approved_limit_increase_is_atomic_audited_and_preserves_rows(tmp_path):
             "from_usd": "2.5",
             "to_usd": "10",
             "authorization": LIMIT_INCREASE_AUTHORIZATION,
-        }
+        },
     ]
 
 
@@ -165,9 +155,7 @@ def test_unapproved_limit_change_fails_closed(tmp_path):
     path = tmp_path / "budget.sqlite3"
     UsdBudgetLedger(path, _pricing())
     with sqlite3.connect(path) as connection:
-        connection.execute(
-            "UPDATE metadata SET value='1500000000' WHERE key='limit_nano_usd'"
-        )
+        connection.execute("UPDATE metadata SET value='1500000000' WHERE key='limit_nano_usd'")
     with pytest.raises(BudgetError, match="budget policy"):
         UsdBudgetLedger(path, _pricing())
 
@@ -214,9 +202,7 @@ def test_unknown_usage_never_releases_the_reservation(tmp_path):
     ledger.record_result(reservation, status="usage_unknown")
     summary = ledger.summary()
     assert summary["accounted_usd"] == format(reservation.reserved_usd, "f")
-    assert summary["active_or_unknown_reserved_usd"] == format(
-        reservation.reserved_usd, "f"
-    )
+    assert summary["active_or_unknown_reserved_usd"] == format(reservation.reserved_usd, "f")
 
 
 def test_completed_usage_cannot_settle_above_its_reserved_bounds(tmp_path):
@@ -289,18 +275,14 @@ def test_v1_completed_rows_migrate_to_safe_settlement_but_unknown_rows_do_not(
     assert migrated["schema_version"] == "2"
     assert migrated["statuses"] == {"completed": 1, "usage_unknown": 1}
     assert migrated["settled_usage_upper_usd"] == "0.00212"
-    assert migrated["active_or_unknown_reserved_usd"] == format(
-        unknown.reserved_usd, "f"
-    )
+    assert migrated["active_or_unknown_reserved_usd"] == format(unknown.reserved_usd, "f")
 
 
 def test_pricing_change_on_an_existing_ledger_fails_closed(tmp_path):
     from bridges._usd_budget import BudgetError, UsdBudgetLedger
 
     path = tmp_path / "budget.sqlite3"
-    UsdBudgetLedger(path, _pricing()).reserve(
-        input_token_upper_bound=100, max_output_tokens=10
-    )
+    UsdBudgetLedger(path, _pricing()).reserve(input_token_upper_bound=100, max_output_tokens=10)
     with pytest.raises(BudgetError, match="pricing"):
         UsdBudgetLedger(path, _pricing(output_rate="7"))
 
@@ -340,8 +322,7 @@ def test_authorized_pricing_identity_migration_preserves_rows_and_audit(tmp_path
             "FROM reservations"
         ).fetchone()
         migration = connection.execute(
-            "SELECT from_fingerprint, to_fingerprint, reservation_count "
-            "FROM pricing_migrations"
+            "SELECT from_fingerprint, to_fingerprint, reservation_count FROM pricing_migrations"
         ).fetchone()
         assert row[0] == "a" * 64
         assert row[1] == old.binding_sha256
@@ -351,10 +332,13 @@ def test_authorized_pricing_identity_migration_preserves_rows_and_audit(tmp_path
     assert resumed.summary()["pricing_migrations"][0]["to_fingerprint"] == "b" * 64
     next_reservation = resumed.reserve(input_token_upper_bound=100, max_output_tokens=10)
     with sqlite3.connect(path) as connection:
-        assert connection.execute(
-            "SELECT pricing_fingerprint FROM reservations WHERE reservation_id=?",
-            (next_reservation.reservation_id,),
-        ).fetchone()[0] == "b" * 64
+        assert (
+            connection.execute(
+                "SELECT pricing_fingerprint FROM reservations WHERE reservation_id=?",
+                (next_reservation.reservation_id,),
+            ).fetchone()[0]
+            == "b" * 64
+        )
 
 
 def test_pricing_identity_migration_rejects_rate_drift_and_active_holds(tmp_path):
@@ -384,9 +368,7 @@ def test_pricing_identity_migration_receipt_is_immutable(tmp_path):
     migrate_pricing_identity(path, new, authorization="resume:immutable:test")
     with sqlite3.connect(path) as connection:
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-            connection.execute(
-                "UPDATE pricing_migrations SET route='other' WHERE id=1"
-            )
+            connection.execute("UPDATE pricing_migrations SET route='other' WHERE id=1")
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             connection.execute("DELETE FROM pricing_migrations WHERE id=1")
 
@@ -413,7 +395,7 @@ def test_source_manifest_excludes_only_named_generated_evidence(tmp_path):
     source = tmp_path / "runtime.py"
     evidence = tmp_path / "evals/intent-reader-audit/real-luna-latest.json"
     source.write_text("BOUND = True\n")
-    evidence.write_text("{\"old\": true}\n")
+    evidence.write_text('{"old": true}\n')
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(
@@ -432,7 +414,7 @@ def test_source_manifest_excludes_only_named_generated_evidence(tmp_path):
     )
     before = source_manifest_sha256(tmp_path)
 
-    evidence.write_text("{\"new\": true}\n")
+    evidence.write_text('{"new": true}\n')
     assert source_manifest_sha256(tmp_path) == before
     assert non_evidence_dirty_paths(tmp_path) == []
 

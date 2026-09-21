@@ -297,9 +297,7 @@ def test_a_deadline_after_the_call_still_accounts_for_what_the_provider_was_paid
         provider_confirms_generation=True,
         usage=Usage(input_tokens=1, output_tokens=1, method=TokenMethod.EXACT),
     )
-    provider = ClockProvider(
-        clock, 0, reply
-    )
+    provider = ClockProvider(clock, 0, reply)
     registry = make_registry_at(clock)
     entry = registry.register("sess", snapshot_bytes(b"mode = fast\n"))
 

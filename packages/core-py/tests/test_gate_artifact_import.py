@@ -682,9 +682,7 @@ def test_multi_source_read_is_truncated_when_any_import_was_truncated(tmp_path):
             "manifest": {"upstream_truncated": True},
         },
     )
-    session = world.session(
-        provider=FakeLuna(replies=[answer_json("", []), answer_json("", [])])
-    )
+    session = world.session(provider=FakeLuna(replies=[answer_json("", []), answer_json("", [])]))
     try:
         imported = session.import_artifact("req_import", manifest_path=str(world.manifest_path))
         local_path = world.workspace / "complete.log"
