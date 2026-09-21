@@ -590,9 +590,7 @@ class Inspector:
                     out.complete = False
                     out.next_cursor_state = {
                         "line": ordinal,
-                        "matches": already + (out.matches_found or 0)
-                        if cumulative_matches
-                        else 0,
+                        "matches": already + (out.matches_found or 0) if cumulative_matches else 0,
                     }
                     out.result_bytes = used
                     # A first match too large for the page leaves the cursor where it was.
@@ -631,9 +629,7 @@ class Inspector:
             out.complete = False
             out.next_cursor_state = {
                 "line": ordinal,
-                "matches": already + (out.matches_found or 0)
-                if cumulative_matches
-                else 0,
+                "matches": already + (out.matches_found or 0) if cumulative_matches else 0,
             }
         return out
 
@@ -675,8 +671,7 @@ class Inspector:
                 "line": ordinal + 1,
                 "matches": already + 1 if cumulative_matches else 0,
             }
-            if ordinal < index.line_count
-            and (not cumulative_matches or already + 1 < max_matches)
+            if ordinal < index.line_count and (not cumulative_matches or already + 1 < max_matches)
             else None
         )
         return out

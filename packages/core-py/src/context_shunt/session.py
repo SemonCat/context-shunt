@@ -523,9 +523,7 @@ class ShuntSession:
 
         attempts = result.cost.attempts_started
         try:
-            raw_artifact_path = self._store.raw_artifact_path(
-                self._identity, entry.source_id
-            )
+            raw_artifact_path = self._store.raw_artifact_path(self._identity, entry.source_id)
         except ShuntError as exc:
             if exc.code != "STORE_FAILED":
                 raise
@@ -785,11 +783,7 @@ class ShuntSession:
         legacy_search_semantics = selector["kind"] == "search" and (
             state.get("search_matches_cumulative") is True
         )
-        if (
-            selector["kind"] == "search"
-            and "cursor" in validated
-            and cursor_version is None
-        ):
+        if selector["kind"] == "search" and "cursor" in validated and cursor_version is None:
             # Cursors minted before the version was embedded used cumulative match state.
             # Treat all of them conservatively, including a scan-budget cursor that has not
             # encountered a match yet. Newly issued cursors bind to the current request
@@ -858,9 +852,7 @@ class ShuntSession:
                 # a disclosure problem would send the caller to a remedy that never works.
                 raise ShuntError("LIMIT_EXCEEDED", "UNIT_OVER_WIRE_BUDGET", retryable=False)
             if extraction.stall_reason == "cap":
-                raise ShuntError(
-                    "LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", retryable=False
-                )
+                raise ShuntError("LIMIT_EXCEEDED", "SEARCH_MAX_MATCHES_EXHAUSTED", retryable=False)
             if clipped_by_allowance:
                 return self._disclosure_exhausted(
                     request_id, operation_id, entry, selector, handles, allowance
@@ -1460,9 +1452,7 @@ class ShuntSession:
         return published
 
     # -- accounting --------------------------------------------------------
-    def reject_tool_call(
-        self, request_id: str, exc: ShuntError, tool: str
-    ) -> dict[str, Any]:
+    def reject_tool_call(self, request_id: str, exc: ShuntError, tool: str) -> dict[str, Any]:
         """Publish and account one plugin-owned public-argument rejection.
 
         Host schema validation happens before a handler and is outside this plugin's

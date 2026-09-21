@@ -85,7 +85,7 @@ READER_SYSTEM_PROMPT = (
     "never `atlas-ops is the contact`. Keep the source key as the grammatical "
     "subject even when that sounds less natural. When the answer selects a record by a "
     "condition, keep both bindings in the same claim: for "
-    "`{\"eligible\":false,\"route_alias\":\"nova-east\"}`, write `route_alias is "
+    '`{"eligible":false,"route_alias":"nova-east"}`, write `route_alias is '
     "nova-east because eligible is false`, never only `route_alias is nova-east`. "
     "Paraphrase everything else freely. "
     "`citation_ids` lists every "

@@ -65,9 +65,7 @@ def aggregate_snapshot(
         if snapshot.media_type != "text/plain":
             raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
         try:
-            root = json.loads(
-                snapshot.data.decode("utf-8"), parse_constant=_reject_json_constant
-            )
+            root = json.loads(snapshot.data.decode("utf-8"), parse_constant=_reject_json_constant)
         except (UnicodeDecodeError, ValueError, RecursionError):
             raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
         json_depth_and_nodes(root, limits)
