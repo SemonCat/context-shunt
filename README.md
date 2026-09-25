@@ -128,9 +128,19 @@ For structured minified JSON, schema 1.3 adds `selector.kind: "aggregate"` with 
 `records_pointer`, optional `expand_pointer`/`record_pointer`/`parse_json`, an exact scalar
 or literal filter, and bounded `group_by`/`distinct` pointer lists. It scans only within the
 declared record budget and returns deterministic canonical JSON with exact counts and
-explicit completeness flags for capped value/group samples. Fully covered reader answers
-are reused only for an exact session/snapshot/query/selector/budget/model-contract match;
-authorization is rechecked before every hit and partial answers are never cached.
+explicit completeness flags for capped value/group samples. An optional `decode_pointer`
+resolves against the parsed root and decodes exactly one JSON-string layer before
+`records_pointer` runs against the decoded value — for producers that wrap the whole record
+array in one outer JSON-string envelope (e.g. `{"result": "<json array as text>"}`). It does
+not recurse: a doubly-encoded string is left as a string, so the next pointer stage refuses
+it rather than silently unwrapping further. Decoding shares its byte/node budget with
+`parse_json`'s per-record decoding, so the two can't be combined to double the effective
+cap. When used, the output carries `decoded_from` with the pointer that was decoded — this
+is provenance for reproducing the decode, not a claim that any field is a verbatim quotation
+of the source. Omitting `decode_pointer` leaves output byte-for-byte unchanged. Fully
+covered reader answers are reused only for an exact session/snapshot/query/selector/budget/
+model-contract match; authorization is rechecked before every hit and partial answers are
+never cached.
 
 ## When the reader fails
 

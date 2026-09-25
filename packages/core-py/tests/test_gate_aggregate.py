@@ -47,7 +47,7 @@ def _setup(tmp_path):
     return session, session.register_path(str(path))
 
 
-def _request(entry, selector, max_scan=20_000):
+def _request(entry, selector, max_scan=20_000, max_result_bytes=16_384):
     return {
         "schema_version": "1.3",
         "request_id": "req_aggregate",
@@ -55,7 +55,7 @@ def _request(entry, selector, max_scan=20_000):
         "source_id": entry.source_id,
         "snapshot_id": entry.snapshot.snapshot_id,
         "selector": selector,
-        "budgets": {"max_result_bytes": 16_384, "max_scan_lines": max_scan},
+        "budgets": {"max_result_bytes": max_result_bytes, "max_scan_lines": max_scan},
     }
 
 
@@ -398,6 +398,387 @@ def test_exact_cardinalities_survive_bounded_key_sample_truncation(tmp_path):
     assert result["distinct"][0]["count"] == 205
     assert result["distinct"][0]["values_complete"] is False
     assert len(result["distinct"][0]["values"]) == 200
+
+
+def _decode_setup(tmp_path, body, *, name="decode.json", config_overrides=None):
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    path = tmp_path / "ws" / name
+    path.write_text(json.dumps(body, separators=(",", ":")))
+    session = ShuntSession(
+        "sess",
+        make_config(tmp_path, **(config_overrides or {})),
+        make_capability(),
+        provider=UnavailableProvider("MUST_NOT_RUN"),
+    )
+    entry = session.register_path(str(path))
+    return session, entry
+
+
+def test_decode_pointer_omitted_matches_current_output_exactly(tmp_path):
+    session, entry = _setup(tmp_path)
+    env = session.inspect(_request(entry, {"kind": "aggregate", "records_pointer": "/data/result"}))
+    result = json.loads(env["extraction"]["segments"][0]["text"])
+    assert "decoded_from" not in result
+
+
+def test_decode_pointer_decodes_one_layer_then_records_pointer_reads_decoded_root(tmp_path):
+    records = [
+        {"status": "200", "page": "1", "per_page": "10"},
+        {"status": "200", "page": "1", "per_page": "10"},
+        {"status": "404", "page": "2", "per_page": "10"},
+        {"status": "200", "page": "2", "per_page": "20"},
+        {"status": "500", "page": "1", "per_page": "10"},
+        {"status": "200", "page": "3", "per_page": "20"},
+        {"status": "404", "page": "1", "per_page": "10"},
+        {"status": "200", "page": "2", "per_page": "10"},
+        {"status": "301", "page": "1", "per_page": "10"},
+    ]
+    inner = json.dumps(
+        {"data": [{"line": json.dumps(row, separators=(",", ":"))} for row in records]},
+        separators=(",", ":"),
+    )
+    session, entry = _decode_setup(tmp_path, {"result": inner}, name="wrapped.json")
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+                "distinct": ["/status"],
+                "group_by": ["/status"],
+            },
+        )
+    )
+    assert env["code"] == "EXTRACTED" and env["status"] == "ok"
+    result = json.loads(env["extraction"]["segments"][0]["text"])
+    assert result["decoded_from"] == "/result"
+    assert result["records_scanned"] == 9 and result["matched_count"] == 9
+    assert result["distinct"][0] == {
+        "path": "/status",
+        "count": 4,
+        "values": ["200", "301", "404", "500"],
+        "values_complete": True,
+    }
+    assert result["groups"] == [
+        {"key": ["200"], "count": 5},
+        {"key": ["301"], "count": 1},
+        {"key": ["404"], "count": 2},
+        {"key": ["500"], "count": 1},
+    ]
+    assert result["group_count"] == 4
+
+
+def test_decode_pointer_does_not_recurse_through_a_second_json_string_layer(tmp_path):
+    doubly_encoded = json.dumps(json.dumps({"data": []}, separators=(",", ":")))
+    session, entry = _decode_setup(tmp_path, {"result": doubly_encoded}, name="double.json")
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": ""},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_rejects_malformed_syntax(tmp_path):
+    # Every pointer field shares the same `jsonPointer` schema pattern (leading "/"), so a
+    # malformed decode_pointer is refused at request validation, before the core ever sees
+    # it - the same path records_pointer/expand_pointer/record_pointer already go through.
+    session, entry = _decode_setup(tmp_path, {"result": "{}"})
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "result", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "SCHEMA_VIOLATION"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_rejects_missing_path(tmp_path):
+    session, entry = _decode_setup(tmp_path, {"result": "{}"})
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/missing", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "POINTER_NOT_FOUND"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_rejects_non_string_target(tmp_path):
+    session, entry = _decode_setup(tmp_path, {"result": {"data": []}})
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_SELECTOR"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_rejects_malformed_json_text(tmp_path):
+    session, entry = _decode_setup(tmp_path, {"result": "not json{"})
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "INVALID_REQUEST"
+    assert env["failure_detail"] == "BAD_JSON"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_and_parse_json_share_one_byte_budget(tmp_path):
+    # A source file's raw bytes are always >= the decode_pointer target's decoded bytes
+    # (JSON-string embedding only ever adds escaping overhead), so decode_pointer's own
+    # byte cap can't be isolated from the file-level read cap using a single decode. What
+    # *is* reachable - and is the actual doubling risk the shared budget guards against -
+    # is decode_pointer's bytes plus every subsequent per-record parse_json's bytes adding
+    # up past the cap even though the file itself comfortably fit under it.
+    records = [{"n": index, "pad": "z" * 20} for index in range(50)]
+    inner = json.dumps(
+        {"data": [json.dumps(row, separators=(",", ":")) for row in records]},
+        separators=(",", ":"),
+    )
+    body = {"result": inner}
+    outer_bytes = len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+    session, entry = _decode_setup(
+        tmp_path,
+        body,
+        config_overrides={"limits": {"max_source_bytes": outer_bytes + 50}},
+    )
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "parse_json": True,
+            },
+        )
+    )
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert env["failure_detail"] == "RESULT_OVER_SOURCE_CAP"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_enforces_the_node_cap(tmp_path):
+    body = {"result": json.dumps({"data": [{"n": i} for i in range(200)]})}
+    session, entry = _decode_setup(
+        tmp_path, body, config_overrides={"limits": {"json_max_nodes": 20}}
+    )
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert env["failure_detail"] == "JSON_TOO_MANY_NODES"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_enforces_the_depth_cap(tmp_path):
+    # The raw file is shallow - one top-level object holding one string - regardless of how
+    # deeply the *decoded* value nests, so depth-cap isolation (unlike byte-cap isolation) is
+    # reachable standalone: only the decode stage's own json_depth_and_nodes walk can trip it.
+    nested = {"data": []}
+    for _ in range(10):
+        nested = {"data": nested}
+    body = {"result": json.dumps(nested)}
+    session, entry = _decode_setup(
+        tmp_path, body, config_overrides={"limits": {"json_max_depth": 5}}
+    )
+    env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": "/data"},
+        )
+    )
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert env["failure_detail"] == "JSON_TOO_DEEP"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_shares_its_budget_with_per_record_parse_json(tmp_path):
+    # decode_pointer alone walks {"data": [{"line": "..."} x 50]} = 102 nodes (1 root object
+    # + 1 array + 50 * (1 object + 1 string)). Each subsequent per-record parse_json of
+    # {"n": i} adds 2 more nodes, 100 total across all 50 records. A cap strictly between
+    # 102 and 202 proves the two stages share one cumulative counter: the decode alone must
+    # fit under it, and only accumulating per-record parses pushes the total over.
+    records = [{"n": i} for i in range(50)]
+    inner = json.dumps(
+        {"data": [{"line": json.dumps(row, separators=(",", ":"))} for row in records]},
+        separators=(",", ":"),
+    )
+    session, entry = _decode_setup(
+        tmp_path, {"result": inner}, config_overrides={"limits": {"json_max_nodes": 150}}
+    )
+    decode_only_env = session.inspect(
+        _request(
+            entry,
+            {"kind": "aggregate", "decode_pointer": "/result", "records_pointer": "/data"},
+        )
+    )
+    assert decode_only_env["code"] == "EXTRACTED"
+
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+            },
+        )
+    )
+    assert env["code"] == "LIMIT_EXCEEDED"
+    assert env["failure_detail"] == "JSON_TOO_MANY_NODES"
+    assert "extraction" not in env
+
+
+def test_decode_pointer_output_still_shrinks_to_fit_the_result_cap(tmp_path):
+    records = [{"key": f"key-{index:03d}"} for index in range(205)]
+    inner = json.dumps(
+        {"data": [{"line": json.dumps(row, separators=(",", ":"))} for row in records]},
+        separators=(",", ":"),
+    )
+    session, entry = _decode_setup(tmp_path, {"result": inner}, name="shrink.json")
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+                "distinct": ["/key"],
+                "group_by": ["/key"],
+            },
+        )
+    )
+    assert env["code"] == "EXTRACTED"
+    result = json.loads(env["extraction"]["segments"][0]["text"])
+    assert result["decoded_from"] == "/result"
+    assert result["matched_count"] == 205
+    assert result["groups_complete"] is False
+    assert result["distinct"][0]["values_complete"] is False
+
+
+def test_decode_pointer_output_byte_shrink_preserves_decoded_from(tmp_path):
+    # Only 20 distinct groups here - well under the 200-row hard sample cap the previous
+    # test exercises - so a tightened max_result_bytes below the naturally emitted size is
+    # the only thing that can force the fits()-loop's group/distinct truncation. That proves
+    # decoded_from survives the byte-driven shrink path specifically, not just the cap path.
+    records = [{"key": f"key-{index:03d}"} for index in range(20)]
+    inner = json.dumps(
+        {"data": [{"line": json.dumps(row, separators=(",", ":"))} for row in records]},
+        separators=(",", ":"),
+    )
+    session, entry = _decode_setup(tmp_path, {"result": inner}, name="byte-shrink.json")
+    full_env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+                "distinct": ["/key"],
+                "group_by": ["/key"],
+            },
+        )
+    )
+    full_result = json.loads(full_env["extraction"]["segments"][0]["text"])
+    assert full_result["group_count"] == 20 and len(full_result["groups"]) == 20
+
+    shrunk_env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+                "distinct": ["/key"],
+                "group_by": ["/key"],
+            },
+            max_result_bytes=600,
+        )
+    )
+    assert shrunk_env["code"] == "EXTRACTED"
+    shrunk_result = json.loads(shrunk_env["extraction"]["segments"][0]["text"])
+    assert shrunk_result["decoded_from"] == "/result"
+    assert shrunk_result["matched_count"] == 20
+    assert shrunk_result["group_count"] == 20
+    assert shrunk_result["groups_complete"] is False
+    assert len(shrunk_result["groups"]) < 20
+
+
+def test_decode_pointer_never_mutates_the_original_snapshot(tmp_path):
+    body = {"result": json.dumps({"data": [{"line": json.dumps({"status": "200"})}]})}
+    session, entry = _decode_setup(tmp_path, body, name="immutable.json")
+    original_value = json.loads(json.dumps(entry.snapshot.json_value))
+    original_snapshot_id = entry.snapshot.snapshot_id
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "/result",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+            },
+        )
+    )
+    assert env["code"] == "EXTRACTED"
+    assert entry.snapshot.json_value == original_value
+    assert entry.snapshot.snapshot_id == original_snapshot_id
+
+
+def test_decode_pointer_empty_string_decodes_a_root_that_is_itself_a_json_string(tmp_path):
+    # decode_pointer's "" means "the whole root" (same empty-pointer convention every other
+    # pointer field already uses), so this covers a snapshot whose root value *is* a bare
+    # JSON string rather than an object wrapping one, e.g. a source that serializes its
+    # entire body as `"{\"data\":[...]}"`.
+    inner = json.dumps({"data": [{"line": json.dumps({"status": "200"})}]})
+    session, entry = _decode_setup(tmp_path, inner, name="empty-decode-pointer.json")
+    env = session.inspect(
+        _request(
+            entry,
+            {
+                "kind": "aggregate",
+                "decode_pointer": "",
+                "records_pointer": "/data",
+                "record_pointer": "/line",
+                "parse_json": True,
+            },
+        )
+    )
+    assert env["code"] == "EXTRACTED"
+    result = json.loads(env["extraction"]["segments"][0]["text"])
+    assert result["decoded_from"] == ""
+    assert result["records_scanned"] == 1
+    assert result["matched_count"] == 1
 
 
 def test_aggregates_json_captured_through_real_oversized_tool_result_route(tmp_path):

@@ -32,11 +32,16 @@ function setup() {
   return { session, entry: session.registerPath(path) };
 }
 
-function request(entry: ReturnType<ShuntSession["registerPath"]>, selector: object, maxScan = 20_000) {
+function request(
+  entry: ReturnType<ShuntSession["registerPath"]>,
+  selector: object,
+  maxScan = 20_000,
+  maxResultBytes = 16_384,
+) {
   return {
     schema_version: "1.3", request_id: "req_aggregate", operation: "inspect",
     source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector,
-    budgets: { max_result_bytes: 16_384, max_scan_lines: maxScan },
+    budgets: { max_result_bytes: maxResultBytes, max_scan_lines: maxScan },
   };
 }
 
@@ -314,6 +319,267 @@ describe("structured deterministic aggregation", () => {
     expect(result.groups).toHaveLength(200);
     expect(result.distinct[0]).toMatchObject({ count: 205, values_complete: false });
     expect(result.distinct[0].values).toHaveLength(200);
+  });
+
+  function decodeSetup(name: string, body: unknown, overrides: Record<string, unknown> = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "shunt-aggregate-decode-"));
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", name);
+    writeFileSync(path, JSON.stringify(body));
+    const session = new ShuntSession("sess", makeConfig(dir, overrides), makeCapability(), {
+      provider: new UnavailableProvider("MUST_NOT_RUN"),
+    });
+    return { session, entry: session.registerPath(path) };
+  }
+
+  it("matches current output exactly when decode_pointer is omitted", () => {
+    const { session, entry } = setup();
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", records_pointer: "/data/result",
+    }));
+    const result = JSON.parse(env.extraction!.segments[0]!.text);
+    expect(result).not.toHaveProperty("decoded_from");
+  });
+
+  it("decodes one layer, then resolves records_pointer against the decoded root", () => {
+    const records = [
+      { status: "200", page: "1", per_page: "10" },
+      { status: "200", page: "1", per_page: "10" },
+      { status: "404", page: "2", per_page: "10" },
+      { status: "200", page: "2", per_page: "20" },
+      { status: "500", page: "1", per_page: "10" },
+      { status: "200", page: "3", per_page: "20" },
+      { status: "404", page: "1", per_page: "10" },
+      { status: "200", page: "2", per_page: "10" },
+      { status: "301", page: "1", per_page: "10" },
+    ];
+    const inner = JSON.stringify({ data: records.map((row) => ({ line: JSON.stringify(row) })) });
+    const { session, entry } = decodeSetup("wrapped.json", { result: inner });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+      distinct: ["/status"], group_by: ["/status"],
+    }));
+    expect(env.code).toBe("EXTRACTED");
+    expect(env.status).toBe("ok");
+    const result = JSON.parse(env.extraction!.segments[0]!.text);
+    expect(result.decoded_from).toBe("/result");
+    expect(result.records_scanned).toBe(9);
+    expect(result.matched_count).toBe(9);
+    expect(result.distinct[0]).toEqual({
+      path: "/status", count: 4, values: ["200", "301", "404", "500"], values_complete: true,
+    });
+    expect(result.groups).toEqual([
+      { key: ["200"], count: 5 }, { key: ["301"], count: 1 },
+      { key: ["404"], count: 2 }, { key: ["500"], count: 1 },
+    ]);
+    expect(result.group_count).toBe(4);
+  });
+
+  it("does not recurse through a second JSON-string layer", () => {
+    const doublyEncoded = JSON.stringify(JSON.stringify({ data: [] }));
+    const { session, entry } = decodeSetup("double.json", { result: doublyEncoded });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "",
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_SELECTOR");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("rejects a malformed decode_pointer at request validation", () => {
+    const { session, entry } = decodeSetup("plain.json", { result: "{}" });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "result", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("SCHEMA_VIOLATION");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("rejects a decode_pointer that resolves to nothing", () => {
+    const { session, entry } = decodeSetup("plain.json", { result: "{}" });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/missing", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("POINTER_NOT_FOUND");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("rejects a non-string decode_pointer target", () => {
+    const { session, entry } = decodeSetup("object.json", { result: { data: [] } });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_SELECTOR");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("rejects malformed JSON text at decode_pointer", () => {
+    const { session, entry } = decodeSetup("bad.json", { result: "not json{" });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("INVALID_REQUEST");
+    expect(env.failure_detail).toBe("BAD_JSON");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("enforces the node cap on the decoded structure", () => {
+    const body = { result: JSON.stringify({ data: Array.from({ length: 200 }, (_, i) => ({ n: i })) }) };
+    const { session, entry } = decodeSetup("deep.json", body, { limits: { json_max_nodes: 20 } });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.failure_detail).toBe("JSON_TOO_MANY_NODES");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("enforces the depth cap on the decoded structure", () => {
+    // The raw file is shallow - one top-level object holding one string - regardless of how
+    // deeply the *decoded* value nests, so depth-cap isolation (unlike byte-cap isolation) is
+    // reachable standalone: only the decode stage's own jsonDepthAndNodes walk can trip it.
+    let nested: unknown = { data: [] };
+    for (let i = 0; i < 10; i++) {
+      nested = { data: nested };
+    }
+    const body = { result: JSON.stringify(nested) };
+    const { session, entry } = decodeSetup("deep-decode.json", body, { limits: { json_max_depth: 5 } });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+    }));
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.failure_detail).toBe("JSON_TOO_DEEP");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("shares one node budget between decode_pointer and per-record parse_json", () => {
+    // decode_pointer alone walks {"data": [{"line": "..."} x 50]} = 102 nodes (1 root
+    // object + 1 array + 50 * (1 object + 1 string)). Each subsequent per-record
+    // parse_json of {"n": i} adds 2 more nodes, 100 total across all 50 records. A cap
+    // strictly between 102 and 202 proves the two stages share one cumulative counter:
+    // the decode alone must fit under it, and only accumulating per-record parses pushes
+    // the total over.
+    const records = Array.from({ length: 50 }, (_, i) => ({ n: i }));
+    const inner = JSON.stringify({ data: records.map((row) => ({ line: JSON.stringify(row) })) });
+    const { session, entry } = decodeSetup("node-budget.json", { result: inner }, {
+      limits: { json_max_nodes: 150 },
+    });
+    const decodeOnlyEnv = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+    }));
+    expect(decodeOnlyEnv.code).toBe("EXTRACTED");
+
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+    }));
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.failure_detail).toBe("JSON_TOO_MANY_NODES");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("shares one byte budget between decode_pointer and per-record parse_json", () => {
+    // A source file's raw bytes are always >= the decode_pointer target's decoded bytes
+    // (embedding a JSON string only ever adds escaping overhead), so decode_pointer's own
+    // byte cap can't be isolated from the file-level read cap using a single decode. What
+    // *is* reachable - and is the doubling risk the shared budget guards against - is
+    // decode_pointer's bytes plus every subsequent per-record parse_json's bytes adding up
+    // past the cap even though the file itself comfortably fit under it.
+    const records = Array.from({ length: 50 }, (_, i) => ({ n: i, pad: "z".repeat(20) }));
+    const inner = JSON.stringify({ data: records.map((row) => JSON.stringify(row)) });
+    const body = { result: inner };
+    const outerBytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    const { session, entry } = decodeSetup("shared-budget.json", body, {
+      limits: { max_source_bytes: outerBytes + 50 },
+    });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data", parse_json: true,
+    }));
+    expect(env.code).toBe("LIMIT_EXCEEDED");
+    expect(env.failure_detail).toBe("RESULT_OVER_SOURCE_CAP");
+    expect(env.extraction).toBeUndefined();
+  });
+
+  it("still shrinks decode_pointer output to fit the value-sample cap", () => {
+    const records = Array.from({ length: 205 }, (_, i) => ({ key: `key-${String(i).padStart(3, "0")}` }));
+    const inner = JSON.stringify({ data: records.map((row) => ({ line: JSON.stringify(row) })) });
+    const { session, entry } = decodeSetup("shrink.json", { result: inner });
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+      distinct: ["/key"], group_by: ["/key"],
+    }));
+    expect(env.code).toBe("EXTRACTED");
+    const result = JSON.parse(env.extraction!.segments[0]!.text);
+    expect(result.decoded_from).toBe("/result");
+    expect(result.matched_count).toBe(205);
+    expect(result.groups_complete).toBe(false);
+    expect(result.distinct[0].values_complete).toBe(false);
+  });
+
+  it("shrinks decode_pointer output to fit a tightened byte budget, preserving decoded_from", () => {
+    // Only 20 distinct groups here - well under the 200-row hard sample cap the previous
+    // test exercises - so a tightened max_result_bytes below the naturally emitted size is
+    // the only thing that can force the fits()-loop's group/distinct truncation. That
+    // proves decoded_from survives the byte-driven shrink path specifically, not just the
+    // value-sample cap path.
+    const records = Array.from({ length: 20 }, (_, i) => ({ key: `key-${String(i).padStart(3, "0")}` }));
+    const inner = JSON.stringify({ data: records.map((row) => ({ line: JSON.stringify(row) })) });
+    const { session, entry } = decodeSetup("byte-shrink.json", { result: inner });
+    const selector = {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+      distinct: ["/key"], group_by: ["/key"],
+    };
+    const fullEnv = session.inspect(request(entry, selector));
+    const fullResult = JSON.parse(fullEnv.extraction!.segments[0]!.text);
+    expect(fullResult.group_count).toBe(20);
+    expect(fullResult.groups).toHaveLength(20);
+
+    const shrunkEnv = session.inspect(request(entry, selector, 20_000, 600));
+    expect(shrunkEnv.code).toBe("EXTRACTED");
+    const shrunkResult = JSON.parse(shrunkEnv.extraction!.segments[0]!.text);
+    expect(shrunkResult.decoded_from).toBe("/result");
+    expect(shrunkResult.matched_count).toBe(20);
+    expect(shrunkResult.group_count).toBe(20);
+    expect(shrunkResult.groups_complete).toBe(false);
+    expect(shrunkResult.groups.length).toBeLessThan(20);
+  });
+
+  it("never mutates the original snapshot", () => {
+    const body = { result: JSON.stringify({ data: [{ line: JSON.stringify({ status: "200" }) }] }) };
+    const { session, entry } = decodeSetup("immutable.json", body);
+    const originalValue = JSON.parse(JSON.stringify(entry.snapshot.jsonValue));
+    const originalSnapshotId = entry.snapshot.snapshotId;
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "/result", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+    }));
+    expect(env.code).toBe("EXTRACTED");
+    expect(entry.snapshot.jsonValue).toEqual(originalValue);
+    expect(entry.snapshot.snapshotId).toBe(originalSnapshotId);
+  });
+
+  it("decodes a root that is itself a JSON string via decode_pointer \"\"", () => {
+    // decode_pointer's "" means "the whole root" (same empty-pointer convention every other
+    // pointer field already uses), so this covers a snapshot whose root value *is* a bare
+    // JSON string rather than an object wrapping one, e.g. a source that serializes its
+    // entire body as `"{\"data\":[...]}"`.
+    const inner = JSON.stringify({ data: [{ line: JSON.stringify({ status: "200" }) }] });
+    const { session, entry } = decodeSetup("empty-decode-pointer.json", inner);
+    const env = session.inspect(request(entry, {
+      kind: "aggregate", decode_pointer: "", records_pointer: "/data",
+      record_pointer: "/line", parse_json: true,
+    }));
+    expect(env.code).toBe("EXTRACTED");
+    const result = JSON.parse(env.extraction!.segments[0]!.text);
+    expect(result.decoded_from).toBe("");
+    expect(result.records_scanned).toBe(1);
+    expect(result.matched_count).toBe(1);
   });
 
   it("aggregates JSON captured through the real oversized tool-result route", () => {

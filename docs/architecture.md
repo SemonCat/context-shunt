@@ -277,7 +277,16 @@ inclusive coordinates, `bytes` uses 0-based half-open coordinates adjusted to sa
 boundaries, and `search` takes a literal needle. Schema 1.3 also adds `aggregate` for exact
 count/distinct/grouping over validated JSON arrays. Its RFC 6901 `records_pointer`, optional
 array expansion/record pointer and bounded embedded-JSON parsing cover minified Loki
-`result[*].values[*][1]` records without regular expressions or executable expressions.
+`result[*].values[*][1]` records without regular expressions or executable expressions. An
+optional `decode_pointer` resolves against the parsed root and decodes exactly one JSON-string
+layer before `records_pointer` runs against the decoded value, for producers that wrap the
+whole record array in one outer JSON-string envelope. It does not recurse — a doubly-encoded
+string is left as a string, so the next pointer stage refuses it rather than silently
+unwrapping further — and it shares its byte/node budget with `parse_json`'s per-record
+decoding rather than getting an independent cap. The original snapshot is never mutated; only
+a local root binding changes. When used, output carries `decoded_from` naming the pointer that
+was decoded — provenance for reproducing the decode, not a claim that any field is a verbatim
+quotation of the source. Omitting it leaves output byte-for-byte unchanged.
 The selected record set must fit the caller scan budget; otherwise it refuses without a
 partial count. Returned keys are capped and explicitly marked incomplete while the scalar
 counts remain exact after a complete scan. Filter/distinct/group numeric identities must be

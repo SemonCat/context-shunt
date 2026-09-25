@@ -643,6 +643,41 @@ describe("the deterministic inspector", () => {
     expect(calls).toBe(before);
   });
 
+  it("resolves an aggregate selector with decode_pointer for a wrapped-JSON source", async () => {
+    const dir = workspace();
+    const { api } = configured(dir);
+    const path = join(dir, "ws", "wrapped.json");
+    const inner = JSON.stringify({
+      data: [{ status: "error" }, { status: "ok" }, { status: "error" }],
+    });
+    writeFileSync(path, JSON.stringify({ result: inner }));
+    const shunt = new ContextShuntPlugin(api);
+    const captured = JSON.parse(
+      await shunt.onReaderTool({ question: "What is here?", paths: [path] }, {}),
+    );
+    const handle = captured.sources[0];
+    const out = JSON.parse(
+      shunt.onInspectTool(
+        {
+          source_id: handle.source_id,
+          snapshot_id: handle.snapshot_id,
+          selector: {
+            kind: "aggregate",
+            decode_pointer: "/result",
+            records_pointer: "/data",
+            filter: { pointer: "/status", equals: "error" },
+          },
+        },
+        {},
+      ),
+    );
+    expect(out.code).toBe("EXTRACTED");
+    expect(out.provenance.derived).toBe(false);
+    const result = JSON.parse(out.extraction.segments[0].text);
+    expect(result.matched_count).toBe(2);
+    expect(result.decoded_from).toBe("/result");
+  });
+
   it("reports this session's accounting without revealing content", async () => {
     const dir = workspace();
     const { api } = configured(dir);

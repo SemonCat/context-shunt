@@ -104,6 +104,19 @@ Missing grouping fields use the explicit JSON marker `{\"missing\":true}` so the
 collapse into genuine `null` values; missing distinct fields are omitted from that field's
 distinct set.
 
+### Addendum: single-layer `decode_pointer`
+
+Some producers wrap the entire record array in one outer JSON-string envelope (e.g.
+`{"result": "<json array as text>"}`) rather than embedding JSON strings per-record. The
+optional `decode_pointer` resolves against the parsed root and decodes exactly one JSON-string
+layer before `records_pointer` runs against the decoded value, reusing the same pointer
+resolution, byte/node budget, and error codes as the rest of the selector. Recursive or
+auto-guessed decoding (repeatedly unwrapping until the result stops being a JSON string) was
+rejected: it would make the number of decode layers a function of the input's shape rather
+than the caller's declared intent, turning an accidental extra layer of encoding into a
+silent behavior change instead of a refused, diagnosable `BAD_SELECTOR`. A caller that needs
+more than one layer must decode again explicitly in a follow-up call.
+
 ## Deliberate non-goals
 
 - No change to any existing selector kind's request or response shape. Both gaps are new,

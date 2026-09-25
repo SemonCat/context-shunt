@@ -40,6 +40,37 @@ function validateEmittedPointer(pointer: string): void {
   }
 }
 
+interface DecodeBudget {
+  bytes: number;
+  nodes: number;
+}
+
+/**
+ * Decode one JSON-string layer, charging the shared embedded-JSON budget in `budget`.
+ * Shared with per-record `parse_json` accounting so a caller cannot combine
+ * `decode_pointer` with `parse_json` to double the effective byte/node ceiling.
+ */
+function decodeEmbeddedJson(text: string, limits: Limits, budget: DecodeBudget): unknown {
+  if (/[\uD800-\uDFFF]/u.test(text)) {
+    throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
+  }
+  budget.bytes += Buffer.byteLength(text, "utf8");
+  if (budget.bytes > limits.maxSourceBytes) {
+    throw new ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", false);
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
+  }
+  budget.nodes += jsonDepthAndNodes(decoded, limits).nodes;
+  if (budget.nodes > limits.jsonMaxNodes) {
+    throw new ShuntError("LIMIT_EXCEEDED", "JSON_TOO_MANY_NODES", false);
+  }
+  return decoded;
+}
+
 function scalarKey(value: Scalar): string {
   return canonicalJson(value);
 }
@@ -53,6 +84,7 @@ function outputScalar(value: GroupValue): boolean {
 }
 
 export interface AggregateSelector {
+  decode_pointer?: string;
   records_pointer: string;
   expand_pointer?: string;
   record_pointer?: string;
@@ -84,6 +116,18 @@ export function aggregateSnapshot(
     }
     jsonDepthAndNodes(root, opts.limits);
   }
+
+  const budget: DecodeBudget = { bytes: 0, nodes: 0 };
+  const decodePointer = selector.decode_pointer;
+  if (decodePointer !== undefined) {
+    validateEmittedPointer(decodePointer);
+    const decodeTarget = resolvePointer(root, decodePointer);
+    if (typeof decodeTarget !== "string") {
+      throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
+    }
+    root = decodeEmbeddedJson(decodeTarget, opts.limits, budget);
+  }
+
   const outer = resolvePointer(root, selector.records_pointer);
   if (!Array.isArray(outer)) {
     throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
@@ -117,8 +161,6 @@ export function aggregateSnapshot(
   );
   const groups = new Map<string, { key: GroupValue[]; count: number }>();
   let matched = 0;
-  let parsedBytes = 0;
-  let parsedNodes = 0;
   const filter = selector.filter;
   let filterExpectedKey: string | undefined;
   if (filter !== undefined && Object.prototype.hasOwnProperty.call(filter, "equals")) {
@@ -137,24 +179,7 @@ export function aggregateSnapshot(
       if (typeof record !== "string") {
         throw new ShuntError("INVALID_REQUEST", "BAD_SELECTOR", false);
       }
-      if (/[\uD800-\uDFFF]/u.test(record)) {
-        // TextEncoder replaces lone surrogates. Reject before byte accounting so the
-        // structured parser stays strict and matches Python's BAD_JSON behavior.
-        throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
-      }
-      parsedBytes += Buffer.byteLength(record, "utf8");
-      if (parsedBytes > opts.limits.maxSourceBytes) {
-        throw new ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", false);
-      }
-      try {
-        record = JSON.parse(record);
-      } catch {
-        throw new ShuntError("INVALID_REQUEST", "BAD_JSON", false);
-      }
-      parsedNodes += jsonDepthAndNodes(record, opts.limits).nodes;
-      if (parsedNodes > opts.limits.jsonMaxNodes) {
-        throw new ShuntError("LIMIT_EXCEEDED", "JSON_TOO_MANY_NODES", false);
-      }
+      record = decodeEmbeddedJson(record, opts.limits, budget);
     }
 
     if (filter !== undefined) {
@@ -209,6 +234,7 @@ export function aggregateSnapshot(
     matched_count: matched,
     records_scanned: records.length,
     schema: "context_shunt.aggregate.v1",
+    ...(decodePointer !== undefined ? { decoded_from: decodePointer } : {}),
   });
   let text = build();
   const fits = (): boolean => {

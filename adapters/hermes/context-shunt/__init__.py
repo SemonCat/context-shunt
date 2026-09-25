@@ -1597,9 +1597,14 @@ INSPECT_TOOL_SCHEMA = {
         "model is involved, so the result is source evidence rather than a summary. Each "
         "page is capped at 16 KiB and counts against a "
         "cumulative disclosure budget, so a large file cannot be paged into a full copy; a "
-        "file small enough to fit that budget can be returned in full. For minified one-line "
-        "sources, use literal search, then a 0-based half-open UTF-8 byte range; continue only "
-        "with the identical selector and returned next_cursor."
+        "file small enough to fit that budget can be returned in full. A minified one-line "
+        "JSON array, or a JSON object wrapping one in a single string field (for example "
+        '`{"result": "<json array as text>"}`), is usually the aggregate selector\'s job: '
+        "pass records_pointer (plus decode_pointer to unwrap that one outer string layer "
+        "first) for exact counts, distinct values, or grouping, rather than paging it with "
+        "search or byte ranges. Reserve literal search, then a 0-based half-open UTF-8 byte "
+        "range, for a minified source that is not JSON or that you need verbatim rather than "
+        "aggregated; continue only with the identical selector and returned next_cursor."
     ),
     "parameters": _registered_tool_parameters("inspectArgs"),
 }

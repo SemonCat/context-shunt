@@ -179,11 +179,15 @@ export const READER_TOOL_PARAMETERS = {
 } as const;
 
 export const INSPECT_TOOL_DESCRIPTION =
-  "Return exact text from a snapshot you already hold: a line range, a byte range, or "
-  + "literal-search hits. Deterministic - no model is involved, so the result is source bytes "
-  + "rather than a summary. Each page is capped at 16 KiB and counts against a cumulative "
-  + "disclosure budget, so a large file cannot be paged into a full copy; a file small "
-  + "enough to fit that budget can be returned in full.";
+  "Return exact text or bounded JSON aggregation from a snapshot you already hold: a line "
+  + "range, a byte range, literal-search hits, or deterministic count/distinct/grouping over "
+  + "a validated JSON array. Deterministic - no model is involved, so the result is source "
+  + "bytes or an exact count rather than a summary. Each page is capped at 16 KiB and counts "
+  + "against a cumulative disclosure budget, so a large file cannot be paged into a full "
+  + "copy; a file small enough to fit that budget can be returned in full. A minified "
+  + "one-line JSON array, or one wrapped in a single outer JSON-string field (for example "
+  + "{\"result\": \"<json array as text>\"}), is usually the aggregate selector's job "
+  + "instead of search/byte paging.";
 
 export const INSPECT_TOOL_PARAMETERS = {
   type: "object",
@@ -198,7 +202,13 @@ export const INSPECT_TOOL_PARAMETERS = {
       type: "object",
       description:
         'Exactly one of {"kind":"lines","start":N,"end":N}, {"kind":"bytes","start":N,"end":N}, '
-        + 'or {"kind":"search","needle":"...","max_matches":N}.',
+        + '{"kind":"search","needle":"...","max_matches":N}, or {"kind":"aggregate",'
+        + '"records_pointer":"<RFC 6901 pointer to the array>",...} for exact counts, distinct '
+        + 'values, or grouping over a JSON array. Add "decode_pointer" (same pointer syntax) to '
+        + 'aggregate when the array itself is wrapped in one outer JSON-string field, e.g. '
+        + '{"result": "<json array as text>"} - it decodes exactly that one layer, never '
+        + 'recursively. Optional aggregate fields: "expand_pointer", "record_pointer", '
+        + '"parse_json", "filter", "distinct" (up to 4 pointers), "group_by" (up to 4 pointers).',
     },
     cursor: {
       type: "string",

@@ -46,6 +46,35 @@ def _validate_emitted_pointer(pointer: str) -> None:
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
 
 
+def _decode_embedded_json(
+    text: str,
+    *,
+    limits: Limits,
+    parsed_bytes: int,
+    parsed_nodes: int,
+) -> tuple[Any, int, int]:
+    """Decode one JSON-string layer, charging the shared embedded-JSON budget.
+
+    Shared with per-record ``parse_json`` accounting (via the returned running totals) so a
+    caller cannot combine ``decode_pointer`` with ``parse_json`` to double the effective
+    byte/node ceiling.
+    """
+    if any("\ud800" <= char <= "\udfff" for char in text):
+        raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False)
+    parsed_bytes += len(text.encode("utf-8"))
+    if parsed_bytes > limits.max_source_bytes:
+        raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
+    try:
+        decoded = json.loads(text, parse_constant=_reject_json_constant)
+    except (ValueError, RecursionError):
+        raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
+    _, nodes = json_depth_and_nodes(decoded, limits)
+    parsed_nodes += nodes
+    if parsed_nodes > limits.json_max_nodes:
+        raise ShuntError("LIMIT_EXCEEDED", "JSON_TOO_MANY_NODES", retryable=False)
+    return decoded, parsed_bytes, parsed_nodes
+
+
 def _output_scalar(value: Any) -> bool:
     return len(canonical_json(value).encode("utf-8")) <= _MAX_SCALAR_BYTES
 
@@ -69,6 +98,19 @@ def aggregate_snapshot(
         except (UnicodeDecodeError, ValueError, RecursionError):
             raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
         json_depth_and_nodes(root, limits)
+
+    parsed_bytes = 0
+    parsed_nodes = 0
+    decode_pointer = selector.get("decode_pointer")
+    if decode_pointer is not None:
+        _validate_emitted_pointer(decode_pointer)
+        decode_target = resolve_pointer(root, decode_pointer)
+        if not isinstance(decode_target, str):
+            raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
+        root, parsed_bytes, parsed_nodes = _decode_embedded_json(
+            decode_target, limits=limits, parsed_bytes=parsed_bytes, parsed_nodes=parsed_nodes
+        )
+
     outer = resolve_pointer(root, selector["records_pointer"])
     if not isinstance(outer, list):
         raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
@@ -99,8 +141,6 @@ def aggregate_snapshot(
     distinct: dict[str, dict[str, Any]] = {path: {} for path in distinct_paths}
     groups: dict[str, dict[str, Any]] = {}
     matched = 0
-    parsed_bytes = 0
-    parsed_nodes = 0
     filter_spec = selector.get("filter")
     filter_expected_key: str | None = None
     if filter_spec is not None and "equals" in filter_spec:
@@ -118,21 +158,9 @@ def aggregate_snapshot(
         if selector.get("parse_json"):
             if not isinstance(record, str):
                 raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR", retryable=False)
-            if any("\ud800" <= char <= "\udfff" for char in record):
-                # A lone surrogate is neither valid UTF-8 nor valid embedded JSON text.
-                # Reject before strict byte accounting attempts to encode it.
-                raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False)
-            parsed_bytes += len(record.encode("utf-8"))
-            if parsed_bytes > limits.max_source_bytes:
-                raise ShuntError("LIMIT_EXCEEDED", "RESULT_OVER_SOURCE_CAP", retryable=False)
-            try:
-                record = json.loads(record, parse_constant=_reject_json_constant)
-            except (ValueError, RecursionError):
-                raise ShuntError("INVALID_REQUEST", "BAD_JSON", retryable=False) from None
-            _, nodes = json_depth_and_nodes(record, limits)
-            parsed_nodes += nodes
-            if parsed_nodes > limits.json_max_nodes:
-                raise ShuntError("LIMIT_EXCEEDED", "JSON_TOO_MANY_NODES", retryable=False)
+            record, parsed_bytes, parsed_nodes = _decode_embedded_json(
+                record, limits=limits, parsed_bytes=parsed_bytes, parsed_nodes=parsed_nodes
+            )
 
         if filter_spec is not None:
             candidate = _optional_pointer(record, filter_spec["pointer"])
@@ -185,18 +213,19 @@ def aggregate_snapshot(
     groups_complete = len(group_rows) == len(all_groups)
 
     def build() -> str:
-        return canonical_json(
-            {
-                "distinct": distinct_rows,
-                "group_by": group_paths,
-                "group_count": len(all_groups),
-                "groups": group_rows,
-                "groups_complete": groups_complete,
-                "matched_count": matched,
-                "records_scanned": len(records),
-                "schema": "context_shunt.aggregate.v1",
-            }
-        )
+        payload: dict[str, Any] = {
+            "distinct": distinct_rows,
+            "group_by": group_paths,
+            "group_count": len(all_groups),
+            "groups": group_rows,
+            "groups_complete": groups_complete,
+            "matched_count": matched,
+            "records_scanned": len(records),
+            "schema": "context_shunt.aggregate.v1",
+        }
+        if decode_pointer is not None:
+            payload["decoded_from"] = decode_pointer
+        return canonical_json(payload)
 
     text = build()
 

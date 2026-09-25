@@ -226,12 +226,13 @@
           }
         },
         {
-          "description": "1.3: bounded deterministic count/distinct/grouping over an array in a validated JSON snapshot. Optional expansion and embedded-JSON parsing cover Loki's minified result/values shape without regular expressions or unbounded parsing.",
+          "description": "1.3: bounded deterministic count/distinct/grouping over an array in a validated JSON snapshot. Optional expansion and embedded-JSON parsing cover Loki's minified result/values shape without regular expressions or unbounded parsing. decode_pointer resolves against the parsed root and decodes exactly one JSON-string layer before records_pointer runs against the decoded value; it never recurses, so a doubly-encoded string is refused by the following stage rather than silently unwrapped further.",
           "type": "object",
           "additionalProperties": false,
           "required": ["kind", "records_pointer"],
           "properties": {
             "kind": { "const": "aggregate" },
+            "decode_pointer": { "$ref": "#/$defs/jsonPointer" },
             "records_pointer": { "$ref": "#/$defs/jsonPointer" },
             "expand_pointer": { "$ref": "#/$defs/jsonPointer" },
             "record_pointer": { "$ref": "#/$defs/jsonPointer" },
