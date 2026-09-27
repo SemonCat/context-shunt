@@ -50,6 +50,7 @@ from .binaryguard import JSON_MEDIA_TYPE, TEXT_MEDIA_TYPE
 from .capability import CapabilityReport
 from .clock import Clock, MonotonicClock
 from .config import Config
+from .economics import attempt_economics_report as economics_report
 from .errors import ShuntError, fallback_allowed
 from .fallback import compact_failure, fit_compaction
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
@@ -1138,6 +1139,11 @@ class ShuntSession:
             "scope": "session",
             "totals": totals_to_dict(self._store.operation_totals(self._identity)),
             "records": [record.to_dict() for record in records],
+            "economics": economics_report(
+                records,
+                self._store.attempt_observations(self._identity, [r.operation_id for r in records]),
+                self.config.economics_rates,
+            ),
             "page": page,
             "page_size": page_size,
             "total_records": total,
@@ -1503,7 +1509,9 @@ class ShuntSession:
             limits=self.config.limits,
         )
         try:
-            self._store.record_operation(self._identity, record)
+            self._store.record_operation(
+                self._identity, record, call_identities=reader.call_identities
+            )
         except Exception:
             # Losing a metric must never fail the caller's operation, and it must never
             # be papered over as a zero: the operation simply has no record.

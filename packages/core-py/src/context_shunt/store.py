@@ -66,6 +66,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -1443,7 +1444,9 @@ class SnapshotStore:
 
     # -- accounting --------------------------------------------------------
 
-    def record_operation(self, identity: ScopeIdentity, record: OperationRecord) -> None:
+    def record_operation(
+        self, identity: ScopeIdentity, record: OperationRecord, *, call_identities: tuple = ()
+    ) -> None:
         scope_id = self.open_scope(identity)
         with self._lock:
             conn = self._connect()
@@ -1487,8 +1490,42 @@ class SnapshotStore:
                             now,
                         ),
                     )
+                    from .attempts import MAX_OPERATIONS, observations
+
+                    if record.attempts_started:
+                        payload = json.dumps(
+                            observations(call_identities, record.attempts_started),
+                            separators=(",", ":"),
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO reader_attempt_observations VALUES (?, ?)",
+                            (record.operation_id, payload),
+                        )
+                        conn.execute(
+                            "DELETE FROM reader_attempt_observations WHERE operation_id IN ("
+                            "SELECT operation_id FROM reader_attempt_observations ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
+                            (MAX_OPERATIONS,),
+                        )
             except sqlite3.Error:
                 raise ShuntError("STORE_FAILED", "ACCOUNTING_FAILED", retryable=False) from None
+
+    def attempt_observations(self, identity: ScopeIdentity, operation_ids: list[str]) -> dict:
+        """Scoped, bounded page; never authorizes by caller-supplied operation ID alone."""
+        operation_ids = operation_ids[: self._limits.stats_max_records_per_page]
+        if not operation_ids:
+            return {}
+        with self._lock:
+            rows = (
+                self._connect()
+                .execute(
+                    "SELECT t.operation_id, t.observations_json FROM reader_attempt_observations t "
+                    "JOIN accounting_events a ON a.operation_id = t.operation_id WHERE a.scope_id = ? "
+                    "AND t.operation_id IN (" + ",".join("?" for _ in operation_ids) + ")",
+                    (identity.scope_id, *operation_ids),
+                )
+                .fetchall()
+            )
+        return {r["operation_id"]: json.loads(r["observations_json"]) for r in rows}
 
     def operation_count(self, identity: ScopeIdentity) -> int:
         with self._lock:

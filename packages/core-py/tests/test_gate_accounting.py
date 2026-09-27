@@ -266,7 +266,7 @@ def test_no_record_carries_a_monetary_value(tmp_path):
     session = _session(tmp_path)
     entry = _big_source(tmp_path, session)
     session.read(_read_request(entry))
-    blob = json.dumps(_stats(session)).lower()
+    blob = json.dumps(_stats(session)["stats"]["records"]).lower()
     for money in ("usd", "cost", "price", "dollar", "cents"):
         assert money not in blob
 

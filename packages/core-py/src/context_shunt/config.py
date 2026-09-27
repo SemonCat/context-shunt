@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .economics import configured_rates
 from .errors import ShuntError
 from .limits import DEFAULT_LIMITS, POSITIVE_LIMITS, Limits
 from .paths import PathPolicy
@@ -65,6 +66,7 @@ _NARROWABLE = frozenset(
     if isinstance(getattr(DEFAULT_LIMITS, key), int)
 )
 _CONFIG_KEYS = {
+    "economics_rates",
     "workspace_roots",
     "artifact_import",
     "spill_dir",
@@ -199,6 +201,7 @@ class Config:
     tool_result_capture: ToolResultCaptureConfig = field(default_factory=ToolResultCaptureConfig)
     artifact_import: ArtifactImportConfig = field(default_factory=ArtifactImportConfig)
     limits: Limits = DEFAULT_LIMITS
+    economics_rates: dict = field(default_factory=dict)
 
     @property
     def suma_post_tool(self) -> ToolResultCaptureConfig:
@@ -303,8 +306,14 @@ def load(raw: dict[str, Any] | None, *, default_spill_dir: Path) -> Config:
         if spill_dir == Path(root) or Path(root) in spill_dir.parents:
             raise ShuntError("UNSAFE_SOURCE", "CACHE_INSIDE_IMPORT_ROOT", retryable=False)
 
+    try:
+        economics_rates = configured_rates(raw.get("economics_rates", []))
+    except ValueError:
+        raise ShuntError("INVALID_REQUEST", "BAD_CONFIGURATION", retryable=False) from None
+
     return Config(
         workspace_roots=roots,
+        economics_rates=economics_rates,
         spill_dir=spill_dir,
         denylist=_read_denylist(raw.get("denylist")),
         gate_enabled=raw.get("gate_enabled", True),

@@ -358,7 +358,11 @@ class _AttemptLedger:
         # observed is taken; the rest are unobserved, which is the truthful record for a
         # call that returned nothing.
         outcome.call_identities.extend(
-            _pad_identities(getattr(exc, "call_identities", ()), extra_attempts + 1)
+            _pad_identities(
+                getattr(exc, "call_identities", ())
+                or ((CallIdentity(usage=billed),) if attempts == 1 else ()),
+                extra_attempts + 1,
+            )
         )
 
 
@@ -950,6 +954,7 @@ class Reader:
                 completion_bytes=completion_bytes,
                 limits=self._limits,
                 unseen_usage=unseen_usage,
+                call_identities=tuple(call_identities),
             )
         )
 
@@ -1159,6 +1164,7 @@ class Reader:
                     completion_bytes=completion_bytes,
                     limits=self._limits,
                     unseen_usage=unseen_usage,
+                    call_identities=tuple(call_identities),
                 )
             )
             if repaired.responses_seen > 0 and (
@@ -2257,6 +2263,7 @@ def _reader_cost(
     completion_bytes: int,
     limits: Limits,
     unseen_usage: Usage | None = None,
+    call_identities: tuple[CallIdentity, ...] = (),
 ) -> ReaderCost:
     """Exact provider usage wins; otherwise a named deterministic estimate."""
     if attempts == 0:
@@ -2274,6 +2281,7 @@ def _reader_cost(
             method=TokenMethod.EXACT,
             attempts_started=attempts,
             attempts_usage_complete=usage_complete,
+            call_identities=call_identities,
         )
     # The estimate covers every physical call: `prompt_bytes` already includes each
     # fallback attempt's prompt, and the output side adds what attempts the reader never
@@ -2289,6 +2297,7 @@ def _reader_cost(
         method=TokenMethod.BYTES_DIV_4,
         attempts_started=attempts,
         attempts_usage_complete=usage_complete,
+        call_identities=call_identities,
     )
 
 

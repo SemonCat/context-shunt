@@ -127,6 +127,7 @@ class CallIdentity:
     reported: ModelIdentity = field(default_factory=ModelIdentity)
     attribution: Attribution = Attribution.UNKNOWN
     confidence: Confidence = Confidence.NONE
+    usage: Usage = field(default_factory=Usage)
 
     @property
     def observed_model(self) -> str:
@@ -178,6 +179,7 @@ class ModelResponse:
             reported=self.reported,
             attribution=attribution,
             confidence=confidence,
+            usage=normalize_usage(self.usage)[0] if self.attempts == 1 else Usage(),
         )
 
     def attribution(self) -> tuple[Attribution, Confidence]:
@@ -310,22 +312,38 @@ class HostBridgeProvider:
             # count, regardless of the generation cap: usage is an observation, not a
             # reason to rewrite the failure. A malformed claim is removed from a fresh
             # error so downstream accounting cannot crash or mistake it for zero.
-            raise without_malformed_billed_usage(exc) from None
+            sanitized = without_malformed_billed_usage(exc)
+            # Own the copy: repeated provider exceptions must never retain our metadata.
+            out = ShuntError(sanitized.code, sanitized.detail, sanitized.retryable)
+            out.billed_usage = sanitized.billed_usage
+            out.usage_complete_attempts = sanitized.usage_complete_attempts
+            out.response_bytes = sanitized.response_bytes
+            out.internal_attempts = sanitized.internal_attempts
+            out.call_identities = sanitized.call_identities or (
+                CallIdentity(
+                    requested=self._target.identity(),
+                    usage=normalize_usage(out.billed_usage)[0]
+                    if _physical_attempts(out.internal_attempts) == 1
+                    else Usage(),
+                ),
+            )
+            raise out from None
         except TimeoutError:
-            raise ShuntError("TIMEOUT", "MODEL_CALL") from None
+            out = ShuntError("TIMEOUT", "MODEL_CALL")
+            out.call_identities = (CallIdentity(requested=self._target.identity()),)
+            raise out from None
         except Exception:
             # The provider's exception text may contain the prompt or a payload echo.
             # It is dropped here and never reaches a log, metric or envelope.
-            raise TransientProviderError("PROVIDER_CALL_FAILED") from None
+            out = TransientProviderError("PROVIDER_CALL_FAILED")
+            out.call_identities = (CallIdentity(requested=self._target.identity()),)
+            raise out from None
         return self._unpack(result)
 
     def _unpack(self, result: Any) -> ModelResponse:
         if not isinstance(result, dict):
             raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
         text = result.get("text")
-        if not isinstance(text, str):
-            raise ShuntError("INVALID_MODEL_OUTPUT", "BAD_BRIDGE_SHAPE", retryable=False)
-
         # Usage is observational. Counts are not compared with request or generation caps:
         # a provider can truthfully report more than it was asked to generate, and that
         # anomaly must not erase an otherwise valid answer. Malformed claims become unknown
@@ -335,20 +353,16 @@ class HostBridgeProvider:
                 input_tokens=result.get("input_tokens"),
                 output_tokens=result.get("output_tokens"),
                 cache_tokens=result.get("cache_tokens"),
+                cache_write_5m_tokens=result.get("cache_write_5m_tokens"),
+                cache_write_1h_tokens=result.get("cache_write_1h_tokens"),
+                input_includes_cache=result.get("input_includes_cache"),
                 method=(
                     TokenMethod.EXACT if result.get("usage_exact") is True else TokenMethod.UNKNOWN
                 ),
             )
         )
-        if (
-            self._enforce_output_caps
-            and len(text.encode("utf-8")) > self._limits.max_tool_result_bytes
-        ):
-            rejected = ShuntError("INVALID_MODEL_OUTPUT", "MODEL_OUTPUT_OVER_CAP", retryable=False)
-            rejected.billed_usage = usage
-            raise rejected
         response = ModelResponse(
-            text=text,
+            text=text if isinstance(text, str) else "",
             requested=self._target.identity(),
             resolved=_identity(result, "resolved"),
             reported=_identity(result, "reported"),
@@ -356,6 +370,20 @@ class HostBridgeProvider:
             usage=usage,
             fallback_used=result.get("fallback_used") is True,
         )
+        reason = None
+        if not isinstance(text, str):
+            reason = "BAD_BRIDGE_SHAPE"
+        elif (
+            self._enforce_output_caps
+            and len(text.encode("utf-8")) > self._limits.max_tool_result_bytes
+        ):
+            reason = "MODEL_OUTPUT_OVER_CAP"
+        if reason:
+            # Publication refusal does not erase observed origin or paid usage.
+            rejected = ShuntError("INVALID_MODEL_OUTPUT", reason, retryable=False)
+            rejected.billed_usage = usage
+            rejected.call_identities = (response.identity_of_this_call(),)
+            raise rejected
         # This bridge makes exactly one physical call, so it is the one place that can
         # state an identity per call with no inference at all.
         return replace(response, call_identities=(response.identity_of_this_call(),))
@@ -380,9 +408,18 @@ def normalize_usage(usage: Any) -> tuple[Usage, bool]:
     """
     if not isinstance(usage, Usage):
         return Usage(), False
-    values = (usage.input_tokens, usage.output_tokens, usage.cache_tokens)
+    values = (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_tokens,
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+    )
     if any(
-        value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+        value is not None
+        and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2**63 - 1
+        )
         for value in values
     ):
         return Usage(), False
@@ -391,7 +428,13 @@ def normalize_usage(usage: Any) -> tuple[Usage, bool]:
         method = TokenMethod.UNKNOWN
     if method is TokenMethod.EXACT and (usage.input_tokens is None or usage.output_tokens is None):
         method = TokenMethod.UNKNOWN
-    return replace(usage, method=method), True
+    return replace(
+        usage,
+        method=method,
+        input_includes_cache=(
+            usage.input_includes_cache if type(usage.input_includes_cache) is bool else None
+        ),
+    ), True
 
 
 def normalize_response_usage(response: ModelResponse) -> ModelResponse:
@@ -734,6 +777,8 @@ def _carried_identities(source: Any, room: int) -> list[CallIdentity]:
         # A provider that reports no per-call records still answered *this* call, so its
         # own origin describes one of them. The rest stay unobserved.
         return [source.identity_of_this_call()]
+    if room == 1:
+        return [CallIdentity(usage=normalize_usage(getattr(source, "billed_usage", None))[0])]
     return []
 
 

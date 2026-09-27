@@ -35,10 +35,11 @@ known figure with an assumed one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .accounting import ReaderCost
+from .attempts import COMPONENTS, identity_key
 from .provenance import ModelIdentity, TokenMethod
 
 TOKENS_PER_MILLION = Decimal("1000000")
@@ -430,3 +431,122 @@ __all__ = [
     "build_economics_report",
     "price_reader_cost",
 ]
+
+
+# Runtime pricing is strictly per attempt, including both cache-write buckets.
+def configured_rates(raw: Any) -> dict:
+    """Validate trusted configuration. No inferred/default prices or raw error echo."""
+    if not isinstance(raw, list) or len(raw) > 32:
+        raise ValueError("BAD_ECONOMICS_RATES")
+    rates = {}
+    allowed = {"provider", "model", "source", "as_of", *COMPONENTS}
+    for item in raw:
+        if not isinstance(item, dict) or set(item) - allowed:
+            raise ValueError("BAD_ECONOMICS_RATES")
+        if any(
+            not isinstance(item.get(k), str)
+            or not 1 <= len(item[k]) <= 128
+            or any(ord(c) < 32 for c in item[k])
+            for k in ("provider", "model", "source", "as_of")
+        ):
+            raise ValueError("BAD_ECONOMICS_RATES")
+        key = identity_key(ModelIdentity(item["provider"], item["model"]))
+        if key in rates:
+            raise ValueError("BAD_ECONOMICS_RATES")
+        entry = {"source": item["source"], "as_of": item["as_of"]}
+        for component in COMPONENTS:
+            value = item.get(component)
+            if value is not None and (isinstance(value, bool) or len(str(value)) > 32):
+                raise ValueError("BAD_ECONOMICS_RATES")
+            try:
+                number = Decimal(str(value)) if value is not None else None
+            except InvalidOperation:
+                raise ValueError("BAD_ECONOMICS_RATES") from None
+            if number is not None and (
+                not number.is_finite()
+                or number < 0
+                or number > Decimal("1000000")
+                or number.as_tuple().exponent < -12
+            ):
+                raise ValueError("BAD_ECONOMICS_RATES")
+            entry[component] = number
+        rates[key] = entry
+    return rates
+
+
+def price_observation(record: dict, rates: dict) -> tuple[Decimal | None, str | None]:
+    status = record["attribution"]
+    key = (
+        record["reported"]
+        if status == "actual"
+        else record["resolved"]
+        if status == "resolved"
+        else None
+    )
+    if key is None:
+        return None, "identity_unknown"
+    rate = rates.get(key)
+    if rate is None:
+        return None, "rate_unknown"
+    usage = record["usage"]
+    if usage["method"] != "exact" or any(usage[k] is None for k in COMPONENTS):
+        return None, "usage_unknown"
+    cached = sum(usage[k] for k in COMPONENTS[2:])
+    included = usage["input_includes_cache"]
+    if cached and included is None:
+        return None, "cache_inclusion_unknown"
+    uncached = usage["input_tokens"] - (cached if included else 0)
+    if uncached < 0:
+        return None, "cache_exceeds_input"
+    total = Decimal(0)
+    for component in COMPONENTS:
+        tokens = uncached if component == "input_tokens" else usage[component]
+        if tokens and rate[component] is None:
+            return None, "rate_unknown"
+        if tokens:
+            total += Decimal(tokens) * rate[component] / Decimal(1000000)
+    return total, key
+
+
+def attempt_economics_report(records: list, observations_by_operation: dict, rates: dict) -> dict:
+    started = sum(r.attempts_started for r in records)
+    known = 0
+    amount = Decimal(0)
+    reasons: dict[str, int] = {}
+    used = set()
+    observed = 0
+    for operation in records:
+        attempts = observations_by_operation.get(operation.operation_id, [])
+        observed += len(attempts)
+        for attempt in attempts:
+            price, reason = price_observation(attempt, rates)
+            if price is None:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            else:
+                known += 1
+                amount += price
+                used.add(reason)
+    missing = max(0, started - observed)
+    if missing:
+        reasons["observations_unavailable"] = missing
+    return {
+        "scope": "page",
+        "attempts_started": started,
+        "attempts_priced": known,
+        "reader_cost_usd_known_subset": format(amount, "f") if known or not started else None,
+        "reader_cost_usd_total": format(amount, "f") if known == started else None,
+        "unknown_reasons": reasons,
+        "rates": [
+            {
+                "identity_sha256": key,
+                "source": rates[key]["source"],
+                "as_of": rates[key]["as_of"],
+                "usd_per_million": {
+                    c: format(rates[key][c], "f") if rates[key][c] is not None else None
+                    for c in COMPONENTS
+                },
+            }
+            for key in sorted(used)
+        ],
+        "net_savings_usd": None,
+    }

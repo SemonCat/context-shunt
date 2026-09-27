@@ -296,6 +296,8 @@ def test_the_ddl_comes_from_the_contract_not_from_the_code():
 #: denylist: this way *adding* a content-bearing column fails the gate, which is the thing
 #: that actually needs preventing.
 ALLOWED_COLUMNS = {
+    # Bounded allowlisted telemetry: digested identities and numeric usage only.
+    "observations_json",
     "at_ms",
     "attempts_started",
     "attempts_usage_complete",

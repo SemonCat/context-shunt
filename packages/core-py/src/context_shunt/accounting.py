@@ -126,6 +126,7 @@ class ReaderCost:
     method: TokenMethod = TokenMethod.NOT_APPLICABLE
     attempts_started: int = 0
     attempts_usage_complete: int = 0
+    call_identities: tuple = ()
 
     @classmethod
     def none(cls) -> ReaderCost:

@@ -110,6 +110,7 @@ def test_a_partially_measured_answer_reports_the_real_attempt_count(tmp_path):
     # attempt's real, unknown cost. `_reader_cost` guards against exactly this by
     # downgrading the *whole* total to a named byte estimate whenever any attempt is
     # unmeasured, so the mix is never reported as if it were the winner's number alone.
+    assert len(result.cost.call_identities) == result.cost.attempts_started
     assert result.cost.method is TokenMethod.BYTES_DIV_4
     assert result.cost.method is not TokenMethod.EXACT
     # A downgraded estimate must still be a real number derived from measured bytes -
@@ -164,6 +165,7 @@ def test_a_fully_measured_answer_still_reports_the_complete_count(tmp_path):
     # The control case: nothing is unmeasured, so the ledger is allowed to say `exact`
     # and to carry the provider's own numbers rather than a byte estimate.
     assert result.cost.method is TokenMethod.EXACT
+    assert result.cost.call_identities[0].usage.input_tokens == 10
     assert result.cost.input_tokens == 10
     assert result.cost.output_tokens == 5
 
@@ -196,5 +198,6 @@ def test_an_all_failed_request_reports_zero_measured_of_several_started(tmp_path
     # Nothing was ever measured, but calls were still made and billed - the honest report
     # is a named estimate derived from the bytes actually sent, never a bare zero. A zero
     # here would read as "this failure cost nothing", which is false.
+    assert len(result.cost.call_identities) == result.cost.attempts_started
     assert result.cost.method is TokenMethod.BYTES_DIV_4
     assert result.cost.input_tokens is not None and result.cost.input_tokens > 0

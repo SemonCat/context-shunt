@@ -218,3 +218,11 @@ CREATE TABLE IF NOT EXISTS orphan_temps (
     created_at_ms INTEGER NOT NULL,
     CHECK (length(blob_hash) = 64)
 ) STRICT;
+
+-- Optional Python reader telemetry extension. Bounded to 1024 recent operations by
+-- its writer. Identity values are SHA-256 digests, never raw names or payload text.
+-- Old writers/readers may ignore this additive table; missing observations mean unknown.
+CREATE TABLE IF NOT EXISTS reader_attempt_observations (
+    operation_id TEXT PRIMARY KEY NOT NULL REFERENCES accounting_events(operation_id) ON DELETE CASCADE,
+    observations_json TEXT NOT NULL CHECK(length(observations_json) <= 262144)
+) STRICT;

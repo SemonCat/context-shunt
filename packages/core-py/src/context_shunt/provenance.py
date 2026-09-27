@@ -130,6 +130,9 @@ class Usage:
     output_tokens: int | None = None
     cache_tokens: int | None = None
     method: TokenMethod = TokenMethod.UNKNOWN
+    cache_write_5m_tokens: int | None = None
+    cache_write_1h_tokens: int | None = None
+    input_includes_cache: bool | None = None
 
     @property
     def complete(self) -> bool:

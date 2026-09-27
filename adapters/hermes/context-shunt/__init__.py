@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 import sys
 import threading
@@ -370,24 +371,51 @@ class _ReaderMetrics:
     def __init__(self, logger: Any):
         self._logger = logger
 
+    def event(self, event: dict) -> None:
+        # Never forward arbitrary event dictionaries: they can carry private content.
+        if isinstance(event, dict):
+            self.observe("reader_duration_ms", event.get("duration_ms", 0), event)
+
     def count(self, _name: str, _labels=None, _value: int = 1) -> None:
         return None
 
     def observe(self, name: str, value: float, labels=None) -> None:
         if name != "reader_duration_ms":
             return
-        bounded = labels or {}
-        self._logger.info(
-            "context-shunt reader metric: %s",
-            json.dumps(
-                {
-                    "duration_ms": max(0, round(value)),
-                    "status": str(bounded.get("status", "error")),
-                    "code": str(bounded.get("code", "INTERNAL_ERROR")),
-                },
-                separators=(",", ":"),
-            ),
+        bounded = labels if isinstance(labels, dict) else {}
+        status = bounded.get("status")
+        code = bounded.get("code")
+        status = status if status in ("ok", "partial", "error") else "error"
+        code = (
+            code
+            if code
+            in (
+                "ANSWERED",
+                "NO_MATCH",
+                "TIMEOUT",
+                "CITATION_INVALID",
+                "LIMIT_EXCEEDED",
+                "MODEL_ERROR",
+                "INVALID_MODEL_OUTPUT",
+                "CANCELLED",
+                "LEGACY_COMPACTED",
+            )
+            else "INTERNAL_ERROR"
         )
+        try:
+            self._logger.info(
+                "context-shunt reader metric: %s",
+                json.dumps(
+                    {
+                        "duration_ms": max(0, round(value)),
+                        "status": status,
+                        "code": code,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        except Exception:
+            pass  # Logging must never change reader behavior.
 
 
 # -- capability ------------------------------------------------------------
@@ -851,6 +879,10 @@ def _bridge_call(
         "input_tokens": _usage_field(usage, "input_tokens"),
         "output_tokens": _usage_field(usage, "output_tokens"),
         "cache_tokens": _usage_field(usage, "cache_read_tokens"),
+        "cache_write_5m_tokens": _usage_field(usage, "cache_write_5m_tokens"),
+        "cache_write_1h_tokens": _usage_field(usage, "cache_write_1h_tokens"),
+        # Preserve unknowns: the legacy facade does not expose this convention.
+        "input_includes_cache": getattr(usage, "input_includes_cache", None),
         "usage_exact": usage is not None
         and _usage_field(usage, "input_tokens") is not None
         and _usage_field(usage, "output_tokens") is not None,
@@ -1604,7 +1636,13 @@ INSPECT_TOOL_SCHEMA = {
         "first) for exact counts, distinct values, or grouping, rather than paging it with "
         "search or byte ranges. Reserve literal search, then a 0-based half-open UTF-8 byte "
         "range, for a minified source that is not JSON or that you need verbatim rather than "
-        "aggregated; continue only with the identical selector and returned next_cursor."
+        "aggregated; continue only with the identical selector and returned next_cursor. "
+        "Search uses needle (literal), not pattern. Aggregate records_pointer must select an "
+        "array in the actual JSON; verify paths from bounded evidence, never infer a wrapper "
+        "key. record_pointer applies after expansion; parse_json only decodes a selected "
+        "record string. Distinct/grouping accept string, boolean and null fields; "
+        "numeric/object values are refused. Byte ranges must stay within authorized bounds "
+        "and end on complete UTF-8 characters."
     ),
     "parameters": _registered_tool_parameters("inspectArgs"),
 }
@@ -1675,7 +1713,11 @@ def register(ctx: Any) -> None:
 
     _llm = getattr(ctx, "llm", None)
     log = getattr(ctx, "logger", None)
-    _metrics = _ReaderMetrics(log) if log is not None else None
+    if log is None:
+        # Hermes PluginContext has no logger. This namespace reaches the host's
+        # existing agent.log and gateway.log handlers; do not configure logging here.
+        log = logging.getLogger("hermes_plugins.context_shunt")
+    _metrics = _ReaderMetrics(log)
     _capability = build_capability_report(ctx)
 
     # Declare the auxiliary task before anything can call the reader, so the task exists
@@ -1746,10 +1788,12 @@ def register(ctx: Any) -> None:
                 description=schema["description"],
             )
 
-    if log is not None:
+    try:
         log.info(
             "context-shunt capability report: %s", json.dumps(_capability.to_dict())
         )
+    except Exception:
+        pass  # Optional diagnostics must not prevent registration.
 
 
 def capability_report() -> dict[str, Any]:
