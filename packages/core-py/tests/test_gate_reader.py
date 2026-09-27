@@ -425,6 +425,48 @@ def test_many_small_records_do_not_overshoot_the_chunk_token_cap(tmp_path):
     assert env["status"] == "partial"
 
 
+def test_one_chunk_timeout_is_omitted_not_discarding_the_others_good_answers(tmp_path):
+    """Audit item 4: TIMEOUT was 8 of 38 readers, the largest non-success class. A
+    per-call timeout on one chunk of a multi-chunk request must not discard the good
+    chunks that already answered - only the whole-request availability-exhausted path
+    (every outcome failed, see the ``all(...)`` check above the ``AVAILABILITY_EXHAUSTED``
+    envelope in ``reader.py``) should turn TIMEOUT into a failed answer. This request has
+    two good chunks and one that times out, so it must come back as a partial answer with
+    the timed-out chunk in ``coverage.omitted``, not as a bare TIMEOUT failure.
+    """
+    registry = make_registry(tmp_path, session_id="sess")
+    good_one = registry.register("sess", snapshot_bytes(b"ALPHA_CHUNK_OK fact one\n"))
+    slow = registry.register("sess", snapshot_bytes(b"BRAVO_CHUNK_TIMEOUT fact two\n"))
+    good_two = registry.register("sess", snapshot_bytes(b"CHARLIE_CHUNK_OK fact three\n"))
+    sources = [
+        {
+            "source_id": entry.source_id,
+            "snapshot_id": entry.snapshot.snapshot_id,
+            "selector": {"kind": "all"},
+        }
+        for entry in (good_one, slow, good_two)
+    ]
+
+    def reply_for(user: str) -> str:
+        # Keyed on the chunk's own content, not call order - two chunks run concurrently
+        # (max_concurrent_model_calls=2 by default), so which call lands first is not
+        # guaranteed.
+        if "BRAVO_CHUNK_TIMEOUT" in user:
+            raise ShuntError("TIMEOUT", "MODEL_CALL_TIMEOUT")
+        return answer_json("", [])
+
+    luna = FakeLuna(default_reply=reply_for)
+    env = Reader(registry, luna).answer("sess", _request(good_one, sources=sources)).envelope
+
+    assert env["code"] != "TIMEOUT"
+    assert env["status"] == "partial"
+    assert env["coverage"]["processed_chunks"] == 2
+    omitted_reasons = {(o["source_id"], o["reason"]) for o in env["coverage"]["omitted"]}
+    assert (slow.source_id, "TIMEOUT") in omitted_reasons
+    assert not any(source_id == good_one.source_id for source_id, _ in omitted_reasons)
+    assert not any(source_id == good_two.source_id for source_id, _ in omitted_reasons)
+
+
 def test_unknown_legacy_origin_keeps_a_multi_source_no_match_partial(tmp_path):
     registry = make_registry(tmp_path, session_id="sess")
     unknown = registry.register(
