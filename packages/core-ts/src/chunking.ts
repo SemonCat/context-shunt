@@ -185,9 +185,13 @@ function* recordChunks(
     let hi = lo - 1;
     while (hi < end) {
       const rendered = canonicalJson(recordAt(node, hi + 1));
-      if (parts.length > 0 && size + utf8Length(rendered) > budget) break;
+      const renderedBytes = utf8Length(rendered);
+      // parts.join("\n") adds one separator byte before every part but the first - charge
+      // it here so `size` never undercounts the joined text's actual byte length.
+      const separatorBytes = parts.length > 0 ? 1 : 0;
+      if (parts.length > 0 && size + separatorBytes + renderedBytes > budget) break;
       parts.push(rendered);
-      size += utf8Length(rendered);
+      size += separatorBytes + renderedBytes;
       hi += 1;
     }
     yield makeChunk(

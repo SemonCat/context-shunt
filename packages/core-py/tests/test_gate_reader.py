@@ -360,6 +360,69 @@ def test_no_match_with_omitted_chunk_is_partial_and_not_a_confirmed_absence(tmp_
     assert any(o["reason"] == "BUDGET_EXCEEDED" for o in env["coverage"]["omitted"])
     assert "Coverage is incomplete" in env["guidance"]
     assert "not a confirmed absence" in env["guidance"]
+    # Plain-text source: no JSON in scope, so the generic byte-range/search action is
+    # what the model is told to do next, not the JSON-only aggregate route.
+    assert "aggregate selector" not in env["guidance"]
+    assert "use context_shunt_inspect to search or read them directly" in env["guidance"]
+
+
+def test_incomplete_json_coverage_routes_to_aggregate_not_more_paging(tmp_path):
+    # Same audit-item-1 shape as test_no_match_with_omitted_chunk_is_partial_and_not_a_confirmed_absence,
+    # but over a JSON source: the routing fix must key this on the snapshot's media_type
+    # and point the model at the deterministic aggregate/decode_pointer route instead of
+    # more chunked paging, without losing the generic "bytes are still in the snapshot"
+    # fallback for a genuinely verbatim need.
+    body = json.dumps([{"id": i, "value": ("x" * 200) + str(i)} for i in range(1, 400)])
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register(
+        "sess", snapshot_bytes(body.encode(), media_type_hint=JSON_MEDIA_TYPE)
+    )
+    luna = FakeLuna(default_reply=answer_json("", []))
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess",
+            _request(
+                entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+            ),
+        )
+        .envelope
+    )
+    assert env["code"] == "NO_MATCH"
+    assert env["status"] == "partial"
+    assert env["coverage"]["complete"] is False
+    assert "aggregate selector" in env["guidance"]
+    assert "decode_pointer" in env["guidance"]
+    assert "no model call" in env["guidance"]
+    # Verbatim reads over the omitted bytes must still be reachable, not forbidden.
+    assert "search or read" in env["guidance"]
+
+
+def test_many_small_records_do_not_overshoot_the_chunk_token_cap(tmp_path):
+    """Regression for the audit's LIMIT_EXCEEDED case: ``_record_chunks`` must charge the
+    ``"\\n".join`` separator byte between records against the chunk budget, not just each
+    record's own rendered bytes - otherwise a chunk of many small records can silently
+    overshoot ``max_chunk_tokens`` and ``plan()`` raises LIMIT_EXCEEDED/CHUNK_OVER_TOKEN_CAP
+    for a request that should have chunked (and paged) successfully instead.
+    """
+    body = json.dumps([{"id": i, "value": f"line {i} value"} for i in range(1, 5000)])
+    registry = make_registry(tmp_path, session_id="sess")
+    entry = registry.register(
+        "sess", snapshot_bytes(body.encode(), media_type_hint=JSON_MEDIA_TYPE)
+    )
+    luna = FakeLuna(default_reply=answer_json("", []))
+    env = (
+        Reader(registry, luna)
+        .answer(
+            "sess",
+            _request(
+                entry, budgets={"max_chunks": 1, "max_answer_bytes": 8192, "deadline_ms": 60000}
+            ),
+        )
+        .envelope
+    )
+    assert env["code"] == "NO_MATCH"
+    assert env["status"] == "partial"
 
 
 def test_unknown_legacy_origin_keeps_a_multi_source_no_match_partial(tmp_path):

@@ -138,6 +138,65 @@ def test_a_citation_id_that_fails_mechanical_verification_drops_the_claim(tmp_pa
     assert env.get("answer", "") == ""
 
 
+def test_citation_repair_fires_over_a_plain_non_chain_provider(tmp_path):
+    """Regression proof for the audit's CITATION_INVALID hypothesis.
+
+    ``_repair_provider_for`` only refuses when ``identity.known`` is False - the requested
+    identity's ``model`` is populated from static provider config, not learned from the
+    host, so it is known before any call is even made. This exercises exactly the
+    production shape (a single :class:`HostBridgeProvider`-like provider, not wrapped in a
+    :class:`FallbackChainProvider`) with a first reply whose citation fails mechanical
+    verification: repair must fire, spending exactly one extra call, and the corrected
+    second reply must be what gets published.
+    """
+    registry, (entry,) = _fixture(tmp_path, SOURCE)
+    bad_reply = claims_json(
+        [{"text": "Timeout is thirty seconds.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "timeout_seconds = 30"}],
+    )
+    repaired_reply = claims_json(
+        [{"text": "Timeout is thirty seconds.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 4, "line_end": 4, "quote": "timeout_seconds = 30"}],
+    )
+    luna = FakeLuna(replies=[bad_reply, repaired_reply])
+    env = Reader(registry, luna).answer("sess", _request([entry])).envelope
+    assert luna.call_count == 2
+    assert env["code"] == "ANSWERED"
+    assert env["answer"] == "Timeout is thirty seconds [c1]."
+    assert env["citations"][0]["verified"] is True
+
+
+def test_citation_repair_fires_when_wrapped_in_a_fallback_chain(tmp_path):
+    """Same regression, but over the other production shape: a configured fallback chain.
+
+    ``build_provider`` (session.py) only returns a bare provider when no fallback chain is
+    configured; when one is, it wraps primary + alternatives in a
+    :class:`FallbackChainProvider`. ``FallbackChainProvider.repair_provider_for`` requires
+    a *unique* leaf whose static ``target.identity()`` matches the identity the failed
+    chunk was actually served by. With two leaves of distinct provider/model - the normal,
+    valid configuration - the primary's own identity is unambiguous, so repair must still
+    fire exactly once against the leaf that produced the rejected answer.
+    """
+    registry, (entry,) = _fixture(tmp_path, SOURCE)
+    bad_reply = claims_json(
+        [{"text": "Timeout is thirty seconds.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 2, "line_end": 2, "quote": "timeout_seconds = 30"}],
+    )
+    repaired_reply = claims_json(
+        [{"text": "Timeout is thirty seconds.", "citation_ids": ["c1"]}],
+        [{"id": "c1", "line_start": 4, "line_end": 4, "quote": "timeout_seconds = 30"}],
+    )
+    primary = FakeLuna(replies=[bad_reply, repaired_reply], provider="openai", model=READER_MODEL)
+    alternative = FakeLuna(provider="anthropic", model="claude-fallback")
+    chain = FallbackChainProvider(primary, [alternative])
+    env = Reader(registry, chain).answer("sess", _request([entry])).envelope
+    assert primary.call_count == 2
+    assert alternative.call_count == 0
+    assert env["code"] == "ANSWERED"
+    assert env["answer"] == "Timeout is thirty seconds [c1]."
+    assert env["citations"][0]["verified"] is True
+
+
 def test_duplicate_citation_id_within_a_claim_drops_it(tmp_path):
     registry, (entry,) = _fixture(tmp_path, SOURCE)
     reply = claims_json(

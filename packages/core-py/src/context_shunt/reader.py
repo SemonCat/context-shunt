@@ -49,6 +49,7 @@ from typing import Any
 from . import envelope as E
 from .accounting import ReaderCost
 from .accounting import estimate_tokens as accounting_tokens
+from .binaryguard import JSON_MEDIA_TYPE
 from .chunking import Chunk, estimate_tokens, plan, render_excerpt
 from .citations import (
     CitationVerifier,
@@ -113,27 +114,60 @@ _MAX_CITATION_REPAIR_REASONS = 8
 # only `answer` could still publish the model's "exactly zero" as a source-wide conclusion.
 # Prefixing the main answer creates a boundary that survives such consumers and languages.
 _INCOMPLETE_ANSWER_PREFIX = "[Reviewed subset only; citations verify bytes, not claims] "
-_INCOMPLETE_COVERAGE_ACTION = (
+_INCOMPLETE_COVERAGE_ACTION_GENERIC = (
     "Do not repeat the identical question. If coverage.omitted lists unreviewed ranges, "
     "those bytes are still in the snapshot - use context_shunt_inspect to search or read "
     "them directly. If coverage.upstream_truncated is set, those bytes were never captured "
     "from the source at all - inspect cannot recover them; issue a new, narrower upstream "
     "query or tool call instead."
 )
-_INCOMPLETE_NO_MATCH_GUIDANCE = (
-    "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
-    "was omitted or reported as upstream-truncated (see coverage.omitted and "
-    "coverage.upstream_truncated). No matching evidence was found in what was reviewed, but "
-    "this is not a confirmed absence in the whole source - only in the part covered. "
-    + _INCOMPLETE_COVERAGE_ACTION
+# JSON sources have a deterministic, zero-model-call route for exactly the kind of
+# question repeated chunked paging is worst at: counts, grouping and filtering. Naming it
+# here - not just in the inspect tool schema - reaches the model at the moment it is
+# deciding whether to ask the identical question again over the next chunk.
+_INCOMPLETE_COVERAGE_ACTION_JSON = (
+    "Do not repeat the identical question. For counts, grouping or filtering over this "
+    "JSON source, use context_shunt_inspect with an aggregate selector (decode_pointer "
+    "first if the JSON is wrapped in an outer string field) instead of paging through more "
+    "chunks - it is deterministic, exact, and costs no model call. If coverage.omitted "
+    "lists unreviewed ranges and the need is a verbatim read rather than a count or filter, "
+    "those bytes are still in the snapshot - use context_shunt_inspect to search or read "
+    "them directly. If coverage.upstream_truncated is set, those bytes were never captured "
+    "from the source at all - inspect cannot recover them; issue a new, narrower upstream "
+    "query or tool call instead."
 )
-_INCOMPLETE_ANSWER_GUIDANCE = (
-    "Coverage is incomplete: not every planned chunk was reviewed, and/or source content "
-    "was omitted or reported as upstream-truncated (see coverage.omitted and "
-    "coverage.upstream_truncated). The answer is explicitly scoped to the reviewed subset. "
-    "Mechanical citation checks do not establish that the cited bytes support its prose. "
-    + _INCOMPLETE_COVERAGE_ACTION
-)
+
+
+def _incomplete_coverage_action(handles: list[dict[str, Any]]) -> str:
+    """Route the incomplete-coverage guidance by the sources' actual media_type.
+
+    Keyed on ``media_type`` from the resolved snapshot handles, never on the question's
+    prose - a source is JSON or it isn't, regardless of what the model appears to be
+    asking.
+    """
+    if any(h.get("media_type") == JSON_MEDIA_TYPE for h in handles):
+        return _INCOMPLETE_COVERAGE_ACTION_JSON
+    return _INCOMPLETE_COVERAGE_ACTION_GENERIC
+
+
+def _incomplete_no_match_guidance(handles: list[dict[str, Any]]) -> str:
+    return (
+        "Coverage is incomplete: not every planned chunk was reviewed, and/or source "
+        "content was omitted or reported as upstream-truncated (see coverage.omitted and "
+        "coverage.upstream_truncated). No matching evidence was found in what was "
+        "reviewed, but this is not a confirmed absence in the whole source - only in the "
+        "part covered. " + _incomplete_coverage_action(handles)
+    )
+
+
+def _incomplete_answer_guidance(handles: list[dict[str, Any]]) -> str:
+    return (
+        "Coverage is incomplete: not every planned chunk was reviewed, and/or source "
+        "content was omitted or reported as upstream-truncated (see coverage.omitted and "
+        "coverage.upstream_truncated). The answer is explicitly scoped to the reviewed "
+        "subset. Mechanical citation checks do not establish that the cited bytes support "
+        "its prose. " + _incomplete_coverage_action(handles)
+    )
 
 
 def _scope_published_answer(answer: str, *, complete: bool) -> str:
@@ -783,7 +817,7 @@ class Reader:
                     result_kind=ResultKind.MODEL_DERIVED,
                     provenance=provenance,
                     accounting_id=accounting_id,
-                    guidance=None if complete else _INCOMPLETE_NO_MATCH_GUIDANCE,
+                    guidance=None if complete else _incomplete_no_match_guidance(handles),
                 ),
                 provenance=provenance,
                 cost=ReaderCost.none(),
@@ -1521,7 +1555,7 @@ class Reader:
                     result_kind=ResultKind.MODEL_DERIVED,
                     provenance=provenance,
                     accounting_id=accounting_id,
-                    guidance=None if complete else _INCOMPLETE_NO_MATCH_GUIDANCE,
+                    guidance=None if complete else _incomplete_no_match_guidance(handles),
                 ),
                 provenance=provenance,
                 cost=cost,
@@ -1541,7 +1575,7 @@ class Reader:
                 result_kind=ResultKind.MODEL_DERIVED,
                 provenance=provenance,
                 accounting_id=accounting_id,
-                guidance=None if ok else _INCOMPLETE_ANSWER_GUIDANCE,
+                guidance=None if ok else _incomplete_answer_guidance(handles),
             )
 
         if self._enforce_output_caps:

@@ -178,10 +178,14 @@ def _record_chunks(
         hi = lo - 1
         while hi < end:
             rendered = canonical_json(record_at(node, hi + 1))
-            if parts and size + len(rendered.encode("utf-8")) > budget:
+            rendered_bytes = len(rendered.encode("utf-8"))
+            # "\n".join adds one separator byte before every part but the first - charge it
+            # here so ``size`` never undercounts the joined text's actual byte length.
+            separator_bytes = 1 if parts else 0
+            if parts and size + separator_bytes + rendered_bytes > budget:
                 break
             parts.append(rendered)
-            size += len(rendered.encode("utf-8"))
+            size += separator_bytes + rendered_bytes
             hi += 1
         text = "\n".join(parts)
         yield Chunk(
