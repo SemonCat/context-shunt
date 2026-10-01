@@ -1485,6 +1485,37 @@ def test_bridge_call_forwards_60000ms_as_60_second_llm_timeout(tmp_path):
     assert llm.calls[0]["purpose"] == "context-shunt-reader"
 
 
+@pytest.mark.parametrize("cache_write", [0, 37])
+def test_bridge_call_forwards_hermes_ttl_less_cache_writes_unclassified(tmp_path, cache_write):
+    """Hermes' PluginLlmUsage has one `cache_write_tokens` and no TTL buckets."""
+    module = _load_adapter()
+
+    class HermesUsage:
+        input_tokens = 120
+        output_tokens = 30
+        total_tokens = 150
+        cache_read_tokens = 40
+        cache_write_tokens = cache_write
+        cost_usd = None
+
+    class HermesLlm(FakeLlm):
+        def complete(self, messages, **kwargs):
+            result = super().complete(messages, **kwargs)
+            result.usage = HermesUsage()
+            return result
+
+    module.register(FakeCtx(_config(tmp_path), llm=HermesLlm()))
+    result = module._bridge_call(
+        system="s", user="u", provider="", model=READER_MODEL, max_output_tokens=64, timeout_ms=1000
+    )
+    assert result["cache_tokens"] == 40
+    # A TTL bucket is never inferred from a TTL-less count.
+    assert result["cache_write_5m_tokens"] is None
+    assert result["cache_write_1h_tokens"] is None
+    # A positive count is preserved as observed; zero stays unknown, like every field.
+    assert result["cache_write_unclassified_tokens"] == (cache_write or None)
+
+
 def test_hermes_reader_timeout_returns_compactor_summary_and_readable_raw_path(tmp_path):
     """The adapter-visible fail-open shape includes navigation and exact recovery."""
 

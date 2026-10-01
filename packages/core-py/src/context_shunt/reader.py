@@ -195,6 +195,13 @@ def _aggregate_upstream_truncation(values: list[bool | None]) -> bool | None:
     return False
 
 
+#: How long one terminal reader TIMEOUT stops an identical re-send. Long enough to cover
+#: an agent's immediate retry loop inside one turn, short enough that a transient provider
+#: outage does not keep a legitimate retry blocked for the rest of the session.
+TIMEOUT_BREAKER_TTL_MS = 10 * 60 * 1000
+TIMEOUT_BREAKER_MAX_ENTRIES = 32
+
+
 @dataclass
 class ChunkOutcome:
     chunk: Chunk
@@ -541,6 +548,9 @@ class Reader:
         ] = OrderedDict()
         self._answer_cache_bytes = 0
         self._answer_cache_lock = threading.Lock()
+        # Repeated-timeout breaker: breaker key -> (deadline_ms, expires_at_ms). Bounded,
+        # content-free and owned by this reader, so it dies with the session/generation.
+        self._timeout_breaker: OrderedDict[str, tuple[int, int]] = OrderedDict()
 
     # -- public ------------------------------------------------------------
 
@@ -580,16 +590,24 @@ class Reader:
         # vanished from the session's accounting and every savings figure derived from it
         # was overstated. Whatever was actually spent before the failure is carried out.
         spent = _CostSink()
+        breaker_key: str | None = None
+        suppressed = False
         try:
-            cache_key = self._authorized_cache_key(session_id, request, deadline)
+            cache_key, breaker_key, handles = self._authorized_keys(session_id, request, deadline)
             cached = self._cache_get(cache_key, request_id, accounting_id)
             if cached is not None:
                 result = cached
             else:
-                result = self._answer(
-                    session_id, request, request_id, deadline, accounting_id, spent
+                blocked = self._breaker_check(
+                    breaker_key, request, request_id, accounting_id, handles
                 )
-                self._cache_put(cache_key, result)
+                if blocked is not None:
+                    result, suppressed = blocked, True
+                else:
+                    result = self._answer(
+                        session_id, request, request_id, deadline, accounting_id, spent
+                    )
+                    self._cache_put(cache_key, result)
         except Exception as raw_exc:
             exc = (
                 raw_exc
@@ -613,6 +631,8 @@ class Reader:
                 provenance=provenance,
                 cost=spent.cost,
             )
+        if breaker_key is not None and not suppressed:
+            self._breaker_update(breaker_key, request, result)
         self._metrics.observe(
             "reader_duration_ms",
             max(0, self._clock.now_ms() - started_ms),
@@ -625,37 +645,138 @@ class Reader:
 
     # -- internals ---------------------------------------------------------
 
-    def _authorized_cache_key(
+    def _authorized_keys(
         self, session_id: str, raw: dict[str, Any], deadline: Deadline
-    ) -> str:
-        """Validate and re-authorize every handle before looking up cached content."""
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Validate and re-authorize every handle before looking up cached state.
+
+        Returns the answer-cache key, the repeated-timeout breaker key and the freshly
+        resolved handles. Both keys are bound to the session, every exact
+        source/snapshot/selector, the budgets, the refined flag and the reader contract,
+        so a changed snapshot, a narrower selector, another question or another provider
+        target never shares an entry. The breaker key leaves out only ``deadline_ms``
+        (compared separately, so a larger deadline is a different request) and collapses
+        whitespace runs in the question, so a re-send that differs only in spacing is
+        still recognised as the identical question.
+        """
         request = validate_request(raw, operations=READ_OPERATIONS)
         assert_no_secret(request["question"].encode("utf-8"), "QUESTION")
         deadline.check("RESOLVE")
+        handles = []
         for source in request["sources"]:
             entry = self._registry.resolve(session_id, source["source_id"])
             if entry.snapshot.snapshot_id != source["snapshot_id"]:
                 raise ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", retryable=False)
+            handles.append(
+                {
+                    "source_id": entry.source_id,
+                    "snapshot_id": entry.snapshot.snapshot_id,
+                    "media_type": entry.snapshot.media_type,
+                    "bytes": entry.snapshot.bytes_len,
+                    "expires_at": E.iso_expiry(entry.expires_at_epoch),
+                }
+            )
         deadline.check("RESOLVE")
         target = getattr(self._provider, "target", ProviderTarget(model="", provider=""))
-        material = json.dumps(
-            {
-                "session": session_id,
-                "schema": request["schema_version"],
-                "question": request["question"],
-                "sources": request["sources"],
-                "budgets": request["budgets"],
-                "refined": request.get("refined", False),
-                "reader_contract": {
-                    "system": READER_SYSTEM_PROMPT,
-                    "target": {"provider": target.provider, "model": target.model},
-                    "attribution_policy": self._policy.value,
-                },
+        material = {
+            "session": session_id,
+            "schema": request["schema_version"],
+            "question": request["question"],
+            "sources": request["sources"],
+            "budgets": request["budgets"],
+            "refined": request.get("refined", False),
+            "reader_contract": {
+                "system": READER_SYSTEM_PROMPT,
+                "target": {"provider": target.provider, "model": target.model},
+                "attribution_policy": self._policy.value,
             },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(material).hexdigest()
+        }
+        breaker_material = {
+            **material,
+            "kind": "repeated_timeout",
+            "question": " ".join(request["question"].split()),
+            "budgets": {k: v for k, v in request["budgets"].items() if k != "deadline_ms"},
+        }
+        return _digest(material), _digest(breaker_material), handles
+
+    # -- repeated-timeout breaker -------------------------------------------
+
+    def _breaker_check(
+        self,
+        key: str,
+        request: dict[str, Any],
+        request_id: str,
+        accounting_id: str | None,
+        handles: list[dict[str, Any]],
+    ) -> ReaderResult | None:
+        """Refuse to re-send a request that already timed out, without calling a model.
+
+        Only an *identical* request (see :meth:`_authorized_keys`) within the TTL is
+        stopped, and only when its deadline is no larger than the one that timed out.
+        The answer is the same TIMEOUT class the caller already saw, with a distinct
+        failure detail so it can never be mistaken for a fresh provider timeout, zero
+        attempts, intact handles, and nothing marked covered.
+        """
+        now = self._clock.now_ms()
+        deadline_ms = int(request["budgets"]["deadline_ms"])
+        with self._answer_cache_lock:
+            entry = self._timeout_breaker.get(key)
+            if entry is None:
+                return None
+            tripped_deadline, expires_at = entry
+            if now >= expires_at:
+                self._timeout_breaker.pop(key, None)
+                return None
+            if deadline_ms > tripped_deadline:
+                return None
+            self._timeout_breaker.move_to_end(key)
+        self._metrics.count("reader_timeout_breaker", {"result": "suppressed"})
+        exc = ShuntError("TIMEOUT", "REPEATED_TIMEOUT_SUPPRESSED", retryable=False)
+        provenance = self._failure_provenance(exc)
+        coverage = E.Coverage(upstream_truncated=None)
+        for handle in handles:
+            coverage.omit_once(handle["source_id"], {"kind": "all"}, "TIMEOUT")
+        env = E.error_envelope(
+            request_id,
+            exc,
+            accounting_id=accounting_id,
+            provenance=provenance,
+            sources=handles,
+            handles_valid=True,
+        )
+        env["coverage"] = coverage.to_dict()
+        return ReaderResult(
+            envelope=env,
+            provenance=provenance,
+            cost=ReaderCost.none(),
+            source_ids=tuple(h["source_id"] for h in handles),
+        )
+
+    def _breaker_update(self, key: str, request: dict[str, Any], result: ReaderResult) -> None:
+        envelope = result.envelope
+        code = envelope.get("code")
+        if code in ("ANSWERED", "NO_MATCH"):
+            # Any delivered answer, even partial, proves the request can complete.
+            with self._answer_cache_lock:
+                self._timeout_breaker.pop(key, None)
+            return
+        if not (
+            envelope.get("status") == "error"
+            and code == "TIMEOUT"
+            and result.cost.attempts_started > 0
+        ):
+            return
+        try:
+            deadline_ms = int(request["budgets"]["deadline_ms"])
+        except (KeyError, TypeError, ValueError):
+            return
+        expires_at = self._clock.now_ms() + TIMEOUT_BREAKER_TTL_MS
+        with self._answer_cache_lock:
+            self._timeout_breaker.pop(key, None)
+            self._timeout_breaker[key] = (deadline_ms, expires_at)
+            while len(self._timeout_breaker) > TIMEOUT_BREAKER_MAX_ENTRIES:
+                self._timeout_breaker.popitem(last=False)
+        self._metrics.count("reader_timeout_breaker", {"result": "tripped"})
 
     def _cache_get(
         self, key: str, request_id: str, accounting_id: str | None
@@ -2227,6 +2348,12 @@ def _as_failure_provenance(provenance: Provenance) -> Provenance:
         fallback_used=provenance.fallback_used,
         call_identities=provenance.call_identities,
     )
+
+
+def _digest(material: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _handles_survive(exc: ShuntError) -> bool:

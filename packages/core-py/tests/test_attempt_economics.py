@@ -274,3 +274,28 @@ def test_rejected_response_keeps_observed_identity_and_billing(text):
 def test_non_enum_attribution_never_persists_arbitrary_content():
     record = replace(call(), attribution="SYNTHETIC-PRIVATE-BODY")
     assert observations((record,), 1)[0]["attribution"] == "unknown"
+
+
+def test_ttl_less_cache_writes_are_persisted_but_never_priced_into_a_bucket():
+    record = observations((call(cache_write_unclassified_tokens=9),), 1)[0]
+    assert record["usage"]["cache_write_unclassified_tokens"] == 9
+    assert price_observation(record, rates()) == (None, "cache_write_ttl_unknown")
+    from types import SimpleNamespace
+
+    operation = SimpleNamespace(operation_id="op_synthetic", attempts_started=1)
+    summary = report([operation], {"op_synthetic": [record]}, rates())
+    assert summary["unknown_reasons"] == {"cache_write_ttl_unknown": 1}
+    assert summary["reader_cost_usd_total"] is None
+
+
+def test_a_pre_upgrade_observation_without_the_unclassified_field_still_prices():
+    record = observations((call(),), 1)[0]
+    record["usage"].pop("cache_write_unclassified_tokens")
+    assert price_observation(record, rates())[0] == Decimal("0.0003885")
+
+
+def test_a_malformed_unclassified_write_makes_the_whole_claim_unknown():
+    from context_shunt.provider import normalize_usage
+
+    usage, well_formed = normalize_usage(Usage(input_tokens=1, cache_write_unclassified_tokens=-1))
+    assert not well_formed and usage == Usage()

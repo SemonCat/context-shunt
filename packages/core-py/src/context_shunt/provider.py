@@ -355,6 +355,7 @@ class HostBridgeProvider:
                 cache_tokens=result.get("cache_tokens"),
                 cache_write_5m_tokens=result.get("cache_write_5m_tokens"),
                 cache_write_1h_tokens=result.get("cache_write_1h_tokens"),
+                cache_write_unclassified_tokens=result.get("cache_write_unclassified_tokens"),
                 input_includes_cache=result.get("input_includes_cache"),
                 method=(
                     TokenMethod.EXACT if result.get("usage_exact") is True else TokenMethod.UNKNOWN
@@ -414,6 +415,7 @@ def normalize_usage(usage: Any) -> tuple[Usage, bool]:
         usage.cache_tokens,
         usage.cache_write_5m_tokens,
         usage.cache_write_1h_tokens,
+        usage.cache_write_unclassified_tokens,
     )
     if any(
         value is not None

@@ -129,6 +129,8 @@ class Extraction:
     matches_found: int | None = None
     records_scanned: int | None = None
     records_matched: int | None = None
+    #: Effective ``[start, end)`` of an ``align: char`` bytes selector, else ``None``.
+    byte_range: tuple[int, int] | None = None
     #: True when the page emitted nothing *and* the scan position did not move, so a
     #: caller following ``next_cursor`` would loop forever. The extractor knows the start
     #: position, so it is the only place that can tell this apart from an honest empty
@@ -453,24 +455,12 @@ class Inspector:
         wire_budget: int,
         state: dict[str, Any],
     ) -> Extraction:
-        requested_start = int(selector["start"])
-        requested_end = int(selector["end"])
-        if requested_end < requested_start:
-            raise ShuntError("INVALID_REQUEST", "BAD_BYTE_RANGE", retryable=False)
-        start = max(requested_start, int(state.get("offset", requested_start)))
-        end = min(requested_end, len(data))
+        requested_start, end, start = byte_window(data, selector, state)
         out = Extraction(mode="bytes")
+        if selector.get("align") == "char":
+            out.byte_range = (requested_start, end)
         if start >= end:
             return out
-
-        # A text extraction cannot represent fragments of UTF-8 code points. Reject
-        # misaligned selectors instead of disclosing outside the range or dropping bytes.
-        if (
-            _forward_to_boundary(data, requested_start) != requested_start
-            or _forward_to_boundary(data, start) != start
-            or _forward_to_boundary(data, end) != end
-        ):
-            raise ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", retryable=False)
         begin = start
         take = min(end - begin, budget, self._limits.inspect_max_bytes_per_page)
         finish = _back_to_boundary(data, begin, begin + take)
@@ -677,6 +667,51 @@ class Inspector:
         return out
 
 
+def byte_window(
+    data: bytes, selector: dict[str, Any], state: dict[str, Any]
+) -> tuple[int, int, int]:
+    """Resolve a bytes selector to ``(range_start, range_end, page_start)``.
+
+    ``strict`` (the default) never moves an offset: a start, end or cursor offset inside a
+    UTF-8 character is refused, exactly as before ``align`` existed. ``char`` floors both
+    selector offsets to the start of the character containing them. Flooring *both* ends
+    is what makes contiguous ranges tile: ``[a, b)`` and ``[b, c)`` floor ``b`` to the same
+    character start, so a character straddling ``b`` is returned once, by the second range,
+    and never skipped. The widening is at most three bytes before ``start``, the bytes of
+    the one character the caller's range already cut into. A cursor offset is always one
+    this extractor issued on a boundary, so it is never adjusted - only checked.
+    """
+    requested_start = int(selector["start"])
+    requested_end = int(selector["end"])
+    if requested_end < requested_start:
+        raise ShuntError("INVALID_REQUEST", "BAD_BYTE_RANGE", retryable=False)
+    end = min(requested_end, len(data))
+    if selector.get("align") == "char":
+        requested_start = _floor_to_boundary(data, min(requested_start, len(data)))
+        end = _floor_to_boundary(data, end)
+    start = max(requested_start, int(state.get("offset", requested_start)))
+    # A text extraction cannot represent fragments of UTF-8 code points. Reject misaligned
+    # strict selectors instead of disclosing outside the range or dropping bytes.
+    if start < end and (
+        _forward_to_boundary(data, requested_start) != requested_start
+        or _forward_to_boundary(data, start) != start
+        or _forward_to_boundary(data, end) != end
+    ):
+        raise ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", retryable=False)
+    return requested_start, end, start
+
+
+def _floor_to_boundary(data: bytes, offset: int) -> int:
+    """Move back to the start of the UTF-8 character containing ``offset``.
+
+    The snapshot is validated UTF-8, so at most three continuation bytes precede a lead
+    byte. ``len(data)`` is the end of the payload and is already a boundary.
+    """
+    while 0 < offset < len(data) and (data[offset] & 0xC0) == 0x80:
+        offset -= 1
+    return offset
+
+
 def _forward_to_boundary(data: bytes, offset: int) -> int:
     """Advance to the next UTF-8 character start at or after ``offset``."""
     limit = len(data)
@@ -710,6 +745,7 @@ __all__ = [
     "Inspector",
     "Segment",
     "canonical_selector",
+    "byte_window",
     "decode_cursor",
     "encode_cursor",
 ]

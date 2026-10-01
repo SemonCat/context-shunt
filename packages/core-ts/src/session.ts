@@ -53,7 +53,7 @@ import {
 import { ShuntError, fallbackAllowed, isShuntError } from "./errors.js";
 import { GateDecision, PreReadGate, guidanceFor } from "./gate.js";
 import { enforce, enforceOrFixed, fixedError } from "./guard.js";
-import { CURSOR_PREFIX, Inspector, decodeCursor, encodeCursor } from "./inspect.js";
+import { CURSOR_PREFIX, Inspector, byteWindow, decodeCursor, encodeCursor } from "./inspect.js";
 import {
   compactToolResult,
   incumbentCompactToolResult,
@@ -458,8 +458,15 @@ export class ShuntSession {
         + "sources and structure the heuristic dropped are omitted. Treat the summary only "
         + "as navigation: never as the question's answer, exhaustive coverage, an exact "
         + "count, or citation evidence. Use the retained handles with context_shunt_inspect "
-        + "for exact bounded evidence.",
-      recovery: recoveryFor(originalFailure, true),
+        + "for exact bounded evidence."
+        + (result.envelope.failure_detail === "REPEATED_TIMEOUT_SUPPRESSED"
+          ? " This identical question over the same snapshots already exhausted its reader "
+            + "deadline in this session, so it was not sent to the reader again and no model "
+            + "call was made. Target the specific missing evidence with a narrower question or "
+            + "selector, or use context_shunt_inspect for exact bounded evidence over the "
+            + "retained handles."
+          : ""),
+      recovery: recoveryFor(originalFailure, true, result.envelope.failure_detail),
       accountingId: operationId,
       ...(result.envelope.failure_detail !== undefined
         ? { failureDetail: result.envelope.failure_detail }
@@ -596,20 +603,12 @@ export class ShuntSession {
           const sel = args.selector;
           if ((sel["kind"] === "lines" || sel["kind"] === "bytes") && Number(sel["end"]) < Number(sel["start"]))
             throw new ShuntError("INVALID_REQUEST", "BAD_RANGE");
-          if (sel["kind"] === "bytes") {
-            for (const offset of [Number(sel["start"]), Number(sel["end"])]) {
-              const byte = entry.snapshot.data[offset];
-              if (byte !== undefined && (byte & 0xc0) === 0x80) throw new ShuntError("INVALID_REQUEST", "BAD_RANGE");
-            }
-          }
           if (sel["kind"] === "search" && Buffer.byteLength(String(sel["needle"])) > this.config.limits.inspectMaxNeedleBytes)
             throw new ShuntError("INVALID_REQUEST", "NEEDLE_OVER_CAP");
           const state = args.cursor === undefined ? {} : decodeCursor(this.store.cursorKey(), args.cursor, args.source_id, args.snapshot_id, sel);
-          if (sel["kind"] === "bytes") {
-            const offset = Math.max(Number(sel["start"]), Number(state["offset"] ?? sel["start"]));
-            const byte = entry.snapshot.data[offset];
-            if (byte !== undefined && (byte & 0xc0) === 0x80) throw new ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY");
-          }
+          // The same resolution the extractor applies, so this fallback refuses exactly the
+          // selectors the normal path refuses and accepts `align: "char"` ones.
+          if (sel["kind"] === "bytes") byteWindow(entry.snapshot.data, sel, state);
           const failed = errorEnvelope(requestId, failure);
           const result: ReaderResult = { envelope: failed, provenance: deterministicProvenance("no_model_output"), cost: noReaderCost(), sourceIds: [entry.sourceId] };
           const synthetic = { schema_version: "1.1", operation: "read", request_id: requestId, question: "Bounded compaction", sources: [{source_id: args.source_id, snapshot_id: args.snapshot_id, selector: {kind: "all"}}], budgets: {max_chunks: 1, max_answer_bytes: 8192, deadline_ms: 60000} };
@@ -768,6 +767,9 @@ export class ShuntSession {
           : {}),
         ...(extraction.recordsMatched !== undefined
           ? { records_matched: extraction.recordsMatched }
+          : {}),
+        ...(extraction.byteRange !== undefined
+          ? { byte_range: { start: extraction.byteRange[0], end: extraction.byteRange[1] } }
           : {}),
       };
       return buildEnvelope({

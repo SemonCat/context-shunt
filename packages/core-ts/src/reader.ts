@@ -216,6 +216,13 @@ export interface ReaderResult {
 
 const ANSWER_CACHE_MAX_ENTRIES = 32;
 const ANSWER_CACHE_MAX_BYTES = 256 * 1024;
+/**
+ * How long one terminal reader TIMEOUT stops an identical re-send. Long enough to cover an
+ * agent's immediate retry loop inside one turn, short enough that a transient provider
+ * outage does not keep a legitimate retry blocked for the rest of the session.
+ */
+export const TIMEOUT_BREAKER_TTL_MS = 10 * 60 * 1000;
+export const TIMEOUT_BREAKER_MAX_ENTRIES = 32;
 
 interface CachedAnswer {
   envelope: Envelope;
@@ -459,6 +466,8 @@ export class Reader {
   private readonly verifier: CitationVerifier;
   private readonly answerCache = new Map<string, CachedAnswer>();
   private answerCacheBytes = 0;
+  /** Repeated-timeout breaker: key -> tripped deadline and expiry. Bounded, content-free. */
+  private readonly timeoutBreaker = new Map<string, { deadlineMs: number; expiresAtMs: number }>();
 
   constructor(
     private readonly registry: SourceRegistry,
@@ -526,14 +535,23 @@ export class Reader {
     // Whatever was actually spent before the failure is carried out.
     const spent: { cost: ReaderCost } = { cost: noReaderCost() };
     let result: ReaderResult;
+    let breakerKey: string | undefined;
+    let suppressed = false;
     try {
-      const cacheKey = this.authorizedCacheKey(sessionId, request, budget);
-      const cached = this.cacheGet(cacheKey, requestId, opts.accountingId);
+      const keys = this.authorizedKeys(sessionId, request, budget);
+      breakerKey = keys.breakerKey;
+      const cached = this.cacheGet(keys.cacheKey, requestId, opts.accountingId);
       if (cached !== undefined) {
         result = cached;
       } else {
-        result = await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
-        this.cachePut(cacheKey, result);
+        const blocked = this.breakerCheck(keys, requestId, opts.accountingId);
+        if (blocked !== undefined) {
+          result = blocked;
+          suppressed = true;
+        } else {
+          result = await this.run(sessionId, request, requestId, budget, opts.accountingId, spent);
+          this.cachePut(keys.cacheKey, result);
+        }
       }
     } catch (raw) {
       const err = isShuntError(raw) ? raw : new ShuntError("STORE_FAILED", "INTERNAL_ERROR");
@@ -555,6 +573,7 @@ export class Reader {
         sourceIds: [],
       };
     }
+    if (breakerKey !== undefined && !suppressed) this.breakerUpdate(breakerKey, request, result);
     this.metrics.observe(
       "reader_duration_ms",
       Math.max(0, this.clock.nowMs() - startedMs),
@@ -563,19 +582,39 @@ export class Reader {
     return result;
   }
 
-  /** Validate and re-authorize every handle before a cache lookup can reveal an answer. */
-  private authorizedCacheKey(sessionId: string, raw: unknown, deadline: Deadline): string {
+  /**
+   * Validate and re-authorize every handle before a cache or breaker lookup.
+   *
+   * Both keys bind the session, every exact source/snapshot/selector, the budgets, the
+   * refined flag and the reader contract. The breaker key leaves out only `deadline_ms`
+   * (compared separately, so a larger deadline is a different request) and collapses
+   * whitespace runs in the question.
+   */
+  private authorizedKeys(sessionId: string, raw: unknown, deadline: Deadline): {
+    cacheKey: string;
+    breakerKey: string;
+    deadlineMs: number;
+    handles: SourceHandle[];
+  } {
     const request = validateRequest(raw, READ_OPERATIONS) as ReaderRequest;
     assertNoSecret(request.question, "QUESTION");
     deadline.check("RESOLVE");
+    const handles: SourceHandle[] = [];
     for (const source of request.sources) {
       const entry = this.registry.resolve(sessionId, source.source_id);
       if (entry.snapshot.snapshotId !== source.snapshot_id) {
         throw new ShuntError("SOURCE_CHANGED", "SNAPSHOT_MISMATCH", false);
       }
+      handles.push({
+        source_id: entry.sourceId,
+        snapshot_id: entry.snapshot.snapshotId,
+        media_type: entry.snapshot.mediaType,
+        bytes: entry.snapshot.bytesLen,
+        expires_at: isoExpiry(entry.expiresAtEpoch),
+      });
     }
     deadline.check("RESOLVE");
-    const material = stableJson({
+    const material = {
       session: sessionId,
       schema: request.schema_version,
       question: request.question,
@@ -587,8 +626,81 @@ export class Reader {
         target: providerTargetOf(this.provider),
         attribution_policy: this.policy,
       },
-    });
-    return createHash("sha256").update(material, "utf8").digest("hex");
+    };
+    const { deadline_ms: deadlineMs, ...breakerBudgets } = request.budgets;
+    const breakerMaterial = {
+      ...material,
+      kind: "repeated_timeout",
+      question: request.question.split(/\s+/).filter(Boolean).join(" "),
+      budgets: breakerBudgets,
+    };
+    const digest = (value: unknown) =>
+      createHash("sha256").update(stableJson(value), "utf8").digest("hex");
+    return {
+      cacheKey: digest(material),
+      breakerKey: digest(breakerMaterial),
+      deadlineMs: Number(deadlineMs),
+      handles,
+    };
+  }
+
+  /** Refuse to re-send a request that already timed out, without calling a model. */
+  private breakerCheck(
+    keys: { breakerKey: string; deadlineMs: number; handles: SourceHandle[] },
+    requestId: string,
+    accountingId?: string,
+  ): ReaderResult | undefined {
+    const entry = this.timeoutBreaker.get(keys.breakerKey);
+    if (entry === undefined) return undefined;
+    if (this.clock.nowMs() >= entry.expiresAtMs) {
+      this.timeoutBreaker.delete(keys.breakerKey);
+      return undefined;
+    }
+    if (keys.deadlineMs > entry.deadlineMs) return undefined;
+    this.timeoutBreaker.delete(keys.breakerKey);
+    this.timeoutBreaker.set(keys.breakerKey, entry);
+    this.metrics.count("reader_timeout_breaker", { result: "suppressed" });
+    const err = new ShuntError("TIMEOUT", "REPEATED_TIMEOUT_SUPPRESSED", false);
+    const provenance = this.failureProvenance(err);
+    const envelopeOpts: Parameters<typeof errorEnvelope>[2] = {
+      provenance,
+      handlesValid: true,
+      sources: keys.handles,
+    };
+    if (accountingId !== undefined) envelopeOpts.accountingId = accountingId;
+    const envelope = errorEnvelope(requestId, err, envelopeOpts);
+    const coverage = new Coverage();
+    coverage.upstreamTruncated = null;
+    for (const handle of keys.handles) coverage.omitOnce(handle.source_id, { kind: "all" }, "TIMEOUT");
+    envelope.coverage = coverage.toShape();
+    return {
+      envelope,
+      provenance,
+      cost: noReaderCost(),
+      sourceIds: keys.handles.map((handle) => handle.source_id),
+    };
+  }
+
+  private breakerUpdate(key: string, raw: unknown, result: ReaderResult): void {
+    const envelope = result.envelope;
+    if (envelope.code === "ANSWERED" || envelope.code === "NO_MATCH") {
+      // Any delivered answer, even partial, proves the request can complete.
+      this.timeoutBreaker.delete(key);
+      return;
+    }
+    if (envelope.status !== "error" || envelope.code !== "TIMEOUT" || result.cost.attemptsStarted < 1) {
+      return;
+    }
+    const deadlineMs = Number((raw as ReaderRequest).budgets?.deadline_ms);
+    if (!Number.isFinite(deadlineMs)) return;
+    this.timeoutBreaker.delete(key);
+    this.timeoutBreaker.set(key, { deadlineMs, expiresAtMs: this.clock.nowMs() + TIMEOUT_BREAKER_TTL_MS });
+    while (this.timeoutBreaker.size > TIMEOUT_BREAKER_MAX_ENTRIES) {
+      const oldest = this.timeoutBreaker.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.timeoutBreaker.delete(oldest);
+    }
+    this.metrics.count("reader_timeout_breaker", { result: "tripped" });
   }
 
   private cacheGet(key: string, requestId: string, accountingId?: string): ReaderResult | undefined {

@@ -124,6 +124,7 @@ export interface ExtractionShape {
   matches_found?: number;
   records_scanned?: number;
   records_matched?: number;
+  byte_range?: { start: number; end: number };
   disclosed_bytes_source: number;
   disclosed_bytes_session: number;
   disclosure_limit_reached: boolean;
@@ -379,10 +380,21 @@ export function buildEnvelope(opts: BuildOptions): Envelope {
  * a retry or a refined question over the *same* snapshot. Only a failure of the handle
  * itself calls for a recapture.
  */
-export function recoveryFor(code: string, handlesValid?: boolean): RecoveryShape {
+/**
+ * Recovery that depends on more than the code. An identical request that already timed out
+ * is not worth an immediate identical retry: lead with narrower work, and keep waiting as
+ * the last resort for when the suppression window has passed.
+ */
+const RECOVERY_BY_DETAIL: Record<string, string[]> = {
+  "TIMEOUT/REPEATED_TIMEOUT_SUPPRESSED": [
+    "NARROW_SELECTOR", "REFINE_QUESTION_SAME_SNAPSHOT", "INSPECT_HANDLE", "WAIT_AND_RETRY",
+  ],
+};
+
+export function recoveryFor(code: string, handlesValid?: boolean, detail?: string): RecoveryShape {
   return {
     handles_valid: handlesValid ?? HANDLES_SURVIVE.has(code),
-    actions: RECOVERY_BY_CODE[code] ?? ["NONE"],
+    actions: [...(RECOVERY_BY_DETAIL[`${code}/${detail ?? ""}`] ?? RECOVERY_BY_CODE[code] ?? ["NONE"])],
   };
 }
 
@@ -400,6 +412,8 @@ export interface ErrorEnvelopeOptions {
 }
 
 /** Map a bounded failure to an envelope. The exception message never rides along. */
+export const REPEATED_TIMEOUT_GUIDANCE = "Keep the retained handles. This identical question over the same snapshots already exhausted its reader deadline in this session, so it was not sent to the reader again and no model call was made. Narrow the question or selector to the specific missing evidence, or use context_shunt_inspect search/lines/aggregate for exact bounded evidence.";
+
 export function errorEnvelope(
   requestId: string,
   err: ShuntError,
@@ -418,13 +432,17 @@ export function errorEnvelope(
       ? { handles_valid: false, actions: ["REUSE_POINTER_PAIR"] }
       : snapshotMismatch
         ? { handles_valid: true, actions: ["REUSE_POINTER_PAIR"] }
-      : recoveryFor(err.code, opts.handlesValid),
+      : recoveryFor(err.code, opts.handlesValid, err.detail),
     failureDetail: safeFailureDetail(err.detail),
   };
   if (invalidSnapshot) {
     build.guidance = "The snapshot_id is malformed. Reuse the exact source_id/snapshot_id pair from the original pointer; do not shorten, repair, or guess the hash. Check the tool argument schema.";
   } else if (snapshotMismatch) {
     build.guidance = "The source_id exists, but the snapshot_id does not match its immutable snapshot. Reuse the exact source_id/snapshot_id pair from the original pointer; do not repair or guess the hash. Recapture only if that exact original pair is expired or the source was intentionally refreshed.";
+  } else if (err.code === "TIMEOUT" && err.detail === "REPEATED_TIMEOUT_SUPPRESSED") {
+    build.guidance = REPEATED_TIMEOUT_GUIDANCE;
+  } else if (err.code === "INVALID_REQUEST" && err.detail === "UTF8_RANGE_BOUNDARY") {
+    build.guidance = "Keep the same retained handle. Retry the same byte range with \"align\": \"char\" so both offsets floor to UTF-8 character starts (the effective range is returned as extraction.byte_range), or page by lines and follow next_cursor. A bounded literal search can also locate a safe window without a source re-read.";
   } else if (err.code === "INVALID_REQUEST") {
     build.guidance = "Check the tool argument schema and retry with corrected arguments.";
   }

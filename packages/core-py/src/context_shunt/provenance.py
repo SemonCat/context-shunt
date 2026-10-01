@@ -133,6 +133,10 @@ class Usage:
     cache_write_5m_tokens: int | None = None
     cache_write_1h_tokens: int | None = None
     input_includes_cache: bool | None = None
+    #: Cache writes a host reports without a TTL bucket. Recorded as observed so the
+    #: spend is not erased, never assigned to the five-minute or one-hour bucket, and
+    #: never priced: the applicable write rate depends on the TTL it does not state.
+    cache_write_unclassified_tokens: int | None = None
 
     @property
     def complete(self) -> bool:

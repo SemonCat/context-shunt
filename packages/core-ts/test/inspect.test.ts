@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ShuntError } from "../src/errors.js";
-import { Inspector, decodeCursor, encodeCursor, escapedJsonCost } from "../src/inspect.js";
+import { Inspector, byteWindow, decodeCursor, encodeCursor, escapedJsonCost } from "../src/inspect.js";
 import { DEFAULT_LIMITS as L, EMITTED_SCHEMA_VERSION } from "../src/limits.js";
 import { UnavailableProvider } from "../src/provider.js";
 import { ShuntSession } from "../src/session.js";
@@ -695,4 +695,98 @@ it("makes every small UTF-8 range exact or explicitly unable to progress", () =>
       }
     }
   }
+});
+
+// -- align: "char" byte selectors ---------------------------------------------
+
+describe("align char byte selectors", () => {
+  const MIXED = "aé日🎯́ß中文🇹🇼👩‍💻Ωz\n".repeat(3);
+  const raw = enc(MIXED);
+  const floor = (offset: number) => {
+    let p = Math.min(offset, raw.length);
+    while (p > 0 && p < raw.length && ((raw[p] as number) & 0xc0) === 0x80) p -= 1;
+    return p;
+  };
+
+  it("floors both offsets and never widens more than one character", () => {
+    for (let start = 0; start <= raw.length; start++) {
+      for (let end = start; end <= raw.length; end++) {
+        const [lo, hi, page] = byteWindow(raw, { kind: "bytes", start, end, align: "char" }, {});
+        expect([lo, hi, page]).toEqual([floor(start), floor(end), floor(start)]);
+        expect(start - lo).toBeLessThanOrEqual(3);
+        expect(hi).toBeLessThanOrEqual(end);
+      }
+    }
+  });
+
+  it("contiguous ranges tile the source without loss or duplication", () => {
+    const inspector = new Inspector();
+    const index = new LineIndex(raw);
+    for (const width of [1, 2, 3, 5, 7]) {
+      for (const budget of [4, 16]) {
+        const collected: number[] = [];
+        for (let start = 0; start < raw.length; start += width) {
+          const selector = { kind: "bytes", start, end: start + width, align: "char" };
+          let state = {};
+          for (let i = 0; i < raw.length + 2; i++) {
+            const page = inspector.extract(raw, index, selector, {
+              maxResultBytes: budget, maxScanLines: 1, maxWireBytes: WIRE, state,
+            });
+            expect(page.stalled).toBe(false);
+            expect(page.resultBytes).toBeLessThanOrEqual(budget);
+            const [lo, hi] = page.byteRange!;
+            for (const segment of page.segments) {
+              expect(segment.start).toBeGreaterThanOrEqual(lo);
+              expect(segment.end).toBeLessThanOrEqual(hi);
+              collected.push(...raw.subarray(segment.start, segment.end));
+            }
+            if (page.complete) break;
+            state = page.nextCursorState!;
+          }
+        }
+        expect(Buffer.from(collected).equals(Buffer.from(raw))).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the strict default refusal and reports no byte_range for it", () => {
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, MIXED);
+    const refused = s.inspect(request(entry, { kind: "bytes", start: 2, end: 9 }));
+    expect(refused.code).toBe("INVALID_REQUEST");
+    expect(refused.failure_detail).toBe("UTF8_RANGE_BOUNDARY");
+    expect(refused.guidance).toContain('"align": "char"');
+    expect(refused.extraction).toBeUndefined();
+    const strict = s.inspect(request(entry, { kind: "bytes", start: 0, end: 3 }));
+    expect(strict.extraction!.byte_range).toBeUndefined();
+  });
+
+  it("charges exactly what it discloses and binds cursors to the aligned selector", () => {
+    const dir = tmp();
+    const s = session(dir);
+    const entry = captured(dir, s, MIXED);
+    const selector = { kind: "bytes", start: 2, end: 9, align: "char" };
+    let req = request(entry, selector, { maxResultBytes: 4 });
+    const collected: number[] = [];
+    let page;
+    for (let i = 0; i < 16; i++) {
+      const env = s.inspect(req);
+      expect(env.code).toBe("EXTRACTED");
+      page = env.extraction!;
+      expect(page.byte_range).toEqual({ start: floor(2), end: floor(9) });
+      for (const segment of page.segments) collected.push(...enc(segment.text));
+      if (page.complete) break;
+      req = request(entry, selector, { maxResultBytes: 4, cursor: page.next_cursor });
+    }
+    expect(Buffer.from(collected).equals(Buffer.from(raw.subarray(floor(2), floor(9))))).toBe(true);
+    expect(page!.disclosed_bytes_source).toBe(collected.length);
+    const first = s.inspect(request(entry, { ...selector, end: 30 }, { maxResultBytes: 4 }));
+    const crossed = s.inspect(
+      request(entry, { kind: "bytes", start: 2, end: 30 }, {
+        maxResultBytes: 4, cursor: first.extraction!.next_cursor,
+      }),
+    );
+    expect(crossed.code).toBe("INVALID_REQUEST");
+  });
 });

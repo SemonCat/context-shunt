@@ -1114,7 +1114,7 @@ def _artifact_install_smoke(
                     "from importlib.metadata import version; "
                     "assert version('jsonschema') == '4.26.0'; "
                     "import context_shunt as c; "
-                    "assert c.__version__ == '1.1.1', c.__version__; "
+                    "assert c.__version__ == '1.1.2', c.__version__; "
                     f"assert c.EMITTED_SCHEMA_VERSION == {emitted_contract!r}; "
                     # An installed wheel must be able to open a store from its own
                     # vendored DDL, in a clean root with no repository present.

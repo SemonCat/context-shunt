@@ -29,6 +29,8 @@ import {
   INCOMPLETE_ANSWER_PREFIX,
   MAX_RAW_CITATIONS,
   Reader,
+  TIMEOUT_BREAKER_MAX_ENTRIES,
+  TIMEOUT_BREAKER_TTL_MS,
 } from "../src/reader.js";
 import { SourceRegistry } from "../src/registry.js";
 import { JSON_MEDIA_TYPE, snapshotBytes } from "../src/snapshot.js";
@@ -2538,5 +2540,114 @@ describe("release blockers: raw-citation bound, nested chains, bridge usage, per
     expect(records.length).toBe(1);
     expect(result.cost.attemptsStarted).toBe(1);
     expect(observedModel(records[0] as CallIdentity)).toBe(READER_MODEL);
+  });
+});
+
+
+// -- repeated-timeout breaker --------------------------------------------------
+
+describe("repeated-timeout breaker", () => {
+  const timeout = () => new ShuntError("TIMEOUT", "MODEL_CALL", true);
+  const answer = claimsJson(
+    [{ text: "max_retries is 3", citation_ids: ["c1"] }],
+    [{ id: "c1", line_start: 2, line_end: 2, quote: "max_retries = 3" }],
+  );
+
+  function fixture() {
+    const dir = tmp();
+    mkdirSync(join(dir, "ws"), { recursive: true });
+    const path = join(dir, "ws", "conf.txt");
+    writeFileSync(path, SOURCE);
+    const replies: Array<string | ShuntError> = Array.from({ length: 64 }, timeout);
+    const provider = new FakeLuna(replies, answer);
+    const clock = new FakeClock();
+    const s = new ShuntSession("sess", makeConfig(dir), makeCapability(), { provider, clock });
+    return { s, provider, clock, entry: s.registerPath(path), replies, path };
+  }
+
+  function read(
+    entry: { sourceId: string; snapshot: { snapshotId: string } },
+    requestId: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      schema_version: "1.3",
+      request_id: requestId,
+      operation: "read",
+      question: QUESTION,
+      sources: [{ source_id: entry.sourceId, snapshot_id: entry.snapshot.snapshotId, selector: { kind: "all" } }],
+      budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 60000 },
+      ...extra,
+    };
+  }
+
+  it("does not re-send an identical timed-out read and says so", async () => {
+    const { s, provider, entry } = fixture();
+    const first = await s.read(read(entry, "req_1"));
+    const calls = provider.callCount;
+    expect(calls).toBeGreaterThan(0);
+    expect(first.failure_detail).not.toBe("REPEATED_TIMEOUT_SUPPRESSED");
+    const second = await s.read(read(entry, "req_2", { question: `  ${QUESTION.replace(" ", "   ")} ` }));
+    expect(provider.callCount).toBe(calls);
+    expect(second.code).toBe("LEGACY_COMPACTED");
+    expect(second.failure_detail).toBe("REPEATED_TIMEOUT_SUPPRESSED");
+    expect(second.provenance!.attempts_started).toBe(0);
+    expect(second.coverage.complete).toBe(false);
+    expect(second.recovery!.handles_valid).toBe(true);
+    expect(second.recovery!.actions[0]).toBe("NARROW_SELECTOR");
+    expect(second.guidance).toContain("not sent to the reader again");
+    expect(second.sources).toEqual(first.sources);
+  });
+
+  it("still sends a different question, narrower selector or larger deadline", async () => {
+    const { s, provider, entry, replies } = fixture();
+    await s.read(read(entry, "req_1"));
+    for (const extra of [
+      { question: "Which backoff strategy applies?" },
+      { refined: true },
+      { budgets: { max_chunks: 8, max_answer_bytes: 8192, deadline_ms: 120000 } },
+    ]) {
+      const before = provider.callCount;
+      const env = await s.read(read(entry, `req_${JSON.stringify(extra).length}`, extra));
+      expect(provider.callCount).toBeGreaterThan(before);
+      expect(env.failure_detail).not.toBe("REPEATED_TIMEOUT_SUPPRESSED");
+    }
+    replies.length = 0;
+    const narrower = read(entry, "req_n");
+    (narrower.sources[0] as Record<string, unknown>).selector = { kind: "lines", start: 1, end: 2 };
+    const before = provider.callCount;
+    expect((await s.read(narrower)).code).toBe("ANSWERED");
+    expect(provider.callCount).toBeGreaterThan(before);
+  });
+
+  it("expires after its TTL and starts clean after reset", async () => {
+    const { s, provider, clock, entry, replies, path } = fixture();
+    await s.read(read(entry, "req_1"));
+    clock.advance(TIMEOUT_BREAKER_TTL_MS - 1);
+    let before = provider.callCount;
+    expect((await s.read(read(entry, "req_2"))).failure_detail).toBe("REPEATED_TIMEOUT_SUPPRESSED");
+    expect(provider.callCount).toBe(before);
+    clock.advance(1);
+    replies.length = 0;
+    expect((await s.read(read(entry, "req_3"))).code).toBe("ANSWERED");
+    expect(provider.callCount).toBeGreaterThan(before);
+    replies.push(...Array.from({ length: 16 }, timeout));
+    await s.read(read(entry, "req_4", { question: "Fresh timed-out question?" }));
+    const fresh = s.reset(2);
+    const again = fresh.registerPath(path);
+    before = provider.callCount;
+    await fresh.read(read(again, "req_5", { question: "Fresh timed-out question?" }));
+    expect(provider.callCount).toBeGreaterThan(before);
+  });
+
+  it("keeps a bounded, content-free state", async () => {
+    const { s, entry } = fixture();
+    for (let i = 0; i < TIMEOUT_BREAKER_MAX_ENTRIES + 4; i++) {
+      await s.read(read(entry, `req_${i}`, { question: `What is value ${i}?` }));
+    }
+    const state = (s as unknown as { reader: { timeoutBreaker: Map<string, unknown> } }).reader.timeoutBreaker;
+    expect(state.size).toBe(TIMEOUT_BREAKER_MAX_ENTRIES);
+    for (const key of state.keys()) expect(key).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify([...state.values()])).not.toContain("value");
   });
 });

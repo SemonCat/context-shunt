@@ -881,6 +881,10 @@ def _bridge_call(
         "cache_tokens": _usage_field(usage, "cache_read_tokens"),
         "cache_write_5m_tokens": _usage_field(usage, "cache_write_5m_tokens"),
         "cache_write_1h_tokens": _usage_field(usage, "cache_write_1h_tokens"),
+        # Hermes' PluginLlmUsage reports one TTL-less `cache_write_tokens` count. Forward a
+        # positive one as observed-but-unclassified rather than dropping it or guessing its
+        # TTL bucket; zero stays unknown for the same reason as every other field.
+        "cache_write_unclassified_tokens": _usage_field(usage, "cache_write_tokens"),
         # Preserve unknowns: the legacy facade does not expose this convention.
         "input_includes_cache": getattr(usage, "input_includes_cache", None),
         "usage_exact": usage is not None
@@ -1641,8 +1645,10 @@ INSPECT_TOOL_SCHEMA = {
         "array in the actual JSON; verify paths from bounded evidence, never infer a wrapper "
         "key. record_pointer applies after expansion; parse_json only decodes a selected "
         "record string. Distinct/grouping accept string, boolean and null fields; "
-        "numeric/object values are refused. Byte ranges must stay within authorized bounds "
-        "and end on complete UTF-8 characters."
+        "numeric/object values are refused. Byte ranges must stay within authorized bounds; "
+        'for multilingual or emoji text pass "align": "char" so both offsets floor to '
+        "UTF-8 character starts (reported as extraction.byte_range) instead of being "
+        "refused as UTF8_RANGE_BOUNDARY, or page by lines."
     ),
     "parameters": _registered_tool_parameters("inspectArgs"),
 }

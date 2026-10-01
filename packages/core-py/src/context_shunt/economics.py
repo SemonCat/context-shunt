@@ -489,6 +489,10 @@ def price_observation(record: dict, rates: dict) -> tuple[Decimal | None, str | 
     if rate is None:
         return None, "rate_unknown"
     usage = record["usage"]
+    if usage.get("cache_write_unclassified_tokens"):
+        # Real cache-write spend whose TTL bucket the host did not report. Neither write
+        # rate can be applied without guessing, so the attempt stays unpriced.
+        return None, "cache_write_ttl_unknown"
     if usage["method"] != "exact" or any(usage[k] is None for k in COMPONENTS):
         return None, "usage_unknown"
     cached = sum(usage[k] for k in COMPONENTS[2:])

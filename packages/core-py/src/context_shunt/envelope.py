@@ -98,6 +98,18 @@ _RECOVERY_BY_CODE: dict[str, tuple[str, ...]] = {
     "SPILL_FAILED": ("RECAPTURE_SOURCE",),
 }
 
+#: Recovery that depends on more than the code. An identical request that already timed
+#: out is not worth an immediate identical retry: lead with narrower work, and keep
+#: waiting as the last resort for when the suppression window has passed.
+_RECOVERY_BY_DETAIL: dict[tuple[str, str], tuple[str, ...]] = {
+    ("TIMEOUT", "REPEATED_TIMEOUT_SUPPRESSED"): (
+        "NARROW_SELECTOR",
+        "REFINE_QUESTION_SAME_SNAPSHOT",
+        "INSPECT_HANDLE",
+        "WAIT_AND_RETRY",
+    ),
+}
+
 
 def iso_expiry(epoch_seconds: float) -> str:
     return datetime.fromtimestamp(epoch_seconds, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -290,7 +302,9 @@ def _validated_recovery(recovery: dict[str, Any]) -> dict[str, Any]:
     return {"handles_valid": bool(recovery.get("handles_valid")), "actions": list(actions[:6])}
 
 
-def recovery_for(code: str, *, handles_valid: bool | None = None) -> dict[str, Any]:
+def recovery_for(
+    code: str, *, handles_valid: bool | None = None, detail: str | None = None
+) -> dict[str, Any]:
     """Deterministic next steps for a failure code.
 
     ``handles_valid`` is stated explicitly because it is the fact a caller most needs: a
@@ -301,7 +315,9 @@ def recovery_for(code: str, *, handles_valid: bool | None = None) -> dict[str, A
     valid = code in _HANDLES_SURVIVE if handles_valid is None else handles_valid
     return {
         "handles_valid": valid,
-        "actions": list(_RECOVERY_BY_CODE.get(code, ("NONE",))),
+        "actions": list(
+            _RECOVERY_BY_DETAIL.get((code, detail or "")) or _RECOVERY_BY_CODE.get(code, ("NONE",))
+        ),
     }
 
 
@@ -325,7 +341,7 @@ def error_envelope(
         if invalid_snapshot
         else {"handles_valid": True, "actions": ["REUSE_POINTER_PAIR"]}
         if snapshot_mismatch
-        else recovery_for(exc.code, handles_valid=handles_valid)
+        else recovery_for(exc.code, handles_valid=handles_valid, detail=exc.detail)
     )
     detail_guidance = {
         "BAD_SELECTOR": (
@@ -339,9 +355,17 @@ def error_envelope(
             "recapture the source."
         ),
         "UTF8_RANGE_BOUNDARY": (
-            "Keep the same retained handle and adjust the 0-based half-open byte range so "
-            "both offsets fall on UTF-8 character boundaries. A bounded literal search can "
-            "locate a safe window without a source re-read."
+            'Keep the same retained handle. Retry the same byte range with "align": '
+            '"char" so both offsets floor to UTF-8 character starts (the effective range is '
+            "returned as extraction.byte_range), or page by lines and follow next_cursor. "
+            "A bounded literal search can also locate a safe window without a source re-read."
+        ),
+        "REPEATED_TIMEOUT_SUPPRESSED": (
+            "Keep the retained handles. This identical question over the same snapshots "
+            "already exhausted its reader deadline in this session, so it was not sent "
+            "to the reader again and no model call was made. Narrow the question or "
+            "selector to the specific missing evidence, or use context_shunt_inspect "
+            "search/lines/aggregate for exact bounded evidence."
         ),
         "REQUEST_OVER_TOKEN_CAP": (
             "Keep the retained handles. Use deterministic inspect search/aggregate for exact "

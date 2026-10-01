@@ -55,7 +55,7 @@ from .errors import ShuntError, fallback_allowed
 from .fallback import compact_failure, fit_compaction
 from .gate import Decision, GateDecision, PreReadGate, guidance_for
 from .guard import OutputGuardError, enforce, enforce_or_fixed, fixed_error
-from .inspect import CURSOR_PREFIX, Inspector, decode_cursor, encode_cursor
+from .inspect import CURSOR_PREFIX, Inspector, byte_window, decode_cursor, encode_cursor
 from .legacy_compact import compact_tool_result
 from .limits import EMITTED_SCHEMA_VERSION
 from .metrics import MetricsSink, NullMetrics
@@ -546,6 +546,14 @@ class ShuntSession:
                 "failure; keep these handles and use deterministic inspect "
                 "search/aggregate, or narrow the selector and question for one refined read."
             )
+        elif result.envelope.get("failure_detail") == "REPEATED_TIMEOUT_SUPPRESSED":
+            guidance += (
+                " This identical question over the same snapshots already exhausted its "
+                "reader deadline in this session, so it was not sent to the reader again "
+                "and no model call was made. Target the specific missing evidence with a "
+                "narrower question or selector, or use context_shunt_inspect for exact "
+                "bounded evidence over the retained handles."
+            )
         elif original_failure == "TIMEOUT":
             guidance += (
                 " This result is partial, not complete. Retrying the identical full-source "
@@ -594,7 +602,11 @@ class ShuntSession:
                 ),
             ),
             guidance=guidance,
-            recovery=E.recovery_for(original_failure, handles_valid=True),
+            recovery=E.recovery_for(
+                original_failure,
+                handles_valid=True,
+                detail=result.envelope.get("failure_detail"),
+            ),
             accounting_id=operation_id,
             legacy_compaction=legacy_compaction,
         )
@@ -705,14 +717,9 @@ class ShuntSession:
         if kind in ("lines", "bytes") and selector["end"] < selector["start"]:
             raise ShuntError("INVALID_REQUEST", "BAD_SELECTOR")
         if kind == "bytes":
-            data = entry.snapshot.data
-            start = max(selector["start"], int(state.get("offset", selector["start"])))
-            end = min(selector["end"], len(data))
-            if start < end and any(
-                0 <= pos < len(data) and data[pos] & 0xC0 == 0x80
-                for pos in (selector["start"], start, end)
-            ):
-                raise ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY")
+            # The same resolution the extractor applies, so this fallback refuses exactly
+            # the selectors the normal path refuses and accepts `align: char` ones.
+            byte_window(entry.snapshot.data, selector, state)
         if (
             kind == "search"
             and len(selector["needle"].encode("utf-8"))
@@ -918,6 +925,11 @@ class ShuntSession:
                 block["records_scanned"] = extraction.records_scanned
             if extraction.records_matched is not None:
                 block["records_matched"] = extraction.records_matched
+            if extraction.byte_range is not None:
+                block["byte_range"] = {
+                    "start": extraction.byte_range[0],
+                    "end": extraction.byte_range[1],
+                }
             return E.build(
                 request_id=request_id,
                 status="ok" if extraction.complete and fallback is None else "partial",

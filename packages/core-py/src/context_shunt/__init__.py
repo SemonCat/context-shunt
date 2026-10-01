@@ -69,7 +69,7 @@ from .session import ShuntSession, build_provider
 from .spill import SpillEngine, SumaSpillEngine
 from .store import Capture, OperationRecord, PublishedHandle, ScopeIdentity, SnapshotStore
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 __all__ = [
     "ArtifactImportConfig",

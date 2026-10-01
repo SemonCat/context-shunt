@@ -187,7 +187,8 @@ export const INSPECT_TOOL_DESCRIPTION =
   + "copy; a file small enough to fit that budget can be returned in full. A minified "
   + "one-line JSON array, or one wrapped in a single outer JSON-string field (for example "
   + "{\"result\": \"<json array as text>\"}), is usually the aggregate selector's job "
-  + "instead of search/byte paging.";
+  + "instead of search/byte paging. For multilingual or emoji text, add \"align\":\"char\" to a "
+  + "bytes selector so both offsets floor to UTF-8 character starts instead of being refused.";
 
 export const INSPECT_TOOL_PARAMETERS = {
   type: "object",
@@ -201,7 +202,7 @@ export const INSPECT_TOOL_PARAMETERS = {
     selector: {
       type: "object",
       description:
-        'Exactly one of {"kind":"lines","start":N,"end":N}, {"kind":"bytes","start":N,"end":N}, '
+        'Exactly one of {"kind":"lines","start":N,"end":N}, {"kind":"bytes","start":N,"end":N[,"align":"char"]}, '
         + '{"kind":"search","needle":"...","max_matches":N}, or {"kind":"aggregate",'
         + '"records_pointer":"<RFC 6901 pointer to the array>",...} for exact counts, distinct '
         + 'values, or grouping over a JSON array. Add "decode_pointer" (same pointer syntax) to '

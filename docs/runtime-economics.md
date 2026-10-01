@@ -48,10 +48,23 @@ cache usage prevent a complete attempt price. Requested identity alone never qua
 pricing requires provider-confirmed or host-resolved attribution.
 
 Hermes' legacy facade treats missing and zero usage alike. The adapter preserves that
-ambiguity, forwards positive cache-write buckets when available, and does not infer
-inclusion from a model name. On that facade, full prices may remain unknown even after
-installing this release. Recovering those fields requires a supported host usage API;
-this release does not patch Hermes or reinterpret absent fields as zero.
+ambiguity and does not infer inclusion from a model name.
+
+Hermes' `PluginLlmUsage` (checked against the v2026.9.24 host source) exposes
+`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, one TTL-less
+`cache_write_tokens` and `cost_usd`. It has no five-minute/one-hour write buckets and no
+cache-inclusion flag. Earlier adapters read only the bucketed names, so a positive host
+cache-write count was silently dropped. The adapter now forwards a positive
+`cache_write_tokens` as `cache_write_unclassified_tokens`: persisted per attempt, never
+assigned to a TTL bucket, and never priced. An attempt carrying it reports
+`cache_write_ttl_unknown` instead of a guessed price.
+
+Concrete unresolved boundary: under that host API, a Hermes attempt's full configured
+price stays unknown. The bucketed write counts are always unreported (`usage_unknown`),
+zeros cannot be told apart from absence, and `input_includes_cache` is never stated.
+Closing that gap needs a host usage API that reports TTL buckets, explicit zeros and
+inclusion semantics. This repository does not patch Hermes, reinterpret absent fields
+as zero, or use `cost_usd` as an invoice.
 
 ## Stats
 

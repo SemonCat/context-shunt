@@ -105,6 +105,8 @@ export interface Extraction {
   matchesFound: number | undefined;
   recordsScanned?: number;
   recordsMatched?: number;
+  /** Effective `[start, end)` of an `align: "char"` bytes selector. */
+  byteRange?: [number, number];
   /**
    * True when the page emitted nothing *and* the scan position did not move, so a caller
    * following `next_cursor` would loop forever. The extractor knows the start position, so
@@ -476,22 +478,10 @@ export class Inspector {
     wireBudget: number,
     state: CursorState,
   ): Extraction {
-    const requestedStart = Number(selector["start"]);
-    const requestedEnd = Number(selector["end"]);
-    if (requestedEnd < requestedStart) {
-      throw new ShuntError("INVALID_REQUEST", "BAD_BYTE_RANGE", false);
-    }
-    const start = Math.max(requestedStart, state.offset ?? requestedStart);
-    const end = Math.min(requestedEnd, data.length);
+    const [rangeStart, end, start] = byteWindow(data, selector, state);
     const out = emptyExtraction("bytes");
+    if (selector["align"] === "char") out.byteRange = [rangeStart, end];
     if (start >= end) return out;
-
-    // Text cannot represent fragments of UTF-8 code points. Never adjust a selector
-    // past undisclosed bytes or widen it beyond the caller's half-open interval.
-    if (forwardToBoundary(data, requestedStart) !== requestedStart
-        || forwardToBoundary(data, start) !== start || forwardToBoundary(data, end) !== end) {
-      throw new ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", false);
-    }
     const begin = start;
     const take = Math.min(end - begin, budget, this.limits.inspectMaxBytesPerPage);
     let finish = backToBoundary(data, begin, begin + take);
@@ -697,6 +687,49 @@ export class Inspector {
 }
 
 /** Advance to the next UTF-8 character start at or after `offset`. */
+/**
+ * Resolve a bytes selector to `[rangeStart, rangeEnd, pageStart]`.
+ *
+ * `strict` (the default) never moves an offset: a start, end or cursor offset inside a
+ * UTF-8 character is refused, exactly as before `align` existed. `char` floors both
+ * selector offsets to the start of the character containing them. Flooring *both* ends is
+ * what makes contiguous ranges tile: `[a, b)` and `[b, c)` floor `b` to the same character
+ * start, so a character straddling `b` is returned once, by the second range, and never
+ * skipped. The widening is at most three bytes before `start`. A cursor offset is always
+ * one this extractor issued on a boundary, so it is never adjusted - only checked.
+ */
+export function byteWindow(
+  data: Uint8Array,
+  selector: Record<string, unknown>,
+  state: CursorState,
+): [number, number, number] {
+  let rangeStart = Number(selector["start"]);
+  const requestedEnd = Number(selector["end"]);
+  if (requestedEnd < rangeStart) throw new ShuntError("INVALID_REQUEST", "BAD_BYTE_RANGE", false);
+  let end = Math.min(requestedEnd, data.length);
+  if (selector["align"] === "char") {
+    rangeStart = floorToBoundary(data, Math.min(rangeStart, data.length));
+    end = floorToBoundary(data, end);
+  }
+  const start = Math.max(rangeStart, state.offset ?? rangeStart);
+  // Text cannot represent fragments of UTF-8 code points. Reject misaligned strict
+  // selectors instead of disclosing outside the range or dropping bytes.
+  if (start < end && (forwardToBoundary(data, rangeStart) !== rangeStart
+      || forwardToBoundary(data, start) !== start || forwardToBoundary(data, end) !== end)) {
+    throw new ShuntError("INVALID_REQUEST", "UTF8_RANGE_BOUNDARY", false);
+  }
+  return [rangeStart, end, start];
+}
+
+/** Move back to the start of the UTF-8 character containing `offset`. */
+function floorToBoundary(data: Uint8Array, offset: number): number {
+  let position = offset;
+  while (position > 0 && position < data.length && ((data[position] as number) & 0xc0) === 0x80) {
+    position -= 1;
+  }
+  return position;
+}
+
 function forwardToBoundary(data: Uint8Array, offset: number): number {
   let position = offset;
   while (position < data.length && ((data[position] as number) & 0xc0) === 0x80) position += 1;
