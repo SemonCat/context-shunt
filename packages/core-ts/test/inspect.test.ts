@@ -781,12 +781,19 @@ describe("align char byte selectors", () => {
     }
     expect(Buffer.from(collected).equals(Buffer.from(raw.subarray(floor(2), floor(9))))).toBe(true);
     expect(page!.disclosed_bytes_source).toBe(collected.length);
-    const first = s.inspect(request(entry, { ...selector, end: 30 }, { maxResultBytes: 4 }));
+    // Both ends are character starts, so the strict twin is legal on its own: only the
+    // cursor binding (which includes `align`) can refuse the crossing.
+    const edge = floor(30);
+    expect(floor(edge)).toBe(edge);
+    const aligned = { kind: "bytes", start: 0, end: edge, align: "char" };
+    const first = s.inspect(request(entry, aligned, { maxResultBytes: 4 }));
+    expect(first.extraction!.next_cursor).toBeTruthy();
     const crossed = s.inspect(
-      request(entry, { kind: "bytes", start: 2, end: 30 }, {
+      request(entry, { kind: "bytes", start: 0, end: edge }, {
         maxResultBytes: 4, cursor: first.extraction!.next_cursor,
       }),
     );
     expect(crossed.code).toBe("INVALID_REQUEST");
+    expect(crossed.failure_detail).toBe("BAD_CURSOR");
   });
 });
