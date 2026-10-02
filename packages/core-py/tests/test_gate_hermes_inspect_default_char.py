@@ -3,8 +3,9 @@
 The core request contract keeps ``strict`` as its default; only the registered tool fills in
 ``char`` when a ``bytes`` selector omits ``align``. Every case drives the handler the plugin
 actually registered, never the core seam, so the normalization is proven where an agent
-reaches it. Synthetic multilingual text only. ``adapters/openclaw/test/adapter.test.ts``
-asserts the identical fixture and expectations against the OpenClaw entrance.
+reaches it. Synthetic multilingual text only.
+``adapters/openclaw/test/inspect-default-char.test.ts`` asserts the identical fixture and
+expectations against the OpenClaw entrance.
 """
 
 from __future__ import annotations
