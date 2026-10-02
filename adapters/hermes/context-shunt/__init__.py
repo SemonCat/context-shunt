@@ -1393,6 +1393,25 @@ def _validate_tool_args(args: dict[str, Any]) -> dict[str, Any]:
     return validate_tool_args(args)
 
 
+#: ``align`` an inspect ``bytes`` selector gets at this tool entrance when the caller omits
+#: it. The core request contract keeps ``strict`` as its default for backward compatibility;
+#: an agent picking byte offsets in multilingual text cannot see character boundaries, so
+#: the registered tool floors to them unless the caller explicitly asks for ``strict``.
+TOOL_DEFAULT_BYTES_ALIGN = "char"
+
+
+def _tool_entrance_selector(selector: dict[str, Any]) -> dict[str, Any]:
+    """Apply the tool-entrance ``align`` default to an already validated selector.
+
+    Only an absent key on a ``bytes`` selector is filled in; an explicit value, valid or
+    not, was already judged by the schema and is never rewritten. A fresh dictionary is
+    returned so the caller-owned selector is not mutated.
+    """
+    if selector.get("kind") == "bytes" and "align" not in selector:
+        return {**selector, "align": TOOL_DEFAULT_BYTES_ALIGN}
+    return selector
+
+
 def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
     """Exact bounded extraction or JSON aggregation from a handle. Zero model calls."""
     public_args, host_kwargs = _tool_invocation_args(
@@ -1416,7 +1435,7 @@ def context_shunt_inspect(args: dict[str, Any] | None = None, **kwargs) -> str:
         "operation": "inspect",
         "source_id": tool_args["source_id"],
         "snapshot_id": tool_args["snapshot_id"],
-        "selector": tool_args["selector"],
+        "selector": _tool_entrance_selector(tool_args["selector"]),
         "budgets": {
             "max_result_bytes": min(
                 int(
@@ -1600,6 +1619,34 @@ def _registered_tool_parameters(definition_name: str) -> dict[str, Any]:
     return parameters
 
 
+def _inspect_tool_parameters() -> dict[str, Any]:
+    """The canonical inspect arguments, presenting this entrance's ``align`` default.
+
+    The shared contract describes the core request default (``strict``); this tool fills in
+    ``char`` instead, so the registered schema says so. Only the description and a
+    ``default`` annotation change - accepted values stay exactly the canonical enum.
+    """
+    parameters = _registered_tool_parameters("inspectArgs")
+    branches = parameters["properties"]["selector"]["oneOf"]
+    bytes_branches = [
+        branch
+        for branch in branches
+        if branch.get("properties", {}).get("kind", {}).get("const") == "bytes"
+    ]
+    if len(bytes_branches) != 1 or "align" not in bytes_branches[0]["properties"]:
+        raise ValueError("tool-args contract has no single bytes selector with align")
+    align = bytes_branches[0]["properties"]["align"]
+    align["description"] = (
+        "Omitted at this tool: char - both offsets floor to the start of the UTF-8 character "
+        "containing them, so contiguous ranges never split, skip or repeat a character; the "
+        "effective range is returned as extraction.byte_range. strict refuses an offset "
+        "inside a character (UTF8_RANGE_BOUNDARY) and must be passed explicitly. (The "
+        "low-level core request default remains strict.)"
+    )
+    align["default"] = TOOL_DEFAULT_BYTES_ALIGN
+    return parameters
+
+
 READER_TOOL_SCHEMA = {
     "name": "context_shunt_read",
     "description": (
@@ -1645,12 +1692,13 @@ INSPECT_TOOL_SCHEMA = {
         "array in the actual JSON; verify paths from bounded evidence, never infer a wrapper "
         "key. record_pointer applies after expansion; parse_json only decodes a selected "
         "record string. Distinct/grouping accept string, boolean and null fields; "
-        "numeric/object values are refused. Byte ranges must stay within authorized bounds; "
-        'for multilingual or emoji text pass "align": "char" so both offsets floor to '
-        "UTF-8 character starts (reported as extraction.byte_range) instead of being "
-        "refused as UTF8_RANGE_BOUNDARY, or page by lines."
+        "numeric/object values are refused. Byte ranges must stay within authorized bounds. "
+        'A bytes selector without "align" uses "char" here: both offsets floor to UTF-8 '
+        "character starts (reported as extraction.byte_range), so multilingual or emoji text "
+        'is never split. Pass "align": "strict" only when the exact offsets matter; a strict '
+        "offset inside a character is refused as UTF8_RANGE_BOUNDARY."
     ),
-    "parameters": _registered_tool_parameters("inspectArgs"),
+    "parameters": _inspect_tool_parameters(),
 }
 
 STATS_TOOL_SCHEMA = {

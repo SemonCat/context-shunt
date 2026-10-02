@@ -19,6 +19,15 @@ OpenClaw prevents the mode.
 | `context_shunt_inspect` | exact snapshot bytes, capped per page and cumulatively | zero |
 | `context_shunt_stats` | this session's own token accounting | zero |
 
+At this registered `context_shunt_inspect` entrance a `bytes` selector without `align` is
+treated as `"align": "char"`: both offsets floor to UTF-8 character starts and the effective
+range is returned as `extraction.byte_range`, so multilingual or emoji text is never split
+or refused. Pass `"align": "strict"` explicitly to keep exact offsets (an offset inside a
+character is then refused as `UTF8_RANGE_BOUNDARY`). An invalid `align` value is rejected, not
+repaired, and other selector kinds are unaffected. The low-level core request contract keeps
+`strict` as its default; only the tool entrance fills in `char`. Omitted and explicit `char`
+are the same selector for cursor continuation; a cursor never crosses to `strict`.
+
 Run `./scripts/verify integration openclaw --mode local` against a real host checkout to
 check the wiring; without one it reports `NOT_RUN`, never a pass.
 

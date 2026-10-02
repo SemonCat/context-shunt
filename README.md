@@ -120,7 +120,10 @@ are immutable and session-scoped; TTL and session cleanup limit their lifetime. 
 and import roots are separate allowlists. Unsafe, secret, or binary sources are refused;
 cleanup is not a promise of secure erase. See the [tool schema](contracts/v1/tool-args.schema.json).
 For minified one-line payloads, use a literal `search` selector to locate a stable term,
-then request only the needed 0-based, half-open UTF-8 `bytes` range. Continue a partial page
+then request only the needed 0-based, half-open UTF-8 `bytes` range. The registered inspect
+tools floor an omitted `align` to UTF-8 character starts (`char`, reported as
+`extraction.byte_range`); pass `"align": "strict"` for exact offsets. The core request
+default stays `strict`. Continue a partial page
 by resending the identical selector with `extraction.next_cursor`; restarting `lines: 1..1`
 without the cursor restarts the same bounded first page.
 

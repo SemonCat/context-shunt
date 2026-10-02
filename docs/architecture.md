@@ -274,7 +274,8 @@ algorithm). See the module's own docstring for exactly what was and was not port
 
 `context_shunt_inspect` returns deterministic bounded results with no provider call. `lines` uses 1-based
 inclusive coordinates, `bytes` uses 0-based half-open coordinates adjusted to safe UTF-8
-boundaries, and `search` takes a literal needle. Schema 1.3 also adds `aggregate` for exact
+boundaries (the core request default `strict` refuses a misaligned offset; the registered
+inspect tools default an omitted `align` to `char`, which floors both offsets), and `search` takes a literal needle. Schema 1.3 also adds `aggregate` for exact
 count/distinct/grouping over validated JSON arrays. Its RFC 6901 `records_pointer`, optional
 array expansion/record pointer and bounded embedded-JSON parsing cover minified Loki
 `result[*].values[*][1]` records without regular expressions or executable expressions. An

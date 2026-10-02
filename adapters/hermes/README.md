@@ -33,6 +33,15 @@ the cutover plan.
 | `context_shunt_stats` | this session's own token accounting | zero |
 | `context_shunt_import` | a handle and bounded metadata for a producer's already-persisted artifact — never its bytes | zero |
 
+At this registered `context_shunt_inspect` entrance a `bytes` selector without `align` is
+treated as `"align": "char"`: both offsets floor to UTF-8 character starts and the effective
+range is returned as `extraction.byte_range`, so multilingual or emoji text is never split
+or refused. Pass `"align": "strict"` explicitly to keep exact offsets (an offset inside a
+character is then refused as `UTF8_RANGE_BOUNDARY`). An invalid `align` value is rejected, not
+repaired, and other selector kinds are unaffected. The low-level core request contract keeps
+`strict` as its default; only the tool entrance fills in `char`. Omitted and explicit `char`
+are the same selector for cursor continuation; a cursor never crosses to `strict`.
+
 `context_shunt_import` is registered only when `artifact_import.enabled` is set and the
 capability probe supports the mode; registering a permanently-refusing surface in front of
 the model would be worse than not offering it. This host supports the mode because the

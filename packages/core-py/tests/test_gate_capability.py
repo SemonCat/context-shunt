@@ -1878,11 +1878,17 @@ def test_inspect_recovers_an_oversized_single_line_tool_result_through_the_real_
     assert "identical selector" in searched["guidance"]
 
     marker_start = body.encode("utf-8").index(marker.encode("utf-8"))
+    # Explicit strict keeps the exact-offset refusal; omitting align at this tool floors.
     bad_cut = json.loads(
         module.context_shunt_inspect(
             source_id=handle["source_id"],
             snapshot_id=handle["snapshot_id"],
-            selector={"kind": "bytes", "start": marker_start + 8, "end": marker_start + 12},
+            selector={
+                "kind": "bytes",
+                "start": marker_start + 8,
+                "end": marker_start + 12,
+                "align": "strict",
+            },
             task_id="t-oversized-line",
         )
     )
@@ -1891,6 +1897,21 @@ def test_inspect_recovers_an_oversized_single_line_tool_result_through_the_real_
     assert "UTF-8" in bad_cut["guidance"]
     assert "same retained handle" in bad_cut["guidance"]
     assert "without a source re-read" in bad_cut["guidance"]
+    floored = json.loads(
+        module.context_shunt_inspect(
+            source_id=handle["source_id"],
+            snapshot_id=handle["snapshot_id"],
+            selector={"kind": "bytes", "start": marker_start + 8, "end": marker_start + 12},
+            task_id="t-oversized-line",
+        )
+    )
+    assert floored["code"] == "EXTRACTED"
+    # NEEDLE_ is 7 bytes, then 日 (7..9) and 本 (10..12): both offsets floor to a start.
+    assert floored["extraction"]["byte_range"] == {
+        "start": marker_start + 7,
+        "end": marker_start + 10,
+    }
+    assert floored["extraction"]["segments"][0]["text"] == "日"
 
     marker_end = marker_start + len(marker.encode("utf-8"))
     exact = json.loads(

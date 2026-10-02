@@ -187,8 +187,31 @@ export const INSPECT_TOOL_DESCRIPTION =
   + "copy; a file small enough to fit that budget can be returned in full. A minified "
   + "one-line JSON array, or one wrapped in a single outer JSON-string field (for example "
   + "{\"result\": \"<json array as text>\"}), is usually the aggregate selector's job "
-  + "instead of search/byte paging. For multilingual or emoji text, add \"align\":\"char\" to a "
-  + "bytes selector so both offsets floor to UTF-8 character starts instead of being refused.";
+  + "instead of search/byte paging. A bytes selector without \"align\" uses \"char\" here: both "
+  + "offsets floor to UTF-8 character starts (reported as extraction.byte_range), so "
+  + "multilingual or emoji text is never split. Pass \"align\":\"strict\" only when the exact "
+  + "offsets matter; a strict offset inside a character is refused as UTF8_RANGE_BOUNDARY.";
+
+/**
+ * `align` an inspect `bytes` selector gets at this tool entrance when the caller omits it.
+ * The core request contract keeps `strict` as its default for backward compatibility; an
+ * agent picking byte offsets in multilingual text cannot see character boundaries, so the
+ * registered tool floors to them unless the caller explicitly asks for `strict`.
+ */
+export const TOOL_DEFAULT_BYTES_ALIGN = "char";
+
+/**
+ * Apply the tool-entrance `align` default to an already validated selector. Only an absent
+ * key on a `bytes` selector is filled in; an explicit value, valid or not, was already judged
+ * by the schema and is never rewritten. A fresh object is returned so the caller-owned
+ * selector is not mutated.
+ */
+export function toolEntranceSelector(selector: Record<string, unknown>): Record<string, unknown> {
+  if (selector["kind"] === "bytes" && !Object.hasOwn(selector, "align")) {
+    return { ...selector, align: TOOL_DEFAULT_BYTES_ALIGN };
+  }
+  return selector;
+}
 
 export const INSPECT_TOOL_PARAMETERS = {
   type: "object",
@@ -202,7 +225,11 @@ export const INSPECT_TOOL_PARAMETERS = {
     selector: {
       type: "object",
       description:
-        'Exactly one of {"kind":"lines","start":N,"end":N}, {"kind":"bytes","start":N,"end":N[,"align":"char"]}, '
+        'Exactly one of {"kind":"lines","start":N,"end":N}, '
+        + '{"kind":"bytes","start":N,"end":N[,"align":"char"|"strict"]} (align omitted here '
+        + 'means char: offsets floor to UTF-8 character starts; strict must be explicit and '
+        + 'refuses an offset inside a character; the low-level core request default remains '
+        + 'strict), '
         + '{"kind":"search","needle":"...","max_matches":N}, or {"kind":"aggregate",'
         + '"records_pointer":"<RFC 6901 pointer to the array>",...} for exact counts, distinct '
         + 'values, or grouping over a JSON array. Add "decode_pointer" (same pointer syntax) to '
@@ -470,7 +497,7 @@ export class ContextShuntPlugin {
       operation: "inspect",
       source_id: args["source_id"],
       snapshot_id: args["snapshot_id"],
-      selector: args["selector"],
+      selector: toolEntranceSelector(args["selector"] as Record<string, unknown>),
       budgets: {
         max_result_bytes: Math.min(
           Number(raw["max_result_bytes"] ?? this.config.limits.inspectMaxResultBytes),

@@ -101,6 +101,7 @@ UNIT_GATES: dict[str, tuple[str, list[tuple[Path, str]]]] = {
             (CORE_TS, "test/automatic-extract.test.ts"),
             (CORE_TS, "test/aggregate.test.ts"),
             (CORE_TS, "test/search-cap-honesty.test.ts"),
+            (OPENCLAW_ADAPTER, "test/inspect-default-char.test.ts"),
         ],
     ),
     "accounting": ("gate_accounting", [

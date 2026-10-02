@@ -220,7 +220,10 @@ authenticated `cursor`; the same source, snapshot, and selector must be supplied
 Wire-size escaping can make a page smaller than the source-byte cap. Oversized lines page
 as exact byte segments. Concatenate page text without inserting separators: LF bytes
 between selected lines are included, but the final selected line’s terminating LF is excluded.
-Nonempty byte selectors must start and end on UTF-8 boundaries (`INVALID_REQUEST` otherwise).
+In a core request, nonempty strict byte selectors (`align` absent or `"strict"`) must start
+and end on UTF-8 boundaries (`INVALID_REQUEST` otherwise); `"align": "char"` floors both
+offsets instead. The registered Hermes and OpenClaw inspect tools fill in `char` when a
+caller omits `align`, so only an explicit `"strict"` is refused at that entrance.
 A budget too small for one code point is a Shunt page-capacity failure and returns bounded
 `LEGACY_COMPACTED` within the requested byte budget, with incomplete coverage and charged disclosure.
 Use a larger budget for exact inspection; no extraction cursor is advanced by compaction. Exhausted disclosure allowance remains

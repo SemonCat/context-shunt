@@ -103,6 +103,9 @@ reader 處理每個 chunk 時，都會收到問題與已授權的摘錄，不會
 handle 有效性限制。快照不可變更且限定於 session；TTL 與 session 清理限制保存時間。
 Workspace 與 import 根目錄使用不同白名單。不安全、含機密或二進位來源會遭拒；清理不保證
 安全抹除。參見[工具 schema](contracts/v1/tool-args.schema.json)。
+已註冊的 inspect 工具入口在 `bytes` selector 省略 `align` 時視為 `"align": "char"`：兩端位移
+都向下取齊到 UTF-8 字元起點，實際範圍以 `extraction.byte_range` 回傳；需要精確位移時請明確
+傳入 `"align": "strict"`。底層 core request 契約的預設仍是 `strict`。
 
 ## Reader 失敗時
 
